@@ -97,7 +97,7 @@
   )
   (get_local $1)
  )
- (func "$(lib)/set/Set#get:size" (; 2 ;) (type $ii) (param $0 i32) (result i32)
+ (func "$(lib)/set/Set<i32>#get:size" (; 2 ;) (type $ii) (param $0 i32) (result i32)
   (i32.load offset=8
    (get_local $0)
   )
@@ -1971,7 +1971,7 @@
  (func "$(lib)/allocator/arena/free_memory" (; 5 ;) (type $iv) (param $0 i32)
   (nop)
  )
- (func "$(lib)/set/Set#add" (; 6 ;) (type $iii) (param $0 i32) (param $1 i32) (result i32)
+ (func "$(lib)/set/Set<i32>#add" (; 6 ;) (type $iii) (param $0 i32) (param $1 i32) (result i32)
   (local $2 i32)
   (local $3 i32)
   (if
@@ -2083,7 +2083,7 @@
   )
   (get_local $0)
  )
- (func "$(lib)/set/Set#has" (; 7 ;) (type $iii) (param $0 i32) (param $1 i32) (result i32)
+ (func "$(lib)/set/Set<i32>#has" (; 7 ;) (type $iii) (param $0 i32) (param $1 i32) (result i32)
   (local $2 i32)
   (local $3 i32)
   (if
@@ -2143,7 +2143,7 @@
   )
   (i32.const 0)
  )
- (func "$(lib)/set/Set#delete" (; 8 ;) (type $iii) (param $0 i32) (param $1 i32) (result i32)
+ (func "$(lib)/set/Set<i32>#delete" (; 8 ;) (type $iii) (param $0 i32) (param $1 i32) (result i32)
   (local $2 i32)
   (local $3 i32)
   (if
@@ -2253,7 +2253,7 @@
   )
   (i32.const 0)
  )
- (func "$(lib)/set/Set#clear" (; 9 ;) (type $iv) (param $0 i32)
+ (func "$(lib)/set/Set<i32>#clear" (; 9 ;) (type $iv) (param $0 i32)
   (if
    (i32.eqz
     (get_local $0)
@@ -2292,7 +2292,7 @@
    )
   )
   (if
-   (call "$(lib)/set/Set#get:size"
+   (call "$(lib)/set/Set<i32>#get:size"
     (get_global $std/set/set)
    )
    (block
@@ -2306,26 +2306,26 @@
    )
   )
   (drop
-   (call "$(lib)/set/Set#add"
+   (call "$(lib)/set/Set<i32>#add"
     (get_global $std/set/set)
     (i32.const 1)
    )
   )
   (drop
-   (call "$(lib)/set/Set#add"
+   (call "$(lib)/set/Set<i32>#add"
     (get_global $std/set/set)
     (i32.const 0)
    )
   )
   (drop
-   (call "$(lib)/set/Set#add"
+   (call "$(lib)/set/Set<i32>#add"
     (get_global $std/set/set)
     (i32.const 2)
    )
   )
   (if
    (i32.ne
-    (call "$(lib)/set/Set#get:size"
+    (call "$(lib)/set/Set<i32>#get:size"
      (get_global $std/set/set)
     )
     (i32.const 3)
@@ -2342,7 +2342,7 @@
   )
   (if
    (i32.eqz
-    (call "$(lib)/set/Set#has"
+    (call "$(lib)/set/Set<i32>#has"
      (get_global $std/set/set)
      (i32.const 1)
     )
@@ -2359,7 +2359,7 @@
   )
   (if
    (i32.eqz
-    (call "$(lib)/set/Set#has"
+    (call "$(lib)/set/Set<i32>#has"
      (get_global $std/set/set)
      (i32.const 0)
     )
@@ -2376,7 +2376,7 @@
   )
   (if
    (i32.eqz
-    (call "$(lib)/set/Set#has"
+    (call "$(lib)/set/Set<i32>#has"
      (get_global $std/set/set)
      (i32.const 2)
     )
@@ -2392,7 +2392,7 @@
    )
   )
   (if
-   (call "$(lib)/set/Set#has"
+   (call "$(lib)/set/Set<i32>#has"
     (get_global $std/set/set)
     (i32.const 3)
    )
@@ -2407,14 +2407,14 @@
    )
   )
   (drop
-   (call "$(lib)/set/Set#delete"
+   (call "$(lib)/set/Set<i32>#delete"
     (get_global $std/set/set)
     (i32.const 0)
    )
   )
   (if
    (i32.ne
-    (call "$(lib)/set/Set#get:size"
+    (call "$(lib)/set/Set<i32>#get:size"
      (get_global $std/set/set)
     )
     (i32.const 2)
@@ -2431,7 +2431,7 @@
   )
   (if
    (i32.eqz
-    (call "$(lib)/set/Set#has"
+    (call "$(lib)/set/Set<i32>#has"
      (get_global $std/set/set)
      (i32.const 1)
     )
@@ -2447,7 +2447,7 @@
    )
   )
   (if
-   (call "$(lib)/set/Set#has"
+   (call "$(lib)/set/Set<i32>#has"
     (get_global $std/set/set)
     (i32.const 0)
    )
@@ -2463,7 +2463,7 @@
   )
   (if
    (i32.eqz
-    (call "$(lib)/set/Set#has"
+    (call "$(lib)/set/Set<i32>#has"
      (get_global $std/set/set)
      (i32.const 2)
     )
@@ -2478,11 +2478,11 @@
     (unreachable)
    )
   )
-  (call "$(lib)/set/Set#clear"
+  (call "$(lib)/set/Set<i32>#clear"
    (get_global $std/set/set)
   )
   (if
-   (call "$(lib)/set/Set#get:size"
+   (call "$(lib)/set/Set<i32>#get:size"
     (get_global $std/set/set)
    )
    (block
@@ -2496,7 +2496,7 @@
    )
   )
   (if
-   (call "$(lib)/set/Set#has"
+   (call "$(lib)/set/Set<i32>#has"
     (get_global $std/set/set)
     (i32.const 1)
    )
