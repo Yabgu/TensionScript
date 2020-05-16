@@ -3377,6 +3377,13 @@
    call $~lib/rt/__visit_members
   end
  )
+ (func $~lib/rt/pure/finalize (param $0 i32)
+  i32.const 0
+  drop
+  global.get $~lib/rt/tlsf/ROOT
+  local.get $0
+  call $~lib/rt/tlsf/freeBlock
+ )
  (func $~lib/rt/pure/scanBlack (param $0 i32)
   local.get $0
   local.get $0
@@ -3464,9 +3471,8 @@
    i32.add
    i32.const 5
    call $~lib/rt/__visit_members
-   global.get $~lib/rt/tlsf/ROOT
    local.get $0
-   call $~lib/rt/tlsf/freeBlock
+   call $~lib/rt/pure/finalize
   end
  )
  (func $~lib/rt/pure/__collect
@@ -3539,9 +3545,8 @@
       i32.const 0
      end
      if
-      global.get $~lib/rt/tlsf/ROOT
       local.get $5
-      call $~lib/rt/tlsf/freeBlock
+      call $~lib/rt/pure/finalize
      else
       local.get $5
       local.get $6
@@ -3761,9 +3766,8 @@
    i32.and
    i32.eqz
    if
-    global.get $~lib/rt/tlsf/ROOT
     local.get $0
-    call $~lib/rt/tlsf/freeBlock
+    call $~lib/rt/pure/finalize
    else
     local.get $0
     i32.const -2147483648
