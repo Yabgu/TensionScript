@@ -4021,6 +4021,7 @@
   (local $5 i32)
   (local $6 i32)
   (local $7 i32)
+  (local $8 i32)
   local.get $0
   call $~lib/string/String#get:length
   local.set $2
@@ -4228,6 +4229,10 @@
   end
   i32.const 0
   local.set $7
+  local.get $2
+  i32.const 1
+  i32.sub
+  local.set $8
   block $while-break|2
    loop $while-continue|2
     local.get $2
@@ -4289,8 +4294,9 @@
      local.get $1
      i32.ge_u
      if
-      local.get $7
-      i32.eqz
+      local.get $8
+      local.get $2
+      i32.eq
       if
        i32.const 0
        drop
