@@ -1561,7 +1561,7 @@
   i32.const 1440
   global.set $~lib/rt/itcms/fromSpace
   global.get $~lib/memory/__stack_pointer
-  i32.const 24
+  i32.const 28
   i32.sub
   global.set $~lib/memory/__stack_pointer
   block $folding-inner0
@@ -1572,7 +1572,7 @@
    global.get $~lib/memory/__stack_pointer
    local.tee $2
    i32.const 0
-   i32.const 24
+   i32.const 28
    memory.fill $0
    local.get $2
    i32.const 16
@@ -1673,22 +1673,22 @@
    i32.store $0 offset=4
    global.get $~lib/memory/__stack_pointer
    local.get $3
-   i32.store $0 offset=16
+   i32.store $0 offset=20
    global.get $~lib/memory/__stack_pointer
    local.get $3
-   i32.store $0 offset=8
+   i32.store $0 offset=12
    call $issues/1699/MultiAssignmentTest#constructor
    local.set $1
    global.get $~lib/memory/__stack_pointer
    local.get $1
-   i32.store $0 offset=12
+   i32.store $0 offset=16
    local.get $3
    i32.const 1
    local.get $1
    call $~lib/array/Array<issues/1699/MultiAssignmentTest>#__set
    global.get $~lib/memory/__stack_pointer
    local.get $3
-   i32.store $0 offset=8
+   i32.store $0 offset=12
    local.get $3
    i32.const 1
    call $~lib/array/Array<issues/1699/MultiAssignmentTest>#__get
@@ -1734,7 +1734,7 @@
      global.get $~lib/memory/__stack_pointer
      call $issues/1699/MultiAssignmentTest#constructor
      local.tee $1
-     i32.store $0 offset=20
+     i32.store $0 offset=24
      local.get $0
      i32.const 1
      i32.gt_s
@@ -1805,7 +1805,7 @@
     unreachable
    end
    global.get $~lib/memory/__stack_pointer
-   i32.const 24
+   i32.const 28
    i32.add
    global.set $~lib/memory/__stack_pointer
    return

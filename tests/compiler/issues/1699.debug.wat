@@ -3000,13 +3000,13 @@
   (local $testinstance i32)
   (local $5 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 24
+  i32.const 28
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
   i32.const 0
-  i32.const 24
+  i32.const 28
   memory.fill $0
   global.get $~lib/memory/__stack_pointer
   i32.const 0
@@ -3024,12 +3024,12 @@
   global.get $~lib/memory/__stack_pointer
   local.get $testinstances
   local.tee $1
-  i32.store $0 offset=16
+  i32.store $0 offset=20
   local.get $1
   local.set $5
   global.get $~lib/memory/__stack_pointer
   local.get $5
-  i32.store $0 offset=8
+  i32.store $0 offset=12
   local.get $5
   i32.const 1
   local.tee $2
@@ -3038,14 +3038,14 @@
   local.set $5
   global.get $~lib/memory/__stack_pointer
   local.get $5
-  i32.store $0 offset=12
+  i32.store $0 offset=16
   local.get $5
   call $~lib/array/Array<issues/1699/MultiAssignmentTest>#__set
   local.get $1
   local.set $5
   global.get $~lib/memory/__stack_pointer
   local.get $5
-  i32.store $0 offset=8
+  i32.store $0 offset=12
   local.get $5
   local.get $2
   call $~lib/array/Array<issues/1699/MultiAssignmentTest>#__get
@@ -3072,7 +3072,7 @@
     i32.const 0
     call $issues/1699/MultiAssignmentTest#constructor
     local.tee $testinstance
-    i32.store $0 offset=20
+    i32.store $0 offset=24
     local.get $n
     i32.const 1
     i32.gt_s
@@ -3152,7 +3152,7 @@
    unreachable
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 24
+  i32.const 28
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
