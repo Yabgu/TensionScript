@@ -1,12 +1,12 @@
 /**
- * @fileoverview Definitions for asc.
+ * @fileoverview Definitions for the TensionScript compiler frontend.
  * @license Apache-2.0
  */
 
 import { OptionDescription } from "../util/options";
 export { OptionDescription };
 
-/** AssemblyScript version. */
+/** TensionScript version. */
 export const version: string;
 
 /** Available CLI options. */

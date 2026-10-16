@@ -10,6 +10,7 @@
  (type $8 (func (param f64) (result f64)))
  (type $9 (func (param i32 i32 i64)))
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
+ (global $~env (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/total (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/threshold (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/state (mut i32) (i32.const 0))
@@ -1724,7 +1725,7 @@
   (local $1 i32)
   (local $2 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 8
+  i32.const 12
   i32.sub
   global.set $~lib/memory/__stack_pointer
   block $folding-inner0
@@ -1735,19 +1736,30 @@
    global.get $~lib/memory/__stack_pointer
    i64.const 0
    i64.store
+   global.get $~lib/memory/__stack_pointer
+   i32.const 0
+   i32.store offset=8
+   global.get $~env
+   global.get $~lib/memory/__stack_pointer
+   i32.const 1104
+   i32.store
+   i32.const 1108
+   i32.load
+   global.set $~env
    i32.const 2
    i32.const 1104
    i32.load
    call_indirect (type $5)
    drop
-   global.get $~lib/memory/__stack_pointer
-   i32.const 123
-   i32.store
+   global.set $~env
    global.get $~lib/memory/__stack_pointer
    i32.const 123
    i32.store offset=4
    global.get $~lib/memory/__stack_pointer
-   i32.const 8
+   i32.const 123
+   i32.store offset=8
+   global.get $~lib/memory/__stack_pointer
+   i32.const 12
    i32.add
    global.set $~lib/memory/__stack_pointer
    memory.size

@@ -21,6 +21,7 @@
  (global $~lib/rt/itcms/white (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/fromSpace (mut i32) (i32.const 0))
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
+ (global $~env (mut i32) (i32.const 0))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34904))
  (memory $0 1)
  (data $0 (i32.const 1036) "<")
@@ -2552,8 +2553,9 @@
  )
  (func $start:call-rest
   (local $0 i32)
+  (local $1 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 16
+  i32.const 24
   i32.sub
   global.set $~lib/memory/__stack_pointer
   block $folding-inner0
@@ -2562,11 +2564,9 @@
    i32.lt_s
    br_if $folding-inner0
    global.get $~lib/memory/__stack_pointer
-   i64.const 0
-   i64.store
-   global.get $~lib/memory/__stack_pointer
-   i64.const 0
-   i64.store offset=8
+   i32.const 0
+   i32.const 24
+   memory.fill
    memory.size
    i32.const 16
    i32.shl
@@ -2673,6 +2673,13 @@
     call $~lib/builtins/abort
     unreachable
    end
+   global.get $~env
+   global.get $~lib/memory/__stack_pointer
+   i32.const 1648
+   i32.store offset=4
+   i32.const 1652
+   i32.load
+   global.set $~env
    i32.const 1
    global.set $~argumentsLength
    i32.const 1
@@ -2681,6 +2688,9 @@
    i32.const 1648
    i32.load
    call_indirect (type $0)
+   local.set $1
+   global.set $~env
+   local.get $1
    i32.const 1
    i32.ne
    if
@@ -2691,6 +2701,13 @@
     call $~lib/builtins/abort
     unreachable
    end
+   global.get $~env
+   global.get $~lib/memory/__stack_pointer
+   i32.const 1648
+   i32.store offset=8
+   i32.const 1652
+   i32.load
+   global.set $~env
    i32.const 2
    global.set $~argumentsLength
    i32.const 1
@@ -2699,6 +2716,9 @@
    i32.const 1648
    i32.load
    call_indirect (type $0)
+   local.set $1
+   global.set $~env
+   local.get $1
    i32.const 3
    i32.ne
    if
@@ -2709,25 +2729,32 @@
     call $~lib/builtins/abort
     unreachable
    end
+   global.get $~env
    global.get $~lib/memory/__stack_pointer
    i32.const 1648
-   i32.store offset=4
+   i32.store offset=12
+   i32.const 1652
+   i32.load
+   global.set $~env
    i32.const 1
    i32.const 4
    i32.const 1680
    call $~lib/rt/__newArray
-   local.set $0
+   local.set $1
    global.get $~lib/memory/__stack_pointer
-   local.get $0
+   local.get $1
    i32.store
    i32.const 3
    global.set $~argumentsLength
    i32.const 1
    i32.const 2
-   local.get $0
+   local.get $1
    i32.const 1648
    i32.load
    call_indirect (type $0)
+   local.set $1
+   global.set $~env
+   local.get $1
    i32.const 6
    i32.ne
    if
@@ -2738,25 +2765,32 @@
     call $~lib/builtins/abort
     unreachable
    end
+   global.get $~env
    global.get $~lib/memory/__stack_pointer
    i32.const 1648
-   i32.store offset=8
+   i32.store offset=16
+   i32.const 1652
+   i32.load
+   global.set $~env
    i32.const 3
    i32.const 4
    i32.const 1712
    call $~lib/rt/__newArray
-   local.set $0
+   local.set $1
    global.get $~lib/memory/__stack_pointer
-   local.get $0
+   local.get $1
    i32.store
    i32.const 3
    global.set $~argumentsLength
    i32.const 1
    i32.const 2
-   local.get $0
+   local.get $1
    i32.const 1648
    i32.load
    call_indirect (type $0)
+   local.set $1
+   global.set $~env
+   local.get $1
    i32.const 15
    i32.ne
    if
@@ -2814,7 +2848,7 @@
    local.set $0
    global.get $~lib/memory/__stack_pointer
    local.get $0
-   i32.store offset=12
+   i32.store offset=20
    i32.const 2
    local.get $0
    call $call-rest/Foo#constructor
@@ -2841,7 +2875,7 @@
    local.set $0
    global.get $~lib/memory/__stack_pointer
    local.get $0
-   i32.store offset=12
+   i32.store offset=20
    i32.const 2
    local.get $0
    call $call-rest/Foo#constructor
@@ -2959,7 +2993,7 @@
     unreachable
    end
    global.get $~lib/memory/__stack_pointer
-   i32.const 16
+   i32.const 24
    i32.add
    global.set $~lib/memory/__stack_pointer
    return

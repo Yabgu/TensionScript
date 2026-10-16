@@ -17,6 +17,7 @@
  (global $~lib/rt/itcms/white (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/fromSpace (mut i32) (i32.const 0))
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
+ (global $~env (mut i32) (i32.const 0))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34316))
  (memory $0 1)
  (data $0 (i32.const 1036) "\1c")
@@ -1200,6 +1201,7 @@
   (local $1 i32)
   (local $2 i32)
   (local $3 i32)
+  (local $4 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 8
   i32.sub
@@ -1244,9 +1246,13 @@
    i32.store
    i32.const 1424
    global.set $~lib/rt/itcms/fromSpace
+   global.get $~env
    global.get $~lib/memory/__stack_pointer
    i32.const 1056
    i32.store
+   i32.const 1060
+   i32.load
+   global.set $~env
    global.get $~lib/memory/__stack_pointer
    i32.const 4
    i32.sub
@@ -1269,12 +1275,12 @@
    i32.store
    i32.const 4
    call $~lib/rt/itcms/__new
-   local.tee $2
+   local.tee $3
    local.get $0
    i32.store
    local.get $0
    if
-    local.get $2
+    local.get $3
     i32.eqz
     if
      i32.const 0
@@ -1288,47 +1294,47 @@
     local.get $0
     i32.const 20
     i32.sub
-    local.tee $3
+    local.tee $4
     i32.load offset=4
     i32.const 3
     i32.and
     i32.eq
     if
-     local.get $2
+     local.get $3
      i32.const 20
      i32.sub
      i32.load offset=4
      i32.const 3
      i32.and
-     local.tee $1
+     local.tee $2
      global.get $~lib/rt/itcms/white
      i32.eqz
      i32.eq
      if
-      local.get $3
+      local.get $4
       call $~lib/rt/itcms/Object#makeGray
      else
       global.get $~lib/rt/itcms/state
       i32.const 1
       i32.eq
-      local.get $1
+      local.get $2
       i32.const 3
       i32.eq
       i32.and
       if
-       local.get $3
+       local.get $4
        call $~lib/rt/itcms/Object#makeGray
       end
      end
     end
    end
-   local.get $2
+   local.get $3
    local.get $0
    i32.store offset=4
-   local.get $2
+   local.get $3
    i32.const 16
    i32.store offset=8
-   local.get $2
+   local.get $3
    i32.const 4
    i32.store offset=12
    global.get $~lib/memory/__stack_pointer
@@ -1336,13 +1342,14 @@
    i32.add
    global.set $~lib/memory/__stack_pointer
    global.get $~lib/memory/__stack_pointer
-   local.get $2
+   local.get $3
    i32.store offset=4
-   local.get $2
+   local.get $3
    i32.const 1056
    i32.load
    call_indirect (type $0)
    drop
+   global.set $~env
    global.get $~lib/memory/__stack_pointer
    i32.const 8
    i32.add

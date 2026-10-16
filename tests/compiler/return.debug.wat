@@ -4,6 +4,7 @@
  (type $2 (func (param i32)))
  (type $3 (func (param i32 i32 i32 i32)))
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
+ (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/memory/__data_end i32 (i32.const 44))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 32812))
@@ -22,20 +23,62 @@
   call $return/nop
  )
  (func $return/testVoidReturnFunction (param $cond i32) (param $fn i32)
+  (local $2 i32)
+  (local $3 i32)
+  (local $4 i32)
+  (local $5 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
   local.get $cond
   if
+   global.get $~env
+   local.set $3
+   global.get $~lib/memory/__stack_pointer
+   local.get $fn
+   local.tee $2
+   i32.store
+   local.get $2
+   i32.load offset=4
+   global.set $~env
    i32.const 0
    global.set $~argumentsLength
-   local.get $fn
+   local.get $2
    i32.load
    call_indirect (type $0)
+   local.get $3
+   global.set $~env
+   global.get $~lib/memory/__stack_pointer
+   i32.const 8
+   i32.add
+   global.set $~lib/memory/__stack_pointer
    return
   end
+  global.get $~env
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $fn
+  local.tee $4
+  i32.store offset=4
+  local.get $4
+  i32.load offset=4
+  global.set $~env
   i32.const 0
   global.set $~argumentsLength
-  local.get $fn
+  local.get $4
   i32.load
   call_indirect (type $0)
+  local.get $5
+  global.set $~env
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.add
+  global.set $~lib/memory/__stack_pointer
   return
  )
  (func $return/testVoidReturn (param $cond i32)

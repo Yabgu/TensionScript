@@ -9,6 +9,7 @@
  (global $builtins/I (mut i64) (i64.const 0))
  (global $builtins/f (mut f32) (f32.const 0))
  (global $builtins/F (mut f64) (f64.const 0))
+ (global $~env (mut i32) (i32.const 0))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34796))
  (memory $0 1)
  (data $0 (i32.const 1036) "\1c")
@@ -246,8 +247,10 @@
   i32.add
  )
  (func $start:builtins
+  (local $0 i32)
+  (local $1 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 8
+  i32.const 12
   i32.sub
   global.set $~lib/memory/__stack_pointer
   global.get $~lib/memory/__stack_pointer
@@ -264,6 +267,9 @@
   global.get $~lib/memory/__stack_pointer
   i64.const 0
   i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
   i32.const 1
   global.set $builtins/i
   i32.const 0
@@ -611,11 +617,21 @@
   global.set $builtins/f
   f64.const 25
   global.set $builtins/F
+  global.get $~env
+  global.get $~lib/memory/__stack_pointer
+  i32.const 1168
+  i32.store
+  i32.const 1172
+  i32.load
+  global.set $~env
   i32.const 1
   i32.const 2
   i32.const 1168
   i32.load
   call_indirect (type $0)
+  local.set $1
+  global.set $~env
+  local.get $1
   i32.const 3
   i32.ne
   if
@@ -628,7 +644,7 @@
   end
   global.get $~lib/memory/__stack_pointer
   i32.const 1168
-  i32.store
+  i32.store offset=4
   i32.const 2
   i32.const 3
   i32.const 1168
@@ -646,10 +662,10 @@
   end
   global.get $~lib/memory/__stack_pointer
   i32.const 1168
-  i32.store offset=4
+  i32.store offset=8
   global.get $~lib/memory/__stack_pointer
   i32.const 1056
-  i32.store
+  i32.store offset=4
   i32.const 1056
   i32.const 1056
   call $~lib/string/String.__eq
@@ -664,16 +680,16 @@
   end
   global.get $~lib/memory/__stack_pointer
   i32.const 1168
-  i32.store
-  global.get $~lib/memory/__stack_pointer
-  i32.const 1168
-  i32.store
+  i32.store offset=4
   global.get $~lib/memory/__stack_pointer
   i32.const 1168
   i32.store offset=4
   global.get $~lib/memory/__stack_pointer
+  i32.const 1168
+  i32.store offset=8
+  global.get $~lib/memory/__stack_pointer
   i32.const 1200
-  i32.store
+  i32.store offset=4
   i32.const 1200
   i32.const 1200
   call $~lib/string/String.__eq
@@ -1004,7 +1020,7 @@
    unreachable
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 8
+  i32.const 12
   i32.add
   global.set $~lib/memory/__stack_pointer
  )

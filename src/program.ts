@@ -3694,6 +3694,8 @@ export class FunctionPrototype extends DeclaredElement {
 
   /** Operator kind, if an overload. */
   operatorKind: OperatorKind = OperatorKind.Invalid;
+  /** Whether this arrow function captures `this` from an enclosing function. */
+  capturesThis: bool = false;
   /** Already resolved instances. */
   instances: Map<string,Function> | null = null;
   /** Methods overriding this one, if any. These are unbound. */
@@ -3802,6 +3804,8 @@ export class Function extends TypedElement {
   debugLocations: Map<ExpressionRef, Range> = new Map();
   /** Function reference, if compiled. */
   ref: FunctionRef = 0;
+  /** Index in the function table, if already added. Zero means not yet added. */
+  tableIndex: i32 = 0;
   /** Varargs stub for calling with omitted arguments. */
   varargsStub: Function | null = null;
   /** Stub for calling overrides. */
