@@ -26,6 +26,10 @@ import {
 } from "./diagnostics";
 
 import {
+  awaitSites
+} from "./async/ir";
+
+import {
   Module,
   MemorySegment,
   ExpressionRef,
@@ -138,6 +142,7 @@ import {
   FieldDeclaration,
   ForStatement,
   ForOfStatement,
+  AwaitExpression,
   FunctionDeclaration,
   IfStatement,
   ImportStatement,
@@ -3583,6 +3588,10 @@ export class Compiler extends DiagnosticEmitter {
       }
       case NodeKind.UnaryPrefix: {
         expr = this.compileUnaryPrefixExpression(<UnaryPrefixExpression>expression, contextualType, constraints);
+        break;
+      }
+      case NodeKind.Await: {
+        expr = this.compileLoweredAwaitExpression(<AwaitExpression>expression);
         break;
       }
       case NodeKind.Compiled: {
@@ -7861,6 +7870,83 @@ export class Compiler extends DiagnosticEmitter {
       contextualType,
       expression
     ));
+  }
+
+  /**
+   * Compiles the typed read of a lowered `await` — the one thing codegen keeps
+   * of the async lowering (`docs/async-await-plan-v2.md` §4.7.4).
+   *
+   * The lowering (`src/async/lower.ts`) turns the suspension into state and
+   * leaves the `AwaitExpression` in the tree; its operand is deliberately not
+   * compiled here, because the operand's value was produced *before* the
+   * suspension and parked with the task. `T` comes from the resolver's arm
+   * (`resolver.ts:1194`, §2.3's rule), the record pointer from the lowering's
+   * side table (§5.5), and the value from the record at §3.2's offsets:
+   * integers and `bool` in `payload` (offset 8), `f32` in `f0` and the 64-bit
+   * kinds in `f0`/`f1` (offset 16). The emission mirrors `builtin_load`
+   * (`builtins.ts:2471-2478`), so the read is an ordinary aligned load.
+   *
+   * A reference-typed result is refused: §3.3 rules it out of v2 — the
+   * producers cannot supply guest pointers, so a reference is obtained from the
+   * capability's own reader at the await site instead.
+   */
+  private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {
+    let site = awaitSites.get(expression);
+    if (!site) {
+      // No lowering ran, or this await is one the transform did not take. Say so
+      // rather than emitting a read of a record that does not exist.
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "the async lowering transform did not run"
+      );
+      return this.module.unreachable();
+    }
+    let type = this.resolver.resolveExpression(expression, this.currentFlow, Type.auto, ReportMode.Report);
+    if (!type) return this.module.unreachable();
+    if (type == Type.void) {
+      // `await h;` as a statement reads nothing: the task's completion is the
+      // whole effect, and §3.2 has no word for it.
+      this.currentType = Type.void;
+      return this.module.nop();
+    }
+    if (type.isReference) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "a reference-typed await result"
+      );
+      return this.module.unreachable();
+    }
+    if (!type.isMemory) {
+      this.error(
+        DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+        expression.range,
+        "await",
+        type.toString()
+      );
+      return this.module.unreachable();
+    }
+    let offset: i32;
+    if (type == Type.f32 || type == Type.f64 || type == Type.i64 || type == Type.u64) {
+      offset = 16; // `f0` — and `f1` beyond it for the 64-bit kinds
+    } else {
+      offset = 8; // `payload`
+    }
+    // The state field is a `TaskRecord` reference; its value *is* the record
+    // pointer, so it compiles as the field's own type and is used as the load's
+    // address. Asking for `usize` here would be asking for a conversion the
+    // language does not have (`AS2322`).
+    let record = this.compileExpression(site.recordExpression, Type.auto, Constraints.None);
+    this.currentType = type;
+    return this.module.load(
+      type.byteSize,
+      type.isSignedIntegerValue,
+      record,
+      type.toRef(),
+      offset,
+      type.byteSize
+    );
   }
 
   private compileInstanceOfExpression(

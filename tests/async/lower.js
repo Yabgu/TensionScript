@@ -1,23 +1,32 @@
-// The `afterParse` lowering transform's skeleton (Phase 3, commit 2).
+// The `afterParse` lowering transform (Phase 3, commit 3).
 //
-// What is under test: that the transform is registered, that it finds async
-// functions, that it emits the three artifacts of the state-machine shape
-// (`docs/async-await-plan-v2.md` §4.1), and that it *refuses* — with a named
-// diagnostic, never a crash and never silent garbage — every shape this
-// revision does not lower yet. Not under test, and not implemented: `await`
-// transitions (commit 3), liveness-based lifting (commit 4), the runtime and
-// the resume dispatch (Phase 4).
+// What is under test: the three artifacts of the state-machine shape
+// (`docs/async-await-plan-v2.md` §4.1) — the state struct, the entry, and the
+// resume function with its guarded regions — including `await` as a state
+// transition, the settled guard (§1.2 rule 4), the per-await resume-point
+// discriminators (§4.1 artifact 1), the handle and its register call (§4.7.3),
+// and the typed read codegen emits at the await site (§4.7.4). Also under test:
+// every shape this revision does not lower is *refused by name*, never emitted
+// as wrong code.
+//
+// Not under test, and not implemented: lifting (commit 4), the six correctness
+// cases — loops, conditionals, nesting, closures (commit 5), the runtime, the
+// resume dispatch and Phase 4's machine behind `~lib/task-rt`.
 //
 // Run: npm run test:async
 //
 // Why the compiler is driven directly rather than through the CLI: the parser
-// still carries Phase 1's `AS100` guard for every `async` construct, and the
-// CLI stops at the first parse error before the `afterParse` hook runs
+// still carries Phase 1's `AS100` guard for every `async` construct, and the CLI
+// stops at the first parse error before the `afterParse` hook runs
 // (`cli/index.js:634-638` returns from `parseBacklog`). The guard is deleted in
-// commit 7. Until then this test drives the same sequence the CLI does —
+// commit 7b. Until then this test drives the same sequence the CLI does —
 // `afterParse` on `program.parser`, then `initialize()`, then `compile()` —
 // with the diagnostic gate removed, which is what makes the emitted *shape*
 // observable at all.
+//
+// One compiler property the helpers respect: a `Program` may be compiled once.
+// A second `compile()` on the same program throws (measured), so `wat` is
+// memoized per program.
 
 import {
   buildProgram,
@@ -40,69 +49,101 @@ function check(name, actual, expected) {
 }
 
 // AS100 "Not implemented: {0}" — the code every refusal uses, with the `{0}`
-// naming the gap (Phase 1's guard uses the same code for the same reason).
+// naming the gap.
 const NOT_IMPLEMENTED = 100;
 
-/** Builds a program holding `source`, exactly as the CLI would. */
-function programFor(source) {
-  return buildProgram([ [ "probe.ts", source ] ]);
-}
-
-/** Runs the transform the way the CLI does, and answers the parse tree's source. */
-function lower(program) {
+/** Compiles `source` through the lowering transform, exactly as the CLI would. */
+function run(source) {
+  const program = buildProgram([ [ "probe.ts", source ] ]);
   const Transform = asc.AsyncLowerTransform;
   // The CLI assigns these onto the transform's prototype before instantiating
   // it (`cli/index.js:455-462`) — this is that assignment, not a re-implementation.
   Object.assign(Transform.prototype, { program });
   new Transform().afterParse(program.parser);
-  return program.sources.find(source => source.internalPath === "probe");
+  const file = program.sources.find(source => source.internalPath === "probe");
+  return {
+    program,
+    file,
+    /** Top-level names, for a quick "what was emitted" read. */
+    names: () => file.statements.map(statement => statement.name ? statement.name.text : String(statement.kind)),
+    /** Compiles once, and answers the module's text. */
+    wat: () => {
+      if (program.__wat) return program.__wat;
+      program.initialize();
+      return (program.__wat = asc.compile(program).toText(true));
+    },
+    /** Compiles once and answers whether the module validates. */
+    validate: () => asc.validate(asc.compile(program))
+  };
 }
 
-/** The text of each refusal the parser reported, in order. */
-function notImplementedTexts(program) {
-  return program.parser.diagnostics
+/**
+ * The run's refusals, by the *gap* they name. The parser's own guard
+ * ("Async functions", deleted in 7b) is excluded: it fires for every `async`
+ * construct until then, so it says nothing about the transform.
+ */
+function refusals(run) {
+  return run.program.parser.diagnostics
     .filter(diagnostic => diagnostic.code === NOT_IMPLEMENTED)
-    .map(diagnostic => diagnostic.message);
+    .map(diagnostic => diagnostic.message.replace("Not implemented: ", ""))
+    .filter(message => message !== "Async functions");
 }
 
-/** Compiles `program` and answers the module's text. */
-function compileToWat(program) {
-  program.initialize();
-  return asc.compile(program).toText(true);
+/** The text of one function in a module, params and body, for scoped matching. */
+function funcBody(wat, name) {
+  const lines = wat.split("\n");
+  const start = lines.findIndex(line => line.includes(`(func $${name} `) || line.includes(`(func $${name}(`));
+  if (start < 0) return "";
+  let depth = 0;
+  const out = [];
+  for (let i = start; i < lines.length; ++i) {
+    out.push(lines[i]);
+    for (const ch of lines[i]) {
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+    }
+    if (depth === 0 && i > start) break;
+  }
+  return out.join("\n");
 }
 
-const SOURCE = `
-async function f(a: i32): i32 {
-  const b: i32 = a + 1;
-  return b;
+/** The typed read of an `await` in `wat`, as `[offset, count]`. */
+function readOffsets(wat) {
+  const offsets = [];
+  for (const match of wat.matchAll(/i32\.load offset=(\d+)/g)) offsets.push(Number(match[1]));
+  return offsets;
 }
-export function probe(): Task<i32> { return f(1); }
+
+const HANDLE_SOURCE = `
+async function f(h: Task<i32>): i32 {
+  let x: i32 = await h;
+  return x + 1;
+}
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
 `;
 
 // 1. The shape (§4.1's three artifacts).
 
 {
-  const program = programFor(SOURCE);
-  const source = lower(program);
-  const statements = source.statements;
+  const r = run(HANDLE_SOURCE);
+  const statements = r.file.statements;
 
-  check("three artifacts are emitted for `f`", statements.length, 4);
+  check("three artifacts are emitted for `f`", r.names(), [ "f$State", "f", "f$resume", "probe", "make" ]);
   check("the state class comes first", statements[0].name.text, "f$State");
   check("the entry keeps the function's name", statements[1].name.text, "f");
   check("the resume function follows the entry", statements[2].name.text, "f$resume");
 
   const state = statements[0];
-  check("the state class is a class", state.kind, asc.NodeKind.ClassDeclaration);
+  check("the state class extends TaskState (§4.7.3)", state.extendsType.name.identifier.text, "TaskState");
   check(
-    "the state class carries one field per parameter, plus resumePoint, result and handle",
+    "the state class carries the parameter, resumePoint, the awaited record, result and handle",
     state.members.filter(member => member.kind === asc.NodeKind.FieldDeclaration).map(member => member.name.text),
-    [ "a", "resumePoint", "result", "handle" ]
+    [ "h", "resumePoint", "result", "$awaited1", "handle" ]
   );
-  check(
-    "the state class has a constructor",
-    state.members.filter(member => member.kind === asc.NodeKind.MethodDeclaration).length,
-    1
-  );
+  const ctor = state.members.find(member => member.kind === asc.NodeKind.MethodDeclaration);
+  check("the constructor calls super() first (AS2377)", ctor.body.statements[0].expression.kind, asc.NodeKind.Call);
+  check("  ...on `super`", ctor.body.statements[0].expression.expression.kind, asc.NodeKind.Super);
 
   const entry = statements[1];
   check("the entry is no longer marked async", entry.isAsync, false);
@@ -112,97 +153,207 @@ export function probe(): Task<i32> { return f(1); }
     "Task"
   );
   check(
-    "  ...and the handle's type argument is the declared value type",
-    entry.signature.returnType.typeArguments.map(node => node.name.identifier.text),
-    [ "i32" ]
-  );
-  check(
-    "the entry allocates the state, resumes it, and returns the handle",
+    "the entry allocates the state, builds the handle, registers, resumes, and returns",
     entry.body.statements.map(statement => statement.kind),
-    [ asc.NodeKind.Variable, asc.NodeKind.Expression, asc.NodeKind.Return ]
+    [ asc.NodeKind.Variable, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Return ]
   );
-  const entryCall = entry.body.statements[1].expression;
-  check("the entry calls the resume function", entryCall.expression.text, "f$resume");
+  const registerStatement = entry.body.statements[2].expression;
+  check("the register call assigns the handle's record", registerStatement.left.property.text, "_record");
+  check("  ...from __taskRegister", registerStatement.right.expression.text, "__taskRegister");
   check(
-    "  ...with the state as its only argument",
-    entryCall.args.map(argument => argument.text),
-    [ "state" ]
+    "  ...and the entry returns the handle",
+    entry.body.statements[4].value.property.text,
+    "handle"
   );
 
   const resume = statements[2];
   check(
-    "the resume function's parameter list is the state alone (§4.3)",
+    "the resume function takes the state alone (§4.3)",
     resume.signature.parameters.map(parameter => parameter.name.text),
     [ "state" ]
   );
   check(
-    "  ...typed by the state class",
-    resume.signature.parameters[0].type.name.identifier.text,
-    "f$State"
-  );
-  check("the resume function returns nothing", resume.signature.returnType.name.identifier.text, "void");
-  check("the resume function is not async", resume.isAsync, false);
-  check(
-    "the resume body copies the parameter in from the state struct (§4.3)",
-    resume.body.statements[0].declarations[0].name.text,
-    "a"
-  );
-  const resumeKinds = resume.body.statements.map(statement => statement.kind);
-  check(
-    "the terminal return writes the value, the terminal resume point, then returns",
-    resumeKinds.slice(-3),
-    [ asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Return ]
-  );
-  check(
-    "  ...and the rewritten return is the last statement (no dead transition after it)",
-    resumeKinds[resumeKinds.length - 1],
-    asc.NodeKind.Return
-  );
-  const resultWrite = resume.body.statements[resumeKinds.length - 3].expression;
-  check(
-    "the value write targets `result` on the state struct",
-    [ resultWrite.left.expression.text, resultWrite.left.property.text ],
-    [ "state", "result" ]
-  );
-  check(
-    "  ...and the store is an assignment",
-    resultWrite.operator,
-    asc.Token.Equals
+    "the resume body copies the parameter in, then guards one region per await plus the entry and the terminal",
+    resume.body.statements.map(statement => statement.kind),
+    [ asc.NodeKind.Variable, asc.NodeKind.If, asc.NodeKind.If ]
   );
 }
 
-// 2. The emitted shape survives real codegen: read it out of the module.
+// 2. The same shape, in the emitted module.
 
 {
-  const program = programFor(SOURCE);
-  lower(program);
-  const wat = compileToWat(program);
-  // Names are namespaced by the declaring source (`probe/f$resume`), which is
-  // also worth asserting: the artifacts are ordinary members of the file.
+  const r = run(HANDLE_SOURCE);
+  const wat = r.wat();
   check("codegen emits the state class's constructor", wat.includes("(func $probe/f$State#constructor"), true);
   check("codegen emits the entry function", /\(func \$probe\/f \(param \$0 i32\) \(result i32\)/.test(wat), true);
   check("codegen emits the resume function", /\(func \$probe\/f\$resume \(param \$0 i32\)/.test(wat), true);
-  check("the entry calls the resume function", wat.includes("call $probe/f$resume"), true);
   check("the entry constructs the state struct", wat.includes("call $probe/f$State#constructor"), true);
-  check("the entry reads the handle back off it", wat.includes("call $probe/f$State#get:handle"), true);
-  check(
-    "the state struct is a managed class the collector visits",
-    wat.includes("call $probe/f$State~visit"),
-    true
-  );
+  check("the entry builds the handle", /call \$~lib\/task\/Task<i32>#constructor/.test(wat), true);
+  check("the entry registers the task", wat.includes("call $~lib/task-rt/__taskRegister"), true);
+  check("the entry calls the resume function", wat.includes("call $probe/f$resume"), true);
+  check("the state struct is a managed class the collector visits", wat.includes("call $probe/f$State~visit"), true);
   check(
     "  ...and its visitor traces its managed fields",
-    /\$probe\/f\$State~visit[\s\S]{0,600}?call \$~lib\/rt\/itcms\/__visit/.test(wat),
+    /\$probe\/f\$State~visit[\s\S]{0,700}?call \$~lib\/rt\/itcms\/__visit/.test(wat),
     true
   );
 }
 
-// 3. Refusals: every shape this revision does not lower is named, not missed.
+// 3. `await` as a state transition: suspend, settle, park, resume, read.
+
+{
+  const r = run(HANDLE_SOURCE);
+  const wat = r.wat();
+  // Scoped to the resume function: the constructor's own zero-init pass writes
+  // `resumePoint` too, and it is not a discriminator.
+  const points = [ ...funcBody(wat, "probe/f$resume")
+    .matchAll(/i32\.const (\d+)\n *call \$probe\/f\$State#set:resumePoint/g) ]
+    .map(match => Number(match[1]));
+  // The entry's point is 0, but it is the *constructor's* write (the transform
+  // initializes `resumePoint` there, `lowResumePoint = 0`); the resume function
+  // itself writes the await's discriminator and the terminal.
+  check("the resume points written are the await's and the terminal", points, [ 1, 2 ]);
+  check("the operand's record is stored in the state struct", wat.includes("call $probe/f$State#set:$awaited1"), true);
+  check("the settled check runs before the park (§1.2 rule 4)", wat.includes("call $~lib/task-rt/__taskSettled"), true);
+  check("the parked path calls __taskPark", wat.includes("call $~lib/task-rt/__taskPark"), true);
+  check(
+    "  ...and returns (§4.1: a suspension is a return)",
+    /call \$~lib\/task-rt\/__taskPark\n *return/.test(wat),
+    true
+  );
+  check("the typed read happens at the await site (§4.7.4)", readOffsets(wat).includes(8), true);
+}
+
+// 4. Distinct discriminators, in textual order.
+
+{
+  const r = run(`
+async function two(h: Task<i32>, g: Task<i32>): i32 {
+  await h;
+  let y: i32 = await g;
+  return y;
+}
+export function probe(): Task<i32> { return two(make(), make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const wat = r.wat();
+  const points = [ ...funcBody(wat, "probe/two$resume")
+    .matchAll(/i32\.const (\d+)\n *call \$probe\/two\$State#set:resumePoint/g) ]
+    .map(match => Number(match[1]));
+  check("two awaits get distinct, ordered discriminators", points, [ 1, 2, 3 ]);
+  check("  ...and two separate record fields", r.file.statements[0].members
+    .filter(member => member.kind === asc.NodeKind.FieldDeclaration && member.name.text.startsWith("$awaited"))
+    .map(member => member.name.text), [ "$awaited1", "$awaited2" ]);
+  check("two settled guards are emitted", [ ...wat.matchAll(/call \$~lib\/task-rt\/__taskSettled/g) ].length, 2);
+  check("two parks are emitted", [ ...wat.matchAll(/call \$~lib\/task-rt\/__taskPark/g) ].length, 2);
+}
+
+// 5. The value types §3.2 knows, and the two it does not.
+
+{
+  const r = run(`
+async function f(h: Task<f64>, g: Task<i32>): f64 {
+  let a: f64 = await h;
+  return a;
+}
+export function probe(): Task<f64> { return f(changetype<Task<f64>>(0), changetype<Task<i32>>(0)); }
+`);
+  const wat = r.wat();
+  check("f64 reads f0/f1 at offset 16", /f64\.load offset=16/.test(wat), true);
+}
+{
+  const r = run(`
+async function g(h: Task<void>): void { await h; }
+export function probe(): Task<void> { return g(changetype<Task<void>>(0)); }
+`);
+  check("a void result still suspends", r.wat().includes("call $~lib/task-rt/__taskPark"), true);
+  check("  ...and carries no `result` field", r.file.statements[0].members
+    .some(member => member.name.text === "result"), false);
+}
+{
+  const r = run(`
+async function s(h: Task<string>): string { let v: string = await h; return v; }
+export function probe(): Task<string> { return s(changetype<Task<string>>(0)); }
+`);
+  // §3.3: reference-typed await results are out of v2, and codegen is where `T`
+  // is known — so this is refused there, with the program otherwise lowered.
+  r.wat();
+  check("a reference-typed result is refused", refusals(r).includes("a reference-typed await result"), true);
+}
+
+// 6. The positions this revision lowers.
+
+{
+  const r = run(`
+async function p(h: Task<i32>, out: i32): i32 { out = await h; return out + 1; }
+export function probe(): Task<i32> { return p(make(), 0); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("the assignment position lowers", r.names()[0], "p$State");
+  check("  ...with no refusal", refusals(r), []);
+}
+{
+  const r = run(`
+async function r(h: Task<i32>): i32 { return await h; }
+export function probe(): Task<i32> { return r(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("the return position lowers", r.names()[0], "r$State");
+  const wat = r.wat();
+  const resume = funcBody(wat, "probe/r$resume");
+  check(
+    "  ...writing the result before the terminal resume point",
+    /set:result[\s\S]{0,400}?i32\.const 2\n *call \$probe\/r\$State#set:resumePoint/.test(resume),
+    true
+  );
+  check("  ...and the terminal resume point is 2 for one await", /i32\.const 2/.test(resume), true);
+}
+{
+  const r = run(`
+async function e(h: Task<i32>): i32 { await h; return 9; }
+export function probe(): Task<i32> { return e(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("a local used only before the await lowers", r.names()[0], "e$State");
+}
+{
+  const r = run(`
+async function d(h: Task<i32>): i32 { await h; let v: i32 = 2; return v; }
+export function probe(): Task<i32> { return d(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("a local declared after the await lowers", r.names()[0], "d$State");
+}
+{
+  const r = run(`
+namespace N { export async function f(h: Task<i32>): i32 { let v: i32 = await h; return v; } }
+export function probe(): Task<i32> { return N.f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const namespace = r.file.statements.find(statement => statement.name && statement.name.text === "N");
+  check(
+    "a namespace member is lowered in place",
+    namespace.members.map(member => member.name ? member.name.text : String(member.kind)),
+    [ "f$State", "f", "f$resume" ]
+  );
+}
+
+// 7. Refusals: every shape this revision does not lower is named, not missed.
 
 const REFUSALS = [
-  [ "await in the body", `async function f(): i32 { return await g(); }`, "await (async lowering)" ],
-  [ "await in the body, nested in an expression", `async function f(h: Task<i32>): i32 { return 1 + await h; }`,
-    "await (async lowering)" ],
+  [ "await in a sub-expression", `async function f(h: Task<i32>): i32 { return 1 + await h; }`,
+    "await in an unsupported position (async lowering)" ],
+  [ "two awaits in one statement", `async function f(h: Task<i32>, g: Task<i32>): i32 { h(g(await h, await g)); return 1; }`,
+    "more than one await in one statement (async lowering)" ],
+  [ "an await whose operand is another await", `async function f(h: Task<i32>): i32 { return await (await h); }`,
+    "await in an unsupported position (async lowering)" ],
+  [ "await in a call argument", `async function f(h: Task<i32>): i32 { g(await h); return 1; }`,
+    "await in an unsupported position (async lowering)" ],
+  [ "a local that crosses an await", `async function f(h: Task<i32>): i32 { let v: i32 = 1; await h; return v; }`,
+    "a local that crosses an await (async lowering)" ],
+  [ "a parameter written before an await and read after it",
+    `async function f(h: Task<i32>, v: i32): i32 { v = 2; await h; return v; }`,
+    "a parameter written before an await and read after it (async lowering)" ],
   [ "a conditional", `async function f(a: i32): i32 { if (a > 0) return 1; return 0; }`,
     "if in an async function body (async lowering)" ],
   [ "a loop", `async function f(a: i32): i32 { while (a > 0) a -= 1; return a; }`,
@@ -213,40 +364,68 @@ const REFUSALS = [
     "async generic functions (async lowering)" ],
   [ "an optional parameter", `async function f(a: i32 = 1): i32 { return a; }`,
     "optional or rest parameters in an async function (async lowering)" ],
+  [ "no declared return type", `async function f() { return 1; }`,
+    "an async function without a declared return type (async lowering)" ],
   [ "an async arrow", `const f = async (): void => {};`,
     "async arrow functions (async lowering)" ],
   [ "an async method", `class C { async m(): void {} }`,
-    "async methods (async lowering)" ]
+    "async methods (async lowering)" ],
+  [ "an async function expression", `const f = async function (): void {};`,
+    "async function expressions (async lowering)" ]
 ];
 
 for (const [ label, source, expected ] of REFUSALS) {
-  const program = programFor(source);
+  const r = run(source);
   let outcome;
-  let statements = [];
   try {
-    statements = lower(program).statements;
-    outcome = notImplementedTexts(program).some(message => message.includes(expected));
+    outcome = refusals(r).some(message => message.includes(expected));
   } catch (error) {
-    outcome = `aborted: ${error.message}`;
+    outcome = `threw: ${error.message}`;
   }
   check(`${label} is refused by name`, outcome, true);
-  // And nothing was emitted for it: a refused function leaves the statement
-  // list exactly as parsed, with no synthesized `$`-named artifact in it.
   check(
     `  ...and no artifact was emitted for it`,
-    statements.some(statement => typeof statement.name?.text === "string" && statement.name.text.includes("$")),
+    r.names().some(name => name.includes("$")),
     false
   );
 }
 
-// 4. A program that declares no async function is untouched.
+// 8. A `this` body is refused by name.
 
 {
-  const program = programFor(`export function probe(): i32 { return 7; }`);
+  const r = run(`
+class C { x: i32 = 7; m(): i32 { return this.x; } }
+async function f(c: C): i32 { let v: i32 = await c.m(); return v; }
+export function probe(): Task<i32> { return f(new C()); }
+`);
+  // No `this` in the async body here — but the operand is a *method call*, which
+  // is fine. The refusal this checks is the `this` *expression*:
+  const t = run(`
+class C { x: i32 = 7; }
+async function f(h: Task<i32>): i32 { let v: i32 = await h; return this.x; }
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("a method call as the operand lowers", refusals(r), []);
+  check("`this` in an async body is refused by name", refusals(t).includes("this in an async function body (async lowering)"), true);
+}
+
+// 9. A program that declares no async function is untouched.
+
+{
+  const program = buildProgram([ [ "probe.ts", `export function probe(): i32 { return 7; }` ] ]);
   const before = program.sources.find(source => source.internalPath === "probe").statements.length;
-  const source = lower(program);
-  check("a program without async emits nothing", source.statements.length, before);
+  const Transform = asc.AsyncLowerTransform;
+  Object.assign(Transform.prototype, { program });
+  new Transform().afterParse(program.parser);
+  const after = program.sources.find(source => source.internalPath === "probe").statements.length;
+  check("a program without async emits nothing", after, before);
   check("  ...and reports nothing", program.parser.diagnostics.length, 0);
+  check(
+    "  ...and the side table stays empty for it",
+    (program.initialize(), asc.compile(program).toText(true).includes("$awaited")),
+    false
+  );
 }
 
 console.log();
