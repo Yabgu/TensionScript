@@ -1,23 +1,26 @@
 {
-  "name": "assemblyscript",
-  "description": "A TypeScript-like language for WebAssembly.",
+  "name": "@yabgu_gm/tensionscript",
+  "description": "TensionScript: a TypeScript-shaped language for WebAssembly, forked from AssemblyScript for the Tension engine.",
   "keywords": [
     "typescript",
     "webassembly",
     "compiler",
-    "assemblyscript",
+    "tensionscript",
     "wasm"
   ],
-  "version": "0.0.0",
+  "version": "0.1.0",
   "author": "Daniel Wirtz <dcode+assemblyscript@dcode.io>",
   "license": "Apache-2.0",
-  "homepage": "https://assemblyscript.org",
+  "homepage": "https://github.com/Yabgu/Tension",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AssemblyScript/assemblyscript.git"
+    "url": "https://github.com/Yabgu/TensionScript.git"
   },
   "bugs": {
-    "url": "https://github.com/AssemblyScript/assemblyscript/issues"
+    "url": "https://github.com/Yabgu/TensionScript/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=20",
@@ -106,9 +109,5 @@
     "lib/binaryen.d.ts",
     "tsconfig-base.json",
     "NOTICE"
-  ],
-  "funding": {
-    "type": "opencollective",
-    "url": "https://opencollective.com/assemblyscript"
-  }
+  ]
 }

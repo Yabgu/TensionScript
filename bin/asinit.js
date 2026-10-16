@@ -94,9 +94,9 @@ const assemblyDir = path.join(projectDir, "assembly");
 const tsconfigFile = path.join(assemblyDir, "tsconfig.json");
 const asconfigFile = path.join(projectDir, "asconfig.json");
 let tsconfigBase = path.relative(assemblyDir, path.join(compilerDir, "std", "assembly.json"));
-if (/^(\.\.[/\\])*node_modules[/\\]assemblyscript[/\\]/.test(tsconfigBase)) {
+if (/^(\.\.[/\\])*node_modules[/\\]@yabgu_gm[/\\]tensionscript[/\\]/.test(tsconfigBase)) {
   // Use node resolution if the compiler is a normal dependency
-  tsconfigBase = "assemblyscript/std/assembly.json";
+  tsconfigBase = "@yabgu_gm/tensionscript/std/assembly.json";
 }
 const entryFile = path.join(assemblyDir, "index.ts");
 const buildDir = path.join(projectDir, "build");
@@ -362,7 +362,7 @@ function ensurePackageJson() {
         "start": "npx serve ."
       },
       "devDependencies": {
-        "assemblyscript": "^" + version
+        "@yabgu_gm/tensionscript": "^" + version
       }
     }, null, 2));
     console.log(stdoutColors.green("  Created: ") + packageFile);
@@ -400,8 +400,8 @@ function ensurePackageJson() {
       updated = true;
     }
     let devDependencies = pkg["devDependencies"] || {};
-    if (!devDependencies["assemblyscript"]) {
-      devDependencies["assemblyscript"] = "^" + version;
+    if (!devDependencies["@yabgu_gm/tensionscript"]) {
+      devDependencies["@yabgu_gm/tensionscript"] = "^" + version;
       pkg["devDependencies"] = devDependencies;
       updated = true;
     }

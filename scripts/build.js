@@ -201,7 +201,7 @@ const common = {
   platform: "node",
   format: "esm",
   external: [
-    "assemblyscript",
+    "@yabgu_gm/tensionscript",
     "binaryen",
     "long"
   ],
