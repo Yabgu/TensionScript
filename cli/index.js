@@ -74,7 +74,7 @@ function isNonEmptyString(value) {
 //   return ptrOrObj;
 // }
 
-/** AssemblyScript version. */
+/** TensionScript version. */
 export const version = generated.version;
 
 /** Available CLI options. */
@@ -1068,7 +1068,7 @@ export async function main(argv, options) {
     const BAR = stdoutColors.red("▌ ");
     console.error([
       EOL,
-      BAR, "Whoops, the AssemblyScript compiler has crashed during ", stage, " :-(", EOL,
+      BAR, "Whoops, the TensionScript compiler has crashed during ", stage, " :-(", EOL,
       BAR, EOL,
       (typeof e.stack === "string"
         ? [
@@ -1084,7 +1084,7 @@ export async function main(argv, options) {
       ).join(""),
       BAR, EOL,
       BAR, "If you see where the error is, feel free to send us a pull request. If not,", EOL,
-      BAR, "please let us know: https://github.com/AssemblyScript/assemblyscript/issues", EOL,
+      BAR, "please let us know: https://github.com/Yabgu/TensionScript/issues", EOL,
       BAR, EOL,
       BAR, "Thank you!", EOL
     ].join(""));

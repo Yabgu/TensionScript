@@ -18,7 +18,7 @@ jobs:
       run: |
         if git --no-pager diff --name-only $(git rev-parse origin/${{ github.base_ref }})...${{ github.sha }} | grep -q "^dist/"; then
           printf "\nThe pull request modifies distribution files, but it shouldn't.\n" &&
-          printf "Please see https://github.com/AssemblyScript/assemblyscript/blob/main/CONTRIBUTING.md\n" &&
+          printf "Please see https://github.com/Yabgu/TensionScript/blob/main/CONTRIBUTING.md\n" &&
           exit 1;
         else
           printf "\nOK: Distributions files have not been modified.\n";

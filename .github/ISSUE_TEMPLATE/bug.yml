@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for taking the time to fill out this bug report! To get off to a good start, make sure to:
         * Search if there is an existing issue on the topic
-        * Get familiar with the [contributing guidelines](https://github.com/AssemblyScript/assemblyscript/blob/main/CONTRIBUTING.md)
+        * Get familiar with the [contributing guidelines](https://github.com/Yabgu/TensionScript/blob/main/CONTRIBUTING.md)
   - type: textarea
     id: description
     attributes:
@@ -26,8 +26,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: AssemblyScript version
-      description: "What's the AssemblyScript version used?"
+      label: TensionScript version
+      description: "What's the TensionScript version used?"
       placeholder: "vX.Y.Z"
     validations:
       required: true
