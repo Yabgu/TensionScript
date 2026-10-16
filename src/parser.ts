@@ -2171,7 +2171,10 @@ export class Parser extends DiagnosticEmitter {
       // A modifier after `async` cannot belong to this member: TypeScript's
       // rule is that `static` precedes `async` (its 1029), and every other
       // combination is its 1042. Both are refusals; the general code stands in
-      // for the ordering rule, which is not in this fork's inventory.
+      // for the ordering rule, which is not in this fork's inventory. The
+      // misplaced modifier is consumed and `async` dropped, so the member
+      // still parses -- a refusal that also loses the class body would be a
+      // worse diagnostic than the one reported.
       switch (tn.peek()) {
         case Token.Public:
         case Token.Private:
@@ -2184,8 +2187,10 @@ export class Parser extends DiagnosticEmitter {
           this.error(
             DiagnosticCode._0_modifier_cannot_be_used_here,
             tn.range(asyncStart, asyncEnd), "async"
-          );
-          return null;
+          ); // recoverable
+          tn.next(); // consume the misplaced modifier
+          isAsync = false;
+          break;
         }
       }
     }
@@ -2438,8 +2443,7 @@ export class Parser extends DiagnosticEmitter {
       );
 
       let body: Statement | null = null;
-      if (tn.skip(Token.OpenBrace)) {
-        if (flags & CommonFlags.Ambient) {
+      if (tn.skip(Token.OpenBrace)) {        if (flags & CommonFlags.Ambient) {
           this.error(
             DiagnosticCode.An_implementation_cannot_be_declared_in_ambient_contexts,
             tn.range()
@@ -2467,6 +2471,19 @@ export class Parser extends DiagnosticEmitter {
         ); // recoverable
       }
 
+      // `async` is legal on a plain method only. TypeScript refuses it on a
+      // constructor (its 1089) and on an accessor (its 1042); neither message
+      // is in this fork's inventory, so the general modifier code stands in,
+      // and a refused method is stored without the modifier -- the AST never
+      // advertises an `async` the language refuses.
+      let asyncMethod = isAsync;
+      if (isAsync && (name.kind == NodeKind.Constructor || isGetterOrSetter)) {
+        asyncMethod = false;
+        this.error(
+          DiagnosticCode._0_modifier_cannot_be_used_here,
+          tn.range(asyncStart, asyncEnd), "async"
+        ); // recoverable
+      }
       let retMethod = Node.createMethodDeclaration(
         name,
         decorators,
@@ -2475,29 +2492,15 @@ export class Parser extends DiagnosticEmitter {
         signature,
         body,
         tn.range(startPos, tn.pos),
-        isAsync
+        asyncMethod
       );
-      if (isAsync) {
-        if (name.kind == NodeKind.Constructor) {
-          // TypeScript's 1089 ("'async' modifier cannot appear on a
-          // constructor declaration") is not in this fork's inventory.
-          this.error(
-            DiagnosticCode._0_modifier_cannot_be_used_here,
-            tn.range(asyncStart, asyncEnd), "async"
-          ); // recoverable
-        } else if (isGetterOrSetter) {
-          this.error(
-            DiagnosticCode._0_modifier_cannot_be_used_here,
-            tn.range(asyncStart, asyncEnd), "async"
-          ); // recoverable
-        } else {
-          // TODO(lowering): delete this once the async lowering transform
-          // exists (docs/async-await-plan-v2.md §4.5).
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            tn.range(asyncStart, asyncEnd), "Async functions"
-          ); // recoverable
-        }
+      if (asyncMethod) {
+        // TODO(lowering): delete once the async lowering transform exists
+        // (docs/async-await-plan-v2.md §4.5).
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          tn.range(asyncStart, asyncEnd), "Async functions"
+        ); // recoverable
       }
       if (!(isInterface && tn.skip(Token.Comma))) {
         tn.skip(Token.Semicolon);
@@ -3873,6 +3876,18 @@ export class Parser extends DiagnosticEmitter {
       // AsyncFunctionExpression, async arrows
       case Token.Async: {
         let asyncEnd = tn.pos;
+        if (tn.peekOnNewLine()) {
+          // A line terminator after `async` means it is not a modifier
+          // (TypeScript's ASI rule: `async\nfunction f() {}` is two statements
+          // there, and `async` is an unresolved name -- TS2304). `async` is
+          // reserved here, so there is no identifier to fall back to and the
+          // token cannot be used at all.
+          this.error(
+            DiagnosticCode._0_modifier_cannot_be_used_here,
+            tn.range(startPos, asyncEnd), "async"
+          );
+          return null;
+        }
         switch (tn.peek()) {
           case Token.Function: {
             tn.next(); // consume `function`
