@@ -79,6 +79,7 @@ export const enum NodeKind {
   Constructor,
   UnaryPostfix,
   UnaryPrefix,
+  Await,
   Compiled,
 
   // statements
@@ -435,6 +436,13 @@ export abstract class Node {
     range: Range
   ): UnaryPrefixExpression {
     return new UnaryPrefixExpression(operator, operand, range);
+  }
+
+  static createAwaitExpression(
+    operand: Expression,
+    range: Range
+  ): AwaitExpression {
+    return new AwaitExpression(operand, range);
   }
 
   static createCompiledExpression(
@@ -1628,6 +1636,29 @@ export class UnaryPrefixExpression extends UnaryExpression {
   }
 }
 
+/**
+ * Represents an `await` expression, e.g. `await task`.
+ *
+ * Carries the awaited expression and nothing else: the resume point, the
+ * state-machine slot and the correlation key a lowering backend needs are
+ * lowering artifacts and live in that backend's own tables, keyed by node
+ * identity -- never on the node (see `docs/async-await-plan-v2.md` §2.1).
+ *
+ * Deliberately not a `UnaryExpression`: `await` has no operator *token* to
+ * carry, because `Token.Await` is the node kind itself, and `operatorTokenToString`
+ * has no rendering for it.
+ */
+export class AwaitExpression extends Expression {
+  constructor(
+    /** The awaited expression. */
+    public operand: Expression,
+    /** Source range. */
+    range: Range
+  ) {
+    super(NodeKind.Await, range);
+  }
+}
+
 /** Represents a special pre-compiled expression. If the expression has side-effects, special care has to be taken. */
 export class CompiledExpression extends Expression {
   constructor(
@@ -2104,7 +2135,18 @@ export class FunctionDeclaration extends DeclarationStatement {
     /** Arrow function kind, if applicable. */
     public arrowKind: ArrowKind,
     /** Source range. */
-    range: Range
+    range: Range,
+    /**
+     * Whether this declaration carries the `async` modifier.
+     *
+     * A field rather than a node kind and rather than a {@link CommonFlags}
+     * bit: the flag word's last bit is `InternallyNullable = 1 << 31`, so a
+     * bit would mean widening the word and touching every `is`/`isAny`/`set`
+     * site. One field covers functions ({@link FunctionDeclaration}), methods
+     * ({@link MethodDeclaration} extends it) and arrows/function expressions
+     * ({@link FunctionExpression} wraps a declaration carrying `arrowKind`).
+     */
+    public isAsync: bool = false
   ) {
     super(NodeKind.FunctionDeclaration, name, decorators, flags, range);
   }
@@ -2125,7 +2167,8 @@ export class FunctionDeclaration extends DeclarationStatement {
       this.signature,
       this.body,
       this.arrowKind,
-      this.range
+      this.range,
+      this.isAsync // the clone carries the modifier (see `compileFunctionExpression`)
     );
   }
 }
@@ -2227,9 +2270,11 @@ export class MethodDeclaration extends FunctionDeclaration {
     /** Body statement. Usually a block. */
     body: Statement | null,
     /** Source range. */
-    range: Range
+    range: Range,
+    /** Whether this method carries the `async` modifier. */
+    isAsync: bool = false
   ) {
-    super(name, decorators, flags, typeParameters, signature, body, ArrowKind.None, range);
+    super(name, decorators, flags, typeParameters, signature, body, ArrowKind.None, range, isAsync);
     this.kind = NodeKind.MethodDeclaration;
   }
 }
