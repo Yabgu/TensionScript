@@ -2695,6 +2695,9 @@ declare function final(constructor: Constructor): void;
 /** A handle to an asynchronous operation's result (`Task<T>` in `task.ts`). */
 declare class Task<T> {}
 
+/** The base class of a task's on-heap record (`TaskRecord` in `task.ts`). */
+declare class TaskRecord {}
+
 /** Annotates a method, function or constant global as always inlined. */
 declare function inline(...args: any[]): any;
 declare namespace inline {
