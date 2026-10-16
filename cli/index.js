@@ -444,6 +444,12 @@ export async function main(argv, options) {
     }
   }
 
+  // The in-tree async lowering (docs/async-await-plan-v2.md §0.2, §4.5, D9): an
+  // `afterParse` AST transform that turns `async function`s into state machines.
+  // It is a no-op for a program that declares no `async` function, which is what
+  // keeps the output of programs that do not use `async` byte-identical.
+  transforms.push(assemblyscript.AsyncLowerTransform);
+
   // Fix up the prototype of the transforms’ constructors and instantiate them.
   try {
     transforms = transforms.map(transform => {
