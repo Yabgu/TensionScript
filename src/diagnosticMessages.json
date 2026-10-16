@@ -124,6 +124,7 @@
   "Method '{0}' cannot have an implementation because it is marked abstract.": 1245,
   "An interface property cannot have an initializer.": 1246,
   "A definite assignment assertion '!' is not permitted in this context.": 1255,
+  "'await' expressions are only allowed within async functions and at the top levels of modules.": 1308,
   "A class may only extend another class.": 1311,
   "A parameter property cannot be declared using a rest parameter.": 1317,
   "A default export can only be used in a module.": 1319,
