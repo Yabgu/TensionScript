@@ -1,7 +1,7 @@
 Tests
 =====
 
-This directory contains the test cases for AssemblyScript's parser and compiler. A test case
+This directory contains the test cases for TensionScript's parser and compiler. A test case
 consists of:
 
 * A test file that is parsed or compiled (.ts)
@@ -134,5 +134,5 @@ Other
 Tests in other directories are not run automatically and do not need to be updated. There are also:
 
 * [tests/allocators](./allocators) contains the memory allocator test suite
-* [tests/browser](./browser.js) checks typical browser usage via asc's API
+* [tests/browser](./browser.js) checks typical browser usage via the compiler's API
 * [tests/tokenizer](./tokenizer.js) is a visual test for the tokenizer tokenizing itself

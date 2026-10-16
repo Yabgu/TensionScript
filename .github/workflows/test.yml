@@ -18,7 +18,7 @@ jobs:
       run: |
         if git --no-pager diff --name-only $(git rev-parse origin/${{ github.base_ref }})...${{ github.sha }} | grep -q "^dist/"; then
           printf "\nThe pull request modifies distribution files, but it shouldn't.\n" &&
-          printf "Please see https://github.com/AssemblyScript/assemblyscript/blob/main/CONTRIBUTING.md\n" &&
+          printf "Please see https://github.com/Yabgu/TensionScript/blob/main/CONTRIBUTING.md\n" &&
           exit 1;
         else
           printf "\nOK: Distributions files have not been modified.\n";
@@ -65,7 +65,7 @@ jobs:
     - name: "Test ${{ matrix.target }}"
       run: npm run test:compiler -- --wasm build/assemblyscript.${{ matrix.target }}-bootstrap.js
     - name: "Compile ${{ matrix.target }} -> ${{ matrix.target == 'debug' && 'release' || 'debug' }}"
-      run: node bin/asc --config src/asconfig.json --target ${{ matrix.target == 'debug' && 'release' || 'debug' }}-bootstrap --wasm ./build/assemblyscript.${{ matrix.target }}-bootstrap.js
+      run: node bin/tensionscript.js --config src/asconfig.json --target ${{ matrix.target == 'debug' && 'release' || 'debug' }}-bootstrap --wasm ./build/assemblyscript.${{ matrix.target }}-bootstrap.js
     - name: "Test ${{ matrix.target == 'debug' && 'release' || 'debug' }}"
       run: npm run test:compiler -- --wasm build/assemblyscript.${{ matrix.target == 'debug' && 'release' || 'debug' }}-bootstrap.js
   features:

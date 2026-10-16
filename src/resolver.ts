@@ -2196,6 +2196,30 @@ export class Resolver extends DiagnosticEmitter {
     return null;
   }
 
+  /**
+   * Marks the arrows a resolved `this` escaped as capturing the receiver, and
+   * gives each one the `this` local its compiled code will read.
+   *
+   * Codegen cannot re-derive either fact. Which arrows capture `this` is a
+   * property of how resolution reached a binding -- a nested regular function
+   * stops the walk, so it is *not* capturing even though a `this` reference
+   * textually sits inside it -- and the captured type is only known once the
+   * binding is found. Both are therefore recorded here, at resolution time:
+   * `capturesThis` on the arrow's prototype, which is the same element codegen
+   * compiles and materialises, plus the `this` slot in the arrow's frame. The
+   * slot is where the arrow's prologue stores what the environment global
+   * carried in, and where `this` inside its body reads from.
+   */
+  private markCapturingArrows(arrows: Function[], capturedType: Type): void {
+    for (let i = 0, k = arrows.length; i < k; ++i) {
+      let arrow = arrows[i];
+      if (arrow.prototype.capturesThis) continue; // already marked
+      arrow.prototype.capturesThis = true;
+      assert(!arrow.signature.thisType); // an arrow never has one
+      arrow.addLocal(capturedType, CommonNames.this_);
+    }
+  }
+
   /** Looks up the program element the specified this expression refers to. */
   private lookupThisExpression(
     /** The expression to look up. */
@@ -2215,11 +2239,77 @@ export class Resolver extends DiagnosticEmitter {
         return thisLocal;
       }
     }
-    let parent = ctxFlow.sourceFunction.parent;
-    if (parent) {
-      this.currentThisExpression = null;
-      this.currentElementExpression = null;
-      return parent;
+
+    // `this` is lexical: it belongs to the nearest enclosing NON-arrow
+    // function, and an arrow passes the binding outward to it. This is
+    // TypeScript's rule at `--target esnext`, i.e. without the old
+    // `var _this = this` rewrite that `--target es5` emits.
+    //
+    // The previous code returned `sourceFunction.parent` unconditionally, which
+    // is right only for a method, whose parent happens to be its class. Every
+    // other position named an unrelated element: inside an arrow it produced
+    // the enclosing function's *function* type, hence
+    // `TS2339: Property 'x' does not exist on type 'C#m'`, and inside a plain
+    // function it produced the enclosing file.
+    let enclosing: Function | null = ctxFlow.sourceFunction;
+    let escapedArrows: Function[] | null = null;
+    while (
+      enclosing != null &&
+      enclosing.prototype.arrowKind != ArrowKind.None
+    ) {
+      // Remember every arrow this lookup escapes. If a binding is found
+      // outside, each one of them is between the reference and its `this` and
+      // has to transport the receiver through its environment -- including an
+      // outer arrow that does not itself mention `this`, but whose frame is
+      // where a nested arrow is created.
+      if (!escapedArrows) escapedArrows = new Array();
+      escapedArrows.push(enclosing);
+      let outer: Element | null = enclosing.parent;
+      enclosing = outer != null && outer.kind == ElementKind.Function
+        ? <Function>outer
+        : null;
+    }
+    if (enclosing != null) {
+      // A method's parent is its Class and a static method's parent is its
+      // ClassPrototype, which is where statics live. Either way that element
+      // *is* what `this` denotes, and either way it is what the old
+      // unconditional `return parent` produced. Kept first, and kept as the
+      // only route for these two, because it is what makes methods and static
+      // methods work today.
+      let parent = enclosing.parent;
+      if (parent != null && parent.kind == ElementKind.Class) {
+        // The receiver is a runtime value: an arrow that reaches it must
+        // capture it. Note that a static method's `this` takes the
+        // ClassPrototype route below instead and is *not* marked -- statics
+        // have no receiver value at all, and their members are globals, so
+        // there is nothing for an arrow to capture.
+        if (escapedArrows) this.markCapturingArrows(escapedArrows, (<Class>parent).type);
+        this.currentThisExpression = null;
+        this.currentElementExpression = null;
+        return parent;
+      }
+      if (parent != null && parent.kind == ElementKind.ClassPrototype) {
+        this.currentThisExpression = null;
+        this.currentElementExpression = null;
+        return parent;
+      }
+      // Otherwise the binding has to come from the function's own `this` local,
+      // which is what carries an explicit `this: C` type -- a parameter with no
+      // class to fall back to.
+      //
+      // Deliberately `scopedLocals` and not `flow.lookupLocal`: lookupLocal
+      // walks the flow chain, which would let a nested regular function
+      // inherit the enclosing method's `this`. TypeScript does not do that --
+      // a regular function binds `this` dynamically, so it is given no binding
+      // here at all, and gets TS2332 below.
+      let ownLocals = enclosing.flow.scopedLocals;
+      let thisLocal = ownLocals ? ownLocals.get(CommonNames.this_) : null;
+      if (thisLocal) {
+        if (escapedArrows) this.markCapturingArrows(escapedArrows, thisLocal.type);
+        this.currentThisExpression = null;
+        this.currentElementExpression = null;
+        return thisLocal;
+      }
     }
     if (reportMode == ReportMode.Report) {
       this.error(

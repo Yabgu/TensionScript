@@ -8,6 +8,7 @@
  (type $6 (func (param i32 i32 i64)))
  (type $7 (func (result i32)))
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
+ (global $~env (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/total (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/threshold (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/state (mut i32) (i32.const 0))
@@ -1035,7 +1036,7 @@
   (local $4 i32)
   (local $5 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 4
+  i32.const 16
   i32.sub
   global.set $~lib/memory/__stack_pointer
   block $folding-inner1
@@ -1044,12 +1045,25 @@
    i32.lt_s
    br_if $folding-inner1
    global.get $~lib/memory/__stack_pointer
-   i32.const 0
+   i64.const 0
+   i64.store
+   global.get $~lib/memory/__stack_pointer
+   i64.const 0
+   i64.store offset=8
+   global.get $~env
+   global.get $~lib/memory/__stack_pointer
+   i32.const 1056
    i32.store
+   i32.const 1060
+   i32.load
+   global.set $~env
    i32.const 2
    i32.const 1056
    i32.load
    call_indirect (type $0)
+   local.set $0
+   global.set $~env
+   local.get $0
    i32.const 42
    i32.ne
    if
@@ -1060,10 +1074,20 @@
     call $~lib/builtins/abort
     unreachable
    end
+   global.get $~env
+   global.get $~lib/memory/__stack_pointer
+   i32.const 1168
+   i32.store offset=4
+   i32.const 1172
+   i32.load
+   global.set $~env
    i32.const 1
    i32.const 1168
    i32.load
    call_indirect (type $0)
+   local.set $0
+   global.set $~env
+   local.get $0
    i32.const 42
    i32.ne
    if
@@ -1106,15 +1130,25 @@
    i32.store
    i32.const 1744
    global.set $~lib/rt/itcms/fromSpace
+   global.get $~env
+   global.get $~lib/memory/__stack_pointer
+   i32.const 1200
+   i32.store offset=12
+   i32.const 1204
+   i32.load
+   global.set $~env
    i32.const 0
    i32.const 1200
    i32.load
    call_indirect (type $0)
+   local.set $0
+   global.set $~env
+   local.get $0
    call $~lib/number/I32#toString
    local.set $5
    global.get $~lib/memory/__stack_pointer
    local.get $5
-   i32.store
+   i32.store offset=8
    block $__inlined_func$~lib/string/String.__eq$1 (result i32)
     global.get $~lib/memory/__stack_pointer
     i32.const 8
@@ -1264,7 +1298,7 @@
     unreachable
    end
    global.get $~lib/memory/__stack_pointer
-   i32.const 4
+   i32.const 16
    i32.add
    global.set $~lib/memory/__stack_pointer
    return

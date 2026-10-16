@@ -1,23 +1,26 @@
 {
-  "name": "assemblyscript",
-  "description": "A TypeScript-like language for WebAssembly.",
+  "name": "@yabgu_gm/tensionscript",
+  "description": "TensionScript: a TypeScript-shaped language for WebAssembly, forked from AssemblyScript for the Tension engine.",
   "keywords": [
     "typescript",
     "webassembly",
     "compiler",
-    "assemblyscript",
+    "tensionscript",
     "wasm"
   ],
-  "version": "0.0.0",
+  "version": "0.2.0",
   "author": "Daniel Wirtz <dcode+assemblyscript@dcode.io>",
   "license": "Apache-2.0",
-  "homepage": "https://assemblyscript.org",
+  "homepage": "https://github.com/Yabgu/Tension",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AssemblyScript/assemblyscript.git"
+    "url": "https://github.com/Yabgu/TensionScript.git"
   },
   "bugs": {
-    "url": "https://github.com/AssemblyScript/assemblyscript/issues"
+    "url": "https://github.com/Yabgu/TensionScript/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=20",
@@ -68,8 +71,7 @@
     }
   },
   "bin": {
-    "asc": "./bin/asc.js",
-    "asinit": "./bin/asinit.js"
+    "tensionscript": "./bin/tensionscript.js"
   },
   "scripts": {
     "check": "npm run check:config && npm run check:import && npm run lint",
@@ -85,17 +87,17 @@
     "test:browser": "node --enable-source-maps tests/browser",
     "test:asconfig": "cd tests/asconfig && npm run test",
     "test:transform": "npm run test:transform:esm && npm run test:transform:cjs",
-    "test:transform:esm": "node bin/asc tests/compiler/empty --transform ./tests/transform/index.js --noEmit && node bin/asc tests/compiler/empty --transform ./tests/transform/simple.js --noEmit",
-    "test:transform:cjs": "node bin/asc tests/compiler/empty --transform ./tests/transform/cjs/index.js --noEmit && node bin/asc tests/compiler/empty --transform ./tests/transform/cjs/simple.js --noEmit",
+    "test:transform:esm": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/simple.js --noEmit",
+    "test:transform:cjs": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/simple.js --noEmit",
     "test:cli": "node tests/cli/options.js",
     "asbuild": "npm run asbuild:debug && npm run asbuild:release",
-    "asbuild:debug": "node bin/asc --config src/asconfig.json --target debug",
-    "asbuild:release": "node bin/asc --config src/asconfig.json --target release",
-    "asbuild:rtraced": "node bin/asc --config src/asconfig.json --target rtraced",
+    "asbuild:debug": "node bin/tensionscript.js --config src/asconfig.json --target debug",
+    "asbuild:release": "node bin/tensionscript.js --config src/asconfig.json --target release",
+    "asbuild:rtraced": "node bin/tensionscript.js --config src/asconfig.json --target rtraced",
     "bootstrap": "npm run bootstrap:debug && npm run bootstrap:release",
-    "bootstrap:debug": "node bin/asc --config src/asconfig.json --target debug && node bin/asc --config src/asconfig.json --target debug-bootstrap --wasm ./build/assemblyscript.debug.js && node bin/asc --config src/asconfig.json --target debug-bootstrap --wasm ./build/assemblyscript.debug-bootstrap.js && git --no-pager diff --no-index build/assemblyscript.debug.wast build/assemblyscript.debug-bootstrap.wast",
-    "bootstrap:release": "node bin/asc --config src/asconfig.json --target release && node bin/asc --config src/asconfig.json --target release-bootstrap --wasm ./build/assemblyscript.release.js && node bin/asc --config src/asconfig.json --target release-bootstrap --wasm ./build/assemblyscript.release-bootstrap.js && git --no-pager diff --no-index build/assemblyscript.release.wast build/assemblyscript.release-bootstrap.wast",
-    "bootstrap:rtraced": "node bin/asc --config src/asconfig.json --target rtraced && node bin/asc --config src/asconfig.json --target rtraced --wasm ./build/assemblyscript.rtraced.js"
+    "bootstrap:debug": "node bin/tensionscript.js --config src/asconfig.json --target debug && node bin/tensionscript.js --config src/asconfig.json --target debug-bootstrap --wasm ./build/assemblyscript.debug.js && node bin/tensionscript.js --config src/asconfig.json --target debug-bootstrap --wasm ./build/assemblyscript.debug-bootstrap.js && git --no-pager diff --no-index build/assemblyscript.debug.wast build/assemblyscript.debug-bootstrap.wast",
+    "bootstrap:release": "node bin/tensionscript.js --config src/asconfig.json --target release && node bin/tensionscript.js --config src/asconfig.json --target release-bootstrap --wasm ./build/assemblyscript.release.js && node bin/tensionscript.js --config src/asconfig.json --target release-bootstrap --wasm ./build/assemblyscript.release-bootstrap.js && git --no-pager diff --no-index build/assemblyscript.release.wast build/assemblyscript.release-bootstrap.wast",
+    "bootstrap:rtraced": "node bin/tensionscript.js --config src/asconfig.json --target rtraced && node bin/tensionscript.js --config src/asconfig.json --target rtraced --wasm ./build/assemblyscript.rtraced.js"
   },
   "files": [
     "bin/",
@@ -106,9 +108,5 @@
     "lib/binaryen.d.ts",
     "tsconfig-base.json",
     "NOTICE"
-  ],
-  "funding": {
-    "type": "opencollective",
-    "url": "https://opencollective.com/assemblyscript"
-  }
+  ]
 }

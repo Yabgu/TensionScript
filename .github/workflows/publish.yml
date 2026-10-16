@@ -1,3 +1,8 @@
+# Inherited from the upstream project. It is inert on this fork: every job is
+# guarded by `if: github.repository == 'AssemblyScript/assemblyscript'`, so it
+# never executes here, and it drives the upstream release tooling (`aspublish`)
+# and the separately-published @assemblyscript/* subpackages. TensionScript is
+# published manually. Kept verbatim so the inheritance stays visible.
 name: Publish
 on:
   # Note that the main branch will be used regardless of the branch chosen

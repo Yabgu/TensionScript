@@ -34,7 +34,7 @@ import * as optionsUtil from "../util/options.js";
 import * as generated from "./index.generated.js";
 
 import binaryen from "../lib/binaryen.js";
-import * as assemblyscriptJS from "assemblyscript";
+import * as assemblyscriptJS from "@yabgu_gm/tensionscript";
 
 // Use the TS->JS variant by default
 let assemblyscript = assemblyscriptJS;
@@ -74,7 +74,7 @@ function isNonEmptyString(value) {
 //   return ptrOrObj;
 // }
 
-/** AssemblyScript version. */
+/** TensionScript version. */
 export const version = generated.version;
 
 /** Available CLI options. */
@@ -217,13 +217,13 @@ export async function main(argv, options) {
     let colors = opts.help ? stdoutColors : stderrColors;
     out.write([
       colors.white("SYNTAX"),
-      "  " + colors.cyan("asc") + " [entryFile ...] [options]",
+      "  " + colors.cyan("tensionscript") + " [entryFile ...] [options]",
       "",
       colors.white("EXAMPLES"),
-      "  " + colors.cyan("asc") + " hello" + extension,
-      "  " + colors.cyan("asc") + " hello" + extension + " -o hello.wasm -t hello.wat",
-      "  " + colors.cyan("asc") + " hello1" + extension + " hello2" + extension + " -o -O > hello.wasm",
-      "  " + colors.cyan("asc") + " --config asconfig.json --target release",
+      "  " + colors.cyan("tensionscript") + " hello" + extension,
+      "  " + colors.cyan("tensionscript") + " hello" + extension + " -o hello.wasm -t hello.wat",
+      "  " + colors.cyan("tensionscript") + " hello1" + extension + " hello2" + extension + " -o -O > hello.wasm",
+      "  " + colors.cyan("tensionscript") + " --config asconfig.json --target release",
       "",
       colors.white("OPTIONS"),
     ].concat(
@@ -1068,7 +1068,7 @@ export async function main(argv, options) {
     const BAR = stdoutColors.red("▌ ");
     console.error([
       EOL,
-      BAR, "Whoops, the AssemblyScript compiler has crashed during ", stage, " :-(", EOL,
+      BAR, "Whoops, the TensionScript compiler has crashed during ", stage, " :-(", EOL,
       BAR, EOL,
       (typeof e.stack === "string"
         ? [
@@ -1084,7 +1084,7 @@ export async function main(argv, options) {
       ).join(""),
       BAR, EOL,
       BAR, "If you see where the error is, feel free to send us a pull request. If not,", EOL,
-      BAR, "please let us know: https://github.com/AssemblyScript/assemblyscript/issues", EOL,
+      BAR, "please let us know: https://github.com/Yabgu/TensionScript/issues", EOL,
       BAR, EOL,
       BAR, "Thank you!", EOL
     ].join(""));

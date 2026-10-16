@@ -11,13 +11,13 @@ export function buildWeb() {
   const binaryenVersion = pkg.packages["node_modules/binaryen"].version || pkg.dependencies.binaryen.version;
   const longVersion = pkg.packages["node_modules/long"].version || pkg.dependencies.long.version;
 
-  const distUrl = mainVersion === "0.0.0" ? `./` : `https://cdn.jsdelivr.net/npm/assemblyscript@${mainVersion}/dist/`;
+  const distUrl = mainVersion === "0.0.0" ? `./` : `https://cdn.jsdelivr.net/npm/@yabgu_gm/tensionscript@${mainVersion}/dist/`;
   const binaryenUrl = `https://cdn.jsdelivr.net/npm/binaryen@${binaryenVersion}/index.js`;
   const longUrl = `https://cdn.jsdelivr.net/npm/long@${longVersion}/index.js`;
   const importmap = {
     "imports": {
-      "assemblyscript": `${distUrl}assemblyscript.js`,
-      "assemblyscript/asc": `${distUrl}asc.js`,
+      "@yabgu_gm/tensionscript": `${distUrl}assemblyscript.js`,
+      "@yabgu_gm/tensionscript/asc": `${distUrl}asc.js`,
       "binaryen": binaryenUrl,
       "long": longUrl
     }
@@ -25,12 +25,12 @@ export function buildWeb() {
 
   fs.writeFileSync(join(__dirname, "..", "dist", "importmap.json"), `${JSON.stringify(importmap, null, 2)}
   `);
-  fs.writeFileSync(join(__dirname, "..", "dist", "web.js"), `var ASSEMBLYSCRIPT_VERSION = ${JSON.stringify(mainVersion)};
-  var ASSEMBLYSCRIPT_IMPORTMAP = ${JSON.stringify(importmap, null, 2)};
+  fs.writeFileSync(join(__dirname, "..", "dist", "web.js"), `var TENSIONSCRIPT_VERSION = ${JSON.stringify(mainVersion)};
+  var TENSIONSCRIPT_IMPORTMAP = ${JSON.stringify(importmap, null, 2)};
   if (!document.currentScript.src.includes("noinstall")) {
     let elem = document.createElement("script");
     elem.type = "importmap";
-    elem.text = JSON.stringify(ASSEMBLYSCRIPT_IMPORTMAP);
+    elem.text = JSON.stringify(TENSIONSCRIPT_IMPORTMAP);
     document.head.appendChild(elem);
   }
   if (!document.currentScript.src.includes("noshim")) {

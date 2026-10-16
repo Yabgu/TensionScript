@@ -201,7 +201,7 @@ const common = {
   platform: "node",
   format: "esm",
   external: [
-    "assemblyscript",
+    "@yabgu_gm/tensionscript",
     "binaryen",
     "long"
   ],
@@ -226,7 +226,7 @@ const srcBuild = invokeBuild({
   entryPoints: [ "./src/index.ts" ],
   tsconfig: "./src/tsconfig.json",
   outfile: "./dist/assemblyscript.js",
-  banner: { js: prelude("The AssemblyScript compiler") },
+  banner: { js: prelude("The TensionScript compiler") },
   plugins: [ diagnosticsPlugin, reportPlugin("src") ],
   ...common
 });
@@ -235,7 +235,7 @@ const cliBuild = invokeBuild({
   entryPoints: [ "./cli/index.js" ],
   tsconfig: "./cli/tsconfig.json",
   outfile: "./dist/asc.js",
-  banner: { js: prelude("The AssemblyScript frontend") },
+  banner: { js: prelude("The TensionScript frontend") },
   plugins: [ stdlibPlugin, webPlugin, reportPlugin("cli") ],
   ...common
 });
@@ -276,7 +276,7 @@ if (watch) {
 }
 
 console.log(`src : Compiler as a library
-cli : Compiler frontend asc
+cli : Compiler frontend tensionscript
 dts : TS definition bundles
 web : Example web template\n`);
 

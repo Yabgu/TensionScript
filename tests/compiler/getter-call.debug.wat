@@ -23,6 +23,7 @@
  (global $~lib/rt/itcms/fromSpace (mut i32) (i32.const 0))
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
  (global $~lib/native/ASC_LOW_MEMORY_LIMIT i32 (i32.const 0))
+ (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/rt/__rtti_base i32 (i32.const 448))
  (global $~lib/memory/__data_end i32 (i32.const 476))
@@ -2394,8 +2395,11 @@
  (func $getter-call/test (result i32)
   (local $c i32)
   (local $1 i32)
+  (local $2 i32)
+  (local $3 i32)
+  (local $4 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 8
+  i32.const 12
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
@@ -2404,26 +2408,42 @@
   i64.store
   global.get $~lib/memory/__stack_pointer
   i32.const 0
+  i32.store offset=8
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
   call $getter-call/C#constructor
   local.tee $c
   i32.store
+  global.get $~env
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $c
+  local.set $4
+  global.get $~lib/memory/__stack_pointer
+  local.get $4
+  i32.store offset=4
+  local.get $4
+  call $getter-call/C#get:x
+  local.tee $1
+  i32.store offset=8
+  local.get $1
+  i32.load offset=4
+  global.set $~env
   i32.const 0
   global.set $~argumentsLength
-  local.get $c
-  local.set $1
-  global.get $~lib/memory/__stack_pointer
   local.get $1
-  i32.store offset=4
-  local.get $1
-  call $getter-call/C#get:x
   i32.load
   call_indirect (type $4)
-  local.set $1
+  local.set $3
+  local.get $2
+  global.set $~env
+  local.get $3
+  local.set $4
   global.get $~lib/memory/__stack_pointer
-  i32.const 8
+  i32.const 12
   i32.add
   global.set $~lib/memory/__stack_pointer
-  local.get $1
+  local.get $4
   return
  )
  (func $~lib/function/Function<%28%29=>i32>#__visit (param $this i32) (param $cookie i32)
