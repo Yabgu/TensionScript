@@ -2659,7 +2659,18 @@ export class Resolver extends DiagnosticEmitter {
         // fall-through
       }
       case ElementKind.Function: {
-        return (<Function>target).signature.returnType;
+        let functionInstance = <Function>target;
+        // A call to an `async` function yields `Task<T>`, not `T`: the
+        // declaration's return type is the *resolved* value type, and the
+        // handle is what the call produces (`docs/async-await-plan-v2.md` §1.2
+        // rule 2, §2.3). The trait lives on the element and never in the
+        // Signature, because two functions differing only in `async`-ness must
+        // not collide in `program.uniqueSignatures` (§2.3).
+        if (functionInstance.prototype.isAsync) {
+          let taskType = this.resolveAsyncCallType(functionInstance, reportMode);
+          if (taskType) return taskType;
+        }
+        return functionInstance.signature.returnType;
       }
       case ElementKind.PropertyPrototype: {
         let propertyInstance = this.resolveProperty(<PropertyPrototype>target, reportMode);
@@ -2675,6 +2686,13 @@ export class Resolver extends DiagnosticEmitter {
         // fall-through
       }
       case ElementKind.Class: {
+        // A call through a *function value* cannot see `async`: the trait lives
+        // on the element, and the Signature a function type carries is
+        // deliberately free of it (§2.3's interning note), so `arr.map(asyncFn)`
+        // types the callback's call as `T` rather than `Task<T>`. That is the
+        // price of the interning decision, recorded in the phase report;
+        // lifting it means a per-Signature `async` bit with its own interning
+        // key, which is a type-system change beyond this phase.
         let typeArguments = (<Class>target).getTypeArgumentsTo(this.program.functionPrototype);
         if (!(typeArguments && typeArguments.length)) break;
         let signature = assert(typeArguments[0].getSignature());
@@ -2688,6 +2706,31 @@ export class Resolver extends DiagnosticEmitter {
       );
     }
     return null;
+  }
+
+  /**
+   * The `Task<T>` a call to an `async function f(): T` yields.
+   *
+   * `T` is the declaration's return type — the type the body's `return`
+   * produces — and the call wraps it in the standard library's handle;
+   * `await` unwraps it again (§1.2 rules 1 and 2). `T` may be `void`: an
+   * `async function f(): void` yields `Task<void>`, which instantiates through
+   * the ordinary class machinery like any other type argument.
+   *
+   * A program without the standard library's `Task` answers `null`, and the
+   * caller falls back to the plain return type: a program assembled without the
+   * runtime has no task type for the trait to name.
+   */
+  private resolveAsyncCallType(
+    /** The resolved function being called. */
+    instance: Function,
+    /** How to proceed with eventual diagnostics. */
+    reportMode: ReportMode = ReportMode.Report
+  ): Type | null {
+    let taskPrototype = this.program.taskPrototype;
+    if (!taskPrototype) return null;
+    let taskInstance = this.resolveClass(taskPrototype, [ instance.signature.returnType ], new Map(), reportMode);
+    return taskInstance ? taskInstance.type : null;
   }
 
   /** Looks up the program element the specified comma expression refers to. */
