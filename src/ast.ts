@@ -646,9 +646,10 @@ export abstract class Node {
     signature: FunctionTypeNode,
     body: Statement | null,
     arrowKind: ArrowKind,
-    range: Range
+    range: Range,
+    isAsync: bool = false
   ): FunctionDeclaration {
-    return new FunctionDeclaration(name, decorators, flags, typeParameters, signature, body, arrowKind, range);
+    return new FunctionDeclaration(name, decorators, flags, typeParameters, signature, body, arrowKind, range, isAsync);
   }
 
   static createIndexSignature(
@@ -667,9 +668,10 @@ export abstract class Node {
     typeParameters: TypeParameterNode[] | null,
     signature: FunctionTypeNode,
     body: Statement | null,
-    range: Range
+    range: Range,
+    isAsync: bool = false
   ): MethodDeclaration {
-    return new MethodDeclaration(name, decorators, flags, typeParameters, signature, body, range);
+    return new MethodDeclaration(name, decorators, flags, typeParameters, signature, body, range, isAsync);
   }
 
   static createNamespaceDeclaration(
