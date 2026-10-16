@@ -73,7 +73,7 @@ if (cliOptions.options.help || cliOptions.arguments.length === 0) printHelp();
 
 function printHelp() {
   console.log([
-    "Sets up a new AssemblyScript project or updates an existing one.",
+    "Sets up a new TensionScript project or updates an existing one.",
     "",
     stdoutColors.white("SYNTAX"),
     "  " + stdoutColors.cyan("asinit") + " directory [options]",
@@ -108,8 +108,8 @@ const indexHtmlFile = path.join(projectDir, "index.html");
 const testsIndexFile = path.join(testsDir, "index.js");
 
 const paths = [
-  [assemblyDir, "Directory holding the AssemblyScript sources being compiled to WebAssembly."],
-  [tsconfigFile, "TypeScript configuration inheriting recommended AssemblyScript settings."],
+  [assemblyDir, "Directory holding the TensionScript sources being compiled to WebAssembly."],
+  [tsconfigFile, "TypeScript configuration inheriting recommended TensionScript settings."],
   [entryFile, "Example entry file being compiled to WebAssembly to get you started."],
   [buildDir, "Build artifact directory where compiled WebAssembly files are stored."],
   [gitignoreFile, "Git configuration that excludes compiled binaries from source control."],
@@ -199,9 +199,9 @@ function createProject(answer) {
     "",
     stdoutColors.white("  " + commands[pm].test),
     "",
-    "The AssemblyScript documentation covers all the details:",
+    "The TensionScript repository covers all the details:",
     "",
-    "  https://www.assemblyscript.org",
+    "  https://github.com/Yabgu/TensionScript",
     "",
     "Have a nice day!"
   ].join("\n"));
