@@ -17,6 +17,7 @@
  (global $~lib/rt/itcms/white (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/fromSpace (mut i32) (i32.const 0))
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
+ (global $~env (mut i32) (i32.const 0))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34268))
  (memory $0 1)
  (data $0 (i32.const 1036) "<")
@@ -1465,7 +1466,7 @@
   (local $1 i32)
   (local $2 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 8
+  i32.const 12
   i32.sub
   global.set $~lib/memory/__stack_pointer
   block $folding-inner0
@@ -1476,6 +1477,9 @@
    global.get $~lib/memory/__stack_pointer
    i64.const 0
    i64.store
+   global.get $~lib/memory/__stack_pointer
+   i32.const 0
+   i32.store offset=8
    global.get $~lib/memory/__stack_pointer
    global.get $~lib/memory/__stack_pointer
    i32.const 8
@@ -1529,15 +1533,23 @@
    global.set $~lib/memory/__stack_pointer
    local.get $0
    i32.store
+   global.get $~env
    global.get $~lib/memory/__stack_pointer
    local.get $0
    i32.store offset=4
+   global.get $~lib/memory/__stack_pointer
+   i32.const 1456
+   i32.store offset=8
+   i32.const 1460
+   i32.load
+   global.set $~env
    i32.const 1456
    i32.load
    call_indirect (type $0)
    drop
+   global.set $~env
    global.get $~lib/memory/__stack_pointer
-   i32.const 8
+   i32.const 12
    i32.add
    global.set $~lib/memory/__stack_pointer
    i32.const 42

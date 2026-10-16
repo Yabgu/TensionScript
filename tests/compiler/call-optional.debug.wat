@@ -5,6 +5,7 @@
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $call-optional/optIndirect (mut i32) (i32.const 96))
+ (global $~env (mut i32) (i32.const 0))
  (global $~lib/memory/__data_end i32 (i32.const 108))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 32876))
  (global $~lib/memory/__heap_base i32 (i32.const 32876))
@@ -47,6 +48,26 @@
   call $call-optional/opt
  )
  (func $start:call-optional
+  (local $0 i32)
+  (local $1 i32)
+  (local $2 i32)
+  (local $3 i32)
+  (local $4 i32)
+  (local $5 i32)
+  (local $6 i32)
+  (local $7 i32)
+  (local $8 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
   i32.const 3
   i32.const 0
   i32.const 1
@@ -96,14 +117,27 @@
    call $~lib/builtins/abort
    unreachable
   end
+  global.get $~env
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  global.get $call-optional/optIndirect
+  local.tee $0
+  i32.store
+  local.get $0
+  i32.load offset=4
+  global.set $~env
   i32.const 3
   i32.const 0
   i32.const 0
   i32.const 1
   global.set $~argumentsLength
-  global.get $call-optional/optIndirect
+  local.get $0
   i32.load
   call_indirect (type $0)
+  local.set $2
+  local.get $1
+  global.set $~env
+  local.get $2
   i32.const 0
   i32.eq
   i32.eqz
@@ -115,14 +149,27 @@
    call $~lib/builtins/abort
    unreachable
   end
+  global.get $~env
+  local.set $4
+  global.get $~lib/memory/__stack_pointer
+  global.get $call-optional/optIndirect
+  local.tee $3
+  i32.store offset=4
+  local.get $3
+  i32.load offset=4
+  global.set $~env
   i32.const 3
   i32.const 4
   i32.const 0
   i32.const 2
   global.set $~argumentsLength
-  global.get $call-optional/optIndirect
+  local.get $3
   i32.load
   call_indirect (type $0)
+  local.set $5
+  local.get $4
+  global.set $~env
+  local.get $5
   i32.const 5
   i32.eq
   i32.eqz
@@ -134,14 +181,27 @@
    call $~lib/builtins/abort
    unreachable
   end
+  global.get $~env
+  local.set $7
+  global.get $~lib/memory/__stack_pointer
+  global.get $call-optional/optIndirect
+  local.tee $6
+  i32.store offset=8
+  local.get $6
+  i32.load offset=4
+  global.set $~env
   i32.const 3
   i32.const 4
   i32.const 5
   i32.const 3
   global.set $~argumentsLength
-  global.get $call-optional/optIndirect
+  local.get $6
   i32.load
   call_indirect (type $0)
+  local.set $8
+  local.get $7
+  global.set $~env
+  local.get $8
   i32.const 12
   i32.eq
   i32.eqz
@@ -153,8 +213,25 @@
    call $~lib/builtins/abort
    unreachable
   end
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
  )
  (func $~start
   call $start:call-optional
+ )
+ (func $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  global.get $~lib/memory/__data_end
+  i32.lt_s
+  if
+   i32.const 32896
+   i32.const 32944
+   i32.const 1
+   i32.const 1
+   call $~lib/builtins/abort
+   unreachable
+  end
  )
 )

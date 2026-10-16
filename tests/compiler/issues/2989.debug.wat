@@ -6,6 +6,7 @@
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
  (global $issues/2989/value (mut i32) (i32.const 0))
  (global $issues/2989/fn (mut i32) (i32.const 32))
+ (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/memory/__data_end i32 (i32.const 124))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 32892))
@@ -34,6 +35,7 @@
  )
  (func $start:issues/2989
   (local $0 i32)
+  (local $1 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 4
   i32.sub
@@ -42,10 +44,15 @@
   global.get $~lib/memory/__stack_pointer
   i32.const 0
   i32.store
+  global.get $~env
+  local.set $1
   global.get $~lib/memory/__stack_pointer
   global.get $issues/2989/fn
   local.tee $0
   i32.store
+  local.get $0
+  i32.load offset=4
+  global.set $~env
   i32.const 42
   call $issues/2989/foo
   i32.const 1
@@ -53,6 +60,8 @@
   local.get $0
   i32.load
   call_indirect (type $0)
+  local.get $1
+  global.set $~env
   global.get $issues/2989/value
   i32.const 100
   i32.eq
