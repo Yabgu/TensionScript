@@ -3694,6 +3694,8 @@ export class FunctionPrototype extends DeclaredElement {
 
   /** Operator kind, if an overload. */
   operatorKind: OperatorKind = OperatorKind.Invalid;
+  /** Whether this arrow function captures `this` from an enclosing function. */
+  capturesThis: bool = false;
   /** Already resolved instances. */
   instances: Map<string,Function> | null = null;
   /** Methods overriding this one, if any. These are unbound. */
