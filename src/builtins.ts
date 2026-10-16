@@ -126,6 +126,7 @@ export namespace BuiltinNames {
   export const started = "~started";
   export const argumentsLength = "~argumentsLength";
   export const setArgumentsLength = "~setArgumentsLength";
+  export const env = "~env";
 
   // std/builtins.ts
   export const abort = "~lib/builtins/abort";

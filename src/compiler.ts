@@ -429,6 +429,17 @@ export const runtimeFunctions = [ "__new", "__pin", "__unpin", "__collect" ];
 export const runtimeGlobals = [ "__rtti_base" ];
 
 /** Compiler interface. */
+/**
+ * Byte offset of `Function<T>`'s `_index` field. `_index: u32` sits first, and
+ * `_env: usize` follows it at the target's pointer alignment -- so `_env`'s
+ * offset equals the pointer width on both current targets (4 on wasm32, 8 on
+ * wasm64). `Compiler.assertFunctionLayout` verifies both against the resolved
+ * class layout wherever a `Function<T>` instance is materialised, so a change to
+ * the std lib's `Function<T>` is a loud compile-time failure rather than silent
+ * memory corruption.
+ */
+const FUNCTION_INDEX_OFFSET: u32 = 0;
+
 export class Compiler extends DiagnosticEmitter {
 
   /** Program reference. */
@@ -460,6 +471,8 @@ export class Compiler extends DiagnosticEmitter {
   functionTable: Function[] = [];
   /** Arguments length helper global. */
   builtinArgumentsLength: GlobalRef = 0;
+  /** Environment global delivering a captured `this` into an arrow function. */
+  builtinEnv: GlobalRef = 0;
   /** Requires runtime features. */
   runtimeFeatures: RuntimeFeatures = RuntimeFeatures.None;
   /** Current inline functions stack. */
@@ -1893,6 +1906,32 @@ export class Compiler extends DiagnosticEmitter {
       return false; // not recoverable
     }
 
+    // Enter a capturing arrow by taking the receiver its creating function left
+    // in the environment global. Read it once, into the arrow's own `this` local
+    // -- the one `Resolver.markCapturingArrows` created -- so that `this` in the
+    // body is a plain local read and no nested call can clobber the binding.
+    //
+    // This is emitted after the body has been compiled, but placed before it:
+    // the arrow is marked, and its `this` local created, while resolving the
+    // `this` references *inside* the body, so at the top of this method neither
+    // exists yet. Only the order of building the expression changes, not the
+    // order it executes in.
+    if (instance.prototype.capturesThis) {
+      assert(!flow.isInline); // an arrow function is never inlined
+      let capturedThis = assert(flow.lookupLocal(CommonNames.this_));
+      assert(!instance.signature.thisType); // an arrow never has one of its own
+      let prologue = module.local_set(
+        capturedThis.index,
+        module.global_get(this.ensureEnvGlobal(), this.options.sizeTypeRef),
+        capturedThis.type.isManaged
+      );
+      for (let i = stmts.length - 1; i >= bodyStartIndex; --i) {
+        stmts[i + 1] = stmts[i];
+      }
+      stmts[bodyStartIndex] = prologue;
+      flow.setLocalFlag(capturedThis.index, LocalFlags.Initialized);
+    }
+
     return true;
   }
 
@@ -2152,26 +2191,41 @@ export class Compiler extends DiagnosticEmitter {
     let program = this.program;
     let memorySegment = instance.memorySegment;
     if (!memorySegment) {
-
-      // Add to the function table, declaring it on first use so effect analysis works
-      if (!this.options.importTable) {
-        this.module.ensureFunctionTable(CommonNames.DefaultTable);
-      }
-
-      let functionTable = this.functionTable;
-      let tableBase = this.options.tableBase;
-      if (!tableBase) tableBase = 1; // leave first elem blank
-      let index = tableBase + functionTable.length;
-      functionTable.push(instance);
+      let index = this.ensureFunctionTableIndex(instance);
 
       // Create runtime function
       let rtInstance = assert(this.resolver.resolveClass(program.functionPrototype, [ instance.type ]));
+      this.assertFunctionLayout(rtInstance);
       let buf = rtInstance.createBuffer();
       assert(rtInstance.writeField("_index", index, buf));
       assert(rtInstance.writeField("_env", 0, buf));
       instance.memorySegment = memorySegment = this.addRuntimeMemorySegment(buf);
     }
     return i64_add(memorySegment.offset, i64_new(program.totalOverhead));
+  }
+
+  /**
+   * Makes sure the specified function is present in the function table and
+   * returns its index there. A function value's `_index` field has to name this
+   * index, both in the static instance `ensureRuntimeFunction` creates and in the
+   * per-creation heap instance a capturing arrow gets, so both derive it here.
+   */
+  ensureFunctionTableIndex(instance: Function): i32 {
+    let tableIndex = instance.tableIndex;
+    if (tableIndex) return tableIndex;
+
+    // Add to the function table, declaring it on first use so effect analysis works
+    if (!this.options.importTable) {
+      this.module.ensureFunctionTable(CommonNames.DefaultTable);
+    }
+
+    let functionTable = this.functionTable;
+    let tableBase = this.options.tableBase;
+    if (!tableBase) tableBase = 1; // leave first elem blank
+    let index = tableBase + functionTable.length;
+    functionTable.push(instance);
+    instance.tableIndex = index;
+    return index;
   }
 
   // === Statements ===============================================================================
@@ -6564,6 +6618,25 @@ export class Compiler extends DiagnosticEmitter {
     return name;
   }
 
+  /**
+   * Makes sure the environment global is present. An indirect call stores the
+   * callee's environment here before the call and restores the caller's after
+   * it; a capturing arrow reads it in its prologue. It is a `usize` and starts
+   * at zero, so a function entered without a call site having set it reads null
+   * rather than a stale receiver.
+   */
+  ensureEnvGlobal(): string {
+    let name = BuiltinNames.env;
+    if (!this.builtinEnv) {
+      let module = this.module;
+      let sizeTypeRef = this.options.sizeTypeRef;
+      this.builtinEnv = module.addGlobal(name, sizeTypeRef, true,
+        sizeTypeRef == TypeRef.I64 ? module.i64(0) : module.i32(0)
+      );
+    }
+    return name;
+  }
+
   /** Ensures compilation of the varargs stub for the specified function. */
   ensureVarargsStub(original: Function): Function {
     // A varargs stub is a function called with omitted arguments being zeroed,
@@ -7109,45 +7182,76 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
-    let allTrivial = (getSideEffects(functionArg, module.ref) & SideEffects.WritesGlobal) == 0;
-    if (operands && allTrivial) {
-      for (let i = 0; i < numOperands; ++i) {
-        if (!module.isTrivialExpression(operands[i])) {
-          allTrivial = false;
-          break;
-        }
-      }
-    }
-
     let stmts = new Array<ExpressionRef>();
     let sizeTypeRef = this.options.sizeTypeRef;
 
-    if (!allTrivial) {
-      let functionArgLocal = this.currentFlow.getTempLocal(this.options.usizeType);
-      let functionArgSetExpr = module.local_set(functionArgLocal.index, functionArg, true);
-      stmts.push(functionArgSetExpr);
-      functionArg = module.local_get(functionArgLocal.index, sizeTypeRef);
-    }
+    // The callee value is needed twice below -- once for its `_env` and once for
+    // its `_index` -- so it is evaluated exactly once, into a local. It is bound
+    // with a `local.tee` here rather than with a separate `local.set` statement:
+    // the latter shape trips an assertion in Binaryen's stack IR optimizer
+    // (`local2Stack` in `wasm-stack-opts.cpp`) once the local holds the result of
+    // a call and is read twice, which breaks every build at optimizeLevel >= 2,
+    // i.e. release. Evaluating the callee before the operands is what the
+    // non-trivial case already did.
+    let functionArgLocal = this.currentFlow.getTempLocal(this.options.usizeType);
+
+    // Deliver the callee's environment. An arrow function that captures `this`
+    // was created with the receiver of its creating function stored in `_env`,
+    // and this global is how that receiver reaches the arrow's prologue. Save the
+    // caller's environment, hand over the callee's, and restore the caller's
+    // afterwards.
+    let envGlobal = this.ensureEnvGlobal();
+    let envOffset: u32 = this.options.usizeType.byteSize;
+    let envBytes: u32 = this.options.usizeType.byteSize;
+    let savedEnvLocal = this.currentFlow.getTempLocal(this.options.usizeType);
+    stmts.push(module.local_set(
+      savedEnvLocal.index,
+      module.global_get(envGlobal, sizeTypeRef),
+      false
+    ));
+    stmts.push(module.global_set(envGlobal,
+      module.load(envBytes, false,
+        module.local_tee(functionArgLocal.index, functionArg, true),
+        sizeTypeRef, envOffset
+      )
+    ));
+    functionArg = module.local_get(functionArgLocal.index, sizeTypeRef);
 
     // We might be calling a varargs stub here, even if all operands have been
     // provided, so we must set `argumentsLength` in any case. Inject setting it
-    // into the index argument, which becomes executed last after any operands.
+    // into the index argument, which becomes executed last after any operands,
+    // like the environment above has already been handed over.
     let argumentsLength = this.ensureArgumentsLength();
     let functionArgWithVararg = module.block(null, [
       module.global_set(argumentsLength, module.i32(numArguments)),
-      functionArg
+      module.load(4, false, functionArg, TypeRef.I32, FUNCTION_INDEX_OFFSET) // ._index
     ], sizeTypeRef);
 
     if (operands) this.operandsTostack(signature, operands);
-    let expr = module.call_indirect(
+    let callExpr = module.call_indirect(
       null, // TODO: handle multiple tables
-      module.load(4, false, functionArgWithVararg, TypeRef.I32), // ._index
+      functionArgWithVararg,
       operands,
       signature.paramRefs,
       signature.resultRefs
     );
     this.currentType = returnType;
-    stmts.push(expr);
+
+    // Restore the caller's environment once control is back. A non-void result
+    // has to be held across that restore, which the temp local does.
+    let restoreExpr = module.global_set(
+      envGlobal,
+      module.local_get(savedEnvLocal.index, sizeTypeRef)
+    );
+    if (returnType == Type.void) {
+      stmts.push(callExpr);
+      stmts.push(restoreExpr);
+      return module.flatten(stmts, TypeRef.None);
+    }
+    let resultLocal = this.currentFlow.getTempLocal(returnType);
+    stmts.push(module.local_set(resultLocal.index, callExpr, returnType.isManaged));
+    stmts.push(restoreExpr);
+    stmts.push(module.local_get(resultLocal.index, returnType.toRef()));
     return module.flatten(stmts, returnType.toRef());
   }
 
@@ -7349,10 +7453,21 @@ export class Compiler extends DiagnosticEmitter {
       if (!worked) return module.unreachable();
     }
 
-    let offset = this.ensureRuntimeFunction(instance); // reports
-    let expr = this.options.isWasm64
-      ? module.i64(i64_low(offset), i64_high(offset))
-      : module.i32(i64_low(offset));
+    // A capturing arrow carries the receiver of its creating function in its
+    // environment, which differs per creation, so it cannot use the static
+    // runtime function: it gets one heap instance per creation. Every other
+    // function value keeps the static instance with `_env = 0` (plan D6).
+    let valueType = this.currentType;
+    let expr: ExpressionRef;
+    if (instance.prototype.capturesThis) {
+      expr = this.makeCapturingFunctionValue(instance);
+    } else {
+      let offset = this.ensureRuntimeFunction(instance); // reports
+      expr = this.options.isWasm64
+        ? module.i64(i64_low(offset), i64_high(offset))
+        : module.i32(i64_low(offset));
+    }
+    this.currentType = valueType;
 
     // add a constant local referring to the function if applicable
     if (!isSemanticallyAnonymous) {
@@ -7381,6 +7496,57 @@ export class Compiler extends DiagnosticEmitter {
     }
 
     return expr;
+  }
+
+  /**
+   * Verifies `Function<T>`'s field offsets against the class layout. The call
+   * site in `makeCallIndirect` reads `_env` at a hardcoded offset and cannot
+   * resolve a `Function<T>` to check it against, so the check happens wherever an
+   * instance *is* resolved: a std lib layout change then fails loudly at compile
+   * time instead of corrupting memory at run time.
+   */
+  private assertFunctionLayout(classInstance: Class): void {
+    assert(classInstance.offsetof("_index") == FUNCTION_INDEX_OFFSET);
+    assert(classInstance.offsetof("_env") == this.options.usizeType.byteSize);
+  }
+
+  /**
+   * Materialises a runtime function value for an arrow function that captures
+   * `this`: a heap `Function<T>` instance whose `_env` names the receiver of the
+   * function creating it. The static instance `ensureRuntimeFunction` produces
+   * cannot serve here, because `_env` differs per creation while that instance is
+   * shared by all of them.
+   *
+   * `_env` is written without `__link`: it is a field of non-reference type, and
+   * the instance is freshly allocated and therefore white, so the write barrier
+   * has nothing to do. `Function<T>#__visit` already traces `_env` for the
+   * collector once the instance is reachable.
+   */
+  private makeCapturingFunctionValue(instance: Function): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let resolver = this.resolver;
+    let classInstance = assert(resolver.resolveClass(this.program.functionPrototype, [ instance.type ]));
+    this.assertFunctionLayout(classInstance);
+
+    // The receiver of the creating function, as `this` there. The arrow is marked
+    // capturing only where such a binding exists, so this must be present.
+    let thisLocal = assert(flow.lookupLocal(CommonNames.this_));
+
+    let stmts = new Array<ExpressionRef>();
+    let ptrLocal = flow.getTempLocal(classInstance.type);
+    stmts.push(module.local_set(ptrLocal.index, this.makeAllocation(classInstance), classInstance.type.isManaged));
+    let ptrExpr = module.local_get(ptrLocal.index, classInstance.type.toRef());
+    stmts.push(module.store(4, ptrExpr,
+      module.i32(this.ensureFunctionTableIndex(instance)),
+      TypeRef.I32, FUNCTION_INDEX_OFFSET
+    ));
+    stmts.push(module.store(this.options.usizeType.byteSize, ptrExpr,
+      module.local_get(thisLocal.index, thisLocal.type.toRef()),
+      this.options.sizeTypeRef, this.options.usizeType.byteSize
+    ));
+    stmts.push(module.local_get(ptrLocal.index, classInstance.type.toRef()));
+    return module.flatten(stmts, classInstance.type.toRef());
   }
 
   /** Makes sure the enclosing source file of the specified expression has been compiled. */
@@ -7440,6 +7606,16 @@ export class Compiler extends DiagnosticEmitter {
       case NodeKind.This: {
         let thisType = sourceFunction.signature.thisType;
         if (!thisType) {
+          // A capturing arrow has no `thisType` of its own: its receiver arrives
+          // through the environment and lives in the local the resolver created
+          // for it (see `Resolver.markCapturingArrows`). So `this` here is an
+          // ordinary local read, exactly as it is in a method.
+          if (sourceFunction.prototype.capturesThis) {
+            let capturedThis = assert(flow.lookupLocal(CommonNames.this_));
+            flow.set(FlowFlags.AccessesThis);
+            this.currentType = capturedThis.type;
+            return module.local_get(capturedThis.index, capturedThis.type.toRef());
+          }
           this.error(
             DiagnosticCode._this_cannot_be_referenced_in_current_location,
             expression.range
