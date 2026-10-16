@@ -65,7 +65,7 @@ jobs:
     - name: "Test ${{ matrix.target }}"
       run: npm run test:compiler -- --wasm build/assemblyscript.${{ matrix.target }}-bootstrap.js
     - name: "Compile ${{ matrix.target }} -> ${{ matrix.target == 'debug' && 'release' || 'debug' }}"
-      run: node bin/asc --config src/asconfig.json --target ${{ matrix.target == 'debug' && 'release' || 'debug' }}-bootstrap --wasm ./build/assemblyscript.${{ matrix.target }}-bootstrap.js
+      run: node bin/tensionscript.js --config src/asconfig.json --target ${{ matrix.target == 'debug' && 'release' || 'debug' }}-bootstrap --wasm ./build/assemblyscript.${{ matrix.target }}-bootstrap.js
     - name: "Test ${{ matrix.target == 'debug' && 'release' || 'debug' }}"
       run: npm run test:compiler -- --wasm build/assemblyscript.${{ matrix.target == 'debug' && 'release' || 'debug' }}-bootstrap.js
   features:

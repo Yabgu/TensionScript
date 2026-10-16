@@ -7,7 +7,7 @@ Usage
 For an up to date list of available command line options, see:
 
 ```
-$> asc --help
+$> tensionscript --help
 ```
 
 API
@@ -16,9 +16,9 @@ API
 The API accepts the same options as the CLI but also lets you override stdout and stderr. Example:
 
 ```js
-import asc from "@acakar/tensionscript/asc";
+import tensionscript from "@acakar/tensionscript/asc";
 
-const { error, stdout } = await asc.main([
+const { error, stdout } = await tensionscript.main([
   "myModule.ts",
   "--outFile", "myModule.wasm",
   "--optimize",
@@ -44,8 +44,8 @@ The result has the following structure:
 You can also compile a single source string directly (note that this API has limited functionality):
 
 ```js
-import asc from "@acakar/tensionscript/asc";
-const { binary, text, stdout, stderr } = await asc.compileString(`...`, { optimize: 2 });
+import tensionscript from "@acakar/tensionscript/asc";
+const { binary, text, stdout, stderr } = await tensionscript.compileString(`...`, { optimize: 2 });
 ...
 ```
 

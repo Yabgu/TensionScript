@@ -276,7 +276,7 @@ if (watch) {
 }
 
 console.log(`src : Compiler as a library
-cli : Compiler frontend asc
+cli : Compiler frontend tensionscript
 dts : TS definition bundles
 web : Example web template\n`);
 
