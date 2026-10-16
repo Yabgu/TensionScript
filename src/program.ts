@@ -3770,6 +3770,26 @@ export class FunctionPrototype extends DeclaredElement {
     return (<FunctionDeclaration>this.declaration).arrowKind;
   }
 
+  /**
+   * Whether this function is `async`.
+   *
+   * Derived from the declaration, the single source of truth the parser sets
+   * (`src/ast.ts`, `FunctionDeclaration.isAsync`) — the same shape as
+   * {@link arrowKind}, and for the same reason: a clone, a bound prototype
+   * (`toBound`) or a resolved instance must not be able to drift from it.
+   *
+   * `async` is only legal on a plain function or method. TypeScript refuses it
+   * on a constructor (its 1089) and on an accessor (its 1042), and the parser
+   * refuses those from source, so the flags decide here too: a declaration a
+   * transform synthesized cannot smuggle the trait onto a construct the
+   * language does not allow it on. A call through a bound async method still
+   * yields `Task<T>`; a constructor never can.
+   */
+  get isAsync(): bool {
+    return (<FunctionDeclaration>this.declaration).isAsync
+      && !this.isAny(CommonFlags.Constructor | CommonFlags.Get | CommonFlags.Set);
+  }
+
   /** Creates a clone of this prototype that is bound to a concrete class instead. */
   toBound(classInstance: Class): FunctionPrototype {
     assert(this.is(CommonFlags.Instance));
