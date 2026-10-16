@@ -253,6 +253,29 @@ export class Parser extends DiagnosticEmitter {
       flags |= CommonFlags.Ambient;
     }
 
+    // check the `async` function modifier. `async` is a reserved keyword here
+    // (`tokenIsAlsoIdentifier` does not list it), so it can only begin a
+    // function declaration, a function expression or an arrow -- the
+    // identifier path TypeScript's parser takes (`async` alone is an
+    // unresolved name, TS2304) does not exist for us. When it does not begin a
+    // function, the token is left where it is and the expression path reports
+    // it.
+    let isAsyncFunction = false;
+    let asyncStart = 0;
+    let asyncEnd = 0;
+    if (tn.peek() == Token.Async) {
+      let state = tn.mark();
+      tn.next(); // consume `async`
+      if (!tn.peekOnNewLine() && tn.peek() == Token.Function) {
+        isAsyncFunction = true;
+        asyncStart = tn.tokenPos;
+        asyncEnd = tn.pos;
+        if (startPos < 0) startPos = asyncStart;
+      } else {
+        tn.reset(state);
+      }
+    }
+
     // parse the statement
     let statement: Statement | null = null;
 
@@ -286,7 +309,27 @@ export class Parser extends DiagnosticEmitter {
       }
       case Token.Function: {
         tn.next();
-        statement = this.parseFunction(tn, flags, decorators, startPos);
+        statement = this.parseFunction(tn, flags, decorators, startPos, isAsyncFunction);
+        if (isAsyncFunction && statement) {
+          if (flags & CommonFlags.Ambient) {
+            // TypeScript's 1040 ("'async' modifier cannot be used in an
+            // ambient context") is not in this fork's message inventory; the
+            // general modifier code is, and the input is refused either way.
+            this.error(
+              DiagnosticCode._0_modifier_cannot_be_used_here,
+              tn.range(asyncStart, asyncEnd), "async"
+            ); // recoverable
+          } else {
+            // TODO(lowering): delete this once the async lowering transform
+            // exists (docs/async-await-plan-v2.md §4.5). Until then the AST is
+            // built and the pipeline stops here with a named error instead of
+            // reaching codegen's unhandled-kind assert(false).
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              tn.range(asyncStart, asyncEnd), "Async functions"
+            ); // recoverable
+          }
+        }
         decorators = null;
         break;
       }
@@ -1276,6 +1319,17 @@ export class Parser extends DiagnosticEmitter {
 
   private parseParametersThis: NamedTypeNode | null = null;
 
+  /**
+   * Whether the parser is inside an `async` function body.
+   *
+   * `await` outside one is a grammar error (AS1308, TypeScript's code and
+   * text), not a resolution error, so the parser has to know. Set around a
+   * body and restored afterwards, and deliberately *not* inherited by a nested
+   * non-async function -- TypeScript's behaviour (measured against tsc 6.0.3:
+   * an `await` in a function nested in an async one is 1308).
+   */
+  private inAsyncContext: bool = false;
+
   parseParameters(
     tn: Tokenizer,
     isConstructor: bool = false
@@ -1476,7 +1530,8 @@ export class Parser extends DiagnosticEmitter {
     tn: Tokenizer,
     flags: CommonFlags,
     decorators: DecoratorNode[] | null,
-    startPos: i32
+    startPos: i32,
+    isAsync: bool = false
   ): FunctionDeclaration | null {
 
     // at 'function':
@@ -1581,7 +1636,10 @@ export class Parser extends DiagnosticEmitter {
         ); // recoverable
       }
 
+      let outerAsyncContext = this.inAsyncContext;
+      this.inAsyncContext = isAsync;
       body = this.parseBlockStatement(tn, false);
+      this.inAsyncContext = outerAsyncContext;
       if (!body) return null;
     } else if (!(flags & CommonFlags.Ambient)) {
       this.error(
@@ -1598,14 +1656,15 @@ export class Parser extends DiagnosticEmitter {
       signature,
       body,
       ArrowKind.None,
-      tn.range(startPos, tn.pos)
+      tn.range(startPos, tn.pos),
+      isAsync
     );
     ret.overriddenModuleName = this.currentModuleName;
     tn.skip(Token.Semicolon);
     return ret;
   }
 
-  parseFunctionExpression(tn: Tokenizer): FunctionExpression | null {
+  parseFunctionExpression(tn: Tokenizer, isAsync: bool = false): FunctionExpression | null {
     let startPos = tn.tokenPos;
     let name: IdentifierExpression;
     let arrowKind = ArrowKind.None;
@@ -1645,7 +1704,7 @@ export class Parser extends DiagnosticEmitter {
     let parameters = this.parseParameters(tn);
     if (!parameters) return null;
 
-    return this.parseFunctionExpressionCommon(tn, name, parameters, this.parseParametersThis, arrowKind, startPos, signatureStart);
+    return this.parseFunctionExpressionCommon(tn, name, parameters, this.parseParametersThis, arrowKind, startPos, signatureStart, isAsync);
   }
 
   private parseFunctionExpressionCommon(
@@ -1655,7 +1714,8 @@ export class Parser extends DiagnosticEmitter {
     explicitThis: NamedTypeNode | null,
     arrowKind: ArrowKind,
     startPos: i32 = -1,
-    signatureStart: i32 = -1
+    signatureStart: i32 = -1,
+    isAsync: bool = false
   ): FunctionExpression | null {
     if (startPos < 0) startPos = name.range.start;
     if (signatureStart < 0) signatureStart = startPos;
@@ -1687,6 +1747,8 @@ export class Parser extends DiagnosticEmitter {
     );
 
     let body: Statement | null = null;
+    let outerAsyncContext = this.inAsyncContext;
+    this.inAsyncContext = isAsync;
     if (arrowKind) {
       if (tn.skip(Token.OpenBrace)) {
         body = this.parseBlockStatement(tn, false);
@@ -1696,6 +1758,7 @@ export class Parser extends DiagnosticEmitter {
       }
     } else {
       if (!tn.skip(Token.OpenBrace)) {
+        this.inAsyncContext = outerAsyncContext;
         this.error(
           DiagnosticCode._0_expected,
           tn.range(tn.pos), "{"
@@ -1704,6 +1767,7 @@ export class Parser extends DiagnosticEmitter {
       }
       body = this.parseBlockStatement(tn, false);
     }
+    this.inAsyncContext = outerAsyncContext;
     if (!body) return null;
 
     let declaration = Node.createFunctionDeclaration(
@@ -1714,7 +1778,8 @@ export class Parser extends DiagnosticEmitter {
       signature,
       body,
       arrowKind,
-      tn.range(startPos, tn.pos)
+      tn.range(startPos, tn.pos),
+      isAsync
     );
     return Node.createFunctionExpression(declaration);
   }
@@ -2084,6 +2149,47 @@ export class Parser extends DiagnosticEmitter {
       }
     }
 
+    // check the `async` modifier (TypeScript places it after the access and
+    // `static`/`abstract` modifiers and before `get`/`set`).
+    let asyncStart = 0;
+    let asyncEnd = 0;
+    let isAsync = false;
+    if (tn.skip(Token.Async)) {
+      isAsync = true;
+      asyncStart = tn.tokenPos;
+      asyncEnd = tn.pos;
+      if (!startPos) startPos = asyncStart;
+      if (isInterface) {
+        // TypeScript's 1070 ("'async' modifier cannot appear on a type
+        // member") is not in this fork's message inventory; the class-element
+        // code is, and the input is refused either way.
+        this.error(
+          DiagnosticCode._0_modifier_cannot_appear_on_class_elements_of_this_kind,
+          tn.range(asyncStart, asyncEnd), "async"
+        ); // recoverable
+      }
+      // A modifier after `async` cannot belong to this member: TypeScript's
+      // rule is that `static` precedes `async` (its 1029), and every other
+      // combination is its 1042. Both are refusals; the general code stands in
+      // for the ordering rule, which is not in this fork's inventory.
+      switch (tn.peek()) {
+        case Token.Public:
+        case Token.Private:
+        case Token.Protected:
+        case Token.Static:
+        case Token.Abstract:
+        case Token.Readonly:
+        case Token.Override:
+        case Token.Declare: {
+          this.error(
+            DiagnosticCode._0_modifier_cannot_be_used_here,
+            tn.range(asyncStart, asyncEnd), "async"
+          );
+          return null;
+        }
+      }
+    }
+
     // check if accessor: ('get' | 'set') ^\n Identifier
     let state = tn.mark();
     let isConstructor = false;
@@ -2349,7 +2455,10 @@ export class Parser extends DiagnosticEmitter {
             tn.range(), ";"
           ); // recoverable
         }
+        let outerAsyncContext = this.inAsyncContext;
+        this.inAsyncContext = isAsync;
         body = this.parseBlockStatement(tn, false);
+        this.inAsyncContext = outerAsyncContext;
         if (!body) return null;
       } else if (!isInterface && !(flags & (CommonFlags.Ambient | CommonFlags.Abstract))) {
         this.error(
@@ -2365,8 +2474,31 @@ export class Parser extends DiagnosticEmitter {
         typeParameters,
         signature,
         body,
-        tn.range(startPos, tn.pos)
+        tn.range(startPos, tn.pos),
+        isAsync
       );
+      if (isAsync) {
+        if (name.kind == NodeKind.Constructor) {
+          // TypeScript's 1089 ("'async' modifier cannot appear on a
+          // constructor declaration") is not in this fork's inventory.
+          this.error(
+            DiagnosticCode._0_modifier_cannot_be_used_here,
+            tn.range(asyncStart, asyncEnd), "async"
+          ); // recoverable
+        } else if (isGetterOrSetter) {
+          this.error(
+            DiagnosticCode._0_modifier_cannot_be_used_here,
+            tn.range(asyncStart, asyncEnd), "async"
+          ); // recoverable
+        } else {
+          // TODO(lowering): delete this once the async lowering transform
+          // exists (docs/async-await-plan-v2.md §4.5).
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            tn.range(asyncStart, asyncEnd), "Async functions"
+          ); // recoverable
+        }
+      }
       if (!(isInterface && tn.skip(Token.Comma))) {
         tn.skip(Token.Semicolon);
       }
@@ -2386,6 +2518,13 @@ export class Parser extends DiagnosticEmitter {
 
     // field: (':' Type)? ('=' Expression)? ';'?
     } else {
+      if (isAsync) {
+        // `async` on a field is TypeScript's 1042.
+        this.error(
+          DiagnosticCode._0_modifier_cannot_be_used_here,
+          tn.range(asyncStart, asyncEnd), "async"
+        ); // recoverable
+      }
       if (flags & CommonFlags.Declare) {
         this.error(
           DiagnosticCode.Not_implemented_0,
@@ -3711,6 +3850,96 @@ export class Parser extends DiagnosticEmitter {
         let operand = this.parseExpression(tn, Precedence.UnaryPrefix);
         if (!operand) return null;
         return Node.createUnaryPrefixExpression(token, operand, tn.range(startPos, tn.pos));
+      }
+
+      // AwaitExpression (ES2017)
+      case Token.Await: {
+        let awaitEnd = tn.pos;
+        let operand = this.parseExpression(tn, Precedence.UnaryPrefix);
+        if (!operand) return null;
+        if (!this.inAsyncContext) {
+          // A grammar error, not a resolution error -- TypeScript's code and
+          // text. Note that TensionScript has no top-level await (the entry
+          // point is an ordinary function), so the message's second clause
+          // never applies here.
+          this.error(
+            DiagnosticCode._await_expressions_are_only_allowed_within_async_functions_and_at_the_top_levels_of_modules,
+            tn.range(startPos, awaitEnd)
+          );
+        }
+        return Node.createAwaitExpression(operand, tn.range(startPos, tn.pos));
+      }
+
+      // AsyncFunctionExpression, async arrows
+      case Token.Async: {
+        let asyncEnd = tn.pos;
+        switch (tn.peek()) {
+          case Token.Function: {
+            tn.next(); // consume `function`
+            let functionExpression = this.parseFunctionExpression(tn, true);
+            if (!functionExpression) return null;
+            functionExpression.range.start = startPos; // from `async`, not `function`
+            // TODO(lowering): delete once the async lowering transform exists.
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              tn.range(startPos, asyncEnd), "Async functions"
+            );
+            return functionExpression;
+          }
+          case Token.OpenParen: {
+            tn.next(); // consume `(`
+            let arrow = this.parseFunctionExpression(tn, true);
+            if (!arrow) return null;
+            arrow.range.start = startPos; // from `async`, not `(`
+            // TODO(lowering): delete once the async lowering transform exists.
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              tn.range(startPos, asyncEnd), "Async functions"
+            );
+            return arrow;
+          }
+          case Token.Identifier: {
+            if (!tn.peekOnNewLine()) {
+              tn.next(); // consume the parameter
+              let identifier = Node.createIdentifierExpression(tn.readIdentifier(), tn.range(startPos, tn.pos));
+              if (tn.peek() == Token.Equals_GreaterThan && !tn.peekOnNewLine()) {
+                let arrow = this.parseFunctionExpressionCommon(
+                  tn,
+                  Node.createEmptyIdentifierExpression(tn.range(startPos)),
+                  [
+                    Node.createParameter(
+                      ParameterKind.Default,
+                      identifier,
+                      Node.createOmittedType(identifier.range.atEnd),
+                      null,
+                      identifier.range
+                    )
+                  ],
+                  null,
+                  ArrowKind.Single,
+                  startPos,
+                  -1,
+                  true
+                );
+                if (!arrow) return null;
+                // TODO(lowering): delete once the async lowering transform exists.
+                this.error(
+                  DiagnosticCode.Not_implemented_0,
+                  tn.range(startPos, asyncEnd), "Async functions"
+                );
+                return arrow;
+              }
+            }
+            break;
+          }
+        }
+        // Not a function expression and not an arrow: TypeScript's 1042. It
+        // cannot be an identifier reference here -- `async` is reserved.
+        this.error(
+          DiagnosticCode._0_modifier_cannot_be_used_here,
+          tn.range(startPos, asyncEnd), "async"
+        );
+        return null;
       }
       case Token.Plus_Plus:
       case Token.Minus_Minus: {
