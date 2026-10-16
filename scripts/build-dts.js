@@ -315,7 +315,7 @@ function transformTypes(sourceFile) {
   return result;
 }
 
-const prefix = "types:assemblyscript";
+const prefix = "types:tensionscript";
 
 export function generateSrc() {
   const stdout = [];

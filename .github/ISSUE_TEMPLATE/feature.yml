@@ -7,8 +7,7 @@ body:
       value: |
         Thanks for taking the time to fill out this feature suggestion! To get off to a good start, make sure to:
         * Search if there is an existing issue on the topic
-        * See if the feature is mentioned at [implementation status](https://www.assemblyscript.org/status.html)
-        * Get familiar with the [contributing guidelines](https://github.com/AssemblyScript/assemblyscript/blob/main/CONTRIBUTING.md)
+        * Get familiar with the [contributing guidelines](https://github.com/Yabgu/TensionScript/blob/main/CONTRIBUTING.md)
   - type: textarea
     id: description
     attributes:

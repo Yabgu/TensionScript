@@ -1,52 +1,60 @@
-<p align="center">
-  <a href="https://www.assemblyscript.org" target="_blank" rel="noopener"><img width="100" src="https://avatars1.githubusercontent.com/u/28916798?s=200&v=4" alt="AssemblyScript logo"></a>
-</p>
+# TensionScript
 
-<p align="center">
-  <a href="https://github.com/AssemblyScript/assemblyscript/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/AssemblyScript/assemblyscript/test.yml?branch=main&label=test&logo=github" alt="Test status" /></a>
-  <a href="https://github.com/AssemblyScript/assemblyscript/actions/workflows/publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/AssemblyScript/assemblyscript/publish.yml?branch=main&label=publish&logo=github" alt="Publish status" /></a>
-  <a href="https://www.npmjs.com/package/assemblyscript"><img src="https://img.shields.io/npm/v/assemblyscript.svg?color=007acc&logo=npm" alt="npm compiler version" /></a>
-  <a href="https://discord.gg/assemblyscript"><img src="https://img.shields.io/discord/721472913886281818.svg?label=discord&logo=discord&logoColor=ffffff&color=7389D8" alt="Discord online" /></a>
-  <a href="https://stand-with-ukraine.pp.ua"><img src="https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/badges/StandWithUkraine.svg" alt="#StandWithUkraine" /></a>
-</p>
+**A TypeScript-shaped language for WebAssembly** — the compiler Tension's guests
+are written in.
 
-<p align="justify"><strong>AssemblyScript</strong> compiles a variant of <a href="http://www.typescriptlang.org">TypeScript</a> (basically JavaScript with types) to <a href="http://webassembly.org">WebAssembly</a> using <a href="https://github.com/WebAssembly/binaryen">Binaryen</a>. It generates lean and mean WebAssembly modules while being just an <code>npm install</code> away.</p>
+TensionScript compiles TypeScript syntax to WebAssembly using
+[Binaryen](https://github.com/WebAssembly/binaryen). It is maintained for the
+[Tension](https://github.com/Yabgu/Tension) engine as a fork of
+[AssemblyScript](https://github.com/AssemblyScript/assemblyscript). The command
+and the package are its own: it does not collide with `asc` (AssemblyScript's
+compiler) or `tsc` (TypeScript's), so a project that installs both compilers
+always resolves the one it named.
 
-<h3 align="center">
-  <a href="https://www.assemblyscript.org">About</a> &nbsp;·&nbsp;
-  <a href="https://www.assemblyscript.org/getting-started.html">Getting&nbsp;started</a> &nbsp;·&nbsp;
-  <a href="https://www.assemblyscript.org/examples.html">Examples</a> &nbsp;·&nbsp;
-  <a href="https://www.assemblyscript.org/built-with-assemblyscript.html">Built with AssemblyScript</a>
-</h3>
-<br>
-
-<h2 align="center">Contributors</h2>
-
-<p align="center">
-  <a href="https://www.assemblyscript.org/#contributors"><img src="https://www.assemblyscript.org/contributors.svg" alt="Contributor logos" width="720" /></a>
-</p>
-
-<h2 align="center">Thanks to our sponsors!</h2>
-
-<p align="justify">Most of the maintainers and contributors do this open source work in their free time. If you use AssemblyScript for a serious task or plan to do so, and you'd like us to invest more time on it, <a href="https://opencollective.com/assemblyscript/donate" target="_blank" rel="noopener">please donate</a> to our <a href="https://opencollective.com/assemblyscript" target="_blank" rel="noopener">OpenCollective</a>. By sponsoring this project, your logo will show up below. Thank you so much for your support!</p>
-
-<p align="center">
-  <a href="https://www.assemblyscript.org/#sponsors"><img src="https://www.assemblyscript.org/sponsors.svg" alt="Sponsor logos" width="720" /></a>
-</p>
-
-## Development instructions
-
-A development environment can be set up by cloning the repository:
+## Install
 
 ```sh
-git clone https://github.com/AssemblyScript/assemblyscript.git
-cd assemblyscript
-npm install
-npm link
+npm install @acakar/tensionscript
 ```
 
-The link step is optional and makes the development instance available globally. The full process is documented as part of the repository:
+## Usage
 
-* [Compiler instructions](./src)
-* [Runtime instructions](./std/assembly/rt)
-* [Test instructions](./tests)
+The command is `tensionscript`. From an npm script, `tensionscript …` resolves to
+the installed package's binary; from a shell, `npx tensionscript …` does:
+
+```sh
+npx tensionscript assembly/index.ts -o build/index.wasm --runtime incremental --target release
+```
+
+The compiler is also a library, under the package's `asc` subpath:
+
+```js
+import tensionscript from "@acakar/tensionscript/asc";
+```
+
+## Status
+
+Forked from AssemblyScript. What this fork changes:
+
+* **`this` in arrow functions — landed.** An arrow resolves `this` to the
+  receiver of the nearest enclosing non-arrow function, which is TypeScript's
+  rule, instead of to the enclosing function element. The receiver travels with
+  the function value in its environment and is delivered at each indirect call.
+* **async/await — pending.**
+* **closures — pending.**
+
+Everything else tracks the upstream project it was forked from; the divergence is
+deliberate and each change lands with tests.
+
+## Links
+
+* Tension (the engine these guests run on): https://github.com/Yabgu/Tension
+* TensionScript (this compiler): https://github.com/Yabgu/TensionScript
+
+## Attribution and license
+
+Based on AssemblyScript, Apache-2.0 licensed. Original project at
+https://github.com/AssemblyScript/assemblyscript.
+
+The `NOTICE` file retains the original project's attribution, and the license is
+the Apache License 2.0 (`LICENSE`).

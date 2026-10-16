@@ -145,7 +145,7 @@
     local.get $0
     i32.store
     global.get $~lib/memory/__stack_pointer
-    i32.const 8
+    i32.const 16
     i32.sub
     global.set $~lib/memory/__stack_pointer
     global.get $~lib/memory/__stack_pointer
@@ -156,11 +156,20 @@
     i64.const 0
     i64.store
     global.get $~lib/memory/__stack_pointer
+    i64.const 0
+    i64.store offset=8
+    global.get $~lib/memory/__stack_pointer
     local.get $0
     i32.store
     local.get $0
     i32.eqz
     br_if $folding-inner1
+    global.get $~lib/memory/__stack_pointer
+    local.get $0
+    i32.store offset=4
+    local.get $0
+    i32.load offset=4
+    drop
     local.get $0
     i32.load
     unreachable
@@ -254,7 +263,7 @@
     local.get $0
     i32.store
     global.get $~lib/memory/__stack_pointer
-    i32.const 12
+    i32.const 20
     i32.sub
     global.set $~lib/memory/__stack_pointer
     global.get $~lib/memory/__stack_pointer
@@ -262,11 +271,9 @@
     i32.lt_s
     br_if $folding-inner0
     global.get $~lib/memory/__stack_pointer
-    i64.const 0
-    i64.store
-    global.get $~lib/memory/__stack_pointer
     i32.const 0
-    i32.store offset=8
+    i32.const 20
+    memory.fill
     global.get $~lib/memory/__stack_pointer
     local.get $0
     i32.store
@@ -278,6 +285,12 @@
     local.get $0
     i32.eqz
     br_if $folding-inner1
+    global.get $~lib/memory/__stack_pointer
+    local.get $0
+    i32.store offset=8
+    local.get $0
+    i32.load offset=4
+    drop
     local.get $0
     i32.load
     unreachable
@@ -297,6 +310,7 @@
   unreachable
  )
  (func $export:assert-nonnull/testObjFn (param $0 i32) (result i32)
+  (local $1 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 4
   i32.sub
@@ -310,7 +324,7 @@
    local.get $0
    i32.store
    global.get $~lib/memory/__stack_pointer
-   i32.const 8
+   i32.const 16
    i32.sub
    global.set $~lib/memory/__stack_pointer
    global.get $~lib/memory/__stack_pointer
@@ -321,6 +335,9 @@
    i64.const 0
    i64.store
    global.get $~lib/memory/__stack_pointer
+   i64.const 0
+   i64.store offset=8
+   global.get $~lib/memory/__stack_pointer
    local.get $0
    i32.store
    global.get $~lib/memory/__stack_pointer
@@ -328,6 +345,7 @@
    i32.load offset=4
    local.tee $0
    i32.store offset=4
+   global.get $~lib/memory/__stack_pointer
    local.get $0
    i32.eqz
    if
@@ -338,6 +356,11 @@
     call $~lib/builtins/abort
     unreachable
    end
+   local.get $0
+   i32.store offset=8
+   local.get $0
+   i32.load offset=4
+   drop
    local.get $0
    i32.load
    unreachable
@@ -423,7 +446,7 @@
    local.get $0
    i32.store
    global.get $~lib/memory/__stack_pointer
-   i32.const 8
+   i32.const 16
    i32.sub
    global.set $~lib/memory/__stack_pointer
    global.get $~lib/memory/__stack_pointer
@@ -433,6 +456,9 @@
    global.get $~lib/memory/__stack_pointer
    i64.const 0
    i64.store
+   global.get $~lib/memory/__stack_pointer
+   i64.const 0
+   i64.store offset=8
    global.get $~lib/memory/__stack_pointer
    local.get $0
    i32.store
@@ -449,6 +475,12 @@
    end
    local.get $0
    i32.store offset=4
+   global.get $~lib/memory/__stack_pointer
+   local.get $0
+   i32.store offset=8
+   local.get $0
+   i32.load offset=4
+   drop
    local.get $0
    i32.load
    unreachable
@@ -461,6 +493,7 @@
   unreachable
  )
  (func $export:assert-nonnull/testFn (param $0 i32) (result i32)
+  (local $1 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 4
   i32.sub
@@ -474,7 +507,7 @@
    local.get $0
    i32.store
    global.get $~lib/memory/__stack_pointer
-   i32.const 4
+   i32.const 12
    i32.sub
    global.set $~lib/memory/__stack_pointer
    global.get $~lib/memory/__stack_pointer
@@ -482,11 +515,15 @@
    i32.lt_s
    br_if $folding-inner0
    global.get $~lib/memory/__stack_pointer
+   i64.const 0
+   i64.store
+   global.get $~lib/memory/__stack_pointer
    i32.const 0
-   i32.store
+   i32.store offset=8
    global.get $~lib/memory/__stack_pointer
    local.get $0
    i32.store
+   global.get $~lib/memory/__stack_pointer
    local.get $0
    i32.eqz
    if
@@ -497,6 +534,11 @@
     call $~lib/builtins/abort
     unreachable
    end
+   local.get $0
+   i32.store offset=4
+   local.get $0
+   i32.load offset=4
+   drop
    local.get $0
    i32.load
    unreachable

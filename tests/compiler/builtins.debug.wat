@@ -22,6 +22,7 @@
  (global $builtins/U (mut i64) (i64.const 0))
  (global $builtins/s (mut i32) (i32.const 0))
  (global $builtins/fn (mut i32) (i32.const 144))
+ (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/shared/runtime/Runtime.Stub i32 (i32.const 0))
  (global $~lib/shared/runtime/Runtime.Minimal i32 (i32.const 1))
@@ -534,28 +535,34 @@
   (local $37 f64)
   (local $38 f64)
   (local $39 f64)
-  (local $40 f32)
-  (local $41 f64)
-  (local $42 f32)
+  (local $40 i32)
+  (local $41 i32)
+  (local $42 i32)
   (local $43 f32)
   (local $44 f64)
-  (local $45 f64)
+  (local $45 f32)
   (local $46 f32)
   (local $47 f64)
-  (local $48 i32)
-  (local $49 i32)
-  (local $50 i32)
+  (local $48 f64)
+  (local $49 f32)
+  (local $50 f64)
   (local $51 i32)
   (local $52 i32)
   (local $53 i32)
+  (local $54 i32)
+  (local $55 i32)
+  (local $56 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 8
+  i32.const 12
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
   i64.const 0
   i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
   i32.const 1
   drop
   i32.const 0
@@ -2505,13 +2512,26 @@
   if
    unreachable
   end
+  global.get $~env
+  local.set $41
+  global.get $~lib/memory/__stack_pointer
+  global.get $builtins/fn
+  local.tee $40
+  i32.store
+  local.get $40
+  i32.load offset=4
+  global.set $~env
   i32.const 1
   i32.const 2
   i32.const 2
   global.set $~argumentsLength
-  global.get $builtins/fn
+  local.get $40
   i32.load
   call_indirect (type $2)
+  local.set $42
+  local.get $41
+  global.set $~env
+  local.get $42
   i32.const 3
   i32.eq
   i32.eqz
@@ -2527,11 +2547,11 @@
   i32.const 2
   i32.const 3
   global.get $builtins/fn
-  local.set $53
+  local.set $56
   global.get $~lib/memory/__stack_pointer
-  local.get $53
-  i32.store
-  local.get $53
+  local.get $56
+  i32.store offset=4
+  local.get $56
   call $~lib/function/Function<%28i32%2Ci32%29=>i32>#get:index
   call_indirect (type $2)
   i32.eq
@@ -2545,17 +2565,17 @@
    unreachable
   end
   global.get $builtins/fn
-  local.set $53
+  local.set $56
   global.get $~lib/memory/__stack_pointer
-  local.get $53
-  i32.store offset=4
-  local.get $53
+  local.get $56
+  i32.store offset=8
+  local.get $56
   call $~lib/function/Function<%28i32%2Ci32%29=>i32>#get:name
-  local.set $53
+  local.set $56
   global.get $~lib/memory/__stack_pointer
-  local.get $53
-  i32.store
-  local.get $53
+  local.get $56
+  i32.store offset=4
+  local.get $56
   i32.const 32
   call $~lib/string/String.__eq
   i32.eqz
@@ -2568,11 +2588,11 @@
    unreachable
   end
   global.get $builtins/fn
-  local.set $53
+  local.set $56
   global.get $~lib/memory/__stack_pointer
-  local.get $53
-  i32.store
-  local.get $53
+  local.get $56
+  i32.store offset=4
+  local.get $56
   call $~lib/function/Function<%28i32%2Ci32%29=>i32>#get:length
   i32.const 2
   i32.eq
@@ -2586,11 +2606,11 @@
    unreachable
   end
   global.get $builtins/fn
-  local.set $53
+  local.set $56
   global.get $~lib/memory/__stack_pointer
-  local.get $53
-  i32.store
-  local.get $53
+  local.get $56
+  i32.store offset=4
+  local.get $56
   call $~lib/function/Function<%28i32%2Ci32%29=>i32>#get:length
   i32.const 2
   i32.eq
@@ -2604,17 +2624,17 @@
    unreachable
   end
   global.get $builtins/fn
-  local.set $53
+  local.set $56
   global.get $~lib/memory/__stack_pointer
-  local.get $53
-  i32.store offset=4
-  local.get $53
+  local.get $56
+  i32.store offset=8
+  local.get $56
   call $~lib/function/Function<%28i32%2Ci32%29=>i32>#toString
-  local.set $53
+  local.set $56
   global.get $~lib/memory/__stack_pointer
-  local.get $53
-  i32.store
-  local.get $53
+  local.get $56
+  i32.store offset=4
+  local.get $56
   i32.const 176
   call $~lib/string/String.__eq
   i32.eqz
@@ -2723,57 +2743,57 @@
   f64.ne
   drop
   f32.const nan:0x400000
-  local.tee $40
-  local.get $40
+  local.tee $43
+  local.get $43
   f32.ne
   drop
   f64.const nan:0x8000000000000
-  local.tee $41
-  local.get $41
+  local.tee $44
+  local.get $44
   f64.ne
   drop
   f32.const nan:0x400000
-  local.tee $42
-  local.get $42
+  local.tee $45
+  local.get $45
   f32.sub
   f32.const 0
   f32.eq
   i32.eqz
   drop
   f32.const inf
-  local.tee $43
-  local.get $43
+  local.tee $46
+  local.get $46
   f32.sub
   f32.const 0
   f32.eq
   i32.eqz
   drop
   f64.const nan:0x8000000000000
-  local.tee $44
-  local.get $44
+  local.tee $47
+  local.get $47
   f64.sub
   f64.const 0
   f64.eq
   i32.eqz
   drop
   f64.const inf
-  local.tee $45
-  local.get $45
+  local.tee $48
+  local.get $48
   f64.sub
   f64.const 0
   f64.eq
   i32.eqz
   drop
   f32.const 0
-  local.tee $46
-  local.get $46
+  local.tee $49
+  local.get $49
   f32.sub
   f32.const 0
   f32.eq
   drop
   f64.const 0
-  local.tee $47
-  local.get $47
+  local.tee $50
+  local.get $50
   f64.sub
   f64.const 0
   f64.eq
@@ -3247,30 +3267,30 @@
    unreachable
   end
   i32.const 0
-  local.set $48
-  i32.const 0
-  local.set $49
-  i32.const 51
-  local.set $50
-  i32.const 52
   local.set $51
-  i32.const 52
+  i32.const 0
   local.set $52
+  i32.const 51
+  local.set $53
+  i32.const 52
+  local.set $54
+  i32.const 52
+  local.set $55
   i32.const 256
   i32.const 5
-  local.get $48
-  f64.convert_i32_u
-  local.get $49
-  f64.convert_i32_u
-  local.get $50
-  f64.convert_i32_u
   local.get $51
   f64.convert_i32_u
   local.get $52
   f64.convert_i32_u
+  local.get $53
+  f64.convert_i32_u
+  local.get $54
+  f64.convert_i32_u
+  local.get $55
+  f64.convert_i32_u
   call $~lib/builtins/trace
-  local.get $48
-  local.get $49
+  local.get $51
+  local.get $52
   i32.eq
   i32.eqz
   if
@@ -3281,8 +3301,8 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $48
-  local.get $50
+  local.get $51
+  local.get $53
   i32.ne
   i32.eqz
   if
@@ -3293,7 +3313,7 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $50
+  local.get $53
   i32.const 51
   i32.eq
   i32.eqz
@@ -3305,8 +3325,8 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $51
-  local.get $52
+  local.get $54
+  local.get $55
   i32.eq
   i32.eqz
   if
@@ -3684,7 +3704,7 @@
    unreachable
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 8
+  i32.const 12
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
