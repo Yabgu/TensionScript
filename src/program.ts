@@ -543,6 +543,30 @@ export class Program extends DiagnosticEmitter {
   }
   private _functionPrototype: ClassPrototype | null = null;
 
+  /**
+   * Gets the standard `Task` prototype, or `null` when the program does not
+   * provide it.
+   *
+   * `Task<T>` is the handle type an `async` function's call yields and what
+   * `await` unwraps (`docs/async-await-plan-v2.md` §1.2 rule 2, §2.4). Unlike
+   * the other standard prototypes this one is *optional*: a program assembled
+   * without the standard library (a bare `new Program()` in a unit test, say)
+   * has no `Task`, and the resolver must not throw while looking at code that
+   * never mentions async — so absence answers `null` and the async rules have
+   * no observable effect there. Every program the CLI builds parses
+   * `~lib/task.ts`, so absence means "no standard library", not "no async".
+   */
+  get taskPrototype(): ClassPrototype | null {
+    let cached = this._taskPrototype;
+    if (!cached) {
+      let element = this.elementsByName.get(CommonNames.Task);
+      if (!element || element.kind != ElementKind.ClassPrototype) return null;
+      this._taskPrototype = cached = <ClassPrototype>element;
+    }
+    return cached;
+  }
+  private _taskPrototype: ClassPrototype | null = null;
+
   /** Gets the standard `Int8Array` prototype. */
   get int8ArrayPrototype(): ClassPrototype {
     let cached = this._int8ArrayPrototype;
