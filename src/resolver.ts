@@ -65,6 +65,7 @@ import {
   IntegerLiteralExpression,
   UnaryPrefixExpression,
   UnaryPostfixExpression,
+  AwaitExpression,
   AssertionKind,
   BinaryExpression,
   ThisExpression,
@@ -1045,6 +1046,14 @@ export class Resolver extends DiagnosticEmitter {
           ctxFlow, ctxType, reportMode
         );
       }
+      case NodeKind.Await: {
+        let type = this.resolveAwaitExpression(
+          <AwaitExpression>node,
+          ctxFlow,
+          reportMode
+        );
+        return type ? this.getElementOfType(type) : null;
+      }
     }
     assert(false);
     return null;
@@ -1182,9 +1191,71 @@ export class Resolver extends DiagnosticEmitter {
           ctxFlow, ctxType, reportMode
         );
       }
+      case NodeKind.Await: {
+        return this.resolveAwaitExpression(
+          <AwaitExpression>node,
+          ctxFlow,
+          reportMode
+        );
+      }
     }
     assert(false);
     return null;
+  }
+
+  /**
+   * Resolves an `await` expression to its static type.
+   *
+   * `await h` where `h` is a `Task<T>` has type `T` -- the awaited type of the
+   * operand (`docs/async-await-plan-v2.md` §1.2 rule 2). Awaiting anything else
+   * is TypeScript's rule for an operand that is not a task: the operand's own
+   * type, unchanged, so `await 1` is `i32` and `await "x"` is `string`.
+   *
+   * Two things this deliberately does not do:
+   *
+   * - **It does not re-report an `await` outside an `async` function.** That is
+   *   a grammar rule, reported once by the parser as `AS1308` -- TypeScript's own
+   *   code and text, and its own stage. A second report from here would give one
+   *   mistake two diagnostics.
+   * - **It does not push a want-type down to the operand.** The plan's arm sketch
+   *   (`§2.3`, "propagate T as the operand's want-type") describes the operand as
+   *   a `Task<T>`-typed expression, so the honest push would be `Task<T>` -- and
+   *   that means *instantiating* a class per await for a context that may be
+   *   `void`, nullable or unrelated. The operand therefore resolves on its own
+   *   (`Type.auto`); the cost is that contextual inference through `await` (a
+   *   generic call whose argument type only the context can fix) does not
+   *   happen, which no §1.2 rule requires. Recorded in the phase report.
+   */
+  private resolveAwaitExpression(
+    /** The expression to resolve. */
+    node: AwaitExpression,
+    /** Contextual flow. */
+    ctxFlow: Flow,
+    /** How to proceed with eventual diagnostics. */
+    reportMode: ReportMode = ReportMode.Report
+  ): Type | null {
+    let operandType = this.resolveExpression(node.operand, ctxFlow, Type.auto, reportMode);
+    if (!operandType) return null;
+    let valueType = this.resolveTaskValueType(operandType);
+    return valueType != null ? valueType : operandType;
+  }
+
+  /**
+   * Gets the `T` of a `Task<T>` type, or `null` when the type is not a task.
+   *
+   * Matching is by class identity against the standard library's `Task`, not by
+   * name: a user class that happens to be called `Task` is not one, and a
+   * `Task` that a future alias renames still is. A program without the standard
+   * library has no `Task` at all, and then no type is a task.
+   */
+  private resolveTaskValueType(type: Type): Type | null {
+    let classInstance = type.getClass();
+    if (!classInstance) return null;
+    let taskPrototype = this.program.taskPrototype;
+    if (!taskPrototype) return null;
+    let typeArguments = classInstance.getTypeArgumentsTo(taskPrototype);
+    if (!typeArguments || typeArguments.length != 1) return null;
+    return typeArguments[0];
   }
 
   /** Looks up the program element the specified identifier expression refers to. */
