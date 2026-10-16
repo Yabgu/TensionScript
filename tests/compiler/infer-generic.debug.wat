@@ -17,6 +17,7 @@
  (global $~lib/shared/runtime/Runtime.Stub i32 (i32.const 0))
  (global $~lib/shared/runtime/Runtime.Minimal i32 (i32.const 1))
  (global $~lib/shared/runtime/Runtime.Incremental i32 (i32.const 2))
+ (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/total (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/threshold (mut i32) (i32.const 0))
@@ -2496,6 +2497,8 @@
   (local $7 i32)
   (local $8 i32)
   (local $9 i32)
+  (local $10 i32)
+  (local $11 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 12
   i32.sub
@@ -2512,11 +2515,11 @@
   i32.const 0
   local.set $i
   local.get $this
-  local.set $9
+  local.set $11
   global.get $~lib/memory/__stack_pointer
-  local.get $9
+  local.get $11
   i32.store
-  local.get $9
+  local.get $11
   call $~lib/array/Array<f32>#get:length_
   local.set $len
   loop $for-loop|0
@@ -2524,11 +2527,11 @@
    local.get $len
    local.tee $6
    local.get $this
-   local.set $9
+   local.set $11
    global.get $~lib/memory/__stack_pointer
-   local.get $9
+   local.get $11
    i32.store
-   local.get $9
+   local.get $11
    call $~lib/array/Array<f32>#get:length_
    local.tee $7
    local.get $6
@@ -2537,17 +2540,22 @@
    select
    i32.lt_s
    if
+    global.get $~env
+    local.set $9
     global.get $~lib/memory/__stack_pointer
     local.get $fn
     local.tee $8
     i32.store offset=4
+    local.get $8
+    i32.load offset=4
+    global.set $~env
     local.get $acc
     local.get $this
-    local.set $9
+    local.set $11
     global.get $~lib/memory/__stack_pointer
-    local.get $9
+    local.get $11
     i32.store offset=8
-    local.get $9
+    local.get $11
     call $~lib/array/Array<f32>#get:dataStart
     local.get $i
     i32.const 2
@@ -2556,16 +2564,20 @@
     f32.load
     local.get $i
     local.get $this
-    local.set $9
+    local.set $11
     global.get $~lib/memory/__stack_pointer
-    local.get $9
+    local.get $11
     i32.store
-    local.get $9
+    local.get $11
     i32.const 4
     global.set $~argumentsLength
     local.get $8
     i32.load
     call_indirect (type $5)
+    local.set $10
+    local.get $9
+    global.set $~env
+    local.get $10
     local.set $acc
     local.get $i
     i32.const 1
@@ -2575,12 +2587,12 @@
    end
   end
   local.get $acc
-  local.set $9
+  local.set $11
   global.get $~lib/memory/__stack_pointer
   i32.const 12
   i32.add
   global.set $~lib/memory/__stack_pointer
-  local.get $9
+  local.get $11
   return
  )
  (func $infer-generic/Ref#constructor (param $this i32) (result i32)
