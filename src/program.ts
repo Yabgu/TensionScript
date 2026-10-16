@@ -3804,6 +3804,8 @@ export class Function extends TypedElement {
   debugLocations: Map<ExpressionRef, Range> = new Map();
   /** Function reference, if compiled. */
   ref: FunctionRef = 0;
+  /** Index in the function table, if already added. Zero means not yet added. */
+  tableIndex: i32 = 0;
   /** Varargs stub for calling with omitted arguments. */
   varargsStub: Function | null = null;
   /** Stub for calling overrides. */
