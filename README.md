@@ -3,12 +3,13 @@
 **A TypeScript-shaped language for WebAssembly** — the compiler Tension's guests
 are written in.
 
-TensionScript compiles a variant of TypeScript (basically JavaScript with types)
-to WebAssembly using [Binaryen](https://github.com/WebAssembly/binaryen). It is
-maintained for the [Tension](https://github.com/Yabgu/Tension) engine as a fork
-of [AssemblyScript](https://github.com/AssemblyScript/assemblyscript), and it is
-a **drop-in replacement**: the `asc` command, its options and the standard
-library are the same, so existing build scripts keep working unchanged.
+TensionScript compiles TypeScript syntax to WebAssembly using
+[Binaryen](https://github.com/WebAssembly/binaryen). It is maintained for the
+[Tension](https://github.com/Yabgu/Tension) engine as a fork of
+[AssemblyScript](https://github.com/AssemblyScript/assemblyscript). The command
+and the package are its own: it does not collide with `asc` (AssemblyScript's
+compiler) or `tsc` (TypeScript's), so a project that installs both compilers
+always resolves the one it named.
 
 ## Install
 
@@ -18,18 +19,17 @@ npm install @yabgu_gm/tensionscript
 
 ## Usage
 
-The command is still `asc`. From an npm script, `asc …` resolves to the installed
-package's binary; from a shell, `npx asc …` does:
+The command is `tensionscript`. From an npm script, `tensionscript …` resolves to
+the installed package's binary; from a shell, `npx tensionscript …` does:
 
 ```sh
-npx asc assembly/index.ts -o build/index.wasm --runtime incremental --target release
+npx tensionscript assembly/index.ts -o build/index.wasm --runtime incremental --target release
 ```
 
-The compiler as a library uses the same entry points as before, under the new
-package name:
+The compiler is also a library, under the package's `asc` subpath:
 
 ```js
-import asc from "@yabgu_gm/tensionscript/asc";
+import tensionscript from "@yabgu_gm/tensionscript/asc";
 ```
 
 ## Status

@@ -217,13 +217,13 @@ export async function main(argv, options) {
     let colors = opts.help ? stdoutColors : stderrColors;
     out.write([
       colors.white("SYNTAX"),
-      "  " + colors.cyan("asc") + " [entryFile ...] [options]",
+      "  " + colors.cyan("tensionscript") + " [entryFile ...] [options]",
       "",
       colors.white("EXAMPLES"),
-      "  " + colors.cyan("asc") + " hello" + extension,
-      "  " + colors.cyan("asc") + " hello" + extension + " -o hello.wasm -t hello.wat",
-      "  " + colors.cyan("asc") + " hello1" + extension + " hello2" + extension + " -o -O > hello.wasm",
-      "  " + colors.cyan("asc") + " --config asconfig.json --target release",
+      "  " + colors.cyan("tensionscript") + " hello" + extension,
+      "  " + colors.cyan("tensionscript") + " hello" + extension + " -o hello.wasm -t hello.wat",
+      "  " + colors.cyan("tensionscript") + " hello1" + extension + " hello2" + extension + " -o -O > hello.wasm",
+      "  " + colors.cyan("tensionscript") + " --config asconfig.json --target release",
       "",
       colors.white("OPTIONS"),
     ].concat(

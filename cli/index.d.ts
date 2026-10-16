@@ -1,5 +1,5 @@
 /**
- * @fileoverview Definitions for asc.
+ * @fileoverview Definitions for the TensionScript compiler frontend.
  * @license Apache-2.0
  */
 
