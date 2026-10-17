@@ -100,6 +100,7 @@ import { Parser } from "../parser";
 import { Program } from "../program";
 import { Token } from "../tokenizer";
 import { awaitSites, AwaitSite } from "./ir";
+import { creationEnvOf } from "../closure/ir";
 import {
   ArrowKind,
   ArrayLiteralExpression,
@@ -111,6 +112,7 @@ import {
   ClassDeclaration,
   CommaExpression,
   DeclarationStatement,
+  DoStatement,
   ElementAccessExpression,
   Expression,
   ExpressionStatement,
@@ -137,6 +139,7 @@ import {
   ReturnStatement,
   Source,
   Statement,
+  SwitchStatement,
   TemplateLiteralExpression,
   TernaryExpression,
   TypeNode,
@@ -171,8 +174,10 @@ const RESUME_POINT_FIELD = "resumePoint";
 const RESULT_FIELD = "result";
 /** The state struct's handle field. */
 const HANDLE_FIELD = "handle";
-/** The state struct's environment reference (§4.4) — emitted, unpopulated. */
+/** The state struct's environment reference (§4.4). */
 const ENV_FIELD = "$env";
+/** The this-struct's receiver field, at field 0 (§7.4). */
+const THIS_FIELD = "$this";
 /** Prefix of the synthesized condition temporaries of `if` statements. */
 const COND_TEMP_PREFIX = "$cond";
 
@@ -246,7 +251,14 @@ export class AsyncLowerTransform {
           break;
         }
         case NodeKind.ClassDeclaration: {
-          this.refuseAsyncMembers(<ClassDeclaration>statement, parser);
+          // An async instance method is a state machine whose receiver has no
+          // home in the resume function: `f$resume(state)` is a free function,
+          // so `this` cannot be `param 0` there. The state struct's `$env` is
+          // populated with a one-field this-struct at the entry, and the body's
+          // `this` reads it (docs/closures-plan.md §7.4, §8.3).
+          let classDeclaration = <ClassDeclaration>statement;
+          let artifacts = this.lowerAsyncMethods(source, classDeclaration, declared, parser);
+          for (let j = 0, l = artifacts.length; j < l; ++j) out.push(artifacts[j]);
           out.push(statement);
           break;
         }
@@ -280,7 +292,13 @@ export class AsyncLowerTransform {
     declaration: FunctionDeclaration,
     declared: Array<string>,
     parser: Parser,
-    hoisted: Array<Statement>
+    hoisted: Array<Statement>,
+    /**
+     * The receiver type, when the function has one: an instance method's class,
+     * or an explicit `this:` parameter's type. Non-null means the body's `this`
+     * is replaced by a read of the state struct's this-struct.
+     */
+    thisType: TypeNode | null = null
   ): Statement[] | null {
     let signature = declaration.signature;
     let name = declaration.name.text;
@@ -295,8 +313,11 @@ export class AsyncLowerTransform {
     if (declaration.typeParameters != null) {
       return this.refuse(parser, declaration.range, "async generic functions (async lowering)");
     }
-    if (signature.explicitThisType != null) {
-      return this.refuse(parser, declaration.range, "`this` parameters in an async function (async lowering)");
+    // An explicit `this:` parameter is the free-function spelling of a
+    // receiver: `this` is `param 0`, exactly as it is for a method, so the same
+    // this-struct carries it across a suspension (closures plan §7.1a).
+    if (thisType == null && signature.explicitThisType != null) {
+      thisType = signature.explicitThisType;
     }
     let parameters = signature.parameters;
     for (let i = 0, k = parameters.length; i < k; ++i) {
@@ -321,6 +342,40 @@ export class AsyncLowerTransform {
     }
     let block = <BlockStatement>body;
 
+    // --- the receiver, when the function has one ----------------------------
+
+    // `this` is not available in `f$resume`: the resume function is free, and
+    // the method's receiver is `param 0` of the *entry*. So the entry stores it
+    // in `state.$env` (a one-field this-struct), and every `this` in the body
+    // becomes a read of that field. Reads, not a hoisted local: a local would
+    // need lifting, and the field is always current by construction.
+    let thisEnvName = thisType != null ? name + "$ThisEnv" : "";
+    let thisEnvClass: ClassDeclaration | null = null;
+    if (thisType != null) {
+      let thisField = Node.createFieldDeclaration(
+        Node.createIdentifierExpression(THIS_FIELD, range),
+        null, CommonFlags.Instance,
+        thisType,
+        Node.createCallExpression(
+          Node.createIdentifierExpression("changetype", range),
+          [ thisType ],
+          [ intLiteral(0, range) ],
+          range
+        ),
+        range
+      );
+      thisEnvClass = Node.createClassDeclaration(
+        Node.createIdentifierExpression(thisEnvName, range),
+        null, CommonFlags.None,
+        null,
+        typeNode(TASK_ENV_NAME, range),
+        null,
+        [ thisField ],
+        range
+      );
+      replaceThis(block.statements, thisEnvName, stateVarNameOf(block, parameters));
+    }
+
     // --- the plan: awaits, structure, and what has to be lifted -------------
 
     let lifting = new Lifting();
@@ -328,6 +383,13 @@ export class AsyncLowerTransform {
     let seq = this.planSeq(parser, block.statements, cursor, false, source, hoisted, declared, lifting);
     if (!seq) return null;
     let awaitCount = cursor.next - 1;
+    // An environment local that a closure creation reads must survive a
+    // suspension: the creation statement is emitted unguarded (it is a function
+    // *declaration* in effect), so on a resumed pass it re-reads the local. A
+    // local declared inside a guarded region would be out of scope there — so
+    // the env is lifted exactly as any other cross-await local is, and the
+    // creation reads the copy-in (`docs/closures-plan.md` §8.3(b)).
+    if (awaitCount != 0) this.liftCreationEnvs(block, lifting);
     this.collectLifting(parser, seq, lifting);
     // Parameters whose value is written somewhere: the resume function's copy-in
     // re-reads the state field on every entry, so a write that happens before a
@@ -537,6 +599,22 @@ export class AsyncLowerTransform {
       ],
       range
     ));
+    // state.$env = new f$ThisEnv(this);   — §7.4: the receiver the resume
+    // function cannot otherwise see. Populated unconditionally, and before the
+    // prefix runs, so `this.x` is valid from the first statement.
+    if (thisType != null) {
+      entryStatements.push(Node.createExpressionStatement(
+        assignField(stateIdent, ENV_FIELD,
+          Node.createNewExpression(
+            Node.createSimpleTypeName(thisEnvName, range),
+            null,
+            [ Node.createThisExpression(range) ],
+            range
+          ),
+          range
+        )
+      ));
+    }
     // state.handle = new Task<R>();
     entryStatements.push(Node.createExpressionStatement(
       assignField(stateIdent, HANDLE_FIELD,
@@ -640,7 +718,24 @@ export class AsyncLowerTransform {
       range
     );
 
+    if (thisEnvClass != null) return [ thisEnvClass, stateClass, declaration, resumeFunction ];
     return [ stateClass, declaration, resumeFunction ];
+  }
+
+  /**
+   * Lifts the environment locals that closure creations in this body read.
+   *
+   * `creationEnvOf` (§3.3 of the closures plan) names the local each creation
+   * site stores in `_env`. A creation written as a `function` statement is
+   * emitted unguarded by the resume function, so its read of that local happens
+   * on every entry — including a resumed one. Lifting it is what makes the local
+   * exist at that point, and the copy-in restores the same environment object.
+   */
+  private liftCreationEnvs(block: BlockStatement, lifting: Lifting): void {
+    let names = new Set<string>();
+    collectCreationEnvNames(block.statements, names);
+    if (names.size == 0) return;
+    liftDeclarationsNamed(block.statements, names, lifting);
   }
 
   // --- planning ------------------------------------------------------------
@@ -1328,6 +1423,20 @@ export class AsyncLowerTransform {
       case NodeKind.Null: {
         return true;
       }
+      case NodeKind.Function: {
+        let declaration = (<FunctionExpression>expression).declaration;
+        if (declaration.isAsync) {
+          this.refuse(parser, expression.range,
+            declaration.arrowKind != ArrowKind.None
+              ? "async arrow functions (async lowering)"
+              : "async function expressions (async lowering)");
+          return false;
+        }
+        // A plain function value is opaque here: its body is not part of this
+        // state machine, and the closure transform has already rewritten any
+        // capture it makes into environment accesses (`closures-plan.md` §8.2).
+        return true;
+      }
       case NodeKind.This: {
         this.refuse(parser, expression.range, "this in an async function body (async lowering)");
         return false;
@@ -1452,21 +1561,51 @@ export class AsyncLowerTransform {
     }
   }
 
-  /** Refuses the `async` methods and field initializers of a class body. */
-  private refuseAsyncMembers(classDeclaration: ClassDeclaration, parser: Parser): void {
+  /**
+   * Lowers the `async` instance methods of a class body and answers the
+   * top-level artifacts they need (the this-env class, the state class, the
+   * resume function), in that order.
+   *
+   * A static async method is refused by name: `this` there is the class object,
+   * not a receiver parameter, and there is no value the this-struct could hold.
+   * The closure transform excludes static methods for the same reason
+   * (closures plan §7.1a).
+   */
+  private lowerAsyncMethods(
+    source: Source,
+    classDeclaration: ClassDeclaration,
+    declared: Array<string>,
+    parser: Parser
+  ): Statement[] {
+    let out = new Array<Statement>();
     let members = classDeclaration.members;
     for (let i = 0, k = members.length; i < k; ++i) {
       let member = members[i];
       if (member.kind == NodeKind.MethodDeclaration) {
         let method = <MethodDeclaration>member;
-        if (method.isAsync) {
-          this.refuse(parser, method.range, "async methods (async lowering)");
+        if (!method.isAsync) continue;
+        if (method.is(CommonFlags.Static)) {
+          this.refuse(parser, method.range, "async static methods (async lowering)");
+          continue;
+        }
+        if (method.body == null) continue;
+        let artifacts = this.lowerAsyncFunction(
+          source, method, declared, parser, out,
+          typeNode(classDeclaration.name.text, method.range)
+        );
+        if (artifacts) {
+          // The method stays a class member — it *is* the entry, rewritten in
+          // place. Everything else is a top-level element.
+          for (let j = 0, l = artifacts.length; j < l; ++j) {
+            if (artifacts[j] !== method) out.push(artifacts[j]);
+          }
         }
       } else if (member.kind == NodeKind.FieldDeclaration) {
         let initializer = (<FieldDeclaration>member).initializer;
         if (initializer) this.refuseAsyncFunctionExpression(initializer, parser);
       }
     }
+    return out;
   }
 
   /** Refuses an async function expression or arrow where one can be written. */
@@ -1735,6 +1874,98 @@ function hasLowerable(statements: Statement[]): bool {
 }
 
 /** Every local name declared anywhere in `statement`, for temp naming. */
+/**
+ * Collects the environment locals read by closure creations in `statements`,
+ * recursively. The closure transform's side table names them (`creationEnvOf`).
+ */
+function collectCreationEnvNames(statements: Statement[], into: Set<string>): void {
+  for (let i = 0, k = statements.length; i < k; ++i) {
+    let statement = statements[i];
+    switch (statement.kind) {
+      case NodeKind.Expression: {
+        let expression = (<ExpressionStatement>statement).expression;
+        if (expression.kind == NodeKind.Function) {
+          let env = creationEnvOf.get(<FunctionExpression>expression);
+          if (env != null) into.add(env);
+        }
+        break;
+      }
+      case NodeKind.Variable: {
+        let declarations = (<VariableStatement>statement).declarations;
+        for (let j = 0, l = declarations.length; j < l; ++j) {
+          let initializer = declarations[j].initializer;
+          if (initializer != null && initializer.kind == NodeKind.Function) {
+            let env = creationEnvOf.get(<FunctionExpression>initializer);
+            if (env != null) into.add(env);
+          }
+        }
+        break;
+      }
+      case NodeKind.Block: {
+        collectCreationEnvNames((<BlockStatement>statement).statements, into);
+        break;
+      }
+      case NodeKind.If: {
+        let ifs = <IfStatement>statement;
+        collectCreationEnvNames([ ifs.ifTrue ], into);
+        if (ifs.ifFalse != null) collectCreationEnvNames([ ifs.ifFalse ], into);
+        break;
+      }
+      case NodeKind.While: {
+        collectCreationEnvNames([ (<WhileStatement>statement).body ], into);
+        break;
+      }
+      case NodeKind.Do: {
+        collectCreationEnvNames([ (<DoStatement>statement).body ], into);
+        break;
+      }
+      case NodeKind.For: {
+        let loop = <ForStatement>statement;
+        if (loop.initializer != null) collectCreationEnvNames([ loop.initializer ], into);
+        collectCreationEnvNames([ loop.body ], into);
+        break;
+      }
+      default: break;
+    }
+  }
+}
+
+/** Lifts every declaration in `statements` whose name is in `names`. */
+function liftDeclarationsNamed(
+  statements: Statement[],
+  names: Set<string>,
+  lifting: Lifting
+): void {
+  for (let i = 0, k = statements.length; i < k; ++i) {
+    let statement = statements[i];
+    switch (statement.kind) {
+      case NodeKind.Variable: {
+        let declarations = (<VariableStatement>statement).declarations;
+        for (let j = 0, l = declarations.length; j < l; ++j) {
+          let declaration = declarations[j];
+          let name = declaration.name.text;
+          if (!names.has(name) || lifting.hasLocal(name)) continue;
+          let type = declaration.type;
+          if (type == null) continue; // the creation env always has one
+          lifting.liftLocal(name, type, declaration);
+        }
+        break;
+      }
+      case NodeKind.Block: {
+        liftDeclarationsNamed((<BlockStatement>statement).statements, names, lifting);
+        break;
+      }
+      case NodeKind.If: {
+        let ifs = <IfStatement>statement;
+        liftDeclarationsNamed([ ifs.ifTrue ], names, lifting);
+        if (ifs.ifFalse != null) liftDeclarationsNamed([ ifs.ifFalse ], names, lifting);
+        break;
+      }
+      default: break;
+    }
+  }
+}
+
 function collectLocalNames(statement: Statement, into: Set<string>): void {
   switch (statement.kind) {
     case NodeKind.Block: {
@@ -2028,6 +2259,218 @@ function hasName(parameters: ParameterNode[], block: BlockStatement, name: strin
   let names = new Set<string>();
   collectLocalNames(block, names);
   return names.has(name);
+}
+
+/**
+ * The name the state local will get, without needing the parameter list twice:
+ * `nameForState` depends only on the parameters and the body, and this call site
+ * has both.
+ */
+function stateVarNameOf(block: BlockStatement, parameters: ParameterNode[]): string {
+  return nameForState(parameters, block);
+}
+
+/**
+ * Replaces every `this` in `statements` with `changetype<env>(state.$env).$this`.
+ *
+ * Nested function expressions are **not** descended into: their `this` binding is
+ * their own (a regular function) or is supplied by the shipped `Receiver` path (an
+ * arrow), and neither survives the move into a free resume function — the
+ * resolver reports TS2332 for such an arrow, which names the real problem.
+ */
+function replaceThis(
+  statements: Statement[],
+  envName: string,
+  stateName: string
+): void {
+  for (let i = 0, k = statements.length; i < k; ++i) {
+    replaceThisInStatement(statements[i], envName, stateName);
+  }
+}
+
+function replaceThisInStatement(
+  statement: Statement,
+  envName: string,
+  stateName: string
+): void {
+  switch (statement.kind) {
+    case NodeKind.Expression: {
+      let expression = (<ExpressionStatement>statement).expression;
+      (<ExpressionStatement>statement).expression =
+        replaceThisInExpression(expression, envName, stateName);
+      break;
+    }
+    case NodeKind.Return: {
+      let value = (<ReturnStatement>statement).value;
+      if (value != null) {
+        (<ReturnStatement>statement).value = replaceThisInExpression(value, envName, stateName);
+      }
+      break;
+    }
+    case NodeKind.Variable: {
+      let declarations = (<VariableStatement>statement).declarations;
+      for (let i = 0, k = declarations.length; i < k; ++i) {
+        let initializer = declarations[i].initializer;
+        if (initializer != null) {
+          declarations[i].initializer = replaceThisInExpression(initializer, envName, stateName);
+        }
+      }
+      break;
+    }
+    case NodeKind.Block: {
+      replaceThis((<BlockStatement>statement).statements, envName, stateName);
+      break;
+    }
+    case NodeKind.If: {
+      let ifs = <IfStatement>statement;
+      ifs.condition = replaceThisInExpression(ifs.condition, envName, stateName);
+      replaceThisInStatement(ifs.ifTrue, envName, stateName);
+      if (ifs.ifFalse != null) replaceThisInStatement(ifs.ifFalse, envName, stateName);
+      break;
+    }
+    case NodeKind.While: {
+      let loop = <WhileStatement>statement;
+      loop.condition = replaceThisInExpression(loop.condition, envName, stateName);
+      replaceThisInStatement(loop.body, envName, stateName);
+      break;
+    }
+    case NodeKind.Do: {
+      let loop = <DoStatement>statement;
+      replaceThisInStatement(loop.body, envName, stateName);
+      loop.condition = replaceThisInExpression(loop.condition, envName, stateName);
+      break;
+    }
+    case NodeKind.For: {
+      let loop = <ForStatement>statement;
+      if (loop.initializer != null) replaceThisInStatement(loop.initializer, envName, stateName);
+      if (loop.condition != null) loop.condition = replaceThisInExpression(loop.condition, envName, stateName);
+      if (loop.incrementor != null) loop.incrementor = replaceThisInExpression(loop.incrementor, envName, stateName);
+      replaceThisInStatement(loop.body, envName, stateName);
+      break;
+    }
+    case NodeKind.Switch: {
+      let switchStatement = <SwitchStatement>statement;
+      switchStatement.condition = replaceThisInExpression(switchStatement.condition, envName, stateName);
+      let cases = switchStatement.cases;
+      for (let i = 0, k = cases.length; i < k; ++i) {
+        if (cases[i].label != null) {
+          cases[i].label = replaceThisInExpression(assert(cases[i].label), envName, stateName);
+        }
+        replaceThis(cases[i].statements, envName, stateName);
+      }
+      break;
+    }
+    default: break;
+  }
+}
+
+function replaceThisInExpression(
+  expression: Expression,
+  envName: string,
+  stateName: string
+): Expression {
+  switch (expression.kind) {
+    case NodeKind.This: {
+      return Node.createPropertyAccessExpression(
+        Node.createCallExpression(
+          Node.createIdentifierExpression("changetype", expression.range),
+          [ typeNode(envName, expression.range) ],
+          [
+            Node.createPropertyAccessExpression(
+              Node.createIdentifierExpression(stateName, expression.range),
+              Node.createIdentifierExpression(ENV_FIELD, expression.range),
+              expression.range
+            )
+          ],
+          expression.range
+        ),
+        Node.createIdentifierExpression(THIS_FIELD, expression.range),
+        expression.range
+      );
+    }
+    case NodeKind.Binary: {
+      let binary = <BinaryExpression>expression;
+      binary.left = replaceThisInExpression(binary.left, envName, stateName);
+      binary.right = replaceThisInExpression(binary.right, envName, stateName);
+      return binary;
+    }
+    case NodeKind.Call: {
+      let call = <CallExpression>expression;
+      call.expression = replaceThisInExpression(call.expression, envName, stateName);
+      let args = call.args;
+      for (let i = 0, k = args.length; i < k; ++i) {
+        args[i] = replaceThisInExpression(args[i], envName, stateName);
+      }
+      return call;
+    }
+    case NodeKind.PropertyAccess: {
+      let access = <PropertyAccessExpression>expression;
+      access.expression = replaceThisInExpression(access.expression, envName, stateName);
+      return access;
+    }
+    case NodeKind.Parenthesized: {
+      let parenthesized = <ParenthesizedExpression>expression;
+      parenthesized.expression = replaceThisInExpression(parenthesized.expression, envName, stateName);
+      return parenthesized;
+    }
+    case NodeKind.UnaryPrefix: {
+      let prefix = <UnaryPrefixExpression>expression;
+      prefix.operand = replaceThisInExpression(prefix.operand, envName, stateName);
+      return prefix;
+    }
+    case NodeKind.UnaryPostfix: {
+      let postfix = <UnaryPostfixExpression>expression;
+      postfix.operand = replaceThisInExpression(postfix.operand, envName, stateName);
+      return postfix;
+    }
+    case NodeKind.ElementAccess: {
+      let elementAccess = <ElementAccessExpression>expression;
+      elementAccess.expression = replaceThisInExpression(elementAccess.expression, envName, stateName);
+      elementAccess.elementExpression = replaceThisInExpression(elementAccess.elementExpression, envName, stateName);
+      return elementAccess;
+    }
+    case NodeKind.Ternary: {
+      let ternary = <TernaryExpression>expression;
+      ternary.condition = replaceThisInExpression(ternary.condition, envName, stateName);
+      ternary.ifThen = replaceThisInExpression(ternary.ifThen, envName, stateName);
+      ternary.ifElse = replaceThisInExpression(ternary.ifElse, envName, stateName);
+      return ternary;
+    }
+    case NodeKind.Comma: {
+      let comma = <CommaExpression>expression;
+      let expressions = comma.expressions;
+      for (let i = 0, k = expressions.length; i < k; ++i) {
+        expressions[i] = replaceThisInExpression(expressions[i], envName, stateName);
+      }
+      return comma;
+    }
+    case NodeKind.New: {
+      let newExpression = <NewExpression>expression;
+      let args = newExpression.args;
+      for (let i = 0, k = args.length; i < k; ++i) {
+        args[i] = replaceThisInExpression(args[i], envName, stateName);
+      }
+      return newExpression;
+    }
+    case NodeKind.InstanceOf: {
+      let instanceOf = <InstanceOfExpression>expression;
+      instanceOf.expression = replaceThisInExpression(instanceOf.expression, envName, stateName);
+      return instanceOf;
+    }
+    case NodeKind.Assertion: {
+      let assertion = <AssertionExpression>expression;
+      assertion.expression = replaceThisInExpression(assertion.expression, envName, stateName);
+      return assertion;
+    }
+    case NodeKind.Await: {
+      let awaitNode = <AwaitExpression>expression;
+      awaitNode.operand = replaceThisInExpression(awaitNode.operand, envName, stateName);
+      return awaitNode;
+    }
+    default:
+      // Includes `NodeKind.Function`: a nested function's `this` is its own.
+      return expression;
+  }
 }
 
 /** State-struct members a parameter or local must not be named. */
