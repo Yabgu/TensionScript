@@ -2,7 +2,8 @@
 //
 // Four shapes: a parenthesized arrow, an arrow with a return type, a single
 // non-parenthesized parameter, and the two function-expression forms. All are
-// recognized and reported as not implemented (AS100).
+// recognized, and the AST is printed back here; the parser reports nothing for
+// `async` -- the lowering transform refuses or lowers each shape by name.
 
 const parens = async (): void => {};
 

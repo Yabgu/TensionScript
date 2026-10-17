@@ -1,9 +1,9 @@
 // async function declarations, and the positions `await` takes inside one.
 //
-// Every async construct is recognized and reported as not implemented until
-// the lowering lands (AS100 "Not implemented: Async functions" -- see
-// ASYNC_PHASE1.md), so each case below carries that one diagnostic while the
-// AST it prints back is the faithful one.
+// Every async construct is recognized and its faithful AST is printed back here.
+// The parser no longer diagnoses `async` itself: lowering and refusal both live
+// in the `afterParse` transforms, so this fixture pins the *parse* shape and
+// carries no `async` diagnostic at all.
 
 async function plain(): void {}
 

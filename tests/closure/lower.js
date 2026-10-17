@@ -71,8 +71,7 @@ function run(source) {
 function refusals(r) {
   return r.program.parser.diagnostics
     .filter(diagnostic => diagnostic.code === NOT_IMPLEMENTED)
-    .map(diagnostic => diagnostic.message.replace("Not implemented: ", ""))
-    .filter(message => message !== "Async functions");
+    .map(diagnostic => diagnostic.message.replace("Not implemented: ", ""));
 }
 
 /** The text of one function in a module, params and body. */

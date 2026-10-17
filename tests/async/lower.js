@@ -79,15 +79,15 @@ function run(source) {
 }
 
 /**
- * The run's refusals, by the *gap* they name. The parser's own guard
- * ("Async functions", deleted in 7b) is excluded: it fires for every `async`
- * construct until then, so it says nothing about the transform.
+ * The run's refusals, by the *gap* they name. The parser reports no `async`
+ * diagnostic at all since commit 7b deleted its guard, so everything here comes
+ * from a transform — and a guard that came back would show up as an extra entry
+ * and fail the tests that expect an exact list.
  */
 function refusals(run) {
   return run.program.parser.diagnostics
     .filter(diagnostic => diagnostic.code === NOT_IMPLEMENTED)
-    .map(diagnostic => diagnostic.message.replace("Not implemented: ", ""))
-    .filter(message => message !== "Async functions");
+    .map(diagnostic => diagnostic.message.replace("Not implemented: ", ""));
 }
 
 /**
@@ -843,8 +843,9 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
 }
 
 // 12. The validation walk (Phase 3, commit 7): every `async` construct the
-// lowering pass never reaches is refused by name — never left for the parser's
-// `AS100: Not implemented: Async functions` guard, which commit 7b deletes.
+// lowering pass never reaches is refused by name. The parser reports nothing
+// for `async` since commit 7b deleted its `AS100` guard, so a message here is
+// the only thing standing between the user and a silently mis-compiled shape.
 //
 // The shapes below are the ones measured as *invisible* to the lowering pass:
 // the inside of a non-async function body, a top-level `if`/`while`/`do`/`for`
