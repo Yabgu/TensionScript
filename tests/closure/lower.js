@@ -338,6 +338,8 @@ export function main(): i32 { return outer<i32>(1); }
     refusals(r), [ "a captured local typed by a type parameter (closures lowering)" ]);
 }
 {
+  // C3a replaces the C1 refusal: a for-header binding is captured by cloning the
+  // environment once per iteration, before the incrementor.
   const r = run(`
 function outer(): i32 {
   let r: i32 = 0;
@@ -349,8 +351,7 @@ function outer(): i32 {
 }
 export function main(): i32 { return outer(); }
 `);
-  check("C3: a captured for-header binding is refused by name",
-    refusals(r), [ "a captured for-header binding (closures lowering)" ]);
+  check("C3a: a captured for-header binding is lowered, not refused", refusals(r), []);
 }
 {
   const r = run(`
@@ -648,6 +649,236 @@ export function main(): i32 { return new C().m(); }
 `);
   check("C2d: `super` in a capturing arrow is refused by name",
     refusals(r), [ "super in a capturing arrow (closures lowering)" ]);
+}
+
+
+// — C3a: for-header captures (per-iteration clone, F7) ————————————————————————
+
+const LOOP_A = `
+class Fns { a: () => i32 = (): i32 => 0; b: () => i32 = (): i32 => 0; c: () => i32 = (): i32 => 0; }
+function make(): Fns {
+  const fns = new Fns();
+  let n: i32 = 0;
+  for (let i: i32 = 0; i < 3; i++) {
+    function get(): i32 { return i; }
+    if (n == 0) fns.a = get; else if (n == 1) fns.b = get; else fns.c = get;
+    n++;
+  }
+  return fns;
+}
+export function main(): i32 { const f = make(); return f.a() * 100 + f.b() * 10 + f.c(); }
+`;
+
+{
+  // Case (a): three closures capture 0, 1, 2 — not one aliased binding.
+  const out = await execute(LOOP_A);
+  check("C3a (a): three closures capture 0, 1, 2", out, { value: 12 });
+}
+{
+  // The emitted shape: the env is allocated before the loop, and the body's
+  // last statement replaces it with a copy — before the incrementor runs.
+  const r = run(LOOP_A);
+  const wat = r.wat();
+  const make = funcBody(wat, "probe/make");
+  const envClass = r.file.statements.find(statement => statement.name && statement.name.text === "make$Env$1");
+  check("C3a (a): the loop env class has a copy constructor",
+    envClass.members.map(member => member.name.text), [ "i", "constructor" ]);
+  check("C3a (a): the loop reads and writes the field",
+    [ /make\$Env\$1#get:i/.test(make), /make\$Env\$1#set:i/.test(make) ], [ true, true ]);
+  // The clone is the *last* constructor call in the body: `new X$Env$1($closureEnv$1)`.
+  let lastClone = make.lastIndexOf("make$Env$1#constructor");
+  let lastBodyWork = make.lastIndexOf("Fns#set:");
+  let lastIncrement = make.lastIndexOf("make$Env$1#set:i");
+  check("C3a (a): the clone runs after the body's work and before the incrementor",
+    [ lastClone > lastBodyWork, lastClone < lastIncrement ], [ true, true ]);
+}
+{
+  // Case (b): `continue` runs the clone, so the skipped iteration's value is
+  // never overwritten by the increment.
+  const out = await execute(`
+class Fns { a: () => i32 = (): i32 => 0; b: () => i32 = (): i32 => 0; c: () => i32 = (): i32 => 0; }
+function make(): Fns {
+  const fns = new Fns();
+  let n: i32 = 0;
+  for (let i: i32 = 0; i < 3; i++) {
+    if (i == 1) continue;
+    function get(): i32 { return i; }
+    if (n == 0) fns.a = get; else fns.b = get;
+    n++;
+  }
+  return fns;
+}
+export function main(): i32 { const f = make(); return f.a() * 10 + f.b(); }
+`);
+  check("C3a (b): `continue` still yields 0 and 2", out, { value: 2 });
+}
+{
+  // Case (c): `break` leaves the loop without cloning, and the closures made so
+  // far keep 0 and 1.
+  const out = await execute(`
+class Fns { a: () => i32 = (): i32 => 0; b: () => i32 = (): i32 => 0; c: () => i32 = (): i32 => 0; }
+function make(): Fns {
+  const fns = new Fns();
+  let n: i32 = 0;
+  for (let i: i32 = 0; i < 3; i++) {
+    function get(): i32 { return i; }
+    if (n == 0) fns.a = get; else fns.b = get;
+    n++;
+    if (i == 1) break;
+  }
+  return fns;
+}
+export function main(): i32 { const f = make(); return f.a() * 10 + f.b(); }
+`);
+  check("C3a (c): `break` still yields 0 and 1", out, { value: 1 });
+}
+{
+  // Case (d): a binding declared *inside* the body is per-iteration by
+  // construction — its block owns the environment, and each iteration is a new
+  // block instance. No clone is involved.
+  const r = run(`
+class Fns { a: () => i32 = (): i32 => 0; b: () => i32 = (): i32 => 0; c: () => i32 = (): i32 => 0; }
+function make(): Fns {
+  const fns = new Fns();
+  let n: i32 = 0;
+  for (let i: i32 = 0; i < 3; i++) {
+    let t: i32 = i * 10;
+    function get(): i32 { return t; }
+    if (n == 0) fns.a = get; else if (n == 1) fns.b = get; else fns.c = get;
+    n++;
+  }
+  return fns;
+}
+export function main(): i32 { const f = make(); return f.a() + f.b() + f.c(); }
+`);
+  check("C3a (d): a body binding needs no loop clone", refusals(r), []);
+  check("C3a (d): no copy constructor is synthesized for the loop",
+    r.file.statements
+      .filter(statement => statement.name && statement.name.text.startsWith("make$Env"))
+      .map(statement => statement.members.map(member => member.name.text)),
+    [ [ "t" ] ]);
+}
+{
+  const out = await execute(`
+class Fns { a: () => i32 = (): i32 => 0; b: () => i32 = (): i32 => 0; c: () => i32 = (): i32 => 0; }
+function make(): Fns {
+  const fns = new Fns();
+  let n: i32 = 0;
+  for (let i: i32 = 0; i < 3; i++) {
+    let t: i32 = i * 10;
+    function get(): i32 { return t; }
+    if (n == 0) fns.a = get; else if (n == 1) fns.b = get; else fns.c = get;
+    n++;
+  }
+  return fns;
+}
+export function main(): i32 { const f = make(); return f.a() + f.b() + f.c(); }
+`);
+  check("C3a (d): a body binding yields 0, 10, 20", out, { value: 30 });
+}
+{
+  // Case (e): a closure called inside the iteration sees its own binding, and
+  // the value it captured survives the next iteration's clone.
+  const out = await execute(`
+class Fns { a: () => i32 = (): i32 => 0; b: () => i32 = (): i32 => 0; c: () => i32 = (): i32 => 0; }
+function make(): Fns {
+  const fns = new Fns();
+  let n: i32 = 0;
+  for (let i: i32 = 0; i < 3; i++) {
+    let f = (): i32 => i;
+    let now: i32 = f();
+    function get(): i32 { return i; }
+    if (now != i) return fns;
+    if (n == 0) fns.a = get; else if (n == 1) fns.b = get; else fns.c = get;
+    n++;
+  }
+  return fns;
+}
+export function main(): i32 { const f = make(); return f.a() * 100 + f.b() * 10 + f.c(); }
+`);
+  check("C3a (e): a closure called in its own iteration sees its own value", out, { value: 12 });
+}
+{
+  // A nested loop owns its own `continue` and its own clone: the inner loop's
+  // hook must not fire on an outer loop's `continue` (or the reverse).
+  const out = await execute(`
+class Fns { a: () => i32 = (): i32 => 0; b: () => i32 = (): i32 => 0; }
+function make(): Fns {
+  const fns = new Fns();
+  let n: i32 = 0;
+  for (let i: i32 = 0; i < 2; i++) {
+    for (let j: i32 = 0; j < 2; j++) {
+      if (j == 0) continue;
+      function get(): i32 { return j; }
+      if (n == 0) fns.a = get; else fns.b = get;
+      n++;
+    }
+  }
+  return fns;
+}
+export function main(): i32 { const f = make(); return f.a() * 10 + f.b(); }
+`);
+  check("C3a: a nested loop's `continue` uses the inner loop's clone", out, { value: 11 });
+}
+
+// — C3b: a closure cannot be a host callback (§9.1) ——————————————————————————
+
+const HOST_CALLBACK_CAPTURE = `
+declare function makeCallbacks(onBatch: (c: u32, p: u32, n: u32) => i32): void;
+function outer(): i32 {
+  let x: i32 = 1;
+  function onBatch(c: u32, p: u32, n: u32): i32 { return x; }
+  makeCallbacks(onBatch);
+  return 0;
+}
+export function main(): i32 { return outer(); }
+`;
+
+{
+  const r = run(HOST_CALLBACK_CAPTURE);
+  check("C3b: a capturing closure registered as a host callback is refused by name",
+    refusals(r), [ "a closure captured by a host callback (closures lowering)" ]);
+}
+{
+  // An inline capturing closure is the same case, without the named local.
+  const r = run(`
+declare function makeCallbacks(onBatch: (c: u32, p: u32, n: u32) => i32): void;
+function outer(): i32 {
+  let x: i32 = 1;
+  makeCallbacks((c: u32, p: u32, n: u32): i32 => x);
+  return 0;
+}
+export function main(): i32 { return outer(); }
+`);
+  check("C3b: an inline capturing closure is refused by name",
+    refusals(r), [ "a closure captured by a host callback (closures lowering)" ]);
+}
+{
+  // A non-capturing handler is unaffected: its `_env` is zero, which is what
+  // the shipped `makeCallbacks` guard requires.
+  const r = run(`
+declare function makeCallbacks(onBatch: (c: u32, p: u32, n: u32) => i32): void;
+function onBatch(c: u32, p: u32, n: u32): i32 { return 1; }
+export function main(): i32 { makeCallbacks(onBatch); return 0; }
+`);
+  check("C3b: a non-capturing handler is not refused", refusals(r), []);
+}
+{
+  // A this-only arrow keeps its shipped path: the transform does not name it,
+  // and the runtime `makeCallbacks` guard refuses it (`_env` is the receiver).
+  const r = run(`
+declare function makeCallbacks(onBatch: (c: u32, p: u32, n: u32) => i32): void;
+class C {
+  y: i32 = 1;
+  m(): i32 {
+    const h = (c: u32, p: u32, n: u32): i32 => this.y;
+    makeCallbacks(h);
+    return 0;
+  }
+}
+export function main(): i32 { return new C().m(); }
+`);
+  check("C3b: a this-only arrow is left to the runtime guard", refusals(r), []);
 }
 
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);
