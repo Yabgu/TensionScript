@@ -48,11 +48,12 @@ import {
   CallExpression,
   ClassDeclaration,
   CommaExpression,
+  ContinueStatement,
+  DeclarationStatement,
   DoStatement,
   ElementAccessExpression,
   Expression,
   ExpressionStatement,
-  FieldDeclaration,
   ForOfStatement,
   ForStatement,
   FunctionDeclaration,
@@ -69,6 +70,7 @@ import {
   Node,
   NodeKind,
   ObjectLiteralExpression,
+  ParameterKind,
   ParenthesizedExpression,
   PropertyAccessExpression,
   ReturnStatement,
@@ -253,8 +255,14 @@ class Binding {
   /** Whether this is a parameter (copied into the env at entry). */
   isParam: bool = false;
 
-  /** Whether this is a `for`-header binding (per-iteration rules are C3). */
+  /** Whether this is a `for`-header binding (per-iteration rules apply). */
   isLoopHeader: bool = false;
+
+  /** The `for` statement whose header declared this binding, if any. */
+  isLoopHeaderOf: ForStatement | null = null;
+
+  /** The `Struct` closure this binding was initialised with, if any. */
+  closureValue: FunctionExpression | null = null;
 
   /** Whether the declaration is `const` (assignment is an error). */
   isConst: bool = false;
@@ -273,6 +281,13 @@ class Scope {
 
   bindings: Map<string, Binding> = new Map();
 
+  /**
+   * Named nested function expressions declared in this scope. Kept apart from
+   * `bindings` on purpose: they are values, not captured variables, so the
+   * capture analysis must not treat a reference to one as a capture.
+   */
+  functionValues: Map<string, FunctionExpression> = new Map();
+
   /** Captured bindings declared here, in declaration order. */
   captured: Array<Binding> = new Array();
 
@@ -289,12 +304,29 @@ class Scope {
    */
   needsThis: bool = false;
 
+  /**
+   * Whether this scope is a `for` header that owns captured bindings, and so
+   * needs the per-iteration clone (`docs/closures-plan.md` §2.3, §5.4).
+   */
+  isLoopHeader: bool = false;
+
   constructor(
     public kind: ScopeKind,
     public parent: Scope | null,
     public ownerFunction: FunctionDeclaration,
     public range: Range
   ) {}
+
+  /** Resolves a named nested function through the scope chain. */
+  resolveFunctionValue(name: string): FunctionExpression | null {
+    let scope: Scope | null = this;
+    while (scope != null) {
+      let value = scope.functionValues.get(name);
+      if (value) return value;
+      scope = scope.parent;
+    }
+    return null;
+  }
 
   /** Resolves a name through the scope chain; `null` when not declared. */
   resolve(name: string): Binding | null {
@@ -384,6 +416,9 @@ class OwnerAnalysis {
   /** Switch case -> its scope. */
   scopeOfCase: Map<SwitchCase, Scope> = new Map();
 
+  /** `for` statement -> its header scope. */
+  scopeOfLoop: Map<ForStatement, Scope> = new Map();
+
   /** Block scopes that came from a `BlockStatement` (not switch/try). */
   plainBlocks: Set<Scope> = new Set();
 
@@ -407,6 +442,9 @@ class OwnerAnalysis {
 
   /** Every `this` expression found inside an arrow. */
   thisUses: Array<ThisUse> = new Array();
+
+  /** Function expressions that need an environment (so their `_env` is a struct). */
+  structFunctions: Set<FunctionExpression> = new Set();
 
   /** `this` expressions that become a field read, and the env that holds it. */
   thisRefs: Map<ThisExpression, Scope> = new Map();
@@ -475,7 +513,11 @@ class OwnerAnalysis {
         this.refuse(scope.range, "a capture from a nested function's body (closures lowering)");
         continue;
       }
-      if (scope.kind == ScopeKind.Block && !this.isPlainBlock(scope)) {
+      if (
+        scope.kind == ScopeKind.Block &&
+        !this.isPlainBlock(scope) &&
+        !scope.isLoopHeader
+      ) {
         this.refuse(scope.range, "a capture from a switch or try scope (closures lowering)");
         continue;
       }
@@ -549,6 +591,8 @@ class OwnerAnalysis {
       }
     }
 
+    if (info.needed != null && expression != null) this.structFunctions.add(expression);
+
     // Propagate children's needs upward: a function that creates a closure
     // needing an environment must itself be handed that environment.
     for (let i = 0, k = info.children.length; i < k; ++i) {
@@ -596,7 +640,17 @@ class OwnerAnalysis {
         break;
       }
       case NodeKind.Expression: {
-        this.walkExpression((<ExpressionStatement>statement).expression, scope, info, false);
+        let expression = (<ExpressionStatement>statement).expression;
+        this.walkExpression(expression, scope, info, false);
+        // A nested `function name() {}` is a *named function expression* in this
+        // parser (`parser.ts:4274-4278`), and the compiler binds its name as a
+        // scoped local. Record the same binding here so a later reference to it
+        // can be recognised — the host-callback check needs exactly that.
+        if (expression.kind == NodeKind.Function) {
+          let closure = <FunctionExpression>expression;
+          let name = closure.declaration.name;
+          if (name.text.length > 0) scope.functionValues.set(name.text, closure);
+        }
         break;
       }
       case NodeKind.Return: {
@@ -626,13 +680,14 @@ class OwnerAnalysis {
       case NodeKind.For: {
         let loop = <ForStatement>statement;
         let loopScope = new Scope(ScopeKind.Block, scope, info.node, loop.range);
+        this.scopeOfLoop.set(loop, loopScope);
         this.scopes.push(loopScope);
         let initializer = loop.initializer;
         if (initializer != null) {
           if (initializer.kind == NodeKind.Variable) {
             let declarations = (<VariableStatement>initializer).declarations;
             for (let i = 0, k = declarations.length; i < k; ++i) {
-              this.declare(declarations[i], loopScope, true, info);
+              this.declare(declarations[i], loopScope, true, info, loop);
             }
           } else {
             this.walkStatement(initializer, loopScope, info);
@@ -718,7 +773,8 @@ class OwnerAnalysis {
     declaration: VariableDeclaration,
     scope: Scope,
     isLoopHeader: bool,
-    info: FunctionInfo
+    info: FunctionInfo,
+    loop: ForStatement | null = null
   ): void {
     let initializer = declaration.initializer;
     if (initializer != null) {
@@ -733,6 +789,11 @@ class OwnerAnalysis {
       initializer != null
     );
     binding.isLoopHeader = isLoopHeader;
+    binding.isLoopHeaderOf = loop;
+    if (initializer != null && initializer.kind == NodeKind.Function) {
+      let closure = <FunctionExpression>initializer;
+      if (this.structFunctions.has(closure)) binding.closureValue = closure;
+    }
     binding.isConst = (declaration.flags & CommonFlags.Const) != 0;
     scope.bindings.set(binding.name, binding);
     this.bindingOf.set(declaration, binding);
@@ -845,6 +906,15 @@ class OwnerAnalysis {
         for (let i = 0, k = args.length; i < k; ++i) {
           this.walkExpression(args[i], scope, info, false);
         }
+        if (isHostCallbackRegistration(call)) {
+          for (let i = 0, k = args.length; i < k; ++i) {
+            let closure = this.structClosureIn(args[i], scope);
+            if (closure != null) {
+              this.refuse(closure.range,
+                "a closure captured by a host callback (closures lowering)");
+            }
+          }
+        }
         return;
       }
       case NodeKind.Comma: {
@@ -914,7 +984,16 @@ class OwnerAnalysis {
     binding.captured = true;
     if (!binding.hasInitializer) binding.hasInitFlag = true;
     if (binding.isLoopHeader) {
-      this.refuse(identifier.range, "a captured for-header binding (closures lowering)");
+      // A `for`-header binding is per-iteration in TypeScript; the loop's scope
+      // owns the environment and clones it at the end of each body iteration
+      // (§2.3, §5.4). A `for…of` header cannot be lowered this way — see the
+      // refusal below.
+      if (binding.isLoopHeaderOf == null) {
+        this.refuse(identifier.range,
+          "a captured for-of or for-in binding (closures lowering)");
+      } else {
+        binding.scope.isLoopHeader = true;
+      }
     }
     if (isInsideAsync(info)) {
       this.refuse(identifier.range, "a capture in an async function (closures lowering)");
@@ -950,6 +1029,30 @@ class OwnerAnalysis {
    * `resolver.ts:2295-2402`). If any arrow in the chain owns a local capture, the
    * whole chain is `Struct` and the receiver lives in the environment (§7.1).
    */
+  /**
+   * The `Struct` closure an argument denotes, if any: either a literal capturing
+   * function expression, or a local initialised with one in this scope.
+   *
+   * A this-only arrow is deliberately *not* matched: its `_env` is the receiver,
+   * and the shipped `makeCallbacks` guard already refuses it at run time
+   * (`tension-framework/assembly/runtime/callbacks.ts:34-36`). This transform
+   * refuses only the shape it creates (`docs/closures-plan.md` §9.1).
+   */
+  private structClosureIn(argument: Expression, scope: Scope): FunctionExpression | null {
+    if (argument.kind == NodeKind.Function) {
+      let closure = <FunctionExpression>argument;
+      return this.structFunctions.has(closure) ? closure : null;
+    }
+    if (argument.kind == NodeKind.Identifier) {
+      let name = (<IdentifierExpression>argument).text;
+      let named = scope.resolveFunctionValue(name);
+      if (named != null) return this.structFunctions.has(named) ? named : null;
+      let binding = scope.resolve(name);
+      if (binding != null && binding.closureValue != null) return binding.closureValue;
+    }
+    return null;
+  }
+
   private markThis(expression: ThisExpression, info: FunctionInfo): void {
     let arrows = new Array<FunctionInfo>();
     let current: FunctionInfo | null = info;
@@ -975,7 +1078,7 @@ class OwnerAnalysis {
   }
 
   private makeEnvClass(scope: Scope): ClassDeclaration {
-    let fields = new Array<FieldDeclaration>();
+    let fields = new Array<DeclarationStatement>();
     let range = scope.range;
     let bindings = scope.captured;
     // `$this` is field 0 whenever the environment carries the receiver
@@ -1016,6 +1119,78 @@ class OwnerAnalysis {
         null, CommonFlags.Instance,
         typeNode("bool", range),
         null,
+        range
+      ));
+    }
+    // A loop-header environment is cloned once per iteration (§5.4), so its
+    // class carries the copy constructor that clone calls. `super()` is
+    // required of a derived constructor (AS2377); every field is copied,
+    // including `$this` (the receiver does not change between iterations) and
+    // the `$init$` flags (a binding already assigned stays assigned).
+    if (scope.isLoopHeader) {
+      let selfName = assert(scope.className);
+      let parameterName = "source";
+      let statements = new Array<Statement>();
+      statements.push(Node.createExpressionStatement(
+        Node.createCallExpression(Node.createSuperExpression(range), null, [], range)
+      ));
+      let copies = new Array<Statement>();
+      let all = new Array<string>();
+      if (scope.needsThis) all.push(THIS_FIELD);
+      for (let i = 0, k = bindings.length; i < k; ++i) {
+        all.push(bindings[i].name);
+        if (bindings[i].hasInitFlag) all.push(INIT_PREFIX + bindings[i].name);
+      }
+      for (let i = 0, k = all.length; i < k; ++i) {
+        copies.push(Node.createExpressionStatement(
+          this.assign(
+            this.fieldOn("this", all[i], range),
+            this.fieldOn(parameterName, all[i], range),
+            range
+          )
+        ));
+      }
+      if (copies.length > 0) {
+        statements.push(Node.createIfStatement(
+          Node.createBinaryExpression(
+            Token.Exclamation_Equals,
+            Node.createIdentifierExpression(parameterName, range),
+            Node.createNullExpression(range),
+            range
+          ),
+          Node.createBlockStatement(copies, range),
+          null,
+          range
+        ));
+      }
+      fields.push(Node.createMethodDeclaration(
+        Node.createConstructorExpression(range),
+        null, CommonFlags.Constructor | CommonFlags.Instance,
+        null,
+        Node.createFunctionType(
+          [
+            // `Optional` *with* an initializer, which is exactly how the
+            // parser represents a defaulted parameter (`parser.ts:1490-1515`):
+            // `Default` would make it required (`resolver.ts:392-400`), and an
+            // optional parameter without an initializer is refused by the
+            // varargs stub (`compiler.ts:6794-6797`). The plain `new X$Env()`
+            // allocation stays valid, and `null` is the "first allocation" case.
+            Node.createParameter(
+              ParameterKind.Optional,
+              Node.createIdentifierExpression(parameterName, range),
+              Node.createNamedType(
+                Node.createSimpleTypeName(selfName, range), null, true, range
+              ),
+              Node.createNullExpression(range),
+              range
+            )
+          ],
+          typeNode("void", range),
+          null,
+          false,
+          range
+        ),
+        Node.createBlockStatement(statements, range),
         range
       ));
     }
@@ -1089,7 +1264,8 @@ class OwnerAnalysis {
   private rewriteStatements(
     statements: Array<Statement>,
     scope: Scope,
-    currentFunction: FunctionDeclaration
+    currentFunction: FunctionDeclaration,
+    continueHook: Statement | null = null
   ): Array<Statement> {
     let out = new Array<Statement>();
     if (scope.localName != null) {
@@ -1118,7 +1294,7 @@ class OwnerAnalysis {
       }
     }
     for (let i = 0, k = statements.length; i < k; ++i) {
-      let statement = this.rewriteStatement(statements[i], scope, currentFunction);
+      let statement = this.rewriteStatement(statements[i], scope, currentFunction, continueHook);
       if (statement != null) out.push(statement);
     }
     return out;
@@ -1145,14 +1321,15 @@ class OwnerAnalysis {
   private rewriteStatement(
     statement: Statement,
     scope: Scope,
-    currentFunction: FunctionDeclaration
+    currentFunction: FunctionDeclaration,
+    continueHook: Statement | null = null
   ): Statement | null {
     switch (statement.kind) {
       case NodeKind.Block: {
         let block = <BlockStatement>statement;
         let blockScope = this.scopeOfBlock.get(block);
         let inner = blockScope != null ? blockScope : scope;
-        let rewritten = this.rewriteStatements(block.statements, inner, currentFunction);
+        let rewritten = this.rewriteStatements(block.statements, inner, currentFunction, continueHook);
         return Node.createBlockStatement(rewritten, block.range);
       }
       case NodeKind.Variable: {
@@ -1208,37 +1385,45 @@ class OwnerAnalysis {
         let ifs = <IfStatement>statement;
         return Node.createIfStatement(
           this.rewriteExpression(ifs.condition, scope, currentFunction),
-          assert(this.rewriteStatement(ifs.ifTrue, scope, currentFunction)),
-          ifs.ifFalse != null ? this.rewriteStatement(ifs.ifFalse, scope, currentFunction) : null,
+          assert(this.rewriteStatement(ifs.ifTrue, scope, currentFunction, continueHook)),
+          ifs.ifFalse != null ? this.rewriteStatement(ifs.ifFalse, scope, currentFunction, continueHook) : null,
           ifs.range
         );
       }
       case NodeKind.While: {
         let loop = <WhileStatement>statement;
+        // A nested loop owns its own `continue`: the hook from an outer loop
+        // must not fire inside it.
         return Node.createWhileStatement(
           this.rewriteExpression(loop.condition, scope, currentFunction),
-          assert(this.rewriteStatement(loop.body, scope, currentFunction)),
+          assert(this.rewriteStatement(loop.body, scope, currentFunction, null)),
           loop.range
         );
       }
       case NodeKind.Do: {
         let loop = <DoStatement>statement;
         return Node.createDoStatement(
-          assert(this.rewriteStatement(loop.body, scope, currentFunction)),
+          assert(this.rewriteStatement(loop.body, scope, currentFunction, null)),
           this.rewriteExpression(loop.condition, scope, currentFunction),
           loop.range
         );
       }
       case NodeKind.For: {
         let loop = <ForStatement>statement;
-        let initializer = loop.initializer;
-        return Node.createForStatement(
-          initializer != null ? this.rewriteStatement(initializer, scope, currentFunction) : null,
-          loop.condition != null ? this.rewriteExpression(loop.condition, scope, currentFunction) : null,
-          loop.incrementor != null ? this.rewriteExpression(loop.incrementor, scope, currentFunction) : null,
-          assert(this.rewriteStatement(loop.body, scope, currentFunction)),
-          loop.range
-        );
+        let loopScope = this.scopeOfLoop.get(loop);
+        let inner = loopScope != null ? loopScope : scope;
+        let ownsEnv = loopScope != null && loopScope.localName != null && loopScope.isLoopHeader;
+        if (!ownsEnv) {
+          let initializer = loop.initializer;
+          return Node.createForStatement(
+            initializer != null ? this.rewriteStatement(initializer, inner, currentFunction) : null,
+            loop.condition != null ? this.rewriteExpression(loop.condition, inner, currentFunction) : null,
+            loop.incrementor != null ? this.rewriteExpression(loop.incrementor, inner, currentFunction) : null,
+            assert(this.rewriteStatement(loop.body, inner, currentFunction, null)),
+            loop.range
+          );
+        }
+        return this.rewriteHeaderLoop(loop, assert(loopScope), currentFunction);
       }
       case NodeKind.ForOf: {
         let loop = <ForOfStatement>statement;
@@ -1307,6 +1492,19 @@ class OwnerAnalysis {
           tryStatement.range
         );
       }
+      case NodeKind.Continue: {
+        // A `continue` in a `for`-header-capturing loop must run the clone that
+        // the loop body's last statement performs, because `continue` skips the
+        // rest of the body and goes straight to the incrementor (§2.3).
+        if (continueHook == null) return statement;
+        return Node.createBlockStatement([
+          continueHook,
+          Node.createContinueStatement(
+            (<ContinueStatement>statement).label,
+            statement.range
+          )
+        ], statement.range);
+      }
       case NodeKind.Throw: {
         let thrown = <ThrowStatement>statement;
         return Node.createThrowStatement(
@@ -1318,6 +1516,120 @@ class OwnerAnalysis {
         return statement;
       }
     }
+  }
+
+  /**
+   * Rewrites a `for` loop whose header declares captured bindings (§2.3, §5.4).
+   *
+   * The environment is allocated once, before the loop, and the header
+   * declarations become field assignments in a prelude. The body's last
+   * statement — and every `continue` that targets this loop — replaces the
+   * environment with a fresh copy of itself, so iteration *k*'s closures keep
+   * the values iteration *k* saw. The incrementor stays in the `for` header and
+   * therefore runs on the *fresh* environment, which is what makes
+   * `for (let i = 0; …; i++)` yield 0, 1, 2 rather than 0, 0, 0 or 3, 3, 3.
+   *
+   * ```
+   * let $closureEnv$1 = new f$Env$1();
+   * $closureEnv$1.i = 0;
+   * for (; $closureEnv$1.i < 3; $closureEnv$1.i++) {
+   *   …body…
+   *   $closureEnv$1 = new f$Env$1($closureEnv$1);   // clone, before the incrementor
+   * }
+   * ```
+   */
+  private rewriteHeaderLoop(
+    loop: ForStatement,
+    loopScope: Scope,
+    currentFunction: FunctionDeclaration
+  ): Statement {
+    let prelude = new Array<Statement>();
+    prelude.push(this.makeEnvAllocation(loopScope));
+    if (loopScope.needsThis) {
+      prelude.push(Node.createExpressionStatement(
+        this.assign(
+          this.fieldOn(assert(loopScope.localName), THIS_FIELD, loop.range),
+          Node.createThisExpression(loop.range),
+          loop.range
+        )
+      ));
+    }
+
+    // The initializer runs once: the captured declarations become assignments in
+    // the prelude, and the rest stays a `let` in the header.
+    let keptInitializer: Statement | null = null;
+    let initializer = loop.initializer;
+    if (initializer != null) {
+      if (initializer.kind == NodeKind.Variable) {
+        let variable = <VariableStatement>initializer;
+        let kept = new Array<VariableDeclaration>();
+        let declarations = variable.declarations;
+        for (let i = 0, k = declarations.length; i < k; ++i) {
+          let declaration = declarations[i];
+          let binding = this.bindingOf.get(declaration);
+          if (binding != null && binding.captured) {
+            if (declaration.initializer != null) {
+              prelude.push(Node.createExpressionStatement(
+                this.assign(
+                  this.fieldOf(loopScope, binding, declaration.name.range),
+                  this.rewriteExpression(declaration.initializer, loopScope, currentFunction),
+                  declaration.range
+                )
+              ));
+            }
+          } else {
+            if (declaration.initializer != null) {
+              declaration.initializer = this.rewriteExpression(declaration.initializer, loopScope, currentFunction);
+            }
+            kept.push(declaration);
+          }
+        }
+        if (kept.length > 0) {
+          keptInitializer = Node.createVariableStatement(variable.decorators, kept, variable.range);
+        }
+      } else {
+        keptInitializer = this.rewriteStatement(initializer, loopScope, currentFunction, null);
+      }
+    }
+
+    // The clone is a fresh statement in each position: the AST is a tree, and
+    // the same node cannot be shared between the body's tail and a `continue`.
+    let body = this.rewriteStatement(
+      loop.body, loopScope, currentFunction, this.makeCloneStatement(loopScope)
+    );
+    let rewrittenBody = assert(body);
+    let bodyStatements = rewrittenBody.kind == NodeKind.Block
+      ? (<BlockStatement>rewrittenBody).statements
+      : [ rewrittenBody ];
+    bodyStatements.push(this.makeCloneStatement(loopScope));
+
+    let rewritten = Node.createForStatement(
+      keptInitializer,
+      loop.condition != null ? this.rewriteExpression(loop.condition, loopScope, currentFunction) : null,
+      loop.incrementor != null ? this.rewriteExpression(loop.incrementor, loopScope, currentFunction) : null,
+      Node.createBlockStatement(bodyStatements, loop.body.range),
+      loop.range
+    );
+    prelude.push(rewritten);
+    return Node.createBlockStatement(prelude, loop.range);
+  }
+
+  /** `$closureEnv$N = new X$Env$N($closureEnv$N);` */
+  private makeCloneStatement(scope: Scope): Statement {
+    let localName = assert(scope.localName);
+    let className = assert(scope.className);
+    return Node.createExpressionStatement(
+      this.assign(
+        Node.createIdentifierExpression(localName, scope.range),
+        Node.createNewExpression(
+          Node.createSimpleTypeName(className, scope.range),
+          null,
+          [ Node.createIdentifierExpression(localName, scope.range) ],
+          scope.range
+        ),
+        scope.range
+      )
+    );
   }
 
   private rewriteExpression(
@@ -1617,6 +1929,26 @@ class OwnerAnalysis {
 
 function typeNode(name: string, range: Range): NamedTypeNode {
   return Node.createNamedType(Node.createSimpleTypeName(name, range), null, false, range);
+}
+
+/**
+ * Whether this call registers a host callback.
+ *
+ * The compiled guest calls `makeCallbacks(onBatch, onEvent)` from the framework
+ * (`tension-framework/assembly/runtime/callbacks.ts:56`), and the host has no
+ * indirect-call site at which to restore a closure's environment (§9.1). The
+ * transform runs before resolution, so it recognises the registration by name —
+ * the one place it names a framework symbol rather than a std one, and the
+ * reason the refusal is a compile-time message instead of the runtime assert.
+ */
+function isHostCallbackRegistration(call: CallExpression): bool {
+  let callee = call.expression;
+  let name = callee.kind == NodeKind.Identifier
+    ? (<IdentifierExpression>callee).text
+    : callee.kind == NodeKind.PropertyAccess
+      ? (<PropertyAccessExpression>callee).property.text
+      : "";
+  return name == "makeCallbacks";
 }
 
 /** Whether `info` or any enclosing function is `async`. */
