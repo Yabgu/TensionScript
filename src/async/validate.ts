@@ -113,6 +113,15 @@ export const MESSAGE_ASYNC_FUNCTION_EXPRESSION = "async function expressions (as
  * the only diagnostic for these, and it named no shape.
  */
 export const MESSAGE_NESTED_IN_NON_ASYNC_BODY = "an async function nested in a non-async body (async lowering)";
+/**
+ * An `async` `export default function`. New in commit 7b (ruling A): the shape
+ * is not "nested in a body" — it is a top-level declaration the lowering pass's
+ * statement switch does not visit — so it names itself. Disjoint from the
+ * nested-body message by grammar: `export default` is refused at non-top level
+ * (measured: `TS1109: Expression expected.`), and an export-default arrow or
+ * function expression is a parse error too (`TS1005`/`TS1003`).
+ */
+export const MESSAGE_ASYNC_EXPORT_DEFAULT = "an async export default function (async lowering)";
 
 /**
  * Walks one source's tree and refuses every `async` construct the lowering
@@ -272,7 +281,15 @@ function validateStatement(statement: Statement, parser: Parser, refused: Set<i3
       return;
     }
     case NodeKind.ExportDefault: {
-      validateStatement((<ExportDefaultStatement>statement).declaration, parser, refused);
+      let declaration = (<ExportDefaultStatement>statement).declaration;
+      if (declaration.kind == NodeKind.FunctionDeclaration) {
+        let functionDeclaration = <FunctionDeclaration>declaration;
+        if (functionDeclaration.isAsync) {
+          refuse(parser, declaration, MESSAGE_ASYNC_EXPORT_DEFAULT, refused);
+          return;
+        }
+      }
+      validateStatement(declaration, parser, refused);
       return;
     }
     default: {

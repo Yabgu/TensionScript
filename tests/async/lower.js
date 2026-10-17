@@ -816,7 +816,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
       NESTED],
     ["an export-default async function",
       `export default async function f(): i32 { return 1; } export function main(): i32 { return 1; }`,
-      NESTED],
+      "an async export default function (async lowering)"],
     ["an arrow in a decorator argument",
       `function dec(a: () => i32): void {} @dec(async (): i32 => 1) class C {} export function main(): i32 { return 1; }`,
       "async arrow functions (async lowering)"]
@@ -824,6 +824,22 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   for (const [name, source, message] of cases) {
     check(`${name} is refused by name, not by the parser guard`, refusals(run(source)), [ message ]);
   }
+}
+
+// 12a-bis. The export-default message names its own shape (commit 7b, ruling A),
+// and the two messages are disjoint by grammar rather than by precedence:
+// `export default` is only legal at the top level (measured: a nested one is
+// `TS1109: Expression expected.`), and an export-default arrow or function
+// expression is a parse error (`TS1005`/`TS1003`). So no shape can produce both.
+
+{
+  const atTop = run(`export default async function f(): i32 { return 1; } export function main(): i32 { return 1; }`);
+  check("an export-default async function names the export-default shape", refusals(atTop), [ "an async export default function (async lowering)" ]);
+  check("  ...and not the nested-body message", refusals(atTop).includes("an async function nested in a non-async body (async lowering)"), false);
+
+  const nested = run(`function g(): i32 { export default async function f(): i32 { return 1; } return 1; } export function main(): i32 { return 1; }`);
+  check("a nested `export default` is a parse error, so the messages cannot overlap", nested.program.parser.diagnostics.some(d => d.code === 1109), true);
+  check("  ...and the walk reports nothing for it", refusals(nested), []);
 }
 
 // 12b. The shapes the lowering pass does reach still lower, with no refusal.
