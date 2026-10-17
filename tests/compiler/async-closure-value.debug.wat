@@ -6812,17 +6812,6 @@
    call $async-closure-value/outer$Env#constructor
    local.tee $$closureEnv
    i32.store offset=8
-  end
-  local.get $state
-  local.set $8
-  global.get $~lib/memory/__stack_pointer
-  local.get $8
-  i32.store
-  local.get $8
-  call $async-closure-value/outer$State#get:resumePoint
-  i32.const 0
-  i32.eq
-  if
    local.get $$closureEnv
    local.set $8
    global.get $~lib/memory/__stack_pointer
@@ -7001,17 +6990,6 @@
    global.set $~env
    local.get $7
    drop
-  end
-  local.get $state
-  local.set $8
-  global.get $~lib/memory/__stack_pointer
-  local.get $8
-  i32.store
-  local.get $8
-  call $async-closure-value/outer$State#get:resumePoint
-  i32.const 0
-  i32.eq
-  if
    local.get $state
    local.set $8
    global.get $~lib/memory/__stack_pointer
