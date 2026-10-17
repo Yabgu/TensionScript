@@ -256,6 +256,37 @@ export function parkProbe(): i32 {
     /call \$~lib\/task-rt\/__taskPark[\s\S]{0,400}?return/.test(resume), true);
 }
 
+// 4b. An async body with no await: no guards, no scope damage.
+//
+// Every ordinary statement used to be wrapped in its own
+// `if (resumePoint == 0) { … }` block even when the body had no suspension
+// point, so a `let` declared in one guard was out of scope in the next:
+// `async function f(seed: i32): i32 { let v: i32 = seed * 2; return v + 1; }`
+// failed with TS2304 as soon as it was actually called. A body with no await is
+// emitted straight now, and the value is the proof.
+
+console.log("an async body with no await");
+
+{
+  const r = compile(`
+import { Task } from "~lib/task";
+
+async function compute(seed: i32): i32 {
+  let value: i32 = seed * 2;
+  return value + 1;
+}
+
+export function probe(): i32 {
+  let h: Task<i32> = compute(20);
+  return h._record.payload;
+}
+`);
+  check("an async body with no await compiles and returns its value", r.run("probe"), 41);
+  const resume = funcBody(r.wat, "probe/compute$resume");
+  check("  ...with no resume-point guards", /get:resumePoint/.test(resume), false);
+  check("  ...and no park", /__taskPark/.test(resume), false);
+}
+
 // 5. Guest-to-guest completion (§4.7.3, Phase 4b): a task that awaits another
 // task's *completion*, not a record handed to it already settled.
 

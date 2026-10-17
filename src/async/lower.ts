@@ -910,7 +910,8 @@ export class AsyncLowerTransform {
     }
 
     let ctx = new EmitContext(
-      lifting, resumeVarName, awaitCount + 1, returnsValue, localNames, returnType
+      lifting, resumeVarName, awaitCount + 1, returnsValue, localNames, returnType,
+      awaitCount != 0
     );
     pushAll(resumeStatements, this.emitSeq(seq, ctx));
 
@@ -1506,18 +1507,23 @@ export class AsyncLowerTransform {
         if (plan.lo == 0) {
           // An ordinary statement: runs on the normal pass, skipped on any resume
           // that has not yet cleared the point.
-          out.push(Node.createIfStatement(
-            isZero(resumePointRead(ctx.stateName, range), range),
-            Node.createBlockStatement(rewriteStatement(node, ctx), range),
-            null,
-            range
-          ));
+          let rewritten = rewriteStatement(node, ctx);
+          if (ctx.guarded) {
+            out.push(Node.createIfStatement(
+              isZero(resumePointRead(ctx.stateName, range), range),
+              Node.createBlockStatement(rewritten, range),
+              null,
+              range
+            ));
+          } else {
+            pushAll(out, rewritten);
+          }
         }
         return out;
       }
       case PlanKind.Block: {
         let inner = this.emitSeq(assert(plan.statements), ctx);
-        if (plan.lo == 0) return guarded(rewriteReturns(node, ctx), ctx, range);
+        if (plan.lo == 0) return guardIfNeeded(rewriteReturns(node, ctx), ctx, range);
         out.push(Node.createIfStatement(
           enterGuard(ctx.stateName, plan.lo, plan.hi, range),
           Node.createBlockStatement(inner, range),
@@ -1527,7 +1533,7 @@ export class AsyncLowerTransform {
         return out;
       }
       case PlanKind.If: {
-        if (plan.lo == 0) return guarded(rewriteReturns(node, ctx), ctx, range);
+        if (plan.lo == 0) return guardIfNeeded(rewriteReturns(node, ctx), ctx, range);
         let thenStatements = this.emitSeq(assert(plan.thenSeq), ctx);
         let elseStatements = plan.elseSeq != null ? this.emitSeq(assert(plan.elseSeq), ctx) : new Array<Statement>();
         let temp = ctx.freshTemp(range);
@@ -1578,7 +1584,7 @@ export class AsyncLowerTransform {
         return out;
       }
       case PlanKind.While: {
-        if (plan.lo == 0) return guarded(rewriteReturns(node, ctx), ctx, range);
+        if (plan.lo == 0) return guardIfNeeded(rewriteReturns(node, ctx), ctx, range);
         let bodyStatements = this.emitSeq(assert(plan.body), ctx);
         // `resumePoint != 0 || cond`: a resumed pass enters the body without
         // re-evaluating the condition, then its continuation clears the point, so
@@ -1604,7 +1610,7 @@ export class AsyncLowerTransform {
         return out;
       }
       case PlanKind.For: {
-        if (plan.lo == 0) return guarded(rewriteReturns(node, ctx), ctx, range);
+        if (plan.lo == 0) return guardIfNeeded(rewriteReturns(node, ctx), ctx, range);
         let bodyStatements = this.emitSeq(assert(plan.body), ctx);
         if (plan.incr != null) {
           bodyStatements.push(Node.createExpressionStatement(assert(plan.incr)));
@@ -2036,7 +2042,16 @@ class EmitContext {
     /** Every local name in the body, so a temp never shadows one. */
     public localNames: Set<string>,
     /** The declared result type, for the typed completion's type argument. */
-    public returnType: TypeNode | null = null
+    public returnType: TypeNode | null = null,
+    /**
+     * Whether the body has any suspension point. With none, no resume point can
+     * ever be set, so the per-statement `if (resumePoint == 0)` guards are pure
+     * scope damage: a `let` declared inside one guarded block is out of scope in
+     * the next (measured: `async function f(seed: i32): i32 { let v = seed * 2;
+     * return v + 1; }` failed with TS2304 once it was called). A body with no
+     * await is emitted straight.
+     */
+    public guarded: bool = true
   ) {}
 
   /** A fresh temporary name for an `if`'s condition. */
@@ -2471,6 +2486,15 @@ function rewriteReturns(statement: Statement, ctx: EmitContext): Statement {
 }
 
 /** A statement (or construct) plus its "is this pass normal" guard. */
+/**
+ * `guarded`, unless the body has no suspension point: then the statement is
+ * emitted as it stands. See `EmitContext#guarded`.
+ */
+function guardIfNeeded(statement: Statement, ctx: EmitContext, range: Range): Array<Statement> {
+  if (!ctx.guarded) return [ statement ];
+  return guarded(statement, ctx, range);
+}
+
 function guarded(statement: Statement, ctx: EmitContext, range: Range): Array<Statement> {
   return [
     Node.createIfStatement(
