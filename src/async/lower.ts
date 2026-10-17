@@ -102,6 +102,11 @@ import { Token } from "../tokenizer";
 import { awaitSites, AwaitSite } from "./ir";
 import { creationEnvOf } from "../closure/ir";
 import {
+  validateAsyncConstructs,
+  MESSAGE_ASYNC_ARROW,
+  MESSAGE_ASYNC_FUNCTION_EXPRESSION
+} from "./validate";
+import {
   ArrowKind,
   ArrayLiteralExpression,
   AssertionExpression,
@@ -187,6 +192,28 @@ export class AsyncLowerTransform {
   /** The program being compiled. Assigned by the CLI onto the prototype. */
   readonly program!: Program;
 
+  /**
+   * Construct start positions already refused, per source.
+   *
+   * Phase 2 (the validation walk) reports a construct only if no diagnostic has
+   * named it already, and this is how it knows: `isAsync` answers `false` for a
+   * lowered construct and keeps `true` for a refused one, so it cannot tell the
+   * two apart. Keyed by an `i32` start rather than a built string because the
+   * walk's lookup must not allocate; the map and its sets exist only once a
+   * refusal has happened.
+   */
+  private refusals: Map<Source, Set<i32>> | null = null;
+
+  /**
+   * The function or method currently being lowered, for the refusal record.
+   * A refusal anywhere inside it — a parameter, a return type, a `this` in the
+   * body — aborts the whole construct, so the walk must see that construct as
+   * already reported. Without this every sub-construct refusal would leave the
+   * declaration looking unreached, and the walk would report a second message
+   * for it.
+   */
+  private currentConstruct: Node | null = null;
+
   /** `Transform#afterParse` — runs after parsing, before initialization. */
   afterParse(parser: Parser): void {
     let sources = this.program.sources;
@@ -196,7 +223,13 @@ export class AsyncLowerTransform {
       // declare no `async` function, and skipping them keeps the transform out
       // of the standard library's own compilation path entirely.
       if (source.isLibrary) continue;
+      // Phase 1: lower (or refuse by name) everything this pass reaches.
       this.lowerStatementList(source, source.statements, parser);
+      // Phase 2 (commit 7): refuse by name the `async` constructs phase 1 never
+      // reached. A pure traversal — see `./validate.ts`.
+      let refusals = this.refusals;
+      let refused = refusals != null ? refusals.get(source) : null;
+      validateAsyncConstructs(source, parser, refused != null ? refused : null);
     }
   }
 
@@ -300,6 +333,29 @@ export class AsyncLowerTransform {
      */
     thisType: TypeNode | null = null
   ): Statement[] | null {
+    // Every refusal while lowering this construct belongs to this construct,
+    // and the wrapper records it even when the abort came from a nested one:
+    // the walk must not report an enclosing function the lowering pass was
+    // already working on.
+    let priorConstruct = this.currentConstruct;
+    this.currentConstruct = declaration;
+    let artifacts = this.lowerAsyncFunctionInner(
+      source, declaration, declared, parser, hoisted, thisType
+    );
+    this.currentConstruct = priorConstruct;
+    if (artifacts == null) this.recordRefusal(declaration);
+    return artifacts;
+  }
+
+  /** The body of {@link lowerAsyncFunction}; see the wrapper for the record. */
+  private lowerAsyncFunctionInner(
+    source: Source,
+    declaration: FunctionDeclaration,
+    declared: Array<string>,
+    parser: Parser,
+    hoisted: Array<Statement>,
+    thisType: TypeNode | null
+  ): Statement[] | null {
     let signature = declaration.signature;
     let name = declaration.name.text;
     let range = declaration.range;
@@ -308,7 +364,7 @@ export class AsyncLowerTransform {
     // reader of the diagnostic knows what is missing rather than that "async"
     // is missing.
     if (declaration.arrowKind != ArrowKind.None) {
-      return this.refuse(parser, declaration.range, "async arrow functions (async lowering)");
+      return this.refuse(parser, declaration.range, MESSAGE_ASYNC_ARROW);
     }
     if (declaration.typeParameters != null) {
       return this.refuse(parser, declaration.range, "async generic functions (async lowering)");
@@ -1428,8 +1484,8 @@ export class AsyncLowerTransform {
         if (declaration.isAsync) {
           this.refuse(parser, expression.range,
             declaration.arrowKind != ArrowKind.None
-              ? "async arrow functions (async lowering)"
-              : "async function expressions (async lowering)");
+              ? MESSAGE_ASYNC_ARROW
+              : MESSAGE_ASYNC_FUNCTION_EXPRESSION);
           return false;
         }
         // A plain function value is opaque here: its body is not part of this
@@ -1585,7 +1641,7 @@ export class AsyncLowerTransform {
         let method = <MethodDeclaration>member;
         if (!method.isAsync) continue;
         if (method.is(CommonFlags.Static)) {
-          this.refuse(parser, method.range, "async static methods (async lowering)");
+          this.refuse(parser, method.range, "async static methods (async lowering)", method);
           continue;
         }
         if (method.body == null) continue;
@@ -1615,15 +1671,49 @@ export class AsyncLowerTransform {
     if (!declaration.isAsync) return;
     this.refuse(parser, declaration.range,
       declaration.arrowKind != ArrowKind.None
-        ? "async arrow functions (async lowering)"
-        : "async function expressions (async lowering)"
+        ? MESSAGE_ASYNC_ARROW
+        : MESSAGE_ASYNC_FUNCTION_EXPRESSION,
+      expression
     );
   }
 
-  /** Reports `Not implemented: <what>` and answers `null`. */
-  private refuse(parser: Parser, range: Range, what: string): null {
+  /**
+   * Reports `Not implemented: <what>` and answers `null`.
+   *
+   * Also records the *construct* the refusal aborts — `construct` when the call
+   * site names one, otherwise the declaration being lowered — so the validation
+   * walk can skip it. The record is keyed by the construct's start, never the
+   * diagnostic's: the optional/rest-parameter refusal and the omitted-return-type
+   * refusal report at a parameter or declaration *name*, which is where the user
+   * should look, and a walk keyed on the diagnostic range would miss them and
+   * report the same construct twice.
+   */
+  private refuse(parser: Parser, range: Range, what: string, construct: Node | null = null): null {
+    let node = construct != null ? construct : this.currentConstruct;
+    if (node != null) this.recordRefusalStart(node.range.source, node.range.start);
+    else this.recordRefusalStart(range.source, range.start);
     parser.error(DiagnosticCode.Not_implemented_0, range, what);
     return null;
+  }
+
+  /** Records one construct start as already reported (see `refusals`). */
+  private recordRefusal(construct: Node): void {
+    this.recordRefusalStart(construct.range.source, construct.range.start);
+  }
+
+  /** Records one start position for one source. */
+  private recordRefusalStart(source: Source, start: i32): void {
+    let refusals = this.refusals;
+    if (refusals == null) {
+      refusals = new Map();
+      this.refusals = refusals;
+    }
+    let starts = refusals.get(source);
+    if (starts == null) {
+      starts = new Set();
+      refusals.set(source, starts);
+    }
+    starts.add(start);
   }
 }
 
@@ -2224,7 +2314,7 @@ function reasonFor(node: Node): string {
     case NodeKind.Await: return "await in an unsupported position (async lowering)";
     case NodeKind.Function: {
       return (<FunctionExpression>node).declaration.isAsync
-        ? "async function expressions (async lowering)"
+        ? MESSAGE_ASYNC_FUNCTION_EXPRESSION
         : "a nested function in an async function body (async lowering)";
     }
     case NodeKind.Class: return "a nested class in an async function body (async lowering)";

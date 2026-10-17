@@ -28,6 +28,7 @@
 // A second `compile()` on the same program throws (measured), so `wat` is
 // memoized per program.
 
+import { readFileSync } from "node:fs";
 import {
   buildProgram,
   assemblyscript as asc
@@ -765,6 +766,131 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
     (program.initialize(), asc.compile(program).toText(true).includes("$awaited")),
     false
   );
+}
+
+// 12. The validation walk (Phase 3, commit 7): every `async` construct the
+// lowering pass never reaches is refused by name — never left for the parser's
+// `AS100: Not implemented: Async functions` guard, which commit 7b deletes.
+//
+// The shapes below are the ones measured as *invisible* to the lowering pass:
+// the inside of a non-async function body, a top-level `if`/`while`/`do`/`for`
+// body, an object literal, a class-field initializer beyond its root
+// expression, a top-level `try`/`catch`, a top-level `switch`, and an
+// `export default` declaration.
+
+{
+  const NESTED = "an async function nested in a non-async body (async lowering)";
+  const cases = [
+    ["a function declaration in a non-async body",
+      `function g(): i32 { async function f(): i32 { return 1; } return 1; } export function main(): i32 { return 1; }`,
+      NESTED],
+    ["an arrow in a non-async body",
+      `function g(): i32 { const f = async (): i32 => 1; return 1; } export function main(): i32 { return 1; }`,
+      "async arrow functions (async lowering)"],
+    ["a function declaration in a top-level if",
+      `if (true) { async function f(): i32 { return 1; } } export function main(): i32 { return 1; }`,
+      NESTED],
+    ["a function declaration in a top-level while",
+      `let i: i32 = 0; while (i < 1) { async function f(): i32 { return 1; } i = 1; } export function main(): i32 { return 1; }`,
+      NESTED],
+    ["a function declaration in a top-level do",
+      `let i: i32 = 0; do { async function f(): i32 { return 1; } } while (i < 1); export function main(): i32 { return 1; }`,
+      NESTED],
+    ["a function declaration in a top-level for",
+      `for (let i: i32 = 0; i < 1; i++) { async function f(): i32 { return 1; } } export function main(): i32 { return 1; }`,
+      NESTED],
+    ["an arrow in a top-level object literal",
+      `const o = { f: async (): i32 => 1 }; export function main(): i32 { return 1; }`,
+      "async arrow functions (async lowering)"],
+    ["an arrow nested in a class-field initializer",
+      `class C { o = { f: async (): i32 => 1 }; } export function main(): i32 { return 1; }`,
+      "async arrow functions (async lowering)"],
+    ["a function declaration in a top-level try",
+      `try { async function f(): i32 { return 1; } } catch (e) {} export function main(): i32 { return 1; }`,
+      NESTED],
+    ["a function declaration in a top-level catch",
+      `try {} catch (e) { async function f(): i32 { return 1; } } export function main(): i32 { return 1; }`,
+      NESTED],
+    ["a function declaration in a top-level switch case",
+      `const x: i32 = 1; switch (x) { case 1: { async function f(): i32 { return 1; } break; } } export function main(): i32 { return 1; }`,
+      NESTED],
+    ["an export-default async function",
+      `export default async function f(): i32 { return 1; } export function main(): i32 { return 1; }`,
+      NESTED],
+    ["an arrow in a decorator argument",
+      `function dec(a: () => i32): void {} @dec(async (): i32 => 1) class C {} export function main(): i32 { return 1; }`,
+      "async arrow functions (async lowering)"]
+  ];
+  for (const [name, source, message] of cases) {
+    check(`${name} is refused by name, not by the parser guard`, refusals(run(source)), [ message ]);
+  }
+}
+
+// 12b. The shapes the lowering pass does reach still lower, with no refusal.
+// (These are re-checks of what earlier sections cover, from the walk's angle: a
+// walk that fired too eagerly would add a message here.)
+
+{
+  const cases = [
+    ["a top-level async function",
+      `async function f(): i32 { return 1; } export function main(): i32 { return 1; }`],
+    ["a namespace member",
+      `namespace N { export async function f(): i32 { return 1; } } export function main(): i32 { return 1; }`],
+    ["an async method",
+      `class C { x: i32 = 7; async m(): i32 { return this.x; } } export function main(): i32 { return 1; }`],
+    ["a nested async function in an async body",
+      `async function f(): i32 { async function g(): i32 { return 1; } return 1; } export function main(): i32 { return 1; }`],
+    ["a lowered function with an await",
+      `async function f(h: Task<i32>): i32 { let v: i32 = await h; return v; } export function probe(): Task<i32> { return f(make()); } function make(): Task<i32> { return changetype<Task<i32>>(0); }`]
+  ];
+  for (const [name, source] of cases) {
+    check(`${name} still lowers with no refusal`, refusals(run(source)), []);
+  }
+}
+
+// 12c. The overlap rule: one message per construct. The lowering pass records
+// the construct it refused (not the diagnostic's position), so the walk skips
+// it — including refusals that report at a parameter or declarator name, and
+// refusals that abort an enclosing function from a nested one.
+
+{
+  const generic = run(`async function f<T>(a: T): i32 { return 1; } export function main(): i32 { return 1; }`);
+  check("a generic async function is refused once", refusals(generic), [ "async generic functions (async lowering)" ]);
+
+  const thisBody = run(`async function f(h: Task<i32>): i32 { let v: i32 = await h; return this.x; } export function main(): i32 { return 1; }`);
+  check("a `this` refusal inside the body is not doubled by the walk", refusals(thisBody), [ "this in an async function body (async lowering)" ]);
+
+  const optional = run(`async function f(a: i32 = 1): i32 { return a; } export function main(): i32 { return 1; }`);
+  check("a refusal reported at a parameter name is keyed to its construct, not doubled", refusals(optional), [ "optional or rest parameters in an async function (async lowering)" ]);
+
+  const noReturnType = run(`async function f() { return 1; } export function main(): i32 { return 1; }`);
+  check("a refusal reported at the declaration name is keyed to its construct, not doubled", refusals(noReturnType), [ "an async function without a declared return type (async lowering)" ]);
+
+  const untyped = run(`async function f(h: Task<i32>): i32 { let v = await h; return 1; } export function main(): i32 { return 1; }`);
+  check("a declarator refusal is not doubled by the walk", refusals(untyped), [ "a local without a declared type that crosses an await (async lowering)" ]);
+
+  const nested = run(`async function f(): i32 { async function g(): i32 { return this.x; } return 1; } export function main(): i32 { return 1; }`);
+  check("a refused nested function does not make the walk report its enclosing function", refusals(nested), [ "this in an async function body (async lowering)" ]);
+
+  const two = run(`function a(): i32 { const x = async (): i32 => 1; return 1; } function b(): i32 { const y = async (): i32 => 2; return 2; } export function main(): i32 { return 1; }`);
+  check("two unreached constructs yield two messages, one each", refusals(two), [ "async arrow functions (async lowering)", "async arrow functions (async lowering)" ]);
+}
+
+// 12d. The allocation invariant, at source level.
+//
+// This guards the common allocation paths; new traversal code that uses a
+// different allocation pattern must be caught by review, not by this test.
+// Comments are stripped first: the invariant is about code, and prose that
+// names a forbidden construct does not allocate.
+
+{
+  const walkSource = readFileSync(new URL("../../src/async/validate.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  check("the guard reads the walk's source", walkSource.includes("function validateStatements"), true);
+  for (const pattern of [ "Node.create", "new ", ".clone(", ".push(" ]) {
+    check(`the walk allocates nothing: no \`${pattern.trim()}\``, walkSource.includes(pattern), false);
+  }
 }
 
 console.log();
