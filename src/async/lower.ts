@@ -169,14 +169,27 @@ const PARK_NAME = "__taskPark";
 const SETTLED_NAME = "__taskSettled";
 /** The runtime's register symbol (§4.7.3). */
 const REGISTER_NAME = "__taskRegister";
+/** std's type-exact zero, for a state field's initializer (`task-rt.ts`). */
+const ZERO_NAME = "__asyncZero";
+/** The runtime's completion symbol (§4.7.3): the guest-to-guest path. */
+const COMPLETE_NAME = "__taskComplete";
+/**
+ * The runtime's typed completion symbol: `__taskCompleteResult<R>(state, value)`
+ * stores `value` into the record at §3.2's offset for `R` and then completes.
+ * Generic rather than a plain store emitted here because the transform knows
+ * the return type only *syntactically*: for `type X = f64`, a store chosen by
+ * name would land in `payload` (offset 8) while the read — which uses the
+ * resolved type (`compiler.ts:8025-8027`) — loads from `f0` (offset 16). The
+ * call hands `R` to the compiler, which resolves it once. Measured: the alias
+ * case compiles and reads from offset 16.
+ */
+const COMPLETE_RESULT_NAME = "__taskCompleteResult";
 /** The handle's record field (`std/assembly/task.ts`). */
 const RECORD_FIELD = "_record";
 /** Prefix of the state struct's per-await record fields. */
 const AWAITED_PREFIX = "$awaited";
 /** The state struct's resume-point field. */
 const RESUME_POINT_FIELD = "resumePoint";
-/** The state struct's terminal-value field (the payload stand-in). */
-const RESULT_FIELD = "result";
 /** The state struct's handle field. */
 const HANDLE_FIELD = "handle";
 /**
@@ -621,15 +634,12 @@ export class AsyncLowerTransform {
       range
     ));
     let returnsValue = !isVoidTypeNode(returnType);
-    if (returnsValue) {
-      stateFields.push(Node.createFieldDeclaration(
-        Node.createIdentifierExpression(RESULT_FIELD, range),
-        null, CommonFlags.Instance,
-        returnType,
-        null,
-        range
-      ));
-    }
+    // No `result` field: the payload's home is the task record (§3.2, §3.3),
+    // written by `__taskCompleteResult` and read by codegen's typed read. The
+    // field was the pre-Phase-4 stand-in; nothing read it (measured: no
+    // `get:result` in any emitted fixture), and its zero-initializer was
+    // `changetype<R>(0)`, which does not compile for a non-integer `R`
+    // (measured: `async function d(): f64` → AS202, before this commit too).
     // One record field per await: the awaited task's record, which is what
     // survives the suspension (§4.2). `TaskRecord` is a reference type, so the
     // generated visitor traces it and the record's chain stays alive (§4.4).
@@ -680,22 +690,23 @@ export class AsyncLowerTransform {
     ctorStatements.push(Node.createExpressionStatement(
       assignField(thisIdent, RESUME_POINT_FIELD, intLiteral(0, range), range)
     ));
-    if (returnsValue) {
-      // `changetype<R>(0)`: the same expression works for every `R` — a value
-      // type gets its zero, a reference type a null it will never read (the
-      // terminal writes the real value first).
-      ctorStatements.push(Node.createExpressionStatement(
-        assignField(thisIdent, RESULT_FIELD,
-          changetypeZero(returnType, range), range)
-      ));
-    }
-    // The lifted locals start at a zero of their type. The region that declares
-    // one assigns the real value before any suspension can park.
+    // The lifted locals start at a zero of their type. `__asyncZero<R>()` is
+    // std's type-exact zero (float, integer, or `changetype<R>(0)`), because
+    // the one-spelling `changetype<R>(0)` this used to emit does not compile
+    // for a float `R` (measured: AS202, "Type 'i32' cannot be changed to type
+    // 'f64'"). The region that declares one assigns the real value before any
+    // suspension can park.
     for (let i = 0, k = lifting.locals.length; i < k; ++i) {
       let lift = lifting.locals[i];
       ctorStatements.push(Node.createExpressionStatement(
         assignField(thisIdent, lift.name,
-          changetypeZero(lift.type, lift.declaration.name.range), lift.declaration.name.range)
+          Node.createCallExpression(
+            Node.createIdentifierExpression(ZERO_NAME, lift.declaration.name.range),
+            [ lift.type ],
+            [],
+            lift.declaration.name.range
+          ),
+          lift.declaration.name.range)
       ));
     }
     stateFields.push(Node.createMethodDeclaration(
@@ -899,7 +910,7 @@ export class AsyncLowerTransform {
     }
 
     let ctx = new EmitContext(
-      lifting, resumeVarName, awaitCount + 1, returnsValue, localNames
+      lifting, resumeVarName, awaitCount + 1, returnsValue, localNames, returnType
     );
     pushAll(resumeStatements, this.emitSeq(seq, ctx));
 
@@ -908,13 +919,23 @@ export class AsyncLowerTransform {
     // is reached normally — and if a path somehow leaves it set, the terminal
     // must not clobber it.
     if (!endsWithReturn(seq)) {
+      let terminalStatements = new Array<Statement>();
+      terminalStatements.push(Node.createExpressionStatement(
+        resumePointWrite(resumeVarName, intLiteral(awaitCount + 1, range), range)
+      ));
+      // §4.7.3's completion, for a body that runs off its end: a `void` async
+      // function's task is finished here. A value-returning body cannot reach
+      // this region (every path returns), so the value form is not emitted.
+      terminalStatements.push(Node.createExpressionStatement(
+        Node.createCallExpression(
+          Node.createIdentifierExpression(COMPLETE_NAME, range), null,
+          [ Node.createIdentifierExpression(resumeVarName, range) ],
+          range
+        )
+      ));
       resumeStatements.push(Node.createIfStatement(
         isZero(resumePointRead(resumeVarName, range), range),
-        Node.createBlockStatement([
-          Node.createExpressionStatement(
-            resumePointWrite(resumeVarName, intLiteral(awaitCount + 1, range), range)
-          )
-        ], range),
+        Node.createBlockStatement(terminalStatements, range),
         null,
         range
       ));
@@ -2003,7 +2024,9 @@ class EmitContext {
     /** Whether the function returns a value. */
     public returnsValue: bool,
     /** Every local name in the body, so a temp never shadows one. */
-    public localNames: Set<string>
+    public localNames: Set<string>,
+    /** The declared result type, for the typed completion's type argument. */
+    public returnType: TypeNode | null = null
   ) {}
 
   /** A fresh temporary name for an `if`'s condition. */
@@ -2281,6 +2304,17 @@ function declarationNameOf(statement: Statement): string | null {
   }
 }
 
+/** `__taskComplete(state);` — the guest-to-guest completion (§4.7.3). */
+function completeStatement(stateName: string, range: Range): Statement {
+  return Node.createExpressionStatement(
+    Node.createCallExpression(
+      Node.createIdentifierExpression(COMPLETE_NAME, range), null,
+      [ Node.createIdentifierExpression(stateName, range) ],
+      range
+    )
+  );
+}
+
 /** `let <name> = <state>.<name>;` for a lifted binding's copy-in. */
 function copyIn(name: string, range: Range, stateName: string): Statement {
   return Node.createVariableStatement(
@@ -2314,24 +2348,28 @@ function rewriteStatement(statement: Statement, ctx: EmitContext): Array<Stateme
     let value = returnStatement.value;
     let range = returnStatement.range;
     let out = new Array<Statement>();
+    // §4.7.3: completion is the record's, not the state's. `state.result` was
+    // the payload stand-in until Phase 4; nothing reads it (measured: no
+    // `get:result` in any emitted fixture), and the typed read now goes to the
+    // record, so this writes the record once — evaluating the value exactly
+    // once — instead of writing both.
     if (value != null) {
       if (ctx.returnsValue) {
         out.push(Node.createExpressionStatement(
-          Node.createBinaryExpression(
-            Token.Equals,
-            Node.createPropertyAccessExpression(
-              Node.createIdentifierExpression(stateName, range), // the resume parameter, by name
-              Node.createIdentifierExpression(RESULT_FIELD, range),
-              range
-            ),
-            value,
+          Node.createCallExpression(
+            Node.createIdentifierExpression(COMPLETE_RESULT_NAME, range),
+            [ assert(ctx.returnType) ],
+            [ Node.createIdentifierExpression(stateName, range), value ],
             range
           )
         ));
       } else {
         // `return voidExpr;` — the expression's effect, without a value.
         out.push(Node.createExpressionStatement(value));
+        out.push(completeStatement(stateName, range));
       }
+    } else {
+      out.push(completeStatement(stateName, range));
     }
     out.push(Node.createExpressionStatement(
       resumePointWrite(stateName, intLiteral(ctx.terminal, range), range)
@@ -2738,7 +2776,7 @@ function replaceThisInExpression(
 function isReservedStateField(name: string): bool {
   if (
     name == RESUME_POINT_FIELD ||
-    name == RESULT_FIELD ||
+
     name == HANDLE_FIELD ||
     name == ENV_FIELD ||
     name == "record" // inherited from TaskState (§4.7.3)
@@ -2845,15 +2883,6 @@ function simpleAssignTo(target: Expression, value: Expression, range: Range): Ex
 }
 
 /** `changetype<T>(0)` — a zero of any type, value or reference. */
-function changetypeZero(type: TypeNode, range: Range): Expression {
-  return Node.createCallExpression(
-    Node.createIdentifierExpression("changetype", range),
-    [ type ],
-    [ intLiteral(0, range) ],
-    range
-  );
-}
-
 /** Whether the parser produced the empty type node of an omitted annotation. */
 function isOmittedTypeNode(type: TypeNode): bool {
   return type.kind == NodeKind.NamedType && (<NamedTypeNode>type).name.identifier.text == "";
