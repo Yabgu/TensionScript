@@ -7,6 +7,7 @@
 let mangleImportName_moduleName: string = "";
 let mangleImportName_elementName: string = "";
 
+import { EnvKind, envInfoOf, creationEnvOf } from "./closure/ir";
 import {
   BuiltinNames,
   BuiltinFunctionContext,
@@ -444,6 +445,14 @@ export const runtimeGlobals = [ "__rtti_base" ];
  * memory corruption.
  */
 const FUNCTION_INDEX_OFFSET: u32 = 0;
+
+/**
+ * The local the closure transform gives a `Struct` closure for the environment
+ * it was handed (`docs/closures-plan.md` §6.1). It is the first statement of
+ * the function's body, and the prologue below overwrites the zero the
+ * declaration stores into it.
+ */
+const CLOSURE_ENV_IN_LOCAL = "$closureEnvIn";
 
 export class Compiler extends DiagnosticEmitter {
 
@@ -1816,6 +1825,21 @@ export class Compiler extends DiagnosticEmitter {
       : null;
     let bodyStartIndex = stmts.length;
 
+    // A `Struct` closure receives its environment through the hidden `~env`
+    // global. The local that holds it is created here, before the body is
+    // compiled, so the resolver's lookup for the transform's `$closureEnvIn`
+    // references finds it -- and so its initialized flag is set before the
+    // first read (`docs/closures-plan.md` §6.1, §6.4).
+    if (instance.prototype.envKind == EnvKind.Struct) {
+      let envClassName = assert(instance.prototype.envClass);
+      let source = instance.declaration.range.source;
+      let file = assert(this.program.filesByName.get(source.internalPath));
+      let classPrototype = <ClassPrototype>assert(file.getMember(envClassName));
+      let classInstance = assert(this.resolver.resolveClass(classPrototype, null, new Map(), ReportMode.Swallow));
+      let envIn = flow.addScopedLocal(CLOSURE_ENV_IN_LOCAL, classInstance.type);
+      flow.setLocalFlag(envIn.index, LocalFlags.Initialized);
+    }
+
     // compile statements
     if (bodyNode.kind == NodeKind.Block) {
       stmts = this.compileStatements((<BlockStatement>bodyNode).statements, stmts);
@@ -1935,6 +1959,29 @@ export class Compiler extends DiagnosticEmitter {
       }
       stmts[bodyStartIndex] = prologue;
       flow.setLocalFlag(capturedThis.index, LocalFlags.Initialized);
+    }
+
+    // A closure with a non-`this` capture receives its environment through the
+    // same hidden global (`docs/closures-plan.md` §6.4): `makeCallIndirect`
+    // stores the callee's `_env` there, and this prologue reads it once, at
+    // entry, into the local the transform declared as the body's first
+    // statement. Reading it once is what keeps a nested call from clobbering
+    // the binding -- the same property the `this` prologue above has.
+    //
+    // The declaration stores a zero (`changetype<EnvClass>(0)`); the prologue is
+    // placed directly after it, so the zero exists only to satisfy the local's
+    // initialization and is never observed.
+    if (instance.prototype.envKind == EnvKind.Struct) {
+      let envIn = assert(flow.lookupLocal(CLOSURE_ENV_IN_LOCAL));
+      let prologue = module.local_set(
+        envIn.index,
+        module.global_get(this.ensureEnvGlobal(), this.options.sizeTypeRef),
+        envIn.type.isManaged
+      );
+      for (let i = stmts.length - 1; i >= bodyStartIndex; --i) {
+        stmts[i + 1] = stmts[i];
+      }
+      stmts[bodyStartIndex] = prologue;
     }
 
     return true;
@@ -7347,6 +7394,14 @@ export class Compiler extends DiagnosticEmitter {
       declaration,
       DecoratorFlags.None
     );
+    // The closure transform records what this function's `_env` will mean,
+    // keyed by the expression node -- the declaration above is a clone, so a
+    // declaration-keyed table would not find it (`docs/closures-plan.md` §3.3).
+    let closureInfo = envInfoOf.get(expression);
+    if (closureInfo) {
+      prototype.envKind = closureInfo.kind;
+      prototype.envClass = closureInfo.envClass;
+    }
     let instance: Function | null;
     let contextualTypeArguments = cloneMap(flow.contextualTypeArguments);
     let module = this.module;
@@ -7468,7 +7523,9 @@ export class Compiler extends DiagnosticEmitter {
     // function value keeps the static instance with `_env = 0` (plan D6).
     let valueType = this.currentType;
     let expr: ExpressionRef;
-    if (instance.prototype.capturesThis) {
+    if (instance.prototype.envKind == EnvKind.Struct) {
+      expr = this.makeEnvFunctionValue(instance, assert(creationEnvOf.get(expression)));
+    } else if (instance.prototype.capturesThis) {
       expr = this.makeCapturingFunctionValue(instance);
     } else {
       let offset = this.ensureRuntimeFunction(instance); // reports
@@ -7552,6 +7609,42 @@ export class Compiler extends DiagnosticEmitter {
     ));
     stmts.push(module.store(this.options.usizeType.byteSize, ptrExpr,
       module.local_get(thisLocal.index, thisLocal.type.toRef()),
+      this.options.sizeTypeRef, this.options.usizeType.byteSize
+    ));
+    stmts.push(module.local_get(ptrLocal.index, classInstance.type.toRef()));
+    return module.flatten(stmts, classInstance.type.toRef());
+  }
+
+  /**
+   * Materialises a runtime function value for a closure with a non-`this`
+   * capture: a heap `Function<T>` instance whose `_env` names the environment
+   * the creating scope allocated (`docs/closures-plan.md` §6.3).
+   *
+   * The only difference from `makeCapturingFunctionValue` is where the
+   * environment expression comes from: that method stores the creating
+   * function's receiver (`this`), this one stores the env local the closure
+   * transform recorded for the creation site. `_env` is written without
+   * `__link` for the same reason: the instance is freshly allocated and white.
+   */
+  private makeEnvFunctionValue(instance: Function, envLocalName: string): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let resolver = this.resolver;
+    let classInstance = assert(resolver.resolveClass(this.program.functionPrototype, [ instance.type ]));
+    this.assertFunctionLayout(classInstance);
+
+    let envLocal = assert(flow.lookupLocal(envLocalName));
+
+    let stmts = new Array<ExpressionRef>();
+    let ptrLocal = flow.getTempLocal(classInstance.type);
+    stmts.push(module.local_set(ptrLocal.index, this.makeAllocation(classInstance), classInstance.type.isManaged));
+    let ptrExpr = module.local_get(ptrLocal.index, classInstance.type.toRef());
+    stmts.push(module.store(4, ptrExpr,
+      module.i32(this.ensureFunctionTableIndex(instance)),
+      TypeRef.I32, FUNCTION_INDEX_OFFSET
+    ));
+    stmts.push(module.store(this.options.usizeType.byteSize, ptrExpr,
+      module.local_get(envLocal.index, envLocal.type.toRef()),
       this.options.sizeTypeRef, this.options.usizeType.byteSize
     ));
     stmts.push(module.local_get(ptrLocal.index, classInstance.type.toRef()));
