@@ -550,6 +550,50 @@ export function main(): i32 {
   check("C2b: an escaped arrow mutates the receiver through the env", out, { value: 10 });
 }
 
+{
+  // The receiver can also come from an explicit `this` parameter on a free
+  // function (`outerThisType` reads `signature.explicitThisType`). The call has
+  // to be `outer.call(c)`: a function with an explicit `this` is not callable as
+  // a plain function (pre-existing AS behaviour, measured on the ccf888c6
+  // baseline as TS2685 — not a closure regression).
+  const out = await execute(`
+class C { y: i32 = 5; }
+function outer(this: C): i32 {
+  let x: i32 = 2;
+  const g = (): i32 => this.y + x;
+  return g();
+}
+export function main(): i32 { return outer.call(new C()); }
+`);
+  check("C2b: an explicit `this:` parameter is also a capture source", out, { value: 7 });
+}
+{
+  // `$this` lives in the environment of the scope that owns the captured local,
+  // and the owner's `this` is in scope at that scope's entry, so a block-scoped
+  // local plus `this` needs no parent chain (§7.2).
+  const r = run(`
+class C {
+  y: i32 = 100;
+  m(c: bool): i32 {
+    let r: i32 = 0;
+    if (c) {
+      let x: i32 = 2;
+      const g = (): i32 => this.y + x;
+      r = g();
+    }
+    return r;
+  }
+}
+export function main(): i32 { return new C().m(true); }
+`);
+  check("C2b: `this` plus a block-scoped local is lowered", refusals(r), []);
+  check("C2b: the block env carries `$this` at field 0",
+    r.file.statements
+      .filter(statement => statement.name && statement.name.text.startsWith("m$Env"))
+      .map(statement => statement.members.map(member => member.name.text)),
+    [ [ "$this", "x" ] ]);
+}
+
 // — C2c: method unbound semantics ————————————————————————————————————————————
 
 {
