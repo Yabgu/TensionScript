@@ -1741,7 +1741,17 @@ export class AsyncLowerTransform {
       case NodeKind.Assertion: {
         let assertion = <AssertionExpression>expression;
         if (!this.walkExpression(parser, assertion.expression, names, awaits, writeTarget)) return false;
-        return assertion.toType == null;
+        // `<T>expr` — a type argument inside an async body — is refused by name.
+        // It used to answer `false` here with no diagnostic: the plan then
+        // failed, `lowerAsyncFunction` answered `null`, and the entry was left
+        // as parsed, so the only symptom was codegen's defensive "the async
+        // lowering transform did not run" at the `await`, naming nothing.
+        // (Measured: `let x = <i32>v;` in an async body produced exactly that.)
+        if (assertion.toType != null) {
+          this.refuse(parser, assertion.range, "a type argument in an async body (async lowering)");
+          return false;
+        }
+        return true;
       }
       case NodeKind.Binary: {
         let binary = <BinaryExpression>expression;
