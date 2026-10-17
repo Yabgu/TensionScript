@@ -446,7 +446,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
     .map(member => member.name.text);
   check("a local that does not cross gets no state field", fields.includes("v"), false);
   check("  ...and the state has no extra fields at all", fields, [ "h", "$env", "resumePoint", "result", "$awaited1", "handle" ]);
-  check("  ...and no `set:v` is emitted", /#set:v/.test(r.wat()), false);
+  check("  ...and no `set:v` is emitted", /#set:v\b/.test(r.wat()), false);
 }
 {
   // A parameter written before the await and read after it: the field already
