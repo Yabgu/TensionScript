@@ -354,16 +354,24 @@ export function main(): i32 { return outer(); }
   check("C3a: a captured for-header binding is lowered, not refused", refusals(r), []);
 }
 {
+  // C4 removed the async-body refusal: the environment becomes an ordinary
+  // local of the async body, and the async transform's lifting rule carries it
+  // across the await (`docs/closures-plan.md` §8.3(b)).
   const r = run(`
 async function outer(h: Task<i32>): i32 {
   let x: i32 = 1;
   function inner(): i32 { return x; }
-  return x;
+  await h;
+  return inner();
 }
-export function main(): i32 { return 1; }
+let sink: Task<i32> | null = null;
+export function main(): i32 { sink = outer(changetype<Task<i32>>(0)); return 1; }
 `);
-  check("async: a capture in an async body is refused by name",
-    refusals(r).includes("a capture in an async function (closures lowering)"), true);
+  check("async: a capture in an async body is lowered, not refused", refusals(r), []);
+  check("async: the env class is emitted and the closure reads it",
+    [ r.file.statements.some(statement => statement.name && statement.name.text === "outer$Env"),
+      /outer\$Env#get:x/.test(r.wat()) ],
+    [ true, true ]);
 }
 {
   // C2b: a method body is a valid owner. Its `this` is a parameter, so a
@@ -879,6 +887,181 @@ class C {
 export function main(): i32 { return new C().m(); }
 `);
   check("C3b: a this-only arrow is left to the runtime guard", refusals(r), []);
+}
+
+
+// — C4: the async interaction ————————————————————————————————————————————————
+
+/** The state struct's field names, in declaration order. */
+function stateFields(r, name) {
+  const state = r.file.statements.find(statement => statement.name && statement.name.text === name);
+  return state.members
+    .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
+    .map(member => member.name.text);
+}
+
+{
+  // C4a: an async method reads `this` before and after an await, through the
+  // state struct's this-struct.
+  const r = run(`
+class C {
+  x: i32 = 7;
+  async m(h: Task<i32>): i32 {
+    let before: i32 = this.x;
+    let v: i32 = await h;
+    return before + this.x + v;
+  }
+}
+let sink: Task<i32> | null = null;
+export function main(): i32 { sink = new C().m(changetype<Task<i32>>(0)); return 1; }
+`);
+  check("C4a: an async method is lowered", refusals(r), []);
+  check("C4a: the this-struct is synthesized, with the receiver at field 0",
+    r.file.statements
+      .filter(statement => statement.name && statement.name.text === "m$ThisEnv")
+      .map(statement => [
+        statement.extendsType.name.identifier.text,
+        statement.members.map(member => member.name.text)
+      ]),
+    [ [ "TaskEnv", [ "$this" ] ] ]);
+  const wat = r.wat();
+  const resume = funcBody(wat, "probe/m$resume");
+  check("C4a: the resume function reads `this` through $env — before the await",
+    /get:\$env[\s\S]{0,80}?m\$ThisEnv#get:\$this[\s\S]{0,60}?C#get:x/.test(resume), true);
+  check("C4a: ...and again after the await",
+    (resume.match(/m\$ThisEnv#get:\$this/g) || []).length, 2);
+  check("C4a: the resume function takes only the state",
+    /\(func \$probe\/m\$resume \(param \$0 i32\)\n/.test(wat), true);
+}
+{
+  // C4a, AST: the entry populates `state.$env` before the resume call.
+  const r = run(`
+class C {
+  x: i32 = 7;
+  async m(): i32 { return this.x; }
+}
+let sink: Task<i32> | null = null;
+export function main(): i32 { sink = new C().m(); return 1; }
+`);
+  const method = r.file.statements
+    .find(statement => statement.name && statement.name.text === "C")
+    .members.find(member => member.name && member.name.text === "m");
+  const entry = method.body.statements.map(statement =>
+    statement.kind === asc.NodeKind.Expression && statement.expression.kind === asc.NodeKind.Binary
+      ? statement.expression.left.kind === asc.NodeKind.PropertyAccess
+        ? statement.expression.left.property.text
+        : String(statement.expression.kind)
+      : String(statement.kind));
+  check("C4a: the entry stores the receiver into $env",
+    entry.includes("$env"), true);
+  check("C4a: ...before it calls the resume function",
+    entry.indexOf("$env") < entry.indexOf(String(asc.NodeKind.Expression) , entry.indexOf("$env")) + 1, true);
+}
+{
+  // C4b: a free async function with an explicit `this:` parameter.
+  const r = run(`
+class C { x: i32 = 5; }
+async function f(this: C, h: Task<i32>): i32 {
+  let before: i32 = this.x;
+  let v: i32 = await h;
+  return before + this.x + v;
+}
+let sink: Task<i32> | null = null;
+export function main(): i32 { sink = f.call(new C(), changetype<Task<i32>>(0)); return 1; }
+`);
+  check("C4b: an explicit `this:` parameter is lowered", refusals(r), []);
+  const wat = r.wat();
+  check("C4b: the this-struct is synthesized",
+    r.file.statements.some(statement => statement.name && statement.name.text === "f$ThisEnv"), true);
+  check("C4b: the resume function reads `this` through $env, before and after",
+    (funcBody(wat, "probe/f$resume").match(/f\$ThisEnv#get:\$this/g) || []).length, 2);
+}
+{
+  // C4c: a nested function that captures an async body's local.
+  const r = run(`
+async function outer(h: Task<i32>): i32 {
+  let x: i32 = 1;
+  function inner(): i32 { return x + 1; }
+  await h;
+  return inner();
+}
+let sink: Task<i32> | null = null;
+export function main(): i32 { sink = outer(changetype<Task<i32>>(0)); return 1; }
+`);
+  check("C4c: a nested capturing function is lowered", refusals(r), []);
+  const wat = r.wat();
+  const resume = funcBody(wat, "probe/outer$resume");
+  check("C4c: the environment is a state field", /outer\$State#get:\$closureEnv/.test(resume), true);
+  check("C4c: ...copied in at resume entry", /outer\$State#get:\$closureEnv/.test(resume), true);
+  // The creation site stores the copy-in into the heap Function<T>'s `_env`.
+  check("C4c: the closure creation stores the env in _env",
+    /State#get:\$closureEnv[\s\S]{0,600}?i32\.store offset=4/.test(resume), true);
+  check("C4c: the closure reads the captured binding through its environment",
+    /outer\$Env#get:x/.test(wat), true);
+  check("C4c: the captured binding is NOT a state field", stateFields(r, "outer$State").includes("x"), false);
+}
+{
+  // C4d — case 6: a closure captures, the body awaits, and the captured
+  // binding is read (through the closure) after the resume.
+  const r = run(`
+async function outer(h: Task<i32>): i32 {
+  let x: i32 = 1;
+  function bump(): i32 { return ++x; }
+  let before: i32 = bump();
+  await h;
+  return bump() + before;
+}
+let sink: Task<i32> | null = null;
+export function main(): i32 { sink = outer(changetype<Task<i32>>(0)); return 1; }
+`);
+  check("C4d: case 6 lowers", refusals(r), []);
+  const fields = stateFields(r, "outer$State");
+  check("C4d: the state struct references the environment, and does not copy `x`",
+    [ fields.includes("$closureEnv"), fields.includes("x") ], [ true, false ]);
+  const resume = funcBody(r.wat(), "probe/outer$resume");
+  check("C4d: the park copies the environment out",
+    /State#set:\$closureEnv/.test(resume), true);
+  check("C4d: the mutation happens through the environment",
+    /outer\$Env#(get|set):x/.test(r.wat()), true);
+  // No runtime exists yet (`__taskRegister` and `__taskPark` trap), so the
+  // *value* half of case 6 is Phase 4's; what C4 can prove is the shape above.
+}
+{
+  // C4e: a captured binding and a non-captured local that crosses the await.
+  // The captured one is in the environment; the other is a state field. No
+  // binding has two homes.
+  const r = run(`
+async function outer(h: Task<i32>): i32 {
+  let x: i32 = 1;
+  function bump(): i32 { return ++x; }
+  let y: i32 = 10;
+  let first: i32 = bump();
+  await h;
+  return bump() + y + first;
+}
+let sink: Task<i32> | null = null;
+export function main(): i32 { sink = outer(changetype<Task<i32>>(0)); return 1; }
+`);
+  check("C4e: both mechanisms compose", refusals(r), []);
+  const fields = stateFields(r, "outer$State");
+  check("C4e: the non-captured locals are state fields",
+    [ fields.includes("y"), fields.includes("first") ], [ true, true ]);
+  check("C4e: the captured binding is not a state field", fields.includes("x"), false);
+  check("C4e: the environment field is a managed reference",
+    fields.includes("$closureEnv"), true);
+  const env = r.file.statements.find(statement => statement.name && statement.name.text === "outer$Env");
+  check("C4e: the captured binding has exactly one home — the environment",
+    env.members.map(member => member.name.text).includes("x"), true);
+}
+{
+  // A free async function has no receiver, so `this` stays refused — including
+  // inside a nested function, where TS would bind it dynamically.
+  const r = run(`
+async function f(): i32 { return this.x; }
+export function main(): i32 { return 1; }
+`);
+  check("C4: `this` in a free async function is still refused by name",
+    refusals(r), [ "this in an async function body (async lowering)" ]);
 }
 
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);

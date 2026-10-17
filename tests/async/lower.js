@@ -639,27 +639,25 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check("  ...with no refusal", refusals(r), []);
 }
 
-// Case 6: `await` inside a closure — not exercisable yet, and the three refusals
-// that make it so are asserted here as the documented gap (§4.4).
+// Case 6 (closures × async): C4 un-refused the three shapes that used to make
+// this case unexercisable. What remains refused is `this` in a *free* async
+// function, which has no receiver to capture at all.
 {
   const asyncMethod = run(`class C { async m(): void {} } export function probe(): i32 { return 1; }`);
-  check("case 6 (closures): an async method is refused by name",
-    refusals(asyncMethod).includes("async methods (async lowering)"), true);
+  check("case 6 (closures): an async method is lowered, not refused",
+    refusals(asyncMethod), []);
   const thisBody = run(`
 async function f(): i32 { return this.x; }
 export function probe(): i32 { return 1; }
 `);
-  check("  ...`this` in an async function body is refused by name",
+  check("  ...`this` in a free async function is still refused by name",
     refusals(thisBody).includes("this in an async function body (async lowering)"), true);
   const closure = run(`
 async function f(): i32 { const g = (): i32 => 1; return g(); }
 export function probe(): i32 { return 1; }
 `);
-  check("  ...a closure inside an async body is refused by name",
-    refusals(closure).includes("a nested function in an async function body (async lowering)"), true);
-  check("  => no path supplies `this` or a capture to an async body today", [
-    refusals(asyncMethod).length > 0, refusals(thisBody).length > 0, refusals(closure).length > 0
-  ], [ true, true, true ]);
+  check("  ...a non-async closure inside an async body is lowered, not refused",
+    refusals(closure), []);
 }
 
 // 8b. The environment reference (§4.4): emitted, initialized to null, and
@@ -701,8 +699,6 @@ const REFUSALS = [
     "for-of in an async function body (async lowering)" ],
   [ "break", `async function f(a: i32): i32 { while (a > 0) { break; } return a; }`,
     "break in an async function body (async lowering)" ],
-  [ "a capturing arrow (a closure)", `async function f(): i32 { const g = (): i32 => 1; return g(); }`,
-    "a nested function in an async function body (async lowering)" ],
   [ "a generic async function", `async function f<T>(a: T): void {}`,
     "async generic functions (async lowering)" ],
   [ "an optional parameter", `async function f(a: i32 = 1): i32 { return a; }`,
@@ -711,8 +707,8 @@ const REFUSALS = [
     "an async function without a declared return type (async lowering)" ],
   [ "an async arrow", `const f = async (): void => {};`,
     "async arrow functions (async lowering)" ],
-  [ "an async method", `class C { async m(): void {} }`,
-    "async methods (async lowering)" ],
+  [ "an async static method", `class C { static async m(): void {} }`,
+    "async static methods (async lowering)" ],
   [ "an async function expression", `const f = async function (): void {};`,
     "async function expressions (async lowering)" ]
 ];
