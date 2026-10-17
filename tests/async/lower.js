@@ -90,6 +90,20 @@ function refusals(run) {
     .filter(message => message !== "Async functions");
 }
 
+/**
+ * Compiles the run and answers every diagnostic that is not a named refusal.
+ * This is the "actually compiles" check: a synthesized construction site can be
+ * well-formed as an AST and still draw a resolver error (measured: TS2554 for
+ * `new m$ThisEnv(this)` against a class with no constructor), and the parser's
+ * `AS100` guard would otherwise mask it.
+ */
+function compileErrors(run) {
+  run.wat(); // compiles once, memoized
+  return run.program.parser.diagnostics
+    .filter(diagnostic => diagnostic.code !== NOT_IMPLEMENTED)
+    .map(diagnostic => `${diagnostic.code}: ${diagnostic.message}`);
+}
+
 /** The text of one function in a module, params and body, for scoped matching. */
 function funcBody(wat, name) {
   const lines = wat.split("\n");
@@ -677,6 +691,66 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check("  ...nullable", env.type.isNullable, true);
   check("  ...initialized to null", env.initializer.kind, asc.NodeKind.Null);
   check("  ...and traced by the state's visitor", /\$probe\/f\$State~visit[\s\S]{0,500}?__visit/.test(r.wat()), true);
+}
+
+// 8c. The receiver is constructed with the method's receiver, and the invoked
+// shapes compile — not merely "are not refused".
+//
+// C4's tests asserted refusal-absence for async methods and never compiled a
+// *called* one. That is how a synthesized `new m$ThisEnv(this)` against a class
+// with no constructor survived: it is a resolver error (TS2554), the error points
+// at the method because the synthesized node carries the method's range, and the
+// parser's `AS100` guard kept the CLI from ever reaching it. The lesson is in the
+// async plan §4.8: a feature that synthesizes a construction site must test the
+// *called* form, not only the declared one.
+{
+  const calledMethod = run(`
+class C {
+  x: i32 = 7;
+  async m(h: Task<i32>): i32 { let a: i32 = this.x; await h; return a + this.x; }
+}
+export function probe(): Task<i32> { return new C().m(changetype<Task<i32>>(0)); }
+`);
+  check("a called async method compiles", compileErrors(calledMethod), []);
+  check("  ...and is not refused", refusals(calledMethod), []);
+  const wat = calledMethod.wat();
+  const entry = funcBody(wat, "probe/C#m");
+  const thisEnvCtor = funcBody(wat, "probe/m$ThisEnv#constructor");
+  check("the this-env constructor takes the receiver",
+    /local\.get \$1\n *call \$probe\/m\$ThisEnv#set:\$this/.test(thisEnvCtor), true);
+  // AS emits the field initializer (`$this = changetype<C>(0)`) before the base
+  // constructor call, so "after super()" is asserted on the *receiver
+  // assignment*, which is the one that reads param 1.
+  check("  ...and assigns the receiver after the base constructor runs",
+    /call \$~lib\/task-rt\/TaskEnv#constructor[\s\S]{0,160}?local\.get \$1\n *call \$probe\/m\$ThisEnv#set:\$this/.test(thisEnvCtor), true);
+  check("the entry constructs the env from the method's receiver",
+    /local\.get \$0\n *call \$probe\/m\$ThisEnv#constructor/.test(entry), true);
+  check("  ...assigns it to $env", /call \$probe\/m\$State#set:\$env/.test(entry), true);
+  check("  ...before the synchronous prefix runs",
+    entry.indexOf("$State#set:$env") < entry.indexOf("call $probe/m$resume"), true);
+  const resume = funcBody(wat, "probe/m$resume");
+  const thisReads = [...resume.matchAll(/call \$probe\/m\$ThisEnv#get:\$this/g)].length;
+  check("the resume function reads `this` before and after the await", thisReads, 2);
+  check("  ...once before the park",
+    resume.indexOf("m$ThisEnv#get:$this") < resume.indexOf("__taskPark"), true);
+  check("  ...and once after it",
+    resume.lastIndexOf("m$ThisEnv#get:$this") > resume.indexOf("__taskPark"), true);
+
+  const calledExplicitThis = run(`
+class C { x: i32 = 7; }
+async function f(this: C, h: Task<i32>): i32 { let a: i32 = this.x; await h; return a; }
+export function probe(): Task<i32> { return f.call(new C(), changetype<Task<i32>>(0)); }
+`);
+  check("a called explicit-this async function compiles", compileErrors(calledExplicitThis), []);
+  check("  ...and its entry constructs the this-env from param 0",
+    /local\.get \$0\n *call \$probe\/f\$ThisEnv#constructor/.test(funcBody(calledExplicitThis.wat(), "probe/f")), true);
+
+  const calledStatic = run(`
+class C { static async m(): i32 { return 1; } }
+export function probe(): i32 { return 1; }
+`);
+  check("a static async method is still refused by name (no change)",
+    refusals(calledStatic), [ "async static methods (async lowering)" ]);
 }
 
 // 9. Refusals: every shape this revision does not lower is named, not missed.

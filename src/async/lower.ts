@@ -420,13 +420,53 @@ export class AsyncLowerTransform {
         ),
         range
       );
+      // The constructor takes the receiver. The entry writes
+      // `state.$env = new m$ThisEnv(this)`, so the class must accept one
+      // argument -- a class with only the field initializer would draw TS2554
+      // at that synthesized `new` (measured: every *called* async method failed
+      // to compile until this constructor existed; the emitted diagnostic
+      // pointed at the method, because the synthesized node carries its range).
+      // `super()` first: `TaskEnv` is a base class (AS2377).
+      let ctorParamName = "source";
+      let ctorParam = Node.createParameter(
+        ParameterKind.Default,
+        Node.createIdentifierExpression(ctorParamName, range),
+        thisType,
+        null,
+        range
+      );
+      let ctorBody = Node.createBlockStatement([
+        Node.createExpressionStatement(
+          Node.createCallExpression(Node.createSuperExpression(range), null, [], range)
+        ),
+        Node.createExpressionStatement(
+          Node.createBinaryExpression(
+            Token.Equals,
+            Node.createPropertyAccessExpression(
+              Node.createThisExpression(range),
+              Node.createIdentifierExpression(THIS_FIELD, range),
+              range
+            ),
+            Node.createIdentifierExpression(ctorParamName, range),
+            range
+          )
+        )
+      ], range);
+      let thisEnvCtor = Node.createMethodDeclaration(
+        Node.createConstructorExpression(range),
+        null, CommonFlags.Constructor | CommonFlags.Instance,
+        null,
+        Node.createFunctionType([ ctorParam ], typeNode("void", range), null, false, range),
+        ctorBody,
+        range
+      );
       thisEnvClass = Node.createClassDeclaration(
         Node.createIdentifierExpression(thisEnvName, range),
         null, CommonFlags.None,
         null,
         typeNode(TASK_ENV_NAME, range),
         null,
-        [ thisField ],
+        [ thisField, thisEnvCtor ],
         range
       );
       replaceThis(block.statements, thisEnvName, stateVarNameOf(block, parameters));

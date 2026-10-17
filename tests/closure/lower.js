@@ -916,14 +916,24 @@ let sink: Task<i32> | null = null;
 export function main(): i32 { sink = new C().m(changetype<Task<i32>>(0)); return 1; }
 `);
   check("C4a: an async method is lowered", refusals(r), []);
+  const thisEnvClasses = r.file.statements
+    .filter(statement => statement.name && statement.name.text === "m$ThisEnv");
   check("C4a: the this-struct is synthesized, with the receiver at field 0",
-    r.file.statements
-      .filter(statement => statement.name && statement.name.text === "m$ThisEnv")
-      .map(statement => [
-        statement.extendsType.name.identifier.text,
-        statement.members.map(member => member.name.text)
-      ]),
+    thisEnvClasses.map(statement => [
+      statement.extendsType.name.identifier.text,
+      statement.members
+        .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
+        .map(member => member.name.text)
+    ]),
     [ [ "TaskEnv", [ "$this" ] ] ]);
+  // The entry writes `state.$env = new m$ThisEnv(this)`, so the class must take
+  // the receiver. Without this constructor the synthesized `new` draws TS2554
+  // and a *called* async method does not compile at all.
+  check("C4a: ...and its constructor takes the receiver",
+    thisEnvClasses.map(statement => statement.members
+      .filter(member => member.kind === asc.NodeKind.MethodDeclaration && member.name.text === "constructor")
+      .map(member => member.signature.parameters.length)),
+    [ [ 1 ] ]);
   const wat = r.wat();
   const resume = funcBody(wat, "probe/m$resume");
   check("C4a: the resume function reads `this` through $env — before the await",
