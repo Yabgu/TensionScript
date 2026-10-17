@@ -227,16 +227,25 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
     "Task"
   );
   check(
-    "the entry allocates the state, builds the handle, registers, resumes, and returns",
+    "the entry allocates the state, builds the handle, registers, assigns the resume carrier, resumes, and returns",
     entry.body.statements.map(statement => statement.kind),
-    [ asc.NodeKind.Variable, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Return ]
+    [ asc.NodeKind.Variable, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Return ]
   );
   const registerStatement = entry.body.statements[2].expression;
   check("the register call assigns the handle's record", registerStatement.left.property.text, "_record");
   check("  ...from __taskRegister", registerStatement.right.expression.text, "__taskRegister");
+  // §4.7.3's carrier: `state.resume = changetype<(state: TaskState) => void>(f$resume)`,
+  // between registration and the prefix call, so a suspension inside the prefix
+  // leaves a state the tick can resume.
+  const resumeAssignment = entry.body.statements[3].expression;
+  check("the entry assigns the resume carrier", resumeAssignment.left.property.text, "resume");
+  check("  ...from f$resume, through the variance cast",
+    resumeAssignment.right.args[0].text, "f$resume");
+  check("  ...immediately before the synchronous prefix runs",
+    entry.body.statements[4].expression.expression.text, "f$resume");
   check(
     "  ...and the entry returns the handle",
-    entry.body.statements[4].value.property.text,
+    entry.body.statements[5].value.property.text,
     "handle"
   );
 

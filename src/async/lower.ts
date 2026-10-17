@@ -179,6 +179,12 @@ const RESUME_POINT_FIELD = "resumePoint";
 const RESULT_FIELD = "result";
 /** The state struct's handle field. */
 const HANDLE_FIELD = "handle";
+/**
+ * The resume carrier (`std/assembly/task-rt.ts`, plan §4.7.3): the entry stores
+ * `f$resume` here so `__taskTick` can call it after a delivery, and a parked
+ * task has a way back into its own body.
+ */
+const RESUME_FIELD = "resume";
 /** The state struct's environment reference (§4.4). */
 const ENV_FIELD = "$env";
 /**
@@ -775,6 +781,44 @@ export class AsyncLowerTransform {
         Token.Equals,
         Node.createPropertyAccessExpression(handleAccess, Node.createIdentifierExpression(RECORD_FIELD, range), range),
         Node.createCallExpression(Node.createIdentifierExpression(REGISTER_NAME, range), null, [ stateIdent ], range),
+        range
+      )
+    ));
+    // state.resume = changetype<(state: TaskState) => void>(f$resume);
+    //   — §4.7.3's carrier. Before the prefix runs, so a suspension inside it
+    // leaves a state the tick can resume. The cast is a variance bridge, not a
+    // conversion: the field is declared once for every state struct
+    // (`TaskState`), while `f$resume` takes the concrete struct (measured: the
+    // direct assignment is TS2322 — function parameter types are invariant).
+    entryStatements.push(Node.createExpressionStatement(
+      Node.createBinaryExpression(
+        Token.Equals,
+        Node.createPropertyAccessExpression(
+          stateIdent,
+          Node.createIdentifierExpression(RESUME_FIELD, range),
+          range
+        ),
+        Node.createCallExpression(
+          Node.createIdentifierExpression("changetype", range),
+          [
+            Node.createFunctionType(
+              [
+                Node.createParameter(
+                  ParameterKind.Default,
+                  Node.createIdentifierExpression("state", range),
+                  typeNode(TASK_STATE_NAME, range),
+                  null,
+                  range
+                )
+              ],
+              typeNode("void", range),
+              null, false,
+              range
+            )
+          ],
+          [ resumeIdent ],
+          range
+        ),
         range
       )
     ));
