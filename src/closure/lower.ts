@@ -78,6 +78,7 @@ import {
   SwitchStatement,
   TemplateLiteralExpression,
   TernaryExpression,
+  ThisExpression,
   ThrowStatement,
   TryStatement,
   TypeNode,
@@ -99,6 +100,8 @@ const INIT_PREFIX = "$init$";
 const ENV_SUFFIX = "$Env";
 /** The std helper that guards an uninitialized captured read. */
 const INIT_HELPER = "__closureInit";
+/** The environment field that carries the receiver, when an arrow captures it. */
+const THIS_FIELD = "$this";
 
 /** The in-tree `afterParse` `Transform`. */
 export class ClosureLowerTransform {
@@ -156,7 +159,14 @@ export class ClosureLowerTransform {
           break;
         }
         case NodeKind.ClassDeclaration: {
-          this.checkClass(<ClassDeclaration>statement, parser);
+          // A method body can own an environment (C2b): its `this` is a
+          // parameter, so a combined `this` + local capture has a receiver to
+          // store. The synthesized classes are top-level, so they are emitted
+          // before the class that uses them.
+          let classDeclaration = <ClassDeclaration>statement;
+          let classes = this.lowerMethods(classDeclaration, parser);
+          for (let j = 0, l = classes.length; j < l; ++j) out.push(classes[j]);
+          if (classes.length > 0) changed = true;
           out.push(statement);
           break;
         }
@@ -192,20 +202,35 @@ export class ClosureLowerTransform {
     for (let i = 0, k = out.length; i < k; ++i) statements.push(out[i]);
   }
 
-  /** Refuses a capture from a method body: owners are top-level in C1. */
-  private checkClass(declaration: ClassDeclaration, parser: Parser): void {
+  /**
+   * Lowers the method bodies of one class as owners in their own right, and
+   * answers the environment classes they need.
+   *
+   * A method is a valid owner for the same reason a top-level function is: its
+   * body declares bindings, and its `this` is `param 0`, so a `$this` field has
+   * a value to hold at scope entry. The class name is what the field's type
+   * names.
+   */
+  private lowerMethods(declaration: ClassDeclaration, parser: Parser): Array<ClassDeclaration> {
+    let out = new Array<ClassDeclaration>();
+    let className = declaration.name.text;
     let members = declaration.members;
     for (let i = 0, k = members.length; i < k; ++i) {
       let member = members[i];
       if (member.kind != NodeKind.MethodDeclaration) continue;
       let method = <MethodDeclaration>member;
       if (method.body == null) continue;
-      let analysis = new OwnerAnalysis(this, parser, method);
+      // A static method has no receiver; `this` there is the class object and a
+      // `$this` field would name a value that does not exist as a parameter.
+      if (method.is(CommonFlags.Static)) continue;
+      let analysis = new OwnerAnalysis(this, parser, method, typeNode(className, method.range));
       analysis.run();
-      if (analysis.hasCaptures() && !analysis.refused) {
-        analysis.refuse(method.range, "a capture from a method body (closures lowering)");
-      }
+      if (!analysis.hasCaptures() || analysis.refused) continue;
+      let classes = analysis.makeEnvClasses();
+      for (let j = 0, l = classes.length; j < l; ++j) out.push(classes[j]);
+      analysis.rewrite();
     }
+    return out;
   }
 }
 
@@ -257,6 +282,13 @@ class Scope {
   /** The synthesized class's name, when this scope owns an environment. */
   className: string | null = null;
 
+  /**
+   * Whether the environment carries `$this` at field 0 — an arrow in this scope
+   * captures `this` and at least one local, so the receiver must travel with the
+   * environment rather than through the shipped `Receiver` path (§7.1).
+   */
+  needsThis: bool = false;
+
   constructor(
     public kind: ScopeKind,
     public parent: Scope | null,
@@ -274,6 +306,18 @@ class Scope {
     }
     return null;
   }
+}
+
+/**
+ * One `this` expression inside an arrow, with the arrow chain it escapes and the
+ * non-arrow function it belongs to.
+ */
+class ThisUse {
+  constructor(
+    public expression: ThisExpression,
+    /** The arrow chain, innermost first. */
+    public arrows: Array<FunctionInfo>
+  ) {}
 }
 
 /** One identifier reference that resolved to a declared binding. */
@@ -361,11 +405,28 @@ class OwnerAnalysis {
   /** Type parameter names of the owner, for the D11 check. */
   private typeParameters: Set<string> = new Set();
 
+  /** Every `this` expression found inside an arrow. */
+  thisUses: Array<ThisUse> = new Array();
+
+  /** `this` expressions that become a field read, and the env that holds it. */
+  thisRefs: Map<ThisExpression, Scope> = new Map();
+
+  /**
+   * The type of the owner's own `this`, when it has one: a method's class, or an
+   * explicit `this:` parameter. `null` for a free function, which has no `this`
+   * to capture.
+   */
+  ownerThisType: TypeNode | null;
+
   constructor(
     private transform: ClosureLowerTransform,
     private parser: Parser,
-    public owner: FunctionDeclaration
+    public owner: FunctionDeclaration,
+    ownerThisType: TypeNode | null = null
   ) {
+    this.ownerThisType = ownerThisType != null
+      ? ownerThisType
+      : owner.signature.explicitThisType;
     let typeParameters = owner.typeParameters;
     if (typeParameters) {
       for (let i = 0, k = typeParameters.length; i < k; ++i) {
@@ -427,14 +488,25 @@ class OwnerAnalysis {
         scope.className = ownerName + ENV_SUFFIX + "$" + blockIndex.toString();
       }
     }
-    // A this-capturing arrow that also captures a local is C2.
-    let infos = this.allInfos;
-    for (let i = 0, k = infos.length; i < k; ++i) {
-      let fn = infos[i];
-      if (fn.isArrow && fn.usesThis && fn.capturesLocal) {
-        this.refuse(fn.node.range,
-          "an arrow that captures `this` and a local (closures lowering)");
+    // `this` in an arrow: the shipped `Receiver` path when the arrow captures
+    // nothing else, and a `$this` field when it does (§7.1).
+    let uses = this.thisUses;
+    for (let i = 0, k = uses.length; i < k; ++i) {
+      let use = uses[i];
+      let innermost = use.arrows[0];
+      let env = innermost.needed;
+      if (env == null) continue; // Receiver: delivered by the shipped path
+      if (this.ownerThisType == null) {
+        this.refuse(use.expression.range, "this in a capturing arrow (closures lowering)");
+        continue;
       }
+      if (env.ownerFunction !== this.owner) {
+        this.refuse(use.expression.range,
+          "a capture across more than one environment (closures lowering)");
+        continue;
+      }
+      env.needsThis = true;
+      this.thisRefs.set(use.expression, env);
     }
     if (info.needed != null) {
       this.refuse(this.owner.range,
@@ -684,7 +756,7 @@ class OwnerAnalysis {
         return;
       }
       case NodeKind.This: {
-        this.markThis(info);
+        this.markThis(<ThisExpression>expression, info);
         return;
       }
       case NodeKind.Super: {
@@ -867,13 +939,26 @@ class OwnerAnalysis {
     if (!binding.scope.captured.includes(binding)) binding.scope.captured.push(binding);
   }
 
-  /** Marks `this` as belonging to an enclosing function, through arrows only. */
-  private markThis(info: FunctionInfo): void {
+  /**
+   * Marks `this` as belonging to an enclosing function, through arrows only, and
+   * records the arrow chain it escapes.
+   *
+   * The chain matters: every arrow between the reference and the non-arrow
+   * function that supplies the receiver has to transport it — including an outer
+   * arrow that does not itself mention `this`, but whose frame is where a nested
+   * arrow is created (the shipped resolver marks exactly this set,
+   * `resolver.ts:2295-2402`). If any arrow in the chain owns a local capture, the
+   * whole chain is `Struct` and the receiver lives in the environment (§7.1).
+   */
+  private markThis(expression: ThisExpression, info: FunctionInfo): void {
+    let arrows = new Array<FunctionInfo>();
     let current: FunctionInfo | null = info;
     while (current != null && current.isArrow) {
       current.usesThis = true;
+      arrows.push(current);
       current = current.parent;
     }
+    if (arrows.length > 0) this.thisUses.push(new ThisUse(expression, arrows));
   }
 
   // --- emission -------------------------------------------------------------
@@ -893,6 +978,28 @@ class OwnerAnalysis {
     let fields = new Array<FieldDeclaration>();
     let range = scope.range;
     let bindings = scope.captured;
+    // `$this` is field 0 whenever the environment carries the receiver
+    // (`docs/closures-plan.md` §5.2, Decision 1). It is the only field whose
+    // position is fixed; the rest follow in declaration order.
+    if (scope.needsThis) {
+      // `changetype<C>(0)`, not a bare declaration: a reference-typed field
+      // without an initializer draws TS2564 (it is not assigned in the
+      // constructor), and the value is written at the owner's scope entry
+      // before any closure can read it.
+      let thisType = assert(this.ownerThisType);
+      fields.push(Node.createFieldDeclaration(
+        Node.createIdentifierExpression(THIS_FIELD, range),
+        null, CommonFlags.Instance,
+        thisType,
+        Node.createCallExpression(
+          Node.createIdentifierExpression("changetype", range),
+          [ thisType ],
+          [ Node.createIntegerLiteralExpression(i64_new(0), range) ],
+          range
+        ),
+        range
+      ));
+    }
     for (let i = 0, k = bindings.length; i < k; ++i) {
       fields.push(Node.createFieldDeclaration(
         Node.createIdentifierExpression(bindings[i].name, range),
@@ -946,7 +1053,31 @@ class OwnerAnalysis {
     // its declaration would land in a forked block flow, where the prologue
     // could not see it (`docs/closures-plan.md` §6.1).
     if (expressionBody != null) {
-      info.node.body = Node.createBlockStatement(rewritten, expressionBody.range);
+      // An arrow written as `(): T => expr` is parsed as an
+      // `ExpressionStatement`, and the compiler treats that shape as an
+      // implicit return (`compiler.ts:1816-1836`: a non-block body is an
+      // expression statement, and only an arrow has one). Keep the shape: a
+      // block with a bare expression statement would drop the return value.
+      // The rewrite of an expression body cannot produce more than one
+      // statement — a declaration needs a block, so an owning scope here is an
+      // arrow whose env is delivered, not allocated.
+      if (rewritten.length == 1 && rewritten[0].kind == NodeKind.Expression) {
+        info.node.body = rewritten[0];
+      } else {
+        let returns = rewritten.length == 0
+          ? new Array<Statement>()
+          : rewritten.slice(0, rewritten.length - 1);
+        let last = rewritten.length == 0 ? null : rewritten[rewritten.length - 1];
+        if (last != null && last.kind == NodeKind.Expression) {
+          returns.push(Node.createReturnStatement(
+            (<ExpressionStatement>last).expression,
+            last.range
+          ));
+        } else if (last != null) {
+          returns.push(last);
+        }
+        info.node.body = Node.createBlockStatement(returns, expressionBody.range);
+      }
     } else {
       let block = <BlockStatement>body;
       block.statements.length = 0;
@@ -963,6 +1094,16 @@ class OwnerAnalysis {
     let out = new Array<Statement>();
     if (scope.localName != null) {
       out.push(this.makeEnvAllocation(scope));
+      if (scope.needsThis) {
+        // The receiver is a parameter of the owner, so it is in scope here.
+        out.push(Node.createExpressionStatement(
+          this.assign(
+            this.fieldOn(assert(scope.localName), THIS_FIELD, scope.range),
+            Node.createThisExpression(scope.range),
+            scope.range
+          )
+        ));
+      }
       let captured = scope.captured;
       for (let i = 0, k = captured.length; i < k; ++i) {
         let binding = captured[i];
@@ -1185,6 +1326,14 @@ class OwnerAnalysis {
     currentFunction: FunctionDeclaration
   ): Expression {
     switch (expression.kind) {
+      case NodeKind.This: {
+        let env = this.thisRefs.get(<ThisExpression>expression);
+        if (env == null) return expression; // Receiver path: leave it alone
+        let localName = env.ownerFunction === currentFunction
+          ? assert(env.localName)
+          : ENV_IN_LOCAL;
+        return this.fieldOn(localName, THIS_FIELD, expression.range);
+      }
       case NodeKind.Identifier: {
         let identifier = <IdentifierExpression>expression;
         let binding = this.refs.get(identifier);
