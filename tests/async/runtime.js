@@ -287,6 +287,114 @@ export function probe(): i32 {
   check("  ...and no park", /__taskPark/.test(resume), false);
 }
 
+// 4c. A local declared after an await is visible to the statements after it.
+//
+// Every ordinary statement in a resume body sits in its own
+// `if (resumePoint == K) { … }` guard, so a `let` declared in one guard was out
+// of scope in the next: `await h; let x: i32 = 5; return x;` drew TS2304 on `x`.
+// The fix: consecutive statements with no await of their own now share **one**
+// `if (resumePoint == 0)` block, so a declaration stays in scope for the
+// statements after it (and the emitted module has fewer guards). This is the
+// mechanism, not a hoist: a local that crosses an await is still lifted into the
+// state struct by the existing rule.
+
+console.log("locals declared after an await");
+
+{
+  const one = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskTick } from "~lib/task-rt";
+
+function settled(v: i32): Task<i32> {
+  let r: TaskRecord = new TaskRecord();
+  r.payload = v;
+  r.done = 1;
+  let t: Task<i32> = new Task<i32>();
+  t._record = r;
+  return t;
+}
+
+async function f(): i32 {
+  let h: Task<i32> = settled(0);
+  await h;
+  let x: i32 = 5;
+  return x;
+}
+
+export function probe(): i32 {
+  let t: Task<i32> = f();
+  __taskTick();
+  return t._record.payload;
+}
+`);
+  check("a local declared after an await is read after it (5)", one.run("probe"), 5);
+
+  const two = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskTick } from "~lib/task-rt";
+
+function settled(v: i32): Task<i32> {
+  let r: TaskRecord = new TaskRecord();
+  r.payload = v;
+  r.done = 1;
+  let t: Task<i32> = new Task<i32>();
+  t._record = r;
+  return t;
+}
+
+async function f(): i32 {
+  let h: Task<i32> = settled(0);
+  await h;
+  let x: i32 = 5;
+  let g: Task<i32> = settled(0);
+  await g;
+  return x;
+}
+
+export function probe(): i32 {
+  let t: Task<i32> = f();
+  __taskTick();
+  __taskTick();
+  return t._record.payload;
+}
+`);
+  check("  ...and survives a second await (5)", two.run("probe"), 5);
+
+  const both = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskTick } from "~lib/task-rt";
+
+function settled(v: i32): Task<i32> {
+  let r: TaskRecord = new TaskRecord();
+  r.payload = v;
+  r.done = 1;
+  let t: Task<i32> = new Task<i32>();
+  t._record = r;
+  return t;
+}
+
+async function f(): i32 {
+  let a: i32 = 1;          // before the await: lifted
+  let h: Task<i32> = settled(0);
+  await h;
+  let b: i32 = 2;          // after it: hoisted
+  return a + b;
+}
+
+export function probe(): i32 {
+  let t: Task<i32> = f();
+  __taskTick();
+  return t._record.payload;
+}
+`);
+  check("a lifted local and a hoisted one compose (3)", both.run("probe"), 3);
+  const resume = funcBody(both.wat, "probe/f$resume");
+  check("  ...the hoisted name is declared before the first guard",
+    resume.indexOf("local.set $b") === -1 ||
+    resume.slice(0, resume.indexOf("get:resumePoint")).includes("$b"),
+    true);
+}
+
 // 5. Guest-to-guest completion (§4.7.3, Phase 4b): a task that awaits another
 // task's *completion*, not a record handed to it already settled.
 

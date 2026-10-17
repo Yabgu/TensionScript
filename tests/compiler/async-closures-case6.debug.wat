@@ -6343,17 +6343,6 @@
    call $async-closures-case6/outer$Env#constructor
    local.tee $$closureEnv
    i32.store offset=8
-  end
-  local.get $state
-  local.set $8
-  global.get $~lib/memory/__stack_pointer
-  local.get $8
-  i32.store
-  local.get $8
-  call $async-closures-case6/outer$State#get:resumePoint
-  i32.const 0
-  i32.eq
-  if
    local.get $$closureEnv
    local.set $8
    global.get $~lib/memory/__stack_pointer
