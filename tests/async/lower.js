@@ -107,6 +107,39 @@ function funcBody(wat, name) {
   return out.join("\n");
 }
 
+/** Every statement in a tree, depth-first. */
+function walkStatements(statement, visit) {
+  visit(statement);
+  switch (statement.kind) {
+    case asc.NodeKind.Block:
+      for (const inner of statement.statements) walkStatements(inner, visit);
+      break;
+    case asc.NodeKind.If:
+      walkStatements(statement.ifTrue, visit);
+      if (statement.ifFalse) walkStatements(statement.ifFalse, visit);
+      break;
+    case asc.NodeKind.While:
+      walkStatements(statement.body, visit);
+      break;
+    case asc.NodeKind.For:
+      if (statement.initializer) walkStatements(statement.initializer, visit);
+      walkStatements(statement.body, visit);
+      break;
+  }
+}
+
+/** The condition temporaries of an emitted `if` dispatch, by name. */
+function condTemps(resumeNode) {
+  const names = new Set();
+  walkStatements(resumeNode, (statement) => {
+    if (
+      statement.kind === asc.NodeKind.Variable &&
+      statement.declarations[0].name.text.startsWith("$cond")
+    ) names.add(statement.declarations[0].name.text);
+  });
+  return [ ...names ];
+}
+
 /** The typed read of an `await` in `wat`, as `[offset, count]`. */
 function readOffsets(wat) {
   const offsets = [];
@@ -139,7 +172,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check(
     "the state class carries the parameter, resumePoint, the awaited record, result and handle",
     state.members.filter(member => member.kind === asc.NodeKind.FieldDeclaration).map(member => member.name.text),
-    [ "h", "resumePoint", "result", "$awaited1", "handle" ]
+    [ "h", "x", "resumePoint", "result", "$awaited1", "handle" ]
   );
   const ctor = state.members.find(member => member.kind === asc.NodeKind.MethodDeclaration);
   check("the constructor calls super() first (AS2377)", ctor.body.statements[0].expression.kind, asc.NodeKind.Call);
@@ -173,9 +206,9 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
     [ "state" ]
   );
   check(
-    "the resume body copies the parameter in, then guards one region per await plus the entry and the terminal",
+    "the resume body copies the parameter and the lifted local in, then guards the regions",
     resume.body.statements.map(statement => statement.kind),
-    [ asc.NodeKind.Variable, asc.NodeKind.If, asc.NodeKind.If ]
+    [ asc.NodeKind.Variable, asc.NodeKind.Variable, asc.NodeKind.If, asc.NodeKind.If, asc.NodeKind.If ]
   );
 }
 
@@ -212,7 +245,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   // The entry's point is 0, but it is the *constructor's* write (the transform
   // initializes `resumePoint` there, `lowResumePoint = 0`); the resume function
   // itself writes the await's discriminator and the terminal.
-  check("the resume points written are the await's and the terminal", points, [ 1, 2 ]);
+  check("the resume points written are the await's, the continuation's clear, and the terminal", points, [ 1, 0, 2 ]);
   check("the operand's record is stored in the state struct", wat.includes("call $probe/f$State#set:$awaited1"), true);
   check("the settled check runs before the park (§1.2 rule 4)", wat.includes("call $~lib/task-rt/__taskSettled"), true);
   check("the parked path calls __taskPark", wat.includes("call $~lib/task-rt/__taskPark"), true);
@@ -240,7 +273,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   const points = [ ...funcBody(wat, "probe/two$resume")
     .matchAll(/i32\.const (\d+)\n *call \$probe\/two\$State#set:resumePoint/g) ]
     .map(match => Number(match[1]));
-  check("two awaits get distinct, ordered discriminators", points, [ 1, 2, 3 ]);
+  check("two awaits get distinct, ordered discriminators", points, [ 1, 0, 2, 0, 3 ]);
   check("  ...and two separate record fields", r.file.statements[0].members
     .filter(member => member.kind === asc.NodeKind.FieldDeclaration && member.name.text.startsWith("$awaited"))
     .map(member => member.name.text), [ "$awaited1", "$awaited2" ]);
@@ -438,7 +471,198 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
     refusals(r).includes("a local without a declared type that crosses an await (async lowering)"), true);
 }
 
-// 8. Refusals: every shape this revision does not lower is named, not missed.
+// 8. The six correctness cases (§4.1, §4.3) — shape only; values are Phase 4.
+
+// Case 1: an await inside a loop. The body is resumable: the loop re-enters on a
+// resumed pass without re-evaluating its condition, the continuation clears the
+// resume point, and the next iteration evaluates the condition again.
+{
+  const r = run(`
+async function f(h: Task<i32>): i32 {
+  let sum: i32 = 0;
+  let i: i32 = 0;
+  while (i < 3) {
+    await h;
+    sum = sum + i;
+    i = i + 1;
+  }
+  return sum;
+}
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("case 1 (loop): the loop's live locals are lifted", [ "sum", "i" ].every(name =>
+    r.file.statements[0].members.some(member =>
+      member.kind === asc.NodeKind.FieldDeclaration && member.name.text === name)), true);
+  const resume = funcBody(r.wat(), "probe/f$resume");
+  check("  ...one park, inside the loop", [ ...resume.matchAll(/call \$~lib\/task-rt\/__taskPark/g) ].length, 1);
+  check("  ...the park is preceded by the copy-out of both locals",
+    /set:sum[\s\S]{0,200}?set:i[\s\S]{0,200}?__taskPark/.test(resume), true);
+  check("  ...the loop condition is resume-aware", /resumePoint[\s\S]{0,80}?i32\.ne/.test(resume), true);
+  check("  ...and the continuation clears the point inside the body",
+    /set:resumePoint[\s\S]{0,600}?set:sum/.test(resume), true);
+  check("  ...with no refusal", refusals(r), []);
+}
+// A local declared *inside* a loop body that awaits is lifted too (its
+// declaration would otherwise sit inside a guard block).
+{
+  const r = run(`
+async function f(h: Task<i32>): i32 {
+  let n: i32 = 0;
+  while (n < 2) {
+    let t: i32 = 5;
+    await h;
+    n = n + t;
+  }
+  return n;
+}
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("case 1b (loop-body local): it is lifted", r.file.statements[0].members.some(member =>
+    member.kind === asc.NodeKind.FieldDeclaration && member.name.text === "t"), true);
+  check("  ...with no refusal", refusals(r), []);
+}
+
+// Case 2: an await inside an `if`. The condition is evaluated only on the normal
+// pass; a resume dispatches on which branch the resume point belongs to, so an
+// await in a branch that did not run is never resumed.
+{
+  const r = run(`
+async function f(h: Task<i32>, c: bool): i32 {
+  let v: i32 = 0;
+  if (c) { await h; v = 1; } else { v = 2; }
+  return v;
+}
+export function probe(): Task<i32> { return f(make(), true); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const resume = funcBody(r.wat(), "probe/f$resume");
+  const resumeNode = r.file.statements.find(statement => statement.name.text === "f$resume");
+  check("case 2 (conditional): one condition temporary is allocated",
+    condTemps(resumeNode.body).length, 1);
+  check("  ...the condition is evaluated under `resumePoint == 0`",
+    /resumePoint[\s\S]{0,120}?i32\.eq[\s\S]{0,240}?local\.set/.test(resume), true);
+  check("  ...a resume dispatches on the branch's range",
+    /i32\.ge_s[\s\S]{0,200}?i32\.le_s/.test(resume), true);
+  check("  ...the await parks inside the then-branch", /__taskPark/.test(resume), true);
+  check("  ...with no refusal", refusals(r), []);
+}
+// Nested conditionals: each await gets its own range.
+{
+  const r = run(`
+async function f(h: Task<i32>, a: bool, b: bool): i32 {
+  let v: i32 = 0;
+  if (a) { if (b) { await h; v = 1; } }
+  return v;
+}
+export function probe(): Task<i32> { return f(make(), true, true); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("case 2b (nested conditionals): lowered", refusals(r), []);
+  const resumeNode = r.file.statements.find(statement => statement.name.text === "f$resume");
+  check("  ...with two condition temporaries", condTemps(resumeNode.body).length, 2);
+}
+
+// Case 3: several awaits at different nesting depths, each with its own
+// discriminator and its own record field.
+{
+  const r = run(`
+async function f(h: Task<i32>, g: Task<i32>, k: Task<i32>, c: bool): i32 {
+  let n: i32 = 0;
+  await h;
+  if (c) { await g; n = 1; }
+  while (n < 2) { await k; n = n + 1; }
+  return n;
+}
+export function probe(): Task<i32> { return f(make(), make(), make(), true); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const resume = funcBody(r.wat(), "probe/f$resume");
+  const parks = [ ...resume.matchAll(/call \$~lib\/task-rt\/__taskPark/g) ].length;
+  const awaited = [ ...resume.matchAll(/get:\$awaited(\d+)/g) ].map(m => m[1]);
+  check("case 3 (multiple awaits): three parks", parks, 3);
+  check("  ...three distinct record fields", [ ...new Set(awaited) ].sort(), [ "1", "2", "3" ]);
+  check("  ...three distinct discriminators", [ ...new Set(
+    [ ...resume.matchAll(/i32\.const (\d+)\n *call \$probe\/f\$State#set:resumePoint/g) ].map(m => m[1])
+  ) ].sort(), [ "0", "1", "2", "3", "4" ]);
+  check("  ...with no refusal", refusals(r), []);
+}
+
+// Case 4: an async function nested inside an async function is its own machine,
+// with its own discriminator numbering.
+{
+  const r = run(`
+async function outer(h: Task<i32>): i32 {
+  async function inner(g: Task<i32>): i32 { let v: i32 = await g; return v + 1; }
+  let r: i32 = await h;
+  return r + 1;
+}
+export function probe(): Task<i32> { return outer(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("case 4 (nested): two state machines are emitted", r.names(), [
+    "outer$State", "outer", "outer$resume", "inner$State", "inner", "inner$resume", "probe", "make"
+  ]);
+  const outerResume = funcBody(r.wat(), "probe/outer$resume");
+  const innerResume = funcBody(r.wat(), "probe/inner$resume");
+  check("  ...the outer machine numbers its own await 1",
+    [ ...outerResume.matchAll(/i32\.const 1\n *call \$probe\/outer\$State#set:resumePoint/g) ].length, 1);
+  check("  ...the inner machine numbers its own await 1",
+    [ ...innerResume.matchAll(/i32\.const 1\n *call \$probe\/inner\$State#set:resumePoint/g) ].length, 1);
+  check("  ...their terminals are both 2, independently",
+    [ /i32\.const 2\n *call \$probe\/outer\$State#set:resumePoint/.test(outerResume),
+      /i32\.const 2\n *call \$probe\/inner\$State#set:resumePoint/.test(innerResume) ], [ true, true ]);
+  check("  ...and each has its own await field", [ /outer\$State#get:\$awaited1/.test(outerResume),
+    /inner\$State#get:\$awaited1/.test(innerResume) ], [ true, true ]);
+}
+
+// Case 5: an early return before an await returns directly; a return after an
+// await runs the terminal region. Both write `state.result`.
+{
+  const r = run(`
+async function f(h: Task<i32>, c: bool): i32 {
+  if (c) { return 7; }
+  await h;
+  return 9;
+}
+export function probe(): Task<i32> { return f(make(), true); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const resume = funcBody(r.wat(), "probe/f$resume");
+  check("case 5 (early return): the return before the await writes result then returns",
+    /i32\.const 7[\s\S]{0,120}?set:result[\s\S]{0,120}?return/.test(resume), true);
+  check("  ...and it happens before any park",
+    resume.indexOf("i32.const 7") < resume.indexOf("__taskPark"), true);
+  check("  ...the return after the await writes result 9 in the terminal region",
+    /i32\.const 9[\s\S]{0,120}?set:result/.test(resume), true);
+  check("  ...with no refusal", refusals(r), []);
+}
+
+// Case 6: `await` inside a closure — not exercisable yet, and the three refusals
+// that make it so are asserted here as the documented gap (§4.4).
+{
+  const asyncMethod = run(`class C { async m(): void {} } export function probe(): i32 { return 1; }`);
+  check("case 6 (closures): an async method is refused by name",
+    refusals(asyncMethod).includes("async methods (async lowering)"), true);
+  const thisBody = run(`
+async function f(): i32 { return this.x; }
+export function probe(): i32 { return 1; }
+`);
+  check("  ...`this` in an async function body is refused by name",
+    refusals(thisBody).includes("this in an async function body (async lowering)"), true);
+  const closure = run(`
+async function f(): i32 { const g = (): i32 => 1; return g(); }
+export function probe(): i32 { return 1; }
+`);
+  check("  ...a closure inside an async body is refused by name",
+    refusals(closure).includes("a nested function in an async function body (async lowering)"), true);
+  check("  => no path supplies `this` or a capture to an async body today", [
+    refusals(asyncMethod).length > 0, refusals(thisBody).length > 0, refusals(closure).length > 0
+  ], [ true, true, true ]);
+}
+
+// 9. Refusals: every shape this revision does not lower is named, not missed.
 
 const REFUSALS = [
   [ "await in a sub-expression", `async function f(h: Task<i32>): i32 { return 1 + await h; }`,
@@ -449,11 +673,17 @@ const REFUSALS = [
     "await in an unsupported position (async lowering)" ],
   [ "await in a call argument", `async function f(h: Task<i32>): i32 { g(await h); return 1; }`,
     "await in an unsupported position (async lowering)" ],
-  [ "a conditional", `async function f(a: i32): i32 { if (a > 0) return 1; return 0; }`,
-    "if in an async function body (async lowering)" ],
-  [ "a loop", `async function f(a: i32): i32 { while (a > 0) a -= 1; return a; }`,
-    "while in an async function body (async lowering)" ],
-  [ "a nested function", `async function f(): void { const g = (): void => {}; g(); }`,
+  [ "switch", `async function f(a: i32): i32 { switch (a) { default: return 1; } }`,
+    "switch in an async function body (async lowering)" ],
+  [ "try/catch", `async function f(): i32 { try { return 1; } catch (e) { return 0; } }`,
+    "try/catch in an async function body (async lowering)" ],
+  [ "do/while", `async function f(a: i32): i32 { do { a -= 1; } while (a > 0); return a; }`,
+    "do in an async function body (async lowering)" ],
+  [ "for-of", `async function f(a: i32[]): i32 { for (let v of a) return v; return 0; }`,
+    "for-of in an async function body (async lowering)" ],
+  [ "break", `async function f(a: i32): i32 { while (a > 0) { break; } return a; }`,
+    "break in an async function body (async lowering)" ],
+  [ "a capturing arrow (a closure)", `async function f(): i32 { const g = (): i32 => 1; return g(); }`,
     "a nested function in an async function body (async lowering)" ],
   [ "a generic async function", `async function f<T>(a: T): void {}`,
     "async generic functions (async lowering)" ],
@@ -485,7 +715,7 @@ for (const [ label, source, expected ] of REFUSALS) {
   );
 }
 
-// 9. A `this` body is refused by name.
+// 10. A `this` body is refused by name.
 
 {
   const r = run(`
@@ -505,7 +735,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check("`this` in an async body is refused by name", refusals(t).includes("this in an async function body (async lowering)"), true);
 }
 
-// 10. A program that declares no async function is untouched.
+// 11. A program that declares no async function is untouched.
 
 {
   const program = buildProgram([ [ "probe.ts", `export function probe(): i32 { return 7; }` ] ]);
