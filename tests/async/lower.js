@@ -172,7 +172,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check(
     "the state class carries the parameter, resumePoint, the awaited record, result and handle",
     state.members.filter(member => member.kind === asc.NodeKind.FieldDeclaration).map(member => member.name.text),
-    [ "h", "x", "resumePoint", "result", "$awaited1", "handle" ]
+    [ "h", "$env", "x", "resumePoint", "result", "$awaited1", "handle" ]
   );
   const ctor = state.members.find(member => member.kind === asc.NodeKind.MethodDeclaration);
   check("the constructor calls super() first (AS2377)", ctor.body.statements[0].expression.kind, asc.NodeKind.Call);
@@ -404,7 +404,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
     .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
     .map(member => member.name.text);
   check("a local that does not cross gets no state field", fields.includes("v"), false);
-  check("  ...and the state has no extra fields at all", fields, [ "h", "resumePoint", "result", "$awaited1", "handle" ]);
+  check("  ...and the state has no extra fields at all", fields, [ "h", "$env", "resumePoint", "result", "$awaited1", "handle" ]);
   check("  ...and no `set:v` is emitted", /#set:v/.test(r.wat()), false);
 }
 {
@@ -660,6 +660,24 @@ export function probe(): i32 { return 1; }
   check("  => no path supplies `this` or a capture to an async body today", [
     refusals(asyncMethod).length > 0, refusals(thisBody).length > 0, refusals(closure).length > 0
   ], [ true, true, true ]);
+}
+
+// 8b. The environment reference (§4.4): emitted, initialized to null, and
+// unreachable — nothing in this fork can put a capture into an async body.
+{
+  const r = run(`
+async function f(h: Task<i32>): i32 { let v: i32 = 1; await h; return v; }
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const state = r.file.statements[0];
+  const env = state.members.find(member =>
+    member.kind === asc.NodeKind.FieldDeclaration && member.name.text === "$env");
+  check("the state struct carries an environment reference field", env !== undefined, true);
+  check("  ...typed TaskEnv", env.type.name.identifier.text, "TaskEnv");
+  check("  ...nullable", env.type.isNullable, true);
+  check("  ...initialized to null", env.initializer.kind, asc.NodeKind.Null);
+  check("  ...and traced by the state's visitor", /\$probe\/f\$State~visit[\s\S]{0,500}?__visit/.test(r.wat()), true);
 }
 
 // 9. Refusals: every shape this revision does not lower is named, not missed.

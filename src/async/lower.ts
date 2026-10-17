@@ -153,6 +153,8 @@ const STATE_SUFFIX = "$State";
 const RESUME_SUFFIX = "$resume";
 /** Base class of every state struct (`std/assembly/task-rt.ts`, §4.7). */
 const TASK_STATE_NAME = "TaskState";
+/** Base class of a task's environment (`std/assembly/task-rt.ts`, §4.4). */
+const TASK_ENV_NAME = "TaskEnv";
 /** The runtime's park symbol (§4.7.3). */
 const PARK_NAME = "__taskPark";
 /** The runtime's settled check (§4.7.3). */
@@ -169,6 +171,8 @@ const RESUME_POINT_FIELD = "resumePoint";
 const RESULT_FIELD = "result";
 /** The state struct's handle field. */
 const HANDLE_FIELD = "handle";
+/** The state struct's environment reference (§4.4) — emitted, unpopulated. */
+const ENV_FIELD = "$env";
 /** Prefix of the synthesized condition temporaries of `if` statements. */
 const COND_TEMP_PREFIX = "$cond";
 
@@ -370,6 +374,28 @@ export class AsyncLowerTransform {
         parameter.name.range
       ));
     }
+    // The environment reference (§4.4): a captured binding's storage is the
+    // environment, and the state struct references it rather than copying the
+    // binding. **Emitted and initialized to null, but unreachable until closures
+    // land and `this`-in-an-async-body is un-refused** — every construct that
+    // could supply a capture to an async body is refused by name today, so this
+    // field is always null. It exists so the state struct's shape is stable
+    // across that landing: the closures transform will populate it, and the type
+    // (`TaskEnv`, `std/assembly/task-rt.ts`) is the base its environment will
+    // extend. Being a class-typed field, it is traced by the generated visitor,
+    // which is what lets the collector follow state -> environment once there is
+    // something there to follow.
+    stateFields.push(Node.createFieldDeclaration(
+      Node.createIdentifierExpression(ENV_FIELD, range),
+      null, CommonFlags.Instance,
+      Node.createNamedType(
+        Node.createSimpleTypeName(TASK_ENV_NAME, range),
+        null, true, // nullable: absent today, and absent for a function that captures nothing
+        range
+      ),
+      Node.createNullExpression(range),
+      range
+    ));
     // The lifted locals (§4.3): one field each, of the type the source declared.
     // No `!` — the constructor gives them a zero of their type, and `!` would
     // draw a note either way for a value type ("unnecessary") or a nullable
@@ -2010,6 +2036,7 @@ function isReservedStateField(name: string): bool {
     name == RESUME_POINT_FIELD ||
     name == RESULT_FIELD ||
     name == HANDLE_FIELD ||
+    name == ENV_FIELD ||
     name == "record" // inherited from TaskState (§4.7.3)
   ) return true;
   return name.startsWith(AWAITED_PREFIX);

@@ -31,6 +31,28 @@ import { TaskRecord } from "./task";
  * machine exists would stop rather than pretend.
  */
 
+/**
+ * The base class of a task's environment — the object that will hold a captured
+ * binding's single storage (§4.4: "a captured binding's storage *is* the
+ * environment").
+ *
+ * It declares no fields yet, for the same reason `TaskRecord` declares none: the
+ * fields belong to whatever the closures transform decides the environment looks
+ * like, and std must not pre-empt that. What std can fix today is the *type*, so
+ * the state struct's `$env` field has a nameable type to point at, and so the
+ * shape does not change when closures land.
+ *
+ * **Nothing populates a `$env` field yet.** Closures are unimplemented in this
+ * fork and every construct that would supply a capture to an async body is
+ * refused by name (async methods, `this` in an async body, a nested function in
+ * an async body), so a state struct's `$env` is always `null` today. The field
+ * exists so the layout is stable, and the trace below is why it is a *managed*
+ * reference even while null: when it is populated, the collector must be able to
+ * follow it from the state struct, which a parked task's only root chain runs
+ * through (§4.4).
+ */
+export class TaskEnv {}
+
 /** The base class of every lowered state machine (§4.7.3). */
 export class TaskState {
   /**
