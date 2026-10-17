@@ -444,6 +444,16 @@ export async function main(argv, options) {
     }
   }
 
+  // The in-tree closure lowering (docs/closures-plan.md §3): an `afterParse`
+  // AST transform that analyses captures and rewrites them onto synthesized
+  // environment objects. It is pushed *before* the async transform on purpose:
+  // `applyTransform` runs the array in order, so closures are lowered first and
+  // the async transform sees ordinary code — an environment local and ordinary
+  // field accesses — which its lifting rule already handles (§3.1).
+  // A no-op for a program that captures nothing, which is what keeps programs
+  // without closures byte-identical.
+  transforms.push(assemblyscript.ClosureLowerTransform);
+
   // The in-tree async lowering (docs/async-await-plan-v2.md §0.2, §4.5, D9): an
   // `afterParse` AST transform that turns `async function`s into state machines.
   // It is a no-op for a program that declares no `async` function, which is what

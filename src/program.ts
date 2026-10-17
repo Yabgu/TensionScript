@@ -34,6 +34,7 @@
 // │ └─ClassPrototype         Prototype of concrete class instances
 // └─File                     File, analogous to Source in the AST
 
+import { EnvKind } from "./closure/ir";
 import {
   CommonFlags,
   PATH_DELIMITER,
@@ -3720,6 +3721,18 @@ export class FunctionPrototype extends DeclaredElement {
   operatorKind: OperatorKind = OperatorKind.Invalid;
   /** Whether this arrow function captures `this` from an enclosing function. */
   capturesThis: bool = false;
+  /**
+   * What this function's `_env` word means, when it is a closure value
+   * (`docs/closures-plan.md` §4.5). `None` for every ordinary function.
+   *
+   * Set by `Compiler#compileFunctionExpression` from the closure transform's
+   * side table, keyed by the `FunctionExpression` node — the prototype for a
+   * function expression is created there (`compiler.ts:7342`), after the
+   * declaration is cloned, so a declaration-keyed table would miss it.
+   */
+  envKind: EnvKind = EnvKind.None;
+  /** The synthesized environment class's name, when `envKind` is `Struct`. */
+  envClass: string | null = null;
   /** Already resolved instances. */
   instances: Map<string,Function> | null = null;
   /** Methods overriding this one, if any. These are unbound. */
