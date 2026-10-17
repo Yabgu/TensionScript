@@ -211,9 +211,9 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   const state = statements[0];
   check("the state class extends TaskState (§4.7.3)", state.extendsType.name.identifier.text, "TaskState");
   check(
-    "the state class carries the parameter, resumePoint, the awaited record, result and handle",
+    "the state class carries the parameter, resumePoint, the awaited record and handle — and no value field",
     state.members.filter(member => member.kind === asc.NodeKind.FieldDeclaration).map(member => member.name.text),
-    [ "h", "$env", "x", "resumePoint", "result", "$awaited1", "handle" ]
+    [ "h", "$env", "x", "resumePoint", "$awaited1", "handle" ]
   );
   const ctor = state.members.find(member => member.kind === asc.NodeKind.MethodDeclaration);
   check("the constructor calls super() first (AS2377)", ctor.body.statements[0].expression.kind, asc.NodeKind.Call);
@@ -385,8 +385,8 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   const wat = r.wat();
   const resume = funcBody(wat, "probe/r$resume");
   check(
-    "  ...writing the result before the terminal resume point",
-    /set:result[\s\S]{0,400}?i32\.const 2\n *call \$probe\/r\$State#set:resumePoint/.test(resume),
+    "  ...completing the record before the terminal resume point",
+    /__taskCompleteResult<i32>[\s\S]{0,400}?i32\.const 2\n *call \$probe\/r\$State#set:resumePoint/.test(resume),
     true
   );
   check("  ...and the terminal resume point is 2 for one await", /i32\.const 2/.test(resume), true);
@@ -454,7 +454,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
     .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
     .map(member => member.name.text);
   check("a local that does not cross gets no state field", fields.includes("v"), false);
-  check("  ...and the state has no extra fields at all", fields, [ "h", "$env", "resumePoint", "result", "$awaited1", "handle" ]);
+  check("  ...and the state has no extra fields at all", fields, [ "h", "$env", "resumePoint", "$awaited1", "handle" ]);
   check("  ...and no `set:v` is emitted", /#set:v\b/.test(r.wat()), false);
 }
 {
@@ -668,7 +668,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
 }
 
 // Case 5: an early return before an await returns directly; a return after an
-// await runs the terminal region. Both write `state.result`.
+// await runs the terminal region. Both complete the task's record (§4.7.3).
 {
   const r = run(`
 async function f(h: Task<i32>, c: bool): i32 {
@@ -680,12 +680,12 @@ export function probe(): Task<i32> { return f(make(), true); }
 function make(): Task<i32> { return changetype<Task<i32>>(0); }
 `);
   const resume = funcBody(r.wat(), "probe/f$resume");
-  check("case 5 (early return): the return before the await writes result then returns",
-    /i32\.const 7[\s\S]{0,120}?set:result[\s\S]{0,120}?return/.test(resume), true);
+  check("case 5 (early return): the return before the await completes then returns",
+    /i32\.const 7[\s\S]{0,200}?__taskCompleteResult<i32>[\s\S]{0,200}?return/.test(resume), true);
   check("  ...and it happens before any park",
     resume.indexOf("i32.const 7") < resume.indexOf("__taskPark"), true);
-  check("  ...the return after the await writes result 9 in the terminal region",
-    /i32\.const 9[\s\S]{0,120}?set:result/.test(resume), true);
+  check("  ...the return after the await completes with 9",
+    /i32\.const 9[\s\S]{0,200}?__taskCompleteResult<i32>/.test(resume), true);
   check("  ...with no refusal", refusals(r), []);
 }
 

@@ -256,6 +256,100 @@ export function parkProbe(): i32 {
     /call \$~lib\/task-rt\/__taskPark[\s\S]{0,400}?return/.test(resume), true);
 }
 
+// 5. Guest-to-guest completion (§4.7.3, Phase 4b): a task that awaits another
+// task's *completion*, not a record handed to it already settled.
+
+console.log("guest-to-guest completion");
+
+{
+  // B completes synchronously inside A's prefix, so A's `await` finds the
+  // record settled and never parks — the value has to have been written into
+  // the record by `__taskCompleteResult` for this to be 42.
+  const r = compile(`
+import { Task } from "~lib/task";
+import { __taskTick } from "~lib/task-rt";
+
+async function B(): i32 { return 41; }
+async function A(): i32 { let x: i32 = await B(); return x + 1; }
+
+export function probe(): i32 {
+  let h: Task<i32> = A();
+  __taskTick();
+  return h._record.payload;
+}
+`);
+  check("A() awaits B()'s completion and reads its value (42)", r.run("probe"), 42);
+  const resumeB = funcBody(r.wat, "probe/B$resume");
+  check("  ...B's return completes its record",
+    /__taskCompleteResult<i32>/.test(resumeB), true);
+  // The store's address is `record + RECORD_PAYLOAD` computed as a pointer, so
+  // the store itself carries no offset — the same address the typed read loads
+  // from with `offset=8` (measured in both directions).
+  check("  ...and stores it at `payload`, offset 8",
+    /global\.get \$~lib\/task-rt\/RECORD_PAYLOAD\n *i32\.add\n *local\.get \$1\n *i32\.store/.test(
+      funcBody(r.wat, "~lib/task-rt/__taskCompleteResult<i32>")), true);
+}
+
+{
+  // The parked path: a task parks on a record, a delivery arrives, the tick
+  // resumes it, and it completes in turn (which is what makes the *next*
+  // awaiter of its handle see a value).
+  const r = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
+
+let seen: i32 = 0;
+
+async function g(h: Task<i32>): i32 {
+  let v: i32 = await h;
+  seen = v;
+  return v;
+}
+
+export function probe(): i32 {
+  let record: TaskRecord = new TaskRecord();
+  record.class_ = 4; // JOB_DONE, unbound: its own family
+  record.key = 7;
+  let handle: Task<i32> = new Task<i32>();
+  handle._record = record;
+  g(handle);
+  if (__taskHasRunnable()) return -1;
+  __taskDeliver(4, 7, 41, 0, 0);
+  if (!__taskHasRunnable()) return -2;
+  __taskTick();
+  return seen;
+}
+`);
+  check("a delivered completion wakes the parked task (41)", r.run("probe"), 41);
+}
+
+{
+  // One tick, one resume: the queue is taken at tick start, so a task woken
+  // during the tick runs in the next one.
+  const r = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
+
+async function g(h: Task<i32>): i32 { let v: i32 = await h; return v; }
+
+export function probe(): i32 {
+  let record: TaskRecord = new TaskRecord();
+  record.class_ = 4;
+  record.key = 1;
+  let handle: Task<i32> = new Task<i32>();
+  handle._record = record;
+  g(handle);
+  __taskDeliver(4, 1, 5, 0, 0);
+  if (!__taskHasRunnable()) return -1;  // queued, not yet run
+  __taskTick();
+  let afterFirst = __taskHasRunnable();
+  __taskTick();
+  return afterFirst ? -2 : 0;
+}
+`);
+  check("a tick takes its queue at entry and leaves nothing behind", r.run("probe"), 0);
+}
+
 console.log();
 if (failures) {
   console.log(`FAILURE: ${failures} of ${checks} checks failed`);
