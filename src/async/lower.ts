@@ -16,107 +16,82 @@
  * element of the program. A consequence that is easy to get wrong: **the state
  * class must be inserted before the function that references it** in that array.
  *
- * **Scope of this revision (Phase 3, commit 4).** It lowers `async function`
- * *declarations* whose body is straight-line — no control flow, no nested
- * functions, no `this` — and whose `await`s sit in one of four positions, one
- * await per statement:
+ * ## The state machine, as emitted
+ *
+ * §4.1's three artifacts, per async function:
+ *
+ * 1. **The state struct** — `class f$State extends TaskState`, with a field per
+ *    parameter, a field per lifted local (§4.3), `resumePoint`, `result` (the
+ *    payload stand-in until Phase 4), one `$awaited<K>` record field per await,
+ *    and `handle`.
+ * 2. **The entry** — `f` itself, rewritten: allocate the state, build and
+ *    register the handle, run `f$resume` (the synchronous prefix, §4.1, §1.2
+ *    rule 1), return the handle.
+ * 3. **The resume function** — `f$resume(state): void`, the body with each
+ *    `await` replaced by a state transition.
+ *
+ * **The dispatch rule, which is what makes nested control flow work.** The
+ * resume function keeps the body's *structure* — loops stay loops, `if`s stay
+ * `if`s — and each node is guarded on `state.resumePoint`:
+ *
+ * - `resumePoint == 0` means "running normally": every unexecuted statement runs.
+ * - `resumePoint == K` means "resuming at await K": statements before K are
+ *   skipped, and the continuation for K runs.
+ * - **Each continuation clears `resumePoint` to 0 as its first statement.** That
+ *   is the linchpin: everything after the resumed position — the rest of the
+ *   enclosing block, later iterations of an enclosing loop, statements after the
+ *   loop — then runs normally, exactly once.
+ * - A construct (block, `if`, loop) is entered when `resumePoint == 0` **or**
+ *   when the resume point is in the construct's own discriminator range — which
+ *   is how a resumed iteration re-enters its enclosing loops without
+ *   re-evaluating their conditions (whose side effects must not repeat) and
+ *   without re-running the statements before the await.
+ *
+ * A loop's iteration is therefore resumable: `while (resumePoint != 0 || cond)`
+ * enters the body unconditionally on the resumed pass, runs from the
+ * continuation, clears the point, and the *next* iteration evaluates `cond`
+ * again. An `if` never re-evaluates its condition on resume; it dispatches on
+ * whether the resume point is in the then-range or the else-range, which is also
+ * what makes "the branch did not execute" harmless — the await in it was never
+ * parked, so nothing resumes there.
+ *
+ * ## Scope
+ *
+ * Lowered: `async function` declarations at a source's top level, in a
+ * namespace, or nested inside another function (each is its own machine, with
+ * its own discriminators starting at 1); bodies made of declarations,
+ * expressions, `return`, `if`/`else`, `while`, `for`, blocks, and nested function
+ * declarations; `await` in one of four positions, one await per statement:
  *
  * | Position | Example |
  * |---|---|
  * | expression statement | `await h;` |
- * | single-declaration initializer | `let x: i32 = await h;` |
+ * | initializer | `let x: i32 = await h;` |
  * | assignment | `x = await h;` |
  * | return | `return await h;` |
  *
  * Bindings live across a suspension are **lifted** (§4.3): a local declared
- * before an await and referenced after it becomes a state-struct field, and a
- * parameter written before an await and read after it gains a copy-out. Every
- * suspension copies all lifted bindings out before the park, and the resume
- * function copies them in at entry — commit 2's invariant, now enforced by the
- * emitted code rather than by a refusal. A local that does *not* cross stays a
- * wasm local; a parameter that is not written across a suspension stays a
- * parameter read from the state struct.
+ * before an await and referenced after it becomes a state field, and so does any
+ * local declared *inside* a construct that contains an await (its declaration
+ * would otherwise sit inside a guard block and go out of scope). A parameter
+ * written before an await and read after it gets a copy-out. Every suspension
+ * copies all lifted bindings out before the park; the resume function copies them
+ * in at entry. Locals that cross nothing stay wasm locals.
  *
- * Everything else is refused with a named `AS100` diagnostic — never left for
- * codegen, never emitted as wrong code:
+ * Refused by name, never emitted as wrong code: an `await` in any other position
+ * (a sub-expression, a second await in one statement, a loop condition); `switch`,
+ * `try`, `do`, `for-of`, `break`, `continue`, `throw`; `this`/`super` in the body;
+ * async arrows, methods and function expressions; generic async functions;
+ * optional/rest parameters; an omitted return type; a local with no declared type
+ * that must be lifted; a reference-typed await result; a name the state struct
+ * reserves.
  *
- * | Refused | Until |
- * |---|---|
- * | an `await` anywhere else (a sub-expression, a second await in one statement) | later revisions |
- * | control flow, nested functions/classes, `this`/`super` | commit 5 (the six cases) |
- * | a local with no declared type that crosses an await (the field needs a type) | — (the §4.7.4 limit, restated) |
- * | async arrows, methods, function expressions, generics, optional parameters | commit 6 / deferred by arrow-this |
- * | an `async` function with no declared return type | — (permanent: `T` is what `Task<T>` names) |
- *
- * **What it emits, for `async function f(h: Task<i32>): i32 { … }`** — §4.1's
- * three artifacts, with `N` awaits numbered `1..N` in textual order (`0` is the
- * entry, `N+1` the terminal):
- *
- * ```ts
- * class f$State extends TaskState {     // 1. the state struct, before `f`
- *   h: Task<i32>;                       //    one field per parameter
- *   v: i32;                             //    one per lifted local (§4.3)
- *   resumePoint: i32;                   //    the resume-point discriminator
- *   $awaited1!: TaskRecord;             //    one per await: the awaited record
- *   result: i32;                        //    STAND-IN for the record payload
- *   handle!: Task<i32>;                 //    what the entry returns
- *   constructor(h: Task<i32>) { … }     //    parameters + resumePoint = 0
- * }
- * function f(h: Task<i32>): Task<i32> { // 2. the entry: `f` itself
- *   const state = new f$State(h);
- *   state.handle = new Task<i32>();
- *   state.handle._record = __taskRegister(state);
- *   f$resume(state);                    //    §4.1: the sync prefix runs HERE
- *   return state.handle;                //    §1.2 rule 1: it may be settled
- * }
- * function f$resume(state: f$State): void {   // 3. the resume function
- *   let h = state.h;                    //    §4.3: the copy-in, every entry
- *   let v = state.v;                    //    ...including each lifted local
- *   if (state.resumePoint == 0) {       //    region 0
- *     v = 1;                            //    the declaration, as assignment
- *     state.$awaited1 = h._record;      //    the operand, evaluated once
- *     state.resumePoint = 1;
- *     if (!__taskSettled(state.$awaited1)) {  // §1.2 rule 4
- *       state.v = v;                    //    the copy-out, before the park
- *       state.h = h;
- *       __taskPark(state, state.$awaited1);
- *       return;                         //    a suspension is a return
- *     }
- *   }
- *   if (state.resumePoint == 1) {       //    region 1
- *     let x: i32 = `await h`;           //    codegen's typed read (§4.7.4)
- *     state.result = x + 1;
- *     state.resumePoint = 2;            //    the terminal
- *     return;
- *   }
- * }
- * ```
- *
- * Three things in that shape are deliberate and worth stating:
- *
- * - **The suspension sits at the *end* of the preceding region**, after the
- *   statements that precede it and before the statement that reads the value.
- *   That is what keeps evaluation order: the operand is evaluated where the
- *   `await` is written, and the guarded region that follows is re-entered on
- *   resume. The settled path falls through into region `K`, which is how §1.2
- *   rule 4 works without a second resume point.
- * - **The awaited record lives in the state struct** (`$awaitedK`) — the
- *   operand's result survives the return; the *value* does not, because the
- *   record is the value's bearer (§3.2, §4.7.4).
- * - **The read is codegen's**, not the transform's: `AwaitExpression` nodes stay
- *   in the tree and the side table (`src/async/ir.ts`) tells `compiler.ts` where
- *   to read from. The transform never needs `T` (§4.7.4).
- *
- * **`result` is still a stand-in.** §4.1's terminal writes the task's value; the
- * final shape writes it through the record (§3.2's offsets), which needs the
- * runtime's record instance (Phase 4). Until then the value lands in the state
- * struct, the one object that provably outlives the return.
- *
- * **Invariant for the next revision, restated because breaking it is silent:**
- * parameters are copied *in* from the state struct at the top of `f$resume`
- * (§4.3), so a parameter written in one region is not visible in a later one —
- * which is why a parameter written before an await and read after it is refused
- * here, by name, rather than lowered.
+ * **`this` and captured bindings are not lifted** (§4.4): a captured binding's
+ * storage is the environment, and the state struct will reference the environment
+ * rather than copy the binding. Closures are unimplemented in this fork and `this`
+ * has no path into an async function today (an async method is refused, and there
+ * is no other construct that supplies `this`), so that rule is stated and
+ * currently unreachable — commit 6's job once closures land.
  */
 
 import { CommonFlags } from "../common";
@@ -140,9 +115,11 @@ import {
   Expression,
   ExpressionStatement,
   FieldDeclaration,
+  ForStatement,
   FunctionDeclaration,
   FunctionExpression,
   IdentifierExpression,
+  IfStatement,
   InstanceOfExpression,
   LiteralExpression,
   LiteralKind,
@@ -166,7 +143,8 @@ import {
   UnaryPostfixExpression,
   UnaryPrefixExpression,
   VariableDeclaration,
-  VariableStatement
+  VariableStatement,
+  WhileStatement
 } from "../ast";
 
 /** Suffix of the synthesized state struct for a lowered `async function f`. */
@@ -191,6 +169,8 @@ const RESUME_POINT_FIELD = "resumePoint";
 const RESULT_FIELD = "result";
 /** The state struct's handle field. */
 const HANDLE_FIELD = "handle";
+/** Prefix of the synthesized condition temporaries of `if` statements. */
+const COND_TEMP_PREFIX = "$cond";
 
 /** The in-tree `afterParse` `Transform`. */
 export class AsyncLowerTransform {
@@ -238,11 +218,15 @@ export class AsyncLowerTransform {
         case NodeKind.FunctionDeclaration: {
           let declaration = <FunctionDeclaration>statement;
           if (declaration.isAsync) {
-            let lowered = this.lowerAsyncFunction(source, declaration, declared, parser);
+            let hoisted = new Array<Statement>();
+            let lowered = this.lowerAsyncFunction(source, declaration, declared, parser, hoisted);
             if (lowered) {
               // The state class first: `initialize()` walks this array in order
               // (`program.ts:1102-1113`) and the entry references the class.
               for (let j = 0, l = lowered.length; j < l; ++j) out.push(lowered[j]);
+              // Nested async functions' artifacts (§4.1 for a nested machine):
+              // they are top-level elements even though their entries stay nested.
+              for (let j = 0, l = hoisted.length; j < l; ++j) out.push(hoisted[j]);
             } else {
               out.push(statement); // refused; left as parsed
             }
@@ -284,13 +268,15 @@ export class AsyncLowerTransform {
   /**
    * Lowers one `async function` declaration, or refuses it and returns `null`.
    * The declaration is mutated in place — it *becomes* the entry — and the other
-   * two artifacts are returned in array order.
+   * two artifacts are returned in array order. Nested async functions' artifacts
+   * are appended to `hoisted`.
    */
   private lowerAsyncFunction(
     source: Source,
     declaration: FunctionDeclaration,
     declared: Array<string>,
-    parser: Parser
+    parser: Parser,
+    hoisted: Array<Statement>
   ): Statement[] | null {
     let signature = declaration.signature;
     let name = declaration.name.text;
@@ -331,17 +317,29 @@ export class AsyncLowerTransform {
     }
     let block = <BlockStatement>body;
 
-    // The plan: which awaits, where they suspend, and which names cross one.
-    let plans = this.planBody(parser, block, parameters);
-    if (!plans) return null;
-    let awaitCount = 0;
-    for (let i = 0, k = plans.length; i < k; ++i) {
-      if (plans[i].info) awaitCount++;
+    // --- the plan: awaits, structure, and what has to be lifted -------------
+
+    let lifting = new Lifting();
+    let cursor = new PlanCursor();
+    let seq = this.planSeq(parser, block.statements, cursor, false, source, hoisted, declared, lifting);
+    if (!seq) return null;
+    let awaitCount = cursor.next - 1;
+    this.collectLifting(parser, seq, lifting);
+    // Parameters whose value is written somewhere: the resume function's copy-in
+    // re-reads the state field on every entry, so a write that happens before a
+    // park must also be copied out — which is what lifting the parameter means
+    // (§4.3). Conservative on purpose: *any* write in an awaiting body lifts the
+    // parameter, and a parameter that is never written stays exactly the copy-in
+    // it was.
+    if (awaitCount != 0) {
+      let written = new Set<string>();
+      collectWrites(seq, written);
+      for (let i = 0, k = parameters.length; i < k; ++i) {
+        if (written.has(parameters[i].name.text)) {
+          lifting.liftParameter(parameters[i].name.text, parameters[i].name.range);
+        }
+      }
     }
-    // Which bindings are live across a suspension, and so live in the state
-    // struct rather than in a wasm local or a parameter (§4.3, §4.4).
-    let lifting = this.analyzeLifting(parser, block, parameters, plans);
-    if (!lifting) return null;
 
     // The synthesized names, checked against what this level already declares.
     let stateName = name + STATE_SUFFIX;
@@ -353,6 +351,8 @@ export class AsyncLowerTransform {
       }
     }
 
+    let localNames = new Set<string>();
+    collectLocalNames(block, localNames);
     let stateVarName = nameForState(parameters, block);
     let stateIdent = Node.createIdentifierExpression(stateVarName, range);
     let thisIdent = Node.createThisExpression(range);
@@ -370,11 +370,10 @@ export class AsyncLowerTransform {
         parameter.name.range
       ));
     }
-    // The lifted locals (§4.3): one managed field each, the type the source
-    // declared. No `!` — the constructor gives them a zero of their type, the
-    // same way the payload stand-in does, and `!` would draw a note either way
-    // for a value type ("unnecessary") or a nullable reference ("always
-    // assigned") (`compiler.ts:9232-9257`).
+    // The lifted locals (§4.3): one field each, of the type the source declared.
+    // No `!` — the constructor gives them a zero of their type, and `!` would
+    // draw a note either way for a value type ("unnecessary") or a nullable
+    // reference ("always assigned") (`compiler.ts:9232-9257`).
     for (let i = 0, k = lifting.locals.length; i < k; ++i) {
       let lift = lifting.locals[i];
       stateFields.push(Node.createFieldDeclaration(
@@ -394,11 +393,6 @@ export class AsyncLowerTransform {
     ));
     let returnsValue = !isVoidTypeNode(returnType);
     if (returnsValue) {
-      // No `!` here, and a `changetype<R>(0)` default in the constructor: the
-      // definite-assignment flag would say "unnecessary" for a value type and
-      // "always assigned" for a nullable reference (`compiler.ts:9232-9257`),
-      // and neither note helps. The default is what the field holds until the
-      // terminal write.
       stateFields.push(Node.createFieldDeclaration(
         Node.createIdentifierExpression(RESULT_FIELD, range),
         null, CommonFlags.Instance,
@@ -408,14 +402,13 @@ export class AsyncLowerTransform {
       ));
     }
     // One record field per await: the awaited task's record, which is what
-    // survives the suspension (§4.2's "store its record reference in the state
-    // struct"). `TaskRecord` is a reference type, so the field is traced by the
-    // generated visitor and the record's chain stays alive (§4.4).
-    for (let i = 0, k = plans.length; i < k; ++i) {
-      let info = plans[i].info;
-      if (!info) continue;
+    // survives the suspension (§4.2). `TaskRecord` is a reference type, so the
+    // generated visitor traces it and the record's chain stays alive (§4.4).
+    let awaitFields = new Array<string>();
+    collectAwaitFields(seq, awaitFields);
+    for (let i = 0, k = awaitFields.length; i < k; ++i) {
       stateFields.push(Node.createFieldDeclaration(
-        Node.createIdentifierExpression(info.fieldName, range),
+        Node.createIdentifierExpression(awaitFields[i], range),
         null, CommonFlags.Instance | CommonFlags.DefinitelyAssigned,
         typeNode("TaskRecord", range),
         null,
@@ -437,8 +430,7 @@ export class AsyncLowerTransform {
     let ctorParameters = new Array<ParameterNode>();
     let ctorStatements = new Array<Statement>();
     // The state struct extends `TaskState`, so its constructor must call
-    // `super()` first (`AS2377`). `super` in an expression position is a call
-    // on a `SuperExpression` (`parser.ts:4231-4239`).
+    // `super()` first (`AS2377`).
     ctorStatements.push(Node.createExpressionStatement(
       Node.createCallExpression(Node.createSuperExpression(range), null, [], range)
     ));
@@ -465,28 +457,16 @@ export class AsyncLowerTransform {
       // terminal writes the real value first).
       ctorStatements.push(Node.createExpressionStatement(
         assignField(thisIdent, RESULT_FIELD,
-          Node.createCallExpression(
-            Node.createIdentifierExpression("changetype", range),
-            [ returnType ],
-            [ intLiteral(0, range) ],
-            range
-          ),
-          range)
+          changetypeZero(returnType, range), range)
       ));
     }
-    // The lifted locals start at a zero of their type. Region 0 assigns the
-    // real value when the declaration runs, before any suspension can park.
+    // The lifted locals start at a zero of their type. The region that declares
+    // one assigns the real value before any suspension can park.
     for (let i = 0, k = lifting.locals.length; i < k; ++i) {
       let lift = lifting.locals[i];
       ctorStatements.push(Node.createExpressionStatement(
         assignField(thisIdent, lift.name,
-          Node.createCallExpression(
-            Node.createIdentifierExpression("changetype", lift.declaration.name.range),
-            [ lift.type ],
-            [ intLiteral(0, lift.declaration.name.range) ],
-            lift.declaration.name.range
-          ),
-          lift.declaration.name.range)
+          changetypeZero(lift.type, lift.declaration.name.range), lift.declaration.name.range)
       ));
     }
     stateFields.push(Node.createMethodDeclaration(
@@ -562,154 +542,50 @@ export class AsyncLowerTransform {
     // --- artifact 1: the resume function -----------------------------------
 
     let resumeVarName = nameForState(parameters, block);
-    let resumeStateIdent = Node.createIdentifierExpression(resumeVarName, range);
     // The side table the compiler reads (§4.7.4): where each lowered `await`
     // finds its value. Filled here, once the resume function's state local has
     // its name.
-    for (let i = 0, k = plans.length; i < k; ++i) {
-      let info = plans[i].info;
-      if (!info) continue;
+    let infos = new Array<AwaitInfo>();
+    collectAwaitInfos(seq, infos);
+    for (let i = 0, k = infos.length; i < k; ++i) {
+      let info = infos[i];
       awaitSites.set(info.node, new AwaitSite(
         info.discriminator,
         awaitedFieldExpression(resumeVarName, info.fieldName, info.node.range)
       ));
     }
     let resumeStatements = new Array<Statement>();
+    // §4.3: the resume function's parameter list carries no wasm parameters —
+    // "it reads them from the state struct". The copy-in is unconditional, so it
+    // runs on every entry; a write in an earlier region survives because that
+    // region's park copies it back out (`copyOutStatements`).
     for (let i = 0, k = parameters.length; i < k; ++i) {
       let parameter = parameters[i];
-      // §4.3: the resume function's parameter list carries no wasm parameters —
-      // "it reads them from the state struct". This copy-in is unconditional, so
-      // it lands in every region; a *write* to the parameter in an earlier region
-      // survives because that region's park copies it back out (`copyOutStatements`,
-      // and `analyzeLifting` decides which parameters need it).
-      resumeStatements.push(Node.createVariableStatement(
-        null,
-        [
-          Node.createVariableDeclaration(
-            Node.createIdentifierExpression(parameter.name.text, parameter.name.range),
-            null, CommonFlags.Let, // `let`: the assignment position writes it
-            null,
-            Node.createPropertyAccessExpression(resumeStateIdent,
-              Node.createIdentifierExpression(parameter.name.text, parameter.range), parameter.range),
-            parameter.range
-          )
-        ],
-        parameter.range
-      ));
+      resumeStatements.push(copyIn(parameter.name.text, parameter.name.range, resumeVarName));
     }
-
-    // The lifted locals' copy-in (§4.3), after the parameters and before the
-    // region guards — so it runs on every entry, and the value the field holds
-    // at park time is what the resumed region sees. No annotation: the
-    // initializer's type *is* the field's type.
+    // The lifted locals' copy-in, after the parameters and before the guards.
     for (let i = 0, k = lifting.locals.length; i < k; ++i) {
       let lift = lifting.locals[i];
-      resumeStatements.push(Node.createVariableStatement(
-        null,
-        [
-          Node.createVariableDeclaration(
-            Node.createIdentifierExpression(lift.name, lift.declaration.name.range),
-            null, CommonFlags.Let,
-            null,
-            Node.createPropertyAccessExpression(
-              resumeStateIdent,
-              Node.createIdentifierExpression(lift.name, lift.declaration.name.range),
-              lift.declaration.name.range
-            ),
-            lift.declaration.name.range
-          )
-        ],
-        lift.declaration.name.range
-      ));
+      resumeStatements.push(copyIn(lift.name, lift.declaration.name.range, resumeVarName));
     }
 
-    // Split the body into regions: region 0 runs from entry to the first
-    // suspension, region K resumes at await K and runs to the next suspension,
-    // region N runs from the last await to the terminal.
-    let regions = new Array<Array<Statement>>();
-    regions.push(new Array<Statement>());
-    let regionIndex = 0;
-    let bodyStatements = block.statements;
-    for (let i = 0, k = bodyStatements.length; i < k; ++i) {
-      let statement = bodyStatements[i];
-      let plan = plans[i];
-      let info = plan.info;
-      if (info) {
-        let region = regions[regionIndex];
-        // The operand, evaluated where the `await` is written — before the
-        // suspension, after everything that precedes it.
-        region.push(Node.createExpressionStatement(
-          Node.createBinaryExpression(
-            Token.Equals,
-            awaitedField(resumeStateIdent, info.fieldName, range),
-            Node.createPropertyAccessExpression(info.operand, Node.createIdentifierExpression(RECORD_FIELD, range), range),
-            range
-          )
-        ));
-        // The resume point is written *before* the park, so a completion that
-        // arrives first still finds a valid point (§4.2).
-        region.push(Node.createExpressionStatement(
-          assignField(resumeStateIdent, RESUME_POINT_FIELD, intLiteral(info.discriminator, range), range)
-        ));
-        // §1.2 rule 4: a settled await does not suspend. The settled path falls
-        // through into region `discriminator`, which the guard below opens.
-        region.push(Node.createIfStatement(
-          Node.createUnaryPrefixExpression(
-            Token.Exclamation,
-            Node.createCallExpression(
-              Node.createIdentifierExpression(SETTLED_NAME, range), null,
-              [ awaitedField(resumeStateIdent, info.fieldName, range) ],
-              range
-            ),
-            range
-          ),
-          Node.createBlockStatement(
-            concatStatements(
-              // The copy-out (§4.3): every lifted binding's current value goes
-              // into its field *before* the park, because the frame that holds
-              // the wasm local does not survive the return.
-              copyOutStatements(lifting, resumeVarName, range),
-              [
-                Node.createExpressionStatement(
-                  Node.createCallExpression(
-                    Node.createIdentifierExpression(PARK_NAME, range), null,
-                    [ resumeStateIdent, awaitedField(resumeStateIdent, info.fieldName, range) ],
-                    range
-                  )
-                ),
-                Node.createReturnStatement(null, range) // a suspension is a return
-              ]
-            ),
-            range
-          ),
-          null,
-          range
-        ));
-        // Open the region that reads the awaited value.
-        regionIndex++;
-        regions.push(new Array<Statement>());
-        pushAll(regions[regionIndex], rewriteStatement(statement, lifting, resumeVarName, awaitCount + 1, returnsValue));
-      } else {
-        pushAll(regions[regionIndex], rewriteStatement(statement, lifting, resumeVarName, awaitCount + 1, returnsValue));
-      }
-    }
-    // The terminal, for a body that runs off its end.
-    let lastRegion = regions[regionIndex];
-    if (!lastRegion.length || lastRegion[lastRegion.length - 1].kind != NodeKind.Return) {
-      lastRegion.push(Node.createExpressionStatement(
-        assignField(resumeStateIdent, RESUME_POINT_FIELD, intLiteral(awaitCount + 1, range), range)
-      ));
-    }
-    for (let i = 0, k = regions.length; i < k; ++i) {
+    let ctx = new EmitContext(
+      lifting, resumeVarName, awaitCount + 1, returnsValue, localNames
+    );
+    pushAll(resumeStatements, this.emitSeq(seq, ctx));
+
+    // The terminal, for a body that runs off its end. Guarded on `resumePoint
+    // == 0`: on a resumed pass the point is cleared by the continuation, so this
+    // is reached normally — and if a path somehow leaves it set, the terminal
+    // must not clobber it.
+    if (!endsWithReturn(seq)) {
       resumeStatements.push(Node.createIfStatement(
-        Node.createBinaryExpression(
-          Token.Equals_Equals,
-          Node.createPropertyAccessExpression(resumeStateIdent,
-            Node.createIdentifierExpression(RESUME_POINT_FIELD, range), range),
-          intLiteral(i, range),
-          range
-        ),
-        Node.createBlockStatement(regions[i], range),
+        isZero(resumePointRead(resumeVarName, range), range),
+        Node.createBlockStatement([
+          Node.createExpressionStatement(
+            resumePointWrite(resumeVarName, intLiteral(awaitCount + 1, range), range)
+          )
+        ], range),
         null,
         range
       ));
@@ -741,136 +617,271 @@ export class AsyncLowerTransform {
     return [ stateClass, declaration, resumeFunction ];
   }
 
-  /**
-   * Plans a body: the statements, the awaits in them, and the name crossings.
-   * Reports a refusal and answers `null` when the body cannot be lowered.
-   */
-  private planBody(
+  // --- planning ------------------------------------------------------------
+
+  /** Plans a statement list into a sequence. */
+  private planSeq(
     parser: Parser,
-    block: BlockStatement,
-    parameters: ParameterNode[]
-  ): Array<StatementPlan> | null {
-    let statements = block.statements;
-    let plans = new Array<StatementPlan>();
-    let awaits = new Array<AwaitInfo>();
+    statements: Statement[],
+    cursor: PlanCursor,
+    forceLift: bool,
+    source: Source,
+    hoisted: Array<Statement>,
+    declared: Array<string>,
+    lifting: Lifting
+  ): PlanSeq | null {
+    let seq = new PlanSeq();
     for (let i = 0, k = statements.length; i < k; ++i) {
-      let plan = this.planStatement(parser, statements[i], awaits.length + 1, i);
+      let plan = this.planStatement(
+        parser, statements[i], cursor, forceLift, source, hoisted, declared, lifting
+      );
       if (!plan) return null;
-      if (plan.info) awaits.push(plan.info);
-      plans.push(plan);
+      seq.add(plan);
     }
-    return plans;
+    return seq;
   }
 
-  /**
-   * Plans one statement: its references, and the `await` it suspends on when the
-   * await sits in a position this revision lowers.
-   */
+  /** Plans one statement — a leaf, or a construct whose children are planned. */
   private planStatement(
     parser: Parser,
     statement: Statement,
-    discriminator: i32,
-    index: i32
-  ): StatementPlan | null {
-    let awaits = new Array<AwaitExpression>();
+    cursor: PlanCursor,
+    forceLift: bool,
+    source: Source,
+    hoisted: Array<Statement>,
+    declared: Array<string>,
+    lifting: Lifting
+  ): Plan | null {
+    let plan = new Plan(statement);
     switch (statement.kind) {
       case NodeKind.Empty: {
-        return new StatementPlan(null, new NameSet(), new NameSet());
+        return plan;
       }
       case NodeKind.Expression: {
         let expression = (<ExpressionStatement>statement).expression;
-        // `await h;`
-        if (expression.kind == NodeKind.Await) {
-          let awaitNode = <AwaitExpression>expression;
-          let info = new AwaitInfo(
-            awaitNode, awaitNode.operand, discriminator,
-            AWAITED_PREFIX + discriminator.toString(), index
-          );
-          let before = new NameSet();
-          if (!this.walkExpression(parser, info.operand, before, null, false)) return null;
-          return new StatementPlan(info, before, new NameSet());
+        if (expression.kind == NodeKind.Function) {
+          let nested = (<FunctionExpression>expression).declaration;
+          if (nested.isAsync) {
+            // Case 4: an inner async function is its own state machine, with its
+            // own discriminators starting at 1. Its artifacts are hoisted to the
+            // source's top level; its entry stays where it was declared.
+            let artifacts = this.lowerAsyncFunction(source, nested, declared, parser, hoisted);
+            if (!artifacts) return null;
+            for (let i = 0, k = artifacts.length; i < k; ++i) {
+              if (artifacts[i] !== statement) hoisted.push(artifacts[i]);
+            }
+          }
+          plan.kind = PlanKind.Plain;
+          plan.nestedFunction = true;
+          return plan;
         }
-        // `x = await h;`
-        if (
-          expression.kind == NodeKind.Binary &&
-          (<BinaryExpression>expression).operator == Token.Equals &&
-          (<BinaryExpression>expression).right.kind == NodeKind.Await
-        ) {
-          let binary = <BinaryExpression>expression;
-          let awaitNode = <AwaitExpression>binary.right;
-          let info = new AwaitInfo(
-            awaitNode, awaitNode.operand, discriminator,
-            AWAITED_PREFIX + discriminator.toString(), index
-          );
-          let before = new NameSet();
-          if (!this.walkExpression(parser, info.operand, before, null, false)) return null;
-          let after = new NameSet();
-          // The target is written *after* the suspension: it is the value's
-          // destination, not its source.
-          if (!this.walkExpression(parser, binary.left, after, null, true)) return null;
-          return new StatementPlan(info, before, after);
-        }
-        break;
+        return this.planLeaf(parser, plan, cursor, lifting);
       }
-      case NodeKind.Variable: {
-        let declarations = (<VariableStatement>statement).declarations;
-        if (declarations.length == 1) {
-          let initializer = declarations[0].initializer;
-          if (initializer != null && initializer.kind == NodeKind.Await) {
-            let awaitNode = <AwaitExpression>initializer;
-            let info = new AwaitInfo(
-              awaitNode, awaitNode.operand, discriminator,
-              AWAITED_PREFIX + discriminator.toString(), index
-            );
-            let before = new NameSet();
-            if (!this.walkExpression(parser, info.operand, before, null, false)) return null;
-            return new StatementPlan(info, before, new NameSet());
+      case NodeKind.Variable:
+      case NodeKind.Return: {
+        return this.planLeaf(parser, plan, cursor, lifting);
+      }
+      case NodeKind.Block: {
+        let block = <BlockStatement>statement;
+        let body = this.planSeq(parser, block.statements, cursor, forceLift, source, hoisted, declared, lifting);
+        if (!body) return null;
+        plan.kind = PlanKind.Block;
+        plan.statements = body;
+        plan.lo = body.lo;
+        plan.hi = body.hi;
+        if (body.lo != 0) this.liftDeclaredIn(parser, body, lifting);
+        plan.all = refsOfSeq(body);
+        return plan;
+      }
+      case NodeKind.If: {
+        let ifs = <IfStatement>statement;
+        // The condition is evaluated exactly once, on the normal path; a resume
+        // never re-evaluates it (its side effects must not repeat).
+        if (!this.walkExpression(parser, ifs.condition, plan.all, null, false)) return null;
+        let thenSeq = this.planBranch(parser, ifs.ifTrue, cursor, forceLift, source, hoisted, declared, lifting);
+        if (!thenSeq) return null;
+        let elseSeq: PlanSeq | null = null;
+        if (ifs.ifFalse != null) {
+          elseSeq = this.planBranch(parser, assert(ifs.ifFalse), cursor, forceLift, source, hoisted, declared, lifting);
+          if (!elseSeq) return null;
+        }
+        plan.kind = PlanKind.If;
+        plan.cond = ifs.condition;
+        plan.thenSeq = thenSeq;
+        plan.elseSeq = elseSeq;
+        plan.lo = minLo(thenSeq, elseSeq);
+        plan.hi = maxHi(thenSeq, elseSeq);
+        if (plan.lo != 0) {
+          this.liftDeclaredIn(parser, thenSeq, lifting);
+          if (elseSeq != null) this.liftDeclaredIn(parser, assert(elseSeq), lifting);
+        }
+        plan.all = unionOf(plan.all, unionOf(refsOfSeq(thenSeq), elseSeq ? refsOfSeq(elseSeq) : new NameSet()));
+        return plan;
+      }
+      case NodeKind.While: {
+        let loop = <WhileStatement>statement;
+        if (!this.walkExpression(parser, loop.condition, plan.all, null, false)) return null;
+        let body = this.planBranch(parser, loop.body, cursor, forceLift, source, hoisted, declared, lifting);
+        if (!body) return null;
+        plan.kind = PlanKind.While;
+        plan.cond = loop.condition;
+        plan.body = body;
+        plan.lo = body.lo;
+        plan.hi = body.hi;
+        if (body.lo != 0) this.liftDeclaredIn(parser, body, lifting);
+        plan.all = unionOf(plan.all, refsOfSeq(body));
+        return plan;
+      }
+      case NodeKind.For: {
+        let loop = <ForStatement>statement;
+        // The body is planned first: whether the loop needs instrumenting (and
+        // so whether its initializer's locals must be lifted) depends on it.
+        let body = this.planBranch(parser, loop.body, cursor, forceLift, source, hoisted, declared, lifting);
+        if (!body) return null;
+        if (body.lo != 0) this.liftDeclaredIn(parser, body, lifting);
+        let init = loop.initializer;
+        if (init != null) {
+          let initPlan = this.planStatement(
+            parser, init, new PlanCursor(), false, source, hoisted, declared, lifting
+          );
+          if (!initPlan) return null;
+          if (initPlan.info != null) {
+            return this.refuse(parser, init.range, "await in a for initializer (async lowering)");
+          }
+          if (initPlan.lo != 0) return null; // already refused by the planner
+        }
+        if (loop.condition != null) {
+          if (!this.walkExpression(parser, loop.condition, plan.all, null, false)) return null;
+        }
+        if (loop.incrementor != null) {
+          if (!this.walkExpression(parser, loop.incrementor, plan.all, null, false)) return null;
+        }
+        plan.kind = PlanKind.For;
+        plan.init = init;
+        plan.cond = loop.condition;
+        plan.incr = loop.incrementor;
+        plan.body = body;
+        plan.lo = body.lo;
+        plan.hi = body.hi;
+        plan.all = unionOf(plan.all, refsOfSeq(body));
+        return plan;
+      }
+      case NodeKind.FunctionDeclaration: {
+        let nested = <FunctionDeclaration>statement;
+        if (nested.isAsync) {
+          // A nested async function is its own state machine (case 4): lower it
+          // now, with its own discriminator numbering, and hoist its artifacts.
+          // Its entry stays nested; it captures nothing, because closures are
+          // unimplemented — a nested function that referenced an outer local
+          // would not resolve today.
+          let artifacts = this.lowerAsyncFunction(source, nested, declared, parser, hoisted);
+          if (!artifacts) return null;
+          for (let i = 0, k = artifacts.length; i < k; ++i) {
+            if (artifacts[i] !== statement) hoisted.push(artifacts[i]);
           }
         }
-        break;
-      }
-      case NodeKind.Return: {
-        let value = (<ReturnStatement>statement).value;
-        if (value != null && value.kind == NodeKind.Await) {
-          let awaitNode = <AwaitExpression>value;
-          let info = new AwaitInfo(
-            awaitNode, awaitNode.operand, discriminator,
-            AWAITED_PREFIX + discriminator.toString(), index
-          );
-          let before = new NameSet();
-          if (!this.walkExpression(parser, info.operand, before, null, false)) return null;
-          return new StatementPlan(info, before, new NameSet());
-        }
-        break;
+        // A function declaration has no runtime effect at its position (it is
+        // hoisted), so it is emitted unguarded and its body is not walked.
+        plan.kind = PlanKind.Plain;
+        return plan;
       }
       default: {
         return this.refuse(parser, statement.range, reasonFor(statement));
       }
     }
+  }
 
-    // No supported await in this statement — walk it whole. Any `await` found is
-    // in a position this revision does not lower, and the walker says so.
-    let after = new NameSet();
+  /** Plans a branch or loop body, which need not be a block. */
+  private planBranch(
+    parser: Parser,
+    statement: Statement,
+    cursor: PlanCursor,
+    forceLift: bool,
+    source: Source,
+    hoisted: Array<Statement>,
+    declared: Array<string>,
+    lifting: Lifting
+  ): PlanSeq | null {
+    let statements: Statement[];
+    if (statement.kind == NodeKind.Block) statements = (<BlockStatement>statement).statements;
+    else statements = [ statement ];
+    return this.planSeq(parser, statements, cursor, forceLift, source, hoisted, declared, lifting);
+  }
+
+  /**
+   * Plans a leaf statement: an ordinary one, or one of the four positions
+   * where an `await` is lowered (§4.1).
+   */
+  private planLeaf(
+    parser: Parser,
+    plan: Plan,
+    cursor: PlanCursor,
+    lifting: Lifting
+  ): Plan | null {
+    let statement = plan.node;
+
+    // `await h;`
+    if (statement.kind == NodeKind.Expression) {
+      let expression = (<ExpressionStatement>statement).expression;
+      if (expression.kind == NodeKind.Await) {
+        return this.planAwait(parser, plan, <AwaitExpression>expression, cursor, lifting);
+      }
+      // `x = await h;`
+      if (expression.kind == NodeKind.Binary) {
+        let binary = <BinaryExpression>expression;
+        if (binary.operator == Token.Equals && binary.right.kind == NodeKind.Await) {
+          return this.planAwait(parser, plan, <AwaitExpression>binary.right, cursor, lifting, binary.left);
+        }
+      }
+    }
+    // `let x: T = await h;`
+    if (statement.kind == NodeKind.Variable) {
+      let declarations = (<VariableStatement>statement).declarations;
+      if (declarations.length == 1) {
+        let declaration = declarations[0];
+        let initializer = declaration.initializer;
+        if (initializer != null && initializer.kind == NodeKind.Await) {
+          // A local declared *at* an await sits inside the continuation block, so
+          // it must live in the state struct (§4.3) — there is nowhere else its
+          // declaration could be seen from.
+          let lift = this.liftDeclarator(parser, declaration, lifting);
+          if (!lift) return null;
+          return this.planAwait(parser, plan, <AwaitExpression>initializer, cursor, lifting);
+        }
+      }
+    }
+    // `return await h;`
+    if (statement.kind == NodeKind.Return) {
+      let value = (<ReturnStatement>statement).value;
+      if (value != null && value.kind == NodeKind.Await) {
+        return this.planAwait(parser, plan, <AwaitExpression>value, cursor, lifting);
+      }
+    }
+
+    // No supported await here. Walk the statement whole: any `await` found is in
+    // a position this revision does not lower, and the walker says so. Every
+    // reference counts as "after", because the statement is emitted inside a
+    // guard block and any await it contains could resume past its start.
+    let awaits = new Array<AwaitExpression>();
     switch (statement.kind) {
       case NodeKind.Expression: {
-        if (!this.walkExpression(parser, (<ExpressionStatement>statement).expression, after, awaits, false)) return null;
+        if (!this.walkExpression(parser, (<ExpressionStatement>statement).expression, plan.all, awaits, false)) return null;
         break;
       }
       case NodeKind.Variable: {
         let declarations = (<VariableStatement>statement).declarations;
         for (let i = 0, k = declarations.length; i < k; ++i) {
-          let initializer = declarations[i].initializer;
-          if (initializer && !this.walkExpression(parser, initializer, after, awaits, false)) return null;
+          let declaration = declarations[i];
+          plan.declarations.push(declaration);
+          let initializer = declaration.initializer;
+          if (initializer && !this.walkExpression(parser, initializer, plan.all, awaits, false)) return null;
         }
         break;
       }
       case NodeKind.Return: {
         let value = (<ReturnStatement>statement).value;
-        if (value && !this.walkExpression(parser, value, after, awaits, false)) return null;
+        if (value && !this.walkExpression(parser, value, plan.all, awaits, false)) return null;
         break;
-      }
-      default: { // unreachable: the switch above returns for every other kind
-        return this.refuse(parser, statement.range, reasonFor(statement));
       }
     }
     if (awaits.length) {
@@ -879,101 +890,391 @@ export class AsyncLowerTransform {
         : "await in an unsupported position (async lowering)";
       return this.refuse(parser, awaits[0].range, where);
     }
-    return new StatementPlan(null, new NameSet(), after);
+    return plan;
+  }
+
+  /** Records one supported `await` as a suspension at the next discriminator. */
+  private planAwait(
+    parser: Parser,
+    plan: Plan,
+    node: AwaitExpression,
+    cursor: PlanCursor,
+    lifting: Lifting,
+    writeTarget: Expression | null = null
+  ): Plan | null {
+    let discriminator = cursor.next++;
+    let operand = node.operand;
+    let before = new NameSet();
+    if (!this.walkExpression(parser, operand, before, null, false)) return null;
+    let after = new NameSet();
+    if (writeTarget != null) {
+      if (!this.walkExpression(parser, writeTarget, after, null, true)) return null;
+    }
+    plan.kind = PlanKind.Plain;
+    plan.info = new AwaitInfo(
+      node, operand, discriminator, AWAITED_PREFIX + discriminator.toString(),
+      discriminator
+    );
+    plan.lo = discriminator;
+    plan.hi = discriminator;
+    plan.before = before;
+    plan.after = after;
+    plan.all = unionOf(before, after);
+    return plan;
   }
 
   /**
-   * Refuses the names that cannot survive a suspension:
-   *
-   * - a local declared before an await and referenced after it — its storage
-   *   would have to be lifted (commit 4), and it is not;
-   * - a parameter *written* before an await and *read* after it — the resume
-   *   function copies parameters in from the state struct at entry, so the write
-   *   is lost on re-entry.
-   *
-   * References *before* a suspension are fine: the operand of an `await` is
-   * evaluated before the park, in the region that parks.
+   * Adds one declarator to the lifted set, refusing the ones a state field cannot
+   * carry. `planLeaf` calls this for a declaration at an await, and the planner
+   * for declarations inside an await-bearing construct.
    */
-  private analyzeLifting(
+  private liftDeclarator(
     parser: Parser,
-    block: BlockStatement,
-    parameters: ParameterNode[],
-    plans: Array<StatementPlan>
-  ): Lifting | null {
-    let lifting = new Lifting();
+    declaration: VariableDeclaration,
+    lifting: Lifting
+  ): bool {
+    let name = declaration.name.text;
+    if (lifting.hasLocal(name)) return true;
+    if (isReservedStateField(name)) {
+      this.refuse(parser, declaration.name.range,
+        "a local whose name is reserved by the state struct (async lowering)");
+      return false;
+    }
+    let type = declaration.type;
+    if (type == null) {
+      // The field needs a type, and the transform runs before resolution:
+      // `let v = 1;` has none it can name. (§4.7.4's limit, in a second place.)
+      this.refuse(parser, declaration.name.range,
+        "a local without a declared type that crosses an await (async lowering)");
+      return false;
+    }
+    lifting.liftLocal(name, type, declaration);
+    return true;
+  }
 
+  /**
+   * Lifts every local declared inside a construct that contains an await
+   * (§4.3): the construct's body is emitted inside a guard block, so a plain
+   * declaration would go out of scope for everything after it. Constructs with
+   * no await of their own are emitted verbatim, so their locals stay locals.
+   */
+  private liftDeclaredIn(parser: Parser, seq: PlanSeq, lifting: Lifting): bool {
+    let plans = seq.plans;
     for (let i = 0, k = plans.length; i < k; ++i) {
-      let info = plans[i].info;
-      if (!info) continue;
-      let index = info.statementIndex;
-
-      // Everything referenced after this suspension: the await statement's own
-      // after-part, then every later statement whole. The operand is *not* in
-      // here — it is evaluated before the park, in the region that parks.
-      let referenced = new Set<string>();
-      addAll(referenced, plans[index].after.reads);
-      addAll(referenced, plans[index].after.writes);
-      for (let j = index + 1, jk = plans.length; j < jk; ++j) {
-        addAll(referenced, plans[j].before.reads);
-        addAll(referenced, plans[j].before.writes);
-        addAll(referenced, plans[j].after.reads);
-        addAll(referenced, plans[j].after.writes);
+      let plan = plans[i];
+      let declarations = plan.declarations;
+      for (let j = 0, jk = declarations.length; j < jk; ++j) {
+        if (!this.liftDeclarator(parser, declarations[j], lifting)) return false;
       }
+      if (plan.kind == PlanKind.Block && plan.lo != 0) {
+        if (!this.liftDeclaredIn(parser, assert(plan.statements), lifting)) return false;
+      } else if (plan.kind == PlanKind.If && plan.lo != 0) {
+        if (!this.liftDeclaredIn(parser, assert(plan.thenSeq), lifting)) return false;
+        if (plan.elseSeq != null && !this.liftDeclaredIn(parser, assert(plan.elseSeq), lifting)) return false;
+      } else if ((plan.kind == PlanKind.While || plan.kind == PlanKind.For) && plan.lo != 0) {
+        if (!this.liftDeclaredIn(parser, assert(plan.body), lifting)) return false;
+      }
+    }
+    return true;
+  }
 
-      // A local declared before the suspension and referenced after it is live
-      // across it: its home is the state struct (§4.3, §4.4).
-      for (let j = 0; j < index; ++j) {
-        let statement = block.statements[j];
-        if (statement.kind != NodeKind.Variable) continue;
-        let declarations = (<VariableStatement>statement).declarations;
-        for (let d = 0, dk = declarations.length; d < dk; ++d) {
-          let declaration = declarations[d];
+  /**
+   * The liveness half of lifting (§4.3): a local declared before a suspension
+   * and referenced after it must survive it. Runs over a planned sequence, then
+   * recursively over its constructs.
+   */
+  private collectLifting(parser: Parser, seq: PlanSeq, lifting: Lifting): void {
+    let declaredBefore = new Array<VariableDeclaration>();
+    let plans = seq.plans;
+    for (let i = 0, k = plans.length; i < k; ++i) {
+      let plan = plans[i];
+      if (plan.lo != 0) {
+        // Everything this statement references after its await, plus every
+        // reference in the statements that follow it.
+        let referenced = new NameSet();
+        addAll(referenced.reads, plan.after.reads);
+        addAll(referenced.writes, plan.after.writes);
+        addAll(referenced.reads, plan.all.reads);
+        addAll(referenced.writes, plan.all.writes);
+        for (let j = i + 1, jk = plans.length; j < jk; ++j) {
+          addAll(referenced.reads, plans[j].all.reads);
+          addAll(referenced.writes, plans[j].all.writes);
+        }
+        for (let j = 0, jk = declaredBefore.length; j < jk; ++j) {
+          let declaration = declaredBefore[j];
           let name = declaration.name.text;
-          if (!referenced.has(name)) continue;
-          if (lifting.hasLocal(name)) continue;
-          if (isReservedStateField(name)) {
-            this.refuse(parser, declaration.name.range,
-              "a local whose name is reserved by the state struct (async lowering)");
-            return null;
+          if (referenced.reads.has(name) || referenced.writes.has(name)) {
+            if (!this.liftDeclarator(parser, declaration, lifting)) return;
           }
-          // The field needs a type, and the transform runs before resolution:
-          // `let v = 1;` has none it can name. (The same limit §4.7.4 records
-          // for the typed read, and the same answer: refuse by name.)
-          let type = declaration.type;
-          if (type == null) {
-            this.refuse(parser, declaration.name.range,
-              "a local without a declared type that crosses an await (async lowering)");
-            return null;
-          }
-          lifting.locals.push(new LiftedLocal(name, type, declaration, j));
         }
       }
-
-      // A parameter *written* before this suspension and *read* after it: the
-      // copy-in re-reads the state field on every entry, so the write survives
-      // only if the field is written before the park. That is the parameter's
-      // lift (§4.3) — the field already exists, so it costs one store.
-      let readAfter = new Set<string>();
-      addAll(readAfter, plans[index].after.reads);
-      for (let j = index + 1, jk = plans.length; j < jk; ++j) {
-        addAll(readAfter, plans[j].before.reads);
-        addAll(readAfter, plans[j].after.reads);
+      // Declarations at this level, for the awaits that follow them.
+      let declarations = plan.declarations;
+      for (let j = 0, jk = declarations.length; j < jk; ++j) {
+        let declaration = declarations[j];
+        if (!lifting.hasLocal(declaration.name.text)) declaredBefore.push(declaration);
       }
-      let writeBefore = new Set<string>();
-      for (let j = 0; j < index; ++j) {
-        addAll(writeBefore, plans[j].before.writes);
-        addAll(writeBefore, plans[j].after.writes);
-      }
-      addAll(writeBefore, plans[index].before.writes);
-      for (let i = 0, k2 = parameters.length; i < k2; ++i) {
-        let name = parameters[i].name.text;
-        if (writeBefore.has(name) && readAfter.has(name)) {
-          lifting.liftParameter(name, parameters[i].name.range);
+      // Recurse. A construct's own locals were lifted during planning (they are
+      // declared inside an await-bearing construct); its nested awaits still need
+      // the sequence liveness rule, which the recursion provides.
+      switch (plan.kind) {
+        case PlanKind.Block: {
+          this.collectLifting(parser, assert(plan.statements), lifting);
+          break;
+        }
+        case PlanKind.If: {
+          this.collectLifting(parser, assert(plan.thenSeq), lifting);
+          if (plan.elseSeq != null) this.collectLifting(parser, assert(plan.elseSeq), lifting);
+          break;
+        }
+        case PlanKind.While:
+        case PlanKind.For: {
+          this.collectLifting(parser, assert(plan.body), lifting);
+          break;
         }
       }
     }
-    return lifting;
   }
+
+  // --- emission ------------------------------------------------------------
+
+  /** Emits one planned sequence as resume-function statements. */
+  private emitSeq(seq: PlanSeq, ctx: EmitContext): Array<Statement> {
+    let out = new Array<Statement>();
+    let plans = seq.plans;
+    for (let i = 0, k = plans.length; i < k; ++i) {
+      pushAll(out, this.emitPlan(plans[i], ctx));
+    }
+    return out;
+  }
+
+  /** Emits one planned statement. */
+  private emitPlan(plan: Plan, ctx: EmitContext): Array<Statement> {
+    let out = new Array<Statement>();
+    let node = plan.node;
+    let range = node.range;
+    switch (plan.kind) {
+      case PlanKind.Plain: {
+        if (plan.nestedFunction || node.kind == NodeKind.FunctionDeclaration) {
+          // A declaration is hoisted, so it is emitted unguarded: wrapping it in
+          // a guard block would put a function declaration in a block.
+          out.push(node);
+          return out;
+        }
+        if (plan.info != null) {
+          let info = plan.info;
+          // The prefix: evaluate the operand where the `await` is written, set
+          // the resume point, and suspend unless the task is already settled.
+          let prefix = new Array<Statement>();
+          prefix.push(Node.createExpressionStatement(
+            Node.createBinaryExpression(
+              Token.Equals,
+              awaitedFieldOf(ctx.stateName, info.fieldName, range),
+              Node.createPropertyAccessExpression(
+                info.operand, Node.createIdentifierExpression(RECORD_FIELD, range), range
+              ),
+              range
+            )
+          ));
+          prefix.push(Node.createExpressionStatement(
+            resumePointWrite(ctx.stateName, intLiteral(info.discriminator, range), range)
+          ));
+          // §1.2 rule 4: a settled await does not suspend. The settled path falls
+          // through into the continuation below, which the resume point opens.
+          let park = new Array<Statement>();
+          pushAll(park, copyOutStatements(ctx.lifting, ctx.stateName, range));
+          park.push(Node.createExpressionStatement(
+            Node.createCallExpression(
+              Node.createIdentifierExpression(PARK_NAME, range), null,
+              [ Node.createIdentifierExpression(ctx.stateName, range), awaitedFieldOf(ctx.stateName, info.fieldName, range) ],
+              range
+            )
+          ));
+          park.push(Node.createReturnStatement(null, range)); // a suspension is a return
+          // `if (!__taskSettled($awaitedK)) { <copy-out>; park; return; }` — the
+          // condition is the negation itself, not a comparison of it (an `== 0`
+          // here would invert the guard and park a settled await).
+          prefix.push(Node.createIfStatement(
+            Node.createUnaryPrefixExpression(
+              Token.Exclamation,
+              Node.createCallExpression(
+                Node.createIdentifierExpression(SETTLED_NAME, range), null,
+                [ awaitedFieldOf(ctx.stateName, info.fieldName, range) ],
+                range
+              ),
+              range
+            ),
+            Node.createBlockStatement(park, range),
+            null,
+            range
+          ));
+          out.push(Node.createIfStatement(
+            isZero(resumePointRead(ctx.stateName, range), range),
+            Node.createBlockStatement(prefix, range),
+            null,
+            range
+          ));
+          // The continuation: the statement itself, whose `await` node codegen
+          // compiles as the typed read (§4.7.4). Clearing the resume point first
+          // is what lets everything after it run normally, once.
+          let continuation = new Array<Statement>();
+          continuation.push(Node.createExpressionStatement(
+            resumePointWrite(ctx.stateName, intLiteral(0, range), range)
+          ));
+          pushAll(continuation, rewriteStatement(node, ctx));
+          out.push(Node.createIfStatement(
+            equals(
+              resumePointRead(ctx.stateName, range),
+              intLiteral(info.discriminator, range),
+              range
+            ),
+            Node.createBlockStatement(continuation, range),
+            null,
+            range
+          ));
+          return out;
+        }
+        if (plan.lo == 0) {
+          // An ordinary statement: runs on the normal pass, skipped on any resume
+          // that has not yet cleared the point.
+          out.push(Node.createIfStatement(
+            isZero(resumePointRead(ctx.stateName, range), range),
+            Node.createBlockStatement(rewriteStatement(node, ctx), range),
+            null,
+            range
+          ));
+        }
+        return out;
+      }
+      case PlanKind.Block: {
+        let inner = this.emitSeq(assert(plan.statements), ctx);
+        if (plan.lo == 0) return guarded(rewriteReturns(node, ctx), ctx, range);
+        out.push(Node.createIfStatement(
+          enterGuard(ctx.stateName, plan.lo, plan.hi, range),
+          Node.createBlockStatement(inner, range),
+          null,
+          range
+        ));
+        return out;
+      }
+      case PlanKind.If: {
+        if (plan.lo == 0) return guarded(rewriteReturns(node, ctx), ctx, range);
+        let thenStatements = this.emitSeq(assert(plan.thenSeq), ctx);
+        let elseStatements = plan.elseSeq != null ? this.emitSeq(assert(plan.elseSeq), ctx) : new Array<Statement>();
+        let temp = ctx.freshTemp(range);
+        let body = new Array<Statement>();
+        // The condition is evaluated only on the normal path. On a resume it is
+        // dispatched on the branch the resume point belongs to, which is also why
+        // an await in a branch that did not run is harmless: nothing parked.
+        body.push(Node.createVariableStatement(
+          null,
+          [ Node.createVariableDeclaration(
+            Node.createIdentifierExpression(temp, range),
+            null, CommonFlags.Let,
+            typeNode("bool", range),
+            Node.createFalseExpression(range),
+            range
+          ) ],
+          range
+        ));
+        body.push(Node.createIfStatement(
+          isZero(resumePointRead(ctx.stateName, range), range),
+          Node.createBlockStatement([
+            Node.createExpressionStatement(simpleAssign(temp, assert(plan.cond), range))
+          ], range),
+          Node.createBlockStatement([
+            Node.createExpressionStatement(simpleAssign(
+              temp,
+              inRangeExpression(ctx.stateName, plan.thenSeq != null ? assert(plan.thenSeq).lo : 0,
+                plan.thenSeq != null ? assert(plan.thenSeq).hi : 0, range),
+              range
+            ))
+          ], range),
+          range
+        ));
+        body.push(Node.createIfStatement(
+          Node.createIdentifierExpression(temp, range),
+          Node.createBlockStatement(thenStatements, range),
+          elseStatements.length
+            ? Node.createBlockStatement(elseStatements, range)
+            : null,
+          range
+        ));
+        out.push(Node.createIfStatement(
+          enterGuard(ctx.stateName, plan.lo, plan.hi, range),
+          Node.createBlockStatement(body, range),
+          null,
+          range
+        ));
+        return out;
+      }
+      case PlanKind.While: {
+        if (plan.lo == 0) return guarded(rewriteReturns(node, ctx), ctx, range);
+        let bodyStatements = this.emitSeq(assert(plan.body), ctx);
+        // `resumePoint != 0 || cond`: a resumed pass enters the body without
+        // re-evaluating the condition, then its continuation clears the point, so
+        // the next iteration evaluates it normally.
+        let condition = Node.createBinaryExpression(
+          Token.Bar_Bar,
+          notZero(resumePointRead(ctx.stateName, range), range),
+          plan.cond != null ? plan.cond : Node.createTrueExpression(range),
+          range
+        );
+        out.push(Node.createIfStatement(
+          enterGuard(ctx.stateName, plan.lo, plan.hi, range),
+          Node.createBlockStatement([
+            Node.createWhileStatement(
+              condition,
+              Node.createBlockStatement(bodyStatements, range),
+              range
+            )
+          ], range),
+          null,
+          range
+        ));
+        return out;
+      }
+      case PlanKind.For: {
+        if (plan.lo == 0) return guarded(rewriteReturns(node, ctx), ctx, range);
+        let bodyStatements = this.emitSeq(assert(plan.body), ctx);
+        if (plan.incr != null) {
+          bodyStatements.push(Node.createExpressionStatement(assert(plan.incr)));
+        }
+        let loopStatements = new Array<Statement>();
+        if (plan.init != null) {
+          // The initializer runs once, on the normal pass. A lifted loop variable
+          // becomes an assignment (`rewriteStatement`), and its copy-in already
+          // declared it at function scope.
+          loopStatements.push(Node.createIfStatement(
+            isZero(resumePointRead(ctx.stateName, range), range),
+            Node.createBlockStatement(rewriteStatement(assert(plan.init), ctx), range),
+            null,
+            range
+          ));
+        }
+        loopStatements.push(Node.createWhileStatement(
+          Node.createBinaryExpression(
+            Token.Bar_Bar,
+            notZero(resumePointRead(ctx.stateName, range), range),
+            plan.cond != null ? plan.cond : Node.createTrueExpression(range),
+            range
+          ),
+          Node.createBlockStatement(bodyStatements, range),
+          range
+        ));
+        out.push(Node.createIfStatement(
+          enterGuard(ctx.stateName, plan.lo, plan.hi, range),
+          Node.createBlockStatement(loopStatements, range),
+          null,
+          range
+        ));
+        return out;
+      }
+    }
+    return out;
+  }
+
+  // --- expression walking --------------------------------------------------
 
   /**
    * Walks an expression: collects identifier references, collects the `await`
@@ -1161,16 +1462,84 @@ export class AsyncLowerTransform {
   }
 }
 
-/** One planned statement: its references, and the await it suspends on. */
-class StatementPlan {
+// --- plans -----------------------------------------------------------------
+
+/** What a planned statement is. */
+const enum PlanKind {
+  /** A leaf: an ordinary statement, or one that awaits directly. */
+  Plain,
+  /** A `{ ... }` block. */
+  Block,
+  /** An `if`/`else`. */
+  If,
+  /** A `while` loop. */
+  While,
+  /** A `for` loop, emitted as a `while` plus initializer and incrementor. */
+  For
+}
+
+/** A planned statement: a leaf, or a construct with planned children. */
+class Plan {
+  kind: PlanKind = PlanKind.Plain;
+  /** Discriminator range of the awaits in this subtree (`0` when none). */
+  lo: i32 = 0;
+  hi: i32 = 0;
+  /** The direct await, when this statement is one of the four positions. */
+  info: AwaitInfo | null = null;
+  /** References evaluated before the suspension (the operand alone). */
+  before: NameSet = new NameSet();
+  /** References evaluated after it — or all of them, when there is no direct await. */
+  after: NameSet = new NameSet();
+  /** Every reference in the subtree. */
+  all: NameSet = new NameSet();
+  // structure
+  statements: PlanSeq | null = null; // Block
+  cond: Expression | null = null;    // If, While, For
+  thenSeq: PlanSeq | null = null;    // If
+  elseSeq: PlanSeq | null = null;    // If
+  body: PlanSeq | null = null;       // While, For
+  init: Statement | null = null;     // For
+  incr: Expression | null = null;    // For
+  /** The declarators this statement introduces, when it is a declaration. */
+  declarations: Array<VariableDeclaration> = new Array();
+  /**
+   * Whether this is a nested function declaration in disguise. AS parses
+   * `function inner() {}` inside a function body as an *expression statement*
+   * whose expression is a `FunctionExpression` (measured: kind 40 wrapping
+   * kind 15), not as a `FunctionDeclaration` — and such a statement is hoisted,
+   * so it is emitted unguarded.
+   */
+  nestedFunction: bool = false;
+  range: Range;
+
   constructor(
-    /** The await this statement suspends on, if any. */
-    public info: AwaitInfo | null,
-    /** References evaluated *before* that suspension (the operand alone). */
-    public before: NameSet,
-    /** References evaluated *after* it — or the whole statement, when none. */
-    public after: NameSet
-  ) {}
+    /** The source statement. */
+    public node: Statement
+  ) {
+    this.range = node.range;
+  }
+}
+
+/** A planned statement list. */
+class PlanSeq {
+  plans: Array<Plan> = new Array();
+  /** Discriminator range of the awaits in this sequence (`0` when none). */
+  lo: i32 = 0;
+  hi: i32 = 0;
+
+  add(plan: Plan): void {
+    if (plan.lo != 0) {
+      if (this.lo == 0 || plan.lo < this.lo) this.lo = plan.lo;
+      if (plan.hi > this.hi) this.hi = plan.hi;
+    }
+    this.plans.push(plan);
+  }
+
+}
+
+/** The discriminator counter of one async function. */
+class PlanCursor {
+  next: i32 = 1;
 }
 
 /** One lowered `await`, with the parts that surround it. */
@@ -1184,8 +1553,8 @@ class AwaitInfo {
     public discriminator: i32,
     /** The state field holding the awaited record. */
     public fieldName: string,
-    /** Index of the statement it sits in. */
-    public statementIndex: i32
+    /** Ordinal within the function (informational). */
+    public ordinal: i32
   ) {}
 }
 
@@ -1195,9 +1564,123 @@ class NameSet {
   writes: Set<string> = new Set();
 }
 
+/** Per-function emission state. */
+class EmitContext {
+  private tempCount: i32 = 0;
+  constructor(
+    /** What is lifted (for the copy-out). */
+    public lifting: Lifting,
+    /** The resume function's state parameter name. */
+    public stateName: string,
+    /** The terminal resume point (`N+1`). */
+    public terminal: i32,
+    /** Whether the function returns a value. */
+    public returnsValue: bool,
+    /** Every local name in the body, so a temp never shadows one. */
+    public localNames: Set<string>
+  ) {}
+
+  /** A fresh temporary name for an `if`'s condition. */
+  freshTemp(range: Range): string {
+    let name = COND_TEMP_PREFIX;
+    while (this.localNames.has(name)) {
+      name = COND_TEMP_PREFIX + (++this.tempCount).toString();
+    }
+    this.localNames.add(name); // the next one gets a suffix
+    return name;
+  }
+}
+
+// --- helpers ---------------------------------------------------------------
+
 /** Adds every member of `source` to `target`. */
 function addAll(target: Set<string>, source: Set<string>): void {
   source.forEach((value: string): void => { target.add(value); });
+}
+
+/** The union of two name sets, as a new set. */
+function unionOf(a: NameSet, b: NameSet): NameSet {
+  let out = new NameSet();
+  addAll(out.reads, a.reads);
+  addAll(out.writes, a.writes);
+  addAll(out.reads, b.reads);
+  addAll(out.writes, b.writes);
+  return out;
+}
+
+/** Every reference in a planned sequence. */
+function refsOfSeq(seq: PlanSeq): NameSet {
+  let out = new NameSet();
+  let plans = seq.plans;
+  for (let i = 0, k = plans.length; i < k; ++i) {
+    addAll(out.reads, plans[i].all.reads);
+    addAll(out.writes, plans[i].all.writes);
+  }
+  return out;
+}
+
+/** The smaller of two sequences' first discriminators, `0` for "none". */
+function minLo(a: PlanSeq | null, b: PlanSeq | null): i32 {
+  let lo = 0;
+  if (a != null && a.lo != 0) lo = a.lo;
+  if (b != null && b.lo != 0 && (lo == 0 || b.lo < lo)) lo = b.lo;
+  return lo;
+}
+
+/** The larger of two sequences' last discriminators. */
+function maxHi(a: PlanSeq | null, b: PlanSeq | null): i32 {
+  let hi = 0;
+  if (a != null && a.hi > hi) hi = a.hi;
+  if (b != null && b.hi > hi) hi = b.hi;
+  return hi;
+}
+
+/** Every `$awaited<K>` field a planned sequence needs. */
+function collectAwaitFields(seq: PlanSeq, into: Array<string>): void {
+  let plans = seq.plans;
+  for (let i = 0, k = plans.length; i < k; ++i) {
+    let plan = plans[i];
+    if (plan.info != null) into.push(assert(plan.info).fieldName);
+    if (plan.statements != null) collectAwaitFields(assert(plan.statements), into);
+    if (plan.thenSeq != null) collectAwaitFields(assert(plan.thenSeq), into);
+    if (plan.elseSeq != null) collectAwaitFields(assert(plan.elseSeq), into);
+    if (plan.body != null) collectAwaitFields(assert(plan.body), into);
+  }
+}
+
+/** Every name written anywhere in a planned sequence. */
+function collectWrites(seq: PlanSeq, into: Set<string>): void {
+  let plans = seq.plans;
+  for (let i = 0, k = plans.length; i < k; ++i) {
+    let plan = plans[i];
+    addAll(into, plan.all.writes);
+    addAll(into, plan.before.writes);
+    if (plan.statements != null) collectWrites(assert(plan.statements), into);
+    if (plan.thenSeq != null) collectWrites(assert(plan.thenSeq), into);
+    if (plan.elseSeq != null) collectWrites(assert(plan.elseSeq), into);
+    if (plan.body != null) collectWrites(assert(plan.body), into);
+  }
+}
+
+/** Every `AwaitInfo` a planned sequence holds. */
+function collectAwaitInfos(seq: PlanSeq, into: Array<AwaitInfo>): void {
+  let plans = seq.plans;
+  for (let i = 0, k = plans.length; i < k; ++i) {
+    let plan = plans[i];
+    if (plan.info != null) into.push(assert(plan.info));
+    if (plan.statements != null) collectAwaitInfos(assert(plan.statements), into);
+    if (plan.thenSeq != null) collectAwaitInfos(assert(plan.thenSeq), into);
+    if (plan.elseSeq != null) collectAwaitInfos(assert(plan.elseSeq), into);
+    if (plan.body != null) collectAwaitInfos(assert(plan.body), into);
+  }
+}
+
+/** Whether a sequence's last statement is a `return`. */
+function endsWithReturn(seq: PlanSeq): bool {
+  let plans = seq.plans;
+  if (!plans.length) return false;
+  let last = plans[plans.length - 1];
+  return last.kind == PlanKind.Plain && last.node.kind == NodeKind.Return;
 }
 
 /** Whether `statements` can produce a lowering (the fast path's test). */
@@ -1225,13 +1708,37 @@ function hasLowerable(statements: Statement[]): bool {
   return false;
 }
 
-/** The names a statement introduces, if it is a local declaration. */
-function declaredLocalsOf(statement: Statement): Array<string> {
-  if (statement.kind != NodeKind.Variable) return [];
-  let declarations = (<VariableStatement>statement).declarations;
-  let names = new Array<string>();
-  for (let i = 0, k = declarations.length; i < k; ++i) names.push(declarations[i].name.text);
-  return names;
+/** Every local name declared anywhere in `statement`, for temp naming. */
+function collectLocalNames(statement: Statement, into: Set<string>): void {
+  switch (statement.kind) {
+    case NodeKind.Block: {
+      let statements = (<BlockStatement>statement).statements;
+      for (let i = 0, k = statements.length; i < k; ++i) collectLocalNames(statements[i], into);
+      break;
+    }
+    case NodeKind.If: {
+      let ifs = <IfStatement>statement;
+      collectLocalNames(ifs.ifTrue, into);
+      if (ifs.ifFalse != null) collectLocalNames(assert(ifs.ifFalse), into);
+      break;
+    }
+    case NodeKind.While: {
+      collectLocalNames((<WhileStatement>statement).body, into);
+      break;
+    }
+    case NodeKind.For: {
+      let loop = <ForStatement>statement;
+      if (loop.initializer != null) collectLocalNames(assert(loop.initializer), into);
+      collectLocalNames(loop.body, into);
+      break;
+    }
+    case NodeKind.Variable: {
+      let declarations = (<VariableStatement>statement).declarations;
+      for (let i = 0, k = declarations.length; i < k; ++i) into.add(declarations[i].name.text);
+      break;
+    }
+    default: break;
+  }
 }
 
 /** The name a declaration statement introduces, if it introduces one. */
@@ -1247,8 +1754,6 @@ function declarationNameOf(statement: Statement): string | null {
       return (<DeclarationStatement>statement).name.text;
     }
     case NodeKind.Variable: {
-      // Only the first name; a lowered name colliding with any of them is
-      // already worth refusing.
       let declarations = (<VariableStatement>statement).declarations;
       return declarations.length ? declarations[0].name.text : null;
     }
@@ -1258,26 +1763,41 @@ function declarationNameOf(statement: Statement): string | null {
   }
 }
 
-/** The after-part of an await-bearing statement, as the resume region's head. */
+/** `let <name> = <state>.<name>;` for a lifted binding's copy-in. */
+function copyIn(name: string, range: Range, stateName: string): Statement {
+  return Node.createVariableStatement(
+    null,
+    [
+      Node.createVariableDeclaration(
+        Node.createIdentifierExpression(name, range),
+        null, CommonFlags.Let,
+        null,
+        Node.createPropertyAccessExpression(
+          Node.createIdentifierExpression(stateName, range),
+          Node.createIdentifierExpression(name, range),
+          range
+        ),
+        range
+      )
+    ],
+    range
+  );
+}
+
 /**
- * A statement as the resume function carries it (§4.1's terminal write, §4.3's
- * lifted-local rewrite). Answers a *list*, because a declaration statement with
- * several declarators can split into kept declarations and lifted assignments.
+ * A statement as the resume function carries it: `return`s become the terminal
+ * write (§4.1), a declaration of a lifted local becomes an assignment (§4.3),
+ * everything else is verbatim.
  */
-function rewriteStatement(
-  statement: Statement,
-  lifting: Lifting,
-  stateName: string,
-  terminal: i32,
-  returnsValue: bool
-): Array<Statement> {
+function rewriteStatement(statement: Statement, ctx: EmitContext): Array<Statement> {
+  let stateName = ctx.stateName;
   if (statement.kind == NodeKind.Return) {
     let returnStatement = <ReturnStatement>statement;
     let value = returnStatement.value;
     let range = returnStatement.range;
     let out = new Array<Statement>();
     if (value != null) {
-      if (returnsValue) {
+      if (ctx.returnsValue) {
         out.push(Node.createExpressionStatement(
           Node.createBinaryExpression(
             Token.Equals,
@@ -1296,40 +1816,27 @@ function rewriteStatement(
       }
     }
     out.push(Node.createExpressionStatement(
-      Node.createBinaryExpression(
-        Token.Equals,
-        Node.createPropertyAccessExpression(
-          Node.createIdentifierExpression(stateName, range),
-          Node.createIdentifierExpression(RESUME_POINT_FIELD, range),
-          range
-        ),
-        intLiteral(terminal, range),
-        range
-      )
+      resumePointWrite(stateName, intLiteral(ctx.terminal, range), range)
     ));
     out.push(Node.createReturnStatement(null, range));
-    return [ Node.createBlockStatement(out, range) ];
+    return out;
   }
   if (statement.kind == NodeKind.Variable) {
     let declarations = (<VariableStatement>statement).declarations;
     let lifted: bool = false;
     for (let i = 0, k = declarations.length; i < k; ++i) {
-      if (lifting.hasLocal(declarations[i].name.text)) { lifted = true; break; }
+      if (ctx.lifting.hasLocal(declarations[i].name.text)) { lifted = true; break; }
     }
     if (!lifted) return [ statement ]; // a plain local: nothing changes
     // A lifted local already exists — the copy-in declared it at function scope.
-    // Its declarator becomes an assignment, in source order, and declarators that
-    // were not lifted keep their declaration (a mixed `let a = 1, b = 2;` stays
+    // Its declarator becomes an assignment, in source order; declarators that were
+    // not lifted keep their declaration (a mixed `let a = 1, b = 2;` stays
     // ordered).
     let out = new Array<Statement>();
     for (let i = 0, k = declarations.length; i < k; ++i) {
       let declaration = declarations[i];
-      if (!lifting.hasLocal(declaration.name.text)) {
-        out.push(Node.createVariableStatement(
-          null,
-          [ declaration ],
-          declaration.range
-        ));
+      if (!ctx.lifting.hasLocal(declaration.name.text)) {
+        out.push(Node.createVariableStatement(null, [ declaration ], declaration.range));
         continue;
       }
       let initializer = declaration.initializer;
@@ -1337,12 +1844,7 @@ function rewriteStatement(
         // `let v: T = expr;` → `v = expr;`. The await-bearing declarator keeps
         // its `await` node in place, which is what codegen reads (§4.7.4).
         out.push(Node.createExpressionStatement(
-          Node.createBinaryExpression(
-            Token.Equals,
-            Node.createIdentifierExpression(declaration.name.text, declaration.name.range),
-            initializer,
-            declaration.range
-          )
+          simpleAssign(declaration.name.text, initializer, declaration.range)
         ));
       }
     }
@@ -1351,36 +1853,91 @@ function rewriteStatement(
   return [ statement ];
 }
 
+/** A construct as the resume carries it when it holds no await of its own. */
+function rewriteReturns(statement: Statement, ctx: EmitContext): Statement {
+  switch (statement.kind) {
+    case NodeKind.Block: {
+      let block = <BlockStatement>statement;
+      let out = new Array<Statement>();
+      let statements = block.statements;
+      for (let i = 0, k = statements.length; i < k; ++i) {
+        let rewritten = rewriteReturns(statements[i], ctx);
+        if (rewritten.kind == NodeKind.Block && statements[i].kind != NodeKind.Block) {
+          // A return became several statements: splice them in.
+          let inner = (<BlockStatement>rewritten).statements;
+          for (let j = 0, l = inner.length; j < l; ++j) out.push(inner[j]);
+        } else {
+          out.push(rewritten);
+        }
+      }
+      return Node.createBlockStatement(out, block.range);
+    }
+    case NodeKind.If: {
+      let ifs = <IfStatement>statement;
+      return Node.createIfStatement(
+        ifs.condition,
+        rewriteReturns(ifs.ifTrue, ctx),
+        ifs.ifFalse != null ? rewriteReturns(assert(ifs.ifFalse), ctx) : null,
+        ifs.range
+      );
+    }
+    case NodeKind.While: {
+      let loop = <WhileStatement>statement;
+      return Node.createWhileStatement(loop.condition, rewriteReturns(loop.body, ctx), loop.range);
+    }
+    case NodeKind.For: {
+      let loop = <ForStatement>statement;
+      return Node.createForStatement(
+        loop.initializer, loop.condition, loop.incrementor,
+        rewriteReturns(loop.body, ctx), loop.range
+      );
+    }
+    case NodeKind.Return: {
+      let statements = rewriteStatement(statement, ctx);
+      return statements.length == 1
+        ? statements[0]
+        : Node.createBlockStatement(statements, statement.range);
+    }
+    default: {
+      return statement;
+    }
+  }
+}
+
+/** A statement (or construct) plus its "is this pass normal" guard. */
+function guarded(statement: Statement, ctx: EmitContext, range: Range): Array<Statement> {
+  return [
+    Node.createIfStatement(
+      isZero(resumePointRead(ctx.stateName, range), range),
+      Node.createBlockStatement([ statement ], range),
+      null,
+      range
+    )
+  ];
+}
+
 /** Appends every statement of `statements` to `target`. */
 function pushAll(target: Array<Statement>, statements: Array<Statement>): void {
   for (let i = 0, k = statements.length; i < k; ++i) target.push(statements[i]);
 }
 
-/** The statements of `first` followed by those of `second`, as a list. */
-function concatStatements(first: Array<Statement>, second: Array<Statement>): Array<Statement> {
-  let out = new Array<Statement>(first.length + second.length);
-  let i = 0;
-  for (let k = first.length; i < k; ++i) out[i] = first[i];
-  for (let j = 0, l = second.length; j < l; ++j) out[i + j] = second[j];
-  return out;
-}
-
 /**
  * The copy-out at a suspension (§4.3): each lifted binding's current value into
- * its state-struct field. Parameters come first, then lifted locals, both in
- * declaration order — the order is cosmetic, but stable output is worth having.
+ * its state-struct field.
  */
 function copyOutStatements(lifting: Lifting, stateName: string, range: Range): Array<Statement> {
   let out = new Array<Statement>();
-  let state = Node.createIdentifierExpression(stateName, range);
   let parameters = lifting.parameterNames;
   for (let i = 0, k = parameters.length; i < k; ++i) {
     let name = parameters[i];
     let nameRange = lifting.parameterRange(name);
     out.push(Node.createExpressionStatement(
-      Node.createBinaryExpression(
-        Token.Equals,
-        Node.createPropertyAccessExpression(state, Node.createIdentifierExpression(name, nameRange), nameRange),
+      simpleAssignTo(
+        Node.createPropertyAccessExpression(
+          Node.createIdentifierExpression(stateName, nameRange),
+          Node.createIdentifierExpression(name, nameRange),
+          nameRange
+        ),
         Node.createIdentifierExpression(name, nameRange),
         nameRange
       )
@@ -1390,9 +1947,12 @@ function copyOutStatements(lifting: Lifting, stateName: string, range: Range): A
     let lift = lifting.locals[i];
     let nameRange = lift.declaration.name.range;
     out.push(Node.createExpressionStatement(
-      Node.createBinaryExpression(
-        Token.Equals,
-        Node.createPropertyAccessExpression(state, Node.createIdentifierExpression(lift.name, nameRange), nameRange),
+      simpleAssignTo(
+        Node.createPropertyAccessExpression(
+          Node.createIdentifierExpression(stateName, nameRange),
+          Node.createIdentifierExpression(lift.name, nameRange),
+          nameRange
+        ),
         Node.createIdentifierExpression(lift.name, nameRange),
         nameRange
       )
@@ -1439,22 +1999,12 @@ function hasName(parameters: ParameterNode[], block: BlockStatement, name: strin
   for (let i = 0, k = parameters.length; i < k; ++i) {
     if (parameters[i].name.text == name) return true;
   }
-  return declaresName(block, name);
+  let names = new Set<string>();
+  collectLocalNames(block, names);
+  return names.has(name);
 }
 
-/** Whether `name` is declared anywhere inside `block`. */
-function declaresName(block: BlockStatement, name: string): bool {
-  let statements = block.statements;
-  for (let i = 0, k = statements.length; i < k; ++i) {
-    let locals = declaredLocalsOf(statements[i]);
-    for (let j = 0, l = locals.length; j < l; ++j) {
-      if (locals[j] == name) return true;
-    }
-  }
-  return false;
-}
-
-/** State-struct members a parameter must not be named. */
+/** State-struct members a parameter or local must not be named. */
 function isReservedStateField(name: string): bool {
   if (
     name == RESUME_POINT_FIELD ||
@@ -1474,9 +2024,103 @@ function awaitedField(state: Expression, fieldName: string, range: Range): Expre
   );
 }
 
+/** The state struct's per-await field, addressed by the state's *name*. */
+function awaitedFieldOf(stateName: string, fieldName: string, range: Range): Expression {
+  return awaitedField(Node.createIdentifierExpression(stateName, range), fieldName, range);
+}
+
 /** The same field, for the compiler's side table (a fresh node, not in the tree). */
 function awaitedFieldExpression(stateName: string, fieldName: string, range: Range): Expression {
-  return awaitedField(Node.createIdentifierExpression(stateName, range), fieldName, range);
+  return awaitedFieldOf(stateName, fieldName, range);
+}
+
+/** The state struct's resume-point field, as an expression. */
+function resumePointRead(stateName: string, range: Range): Expression {
+  return Node.createPropertyAccessExpression(
+    Node.createIdentifierExpression(stateName, range),
+    Node.createIdentifierExpression(RESUME_POINT_FIELD, range),
+    range
+  );
+}
+
+/** `state.resumePoint = value`. */
+function resumePointWrite(stateName: string, value: Expression, range: Range): Expression {
+  return Node.createBinaryExpression(
+    Token.Equals,
+    resumePointRead(stateName, range),
+    value,
+    range
+  );
+}
+
+/**
+ * The guard that admits a construct: normal flow, or a resume into one of the
+ * await discriminators in its own subtree.
+ */
+function enterGuard(stateName: string, lo: i32, hi: i32, range: Range): Expression {
+  if (lo == 0) return isZero(resumePointRead(stateName, range), range);
+  return Node.createBinaryExpression(
+    Token.Bar_Bar,
+    isZero(resumePointRead(stateName, range), range),
+    inRangeExpression(stateName, lo, hi, range),
+    range
+  );
+}
+
+/** `resumePoint >= lo && resumePoint <= hi` — the construct's own range. */
+function inRangeExpression(stateName: string, lo: i32, hi: i32, range: Range): Expression {
+  if (lo == 0) return Node.createFalseExpression(range);
+  return Node.createBinaryExpression(
+    Token.Ampersand_Ampersand,
+    Node.createBinaryExpression(
+      Token.GreaterThan_Equals,
+      resumePointRead(stateName, range),
+      intLiteral(lo, range),
+      range
+    ),
+    Node.createBinaryExpression(
+      Token.LessThan_Equals,
+      resumePointRead(stateName, range),
+      intLiteral(hi, range),
+      range
+    ),
+    range
+  );
+}
+
+/** `expr == 0`. */
+function isZero(expr: Expression, range: Range): Expression {
+  return Node.createBinaryExpression(Token.Equals_Equals, expr, intLiteral(0, range), range);
+}
+
+/** `expr != 0`. */
+function notZero(expr: Expression, range: Range): Expression {
+  return Node.createBinaryExpression(Token.Exclamation_Equals, expr, intLiteral(0, range), range);
+}
+
+/** `a == b`. */
+function equals(a: Expression, b: Expression, range: Range): Expression {
+  return Node.createBinaryExpression(Token.Equals_Equals, a, b, range);
+}
+
+/** `<name> = <value>`, with the target an identifier. */
+function simpleAssign(name: string, value: Expression, range: Range): Expression {
+  return simpleAssignTo(Node.createIdentifierExpression(name, range), value, range);
+}
+
+/** `<target> = <value>`. */
+function simpleAssignTo(target: Expression, value: Expression, range: Range): Expression {
+  return Node.createBinaryExpression(Token.Equals, target, value, range);
+}
+
+/** `changetype<T>(0)` — a zero of any type, value or reference. */
+function changetypeZero(type: TypeNode, range: Range): Expression {
+  return Node.createCallExpression(
+    Node.createIdentifierExpression("changetype", range),
+    [ type ],
+    [ intLiteral(0, range) ],
+    range
+  );
 }
 
 /** Whether the parser produced the empty type node of an omitted annotation. */
@@ -1492,22 +2136,20 @@ class LiftedLocal {
     /** The declared type — the field's type. */
     public type: TypeNode,
     /** The declaration that introduced it, for ranges. */
-    public declaration: VariableDeclaration,
-    /** Index of the declaring statement, for ordering. */
-    public statementIndex: i32
+    public declaration: VariableDeclaration
   ) {}
 }
 
 /**
- * What the lifting analysis decided for one async function (§4.3, §4.4):
- * which locals live in the state struct, and which parameters need their writes
+ * What the lifting analysis decided for one async function (§4.3, §4.4): which
+ * locals live in the state struct, and which parameters need their writes
  * carried across a suspension.
  *
  * `this` and captured bindings are **not** here, by §4.4's single-storage rule:
- * a captured binding's storage is the environment, and the state struct
- * references the environment rather than copying the binding. Closures are
- * refused before this analysis runs, so the rule is currently vacuous — commit 6
- * makes it load-bearing.
+ * a captured binding's storage is the environment, and the state struct will
+ * reference the environment rather than copy the binding. Closures and async
+ * methods are both refused, so no path supplies `this` today — the rule is
+ * stated and currently unreachable.
  */
 class Lifting {
   /** Locals lifted into the state struct, in declaration order. */
@@ -1516,7 +2158,7 @@ class Lifting {
   parameters: Set<string> = new Set();
   /** Parameter names in declaration order (for stable copy-out output). */
   parameterNames: Array<string> = new Array();
-  /** Ranges by parameter name, for diagnostics-free node construction. */
+  /** Ranges by parameter name, for node construction. */
   private parameterRanges: Map<string, Range> = new Map();
 
   /** Records a lifted parameter. */
@@ -1531,6 +2173,12 @@ class Lifting {
   /** The range a lifted parameter was declared at. */
   parameterRange(name: string): Range {
     return assert(this.parameterRanges.get(name));
+  }
+
+  /** Records a lifted local. */
+  liftLocal(name: string, type: TypeNode, declaration: VariableDeclaration): void {
+    if (this.hasLocal(name)) return;
+    this.locals.push(new LiftedLocal(name, type, declaration));
   }
 
   /** Whether `name` is a lifted local. */
