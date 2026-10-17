@@ -995,9 +995,11 @@ class OwnerAnalysis {
         binding.scope.isLoopHeader = true;
       }
     }
-    if (isInsideAsync(info)) {
-      this.refuse(identifier.range, "a capture in an async function (closures lowering)");
-    }
+    // A capture inside an async body is lowered like any other: the environment
+    // becomes an ordinary local of the async function's body, and the async
+    // transform's own lifting rule carries that local across an await as a
+    // managed state field — `docs/closures-plan.md` §8.3(b). No async-specific
+    // code is involved, which is the layering the two plans were built for.
     if (binding.type == null) {
       this.refuse(identifier.range,
         "a captured local without a declared type (closures lowering)");
@@ -1951,15 +1953,6 @@ function isHostCallbackRegistration(call: CallExpression): bool {
   return name == "makeCallbacks";
 }
 
-/** Whether `info` or any enclosing function is `async`. */
-function isInsideAsync(info: FunctionInfo): bool {
-  let current: FunctionInfo | null = info;
-  while (current != null) {
-    if (current.isAsync) return true;
-    current = current.parent;
-  }
-  return false;
-}
 
 /** `true` for the simple and compound assignment operators. */
 function isAssignmentOperator(token: Token): bool {
