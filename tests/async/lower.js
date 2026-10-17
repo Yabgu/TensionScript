@@ -338,7 +338,107 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   );
 }
 
-// 7. Refusals: every shape this revision does not lower is named, not missed.
+// 7. Lifting (§4.3): a binding crosses a suspension iff it is live across one.
+
+{
+  // A local declared before the await and read after it: it lives in the state
+  // struct, is copied out before the park, and copied in at resume.
+  const r = run(`
+async function f(h: Task<i32>): i32 { let v: i32 = 1; await h; return v; }
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const fields = r.file.statements[0].members
+    .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
+    .map(member => member.name.text);
+  check("a local that crosses an await gets a state field", fields.includes("v"), true);
+  const wat = r.wat();
+  const resume = funcBody(wat, "probe/f$resume");
+  check("  ...copied in at resume entry", /call \$probe\/f\$State#get:v\n *local\.set/.test(resume), true);
+  check("  ...copied out before the park", /set:v[\s\S]{0,200}?call \$~lib\/task-rt\/__taskPark/.test(resume), true);
+  check("  ...and its declaration became an assignment", /i32\.const 1\n *local\.set/.test(resume), true);
+  check("  ...and the untouched parameter is not copied out", /#set:h/.test(resume), false);
+  check("  ...with no refusal", refusals(r), []);
+}
+{
+  // A local that does not cross: no field, and it stays an ordinary local.
+  const r = run(`
+async function f(h: Task<i32>): i32 { let v: i32 = 1; await h; return 9; }
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const fields = r.file.statements[0].members
+    .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
+    .map(member => member.name.text);
+  check("a local that does not cross gets no state field", fields.includes("v"), false);
+  check("  ...and the state has no extra fields at all", fields, [ "h", "resumePoint", "result", "$awaited1", "handle" ]);
+  check("  ...and no `set:v` is emitted", /#set:v/.test(r.wat()), false);
+}
+{
+  // A parameter written before the await and read after it: the field already
+  // exists; lifting it costs the copy-out.
+  const r = run(`
+async function f(h: Task<i32>, out: i32): i32 { out = 2; await h; return out + 1; }
+export function probe(): Task<i32> { return f(make(), 0); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("a parameter written before an await and read after it lowers", refusals(r), []);
+  const resume = funcBody(r.wat(), "probe/f$resume");
+  check("  ...with a copy-out of the parameter before the park",
+    /set:out[\s\S]{0,200}?call \$~lib\/task-rt\/__taskPark/.test(resume), true);
+}
+{
+  // Assignment to a local target that crosses an await: the local is a field-
+  // backed local now, so the assignment lands in the region that resumes.
+  const r = run(`
+async function f(h: Task<i32>): i32 { let v: i32 = 0; v = await h; return v + 1; }
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("assignment to a local that crosses an await lowers", refusals(r), []);
+  const wat = r.wat();
+  check("  ...reading the value into the lifted local", /i32\.load offset=8\n *local\.set/.test(wat), true);
+  const fields = r.file.statements[0].members
+    .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
+    .map(member => member.name.text);
+  check("  ...which is a state field", fields.includes("v"), true);
+}
+{
+  // Several lifted bindings, and a lifted local declared between two awaits:
+  // each gets its own field, and every park copies out everything lifted.
+  const r = run(`
+async function f(h: Task<i32>, g: Task<i32>, out: i32): i32 {
+  let a: i32 = 1;
+  await h;
+  let c: i32 = a + out;
+  await g;
+  return c + a;
+}
+export function probe(): Task<i32> { return f(make(), make(), 2); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  const fields = r.file.statements[0].members
+    .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
+    .map(member => member.name.text);
+  check("each crossing local gets its own field", [ fields.includes("a"), fields.includes("c") ], [ true, true ]);
+  const resume = funcBody(r.wat(), "probe/f$resume");
+  check("there are two parks", [ ...resume.matchAll(/call \$~lib\/task-rt\/__taskPark/g) ].length, 2);
+  check("both copy out `a`", [ ...resume.matchAll(/set:a\n/g) ].length, 2);
+  check("the second park also copies out `c`", /set:c[\s\S]{0,200}?call \$~lib\/task-rt\/__taskPark/.test(resume), true);
+  check("  ...with no refusal", refusals(r), []);
+}
+{
+  // A lifted local needs a type the state field can carry.
+  const r = run(`
+async function f(h: Task<i32>): i32 { let v = 1; await h; return v; }
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("an untyped local that crosses an await is refused by name",
+    refusals(r).includes("a local without a declared type that crosses an await (async lowering)"), true);
+}
+
+// 8. Refusals: every shape this revision does not lower is named, not missed.
 
 const REFUSALS = [
   [ "await in a sub-expression", `async function f(h: Task<i32>): i32 { return 1 + await h; }`,
@@ -349,11 +449,6 @@ const REFUSALS = [
     "await in an unsupported position (async lowering)" ],
   [ "await in a call argument", `async function f(h: Task<i32>): i32 { g(await h); return 1; }`,
     "await in an unsupported position (async lowering)" ],
-  [ "a local that crosses an await", `async function f(h: Task<i32>): i32 { let v: i32 = 1; await h; return v; }`,
-    "a local that crosses an await (async lowering)" ],
-  [ "a parameter written before an await and read after it",
-    `async function f(h: Task<i32>, v: i32): i32 { v = 2; await h; return v; }`,
-    "a parameter written before an await and read after it (async lowering)" ],
   [ "a conditional", `async function f(a: i32): i32 { if (a > 0) return 1; return 0; }`,
     "if in an async function body (async lowering)" ],
   [ "a loop", `async function f(a: i32): i32 { while (a > 0) a -= 1; return a; }`,
@@ -390,7 +485,7 @@ for (const [ label, source, expected ] of REFUSALS) {
   );
 }
 
-// 8. A `this` body is refused by name.
+// 9. A `this` body is refused by name.
 
 {
   const r = run(`
@@ -410,7 +505,7 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check("`this` in an async body is refused by name", refusals(t).includes("this in an async function body (async lowering)"), true);
 }
 
-// 9. A program that declares no async function is untouched.
+// 10. A program that declares no async function is untouched.
 
 {
   const program = buildProgram([ [ "probe.ts", `export function probe(): i32 { return 7; }` ] ]);
