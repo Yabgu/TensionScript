@@ -100,7 +100,7 @@ import { Parser } from "../parser";
 import { Program } from "../program";
 import { Token } from "../tokenizer";
 import { awaitSites, AwaitSite } from "./ir";
-import { creationEnvOf } from "../closure/ir";
+import { creationEnvOf, envInfoOf, EnvInfo, EnvKind } from "../closure/ir";
 import {
   validateAsyncConstructs,
   MESSAGE_ASYNC_ARROW,
@@ -181,6 +181,14 @@ const RESULT_FIELD = "result";
 const HANDLE_FIELD = "handle";
 /** The state struct's environment reference (§4.4). */
 const ENV_FIELD = "$env";
+/**
+ * The local that holds the environment a `Struct` closure **received** through
+ * `~env`. Codegen creates it for a `EnvKind.Struct` function
+ * (`compiler.ts:455`, `:1833-1841`); the closure transform names it when it
+ * rewrites a capture (`src/closure/lower.ts:98`). The async transform needs the
+ * same name to carry that environment across the entry/resume boundary.
+ */
+const ENV_IN_LOCAL = "$closureEnvIn";
 /** The this-struct's receiver field, at field 0 (§7.4). */
 const THIS_FIELD = "$this";
 /** Prefix of the synthesized condition temporaries of `if` statements. */
@@ -331,7 +339,16 @@ export class AsyncLowerTransform {
      * or an explicit `this:` parameter's type. Non-null means the body's `this`
      * is replaced by a read of the state struct's this-struct.
      */
-    thisType: TypeNode | null = null
+    thisType: TypeNode | null = null,
+    /**
+     * The `FunctionExpression` this declaration was created as, when it is a
+     * closure value: a bare `async function inner() {}` written in a function
+     * body parses as an expression statement wrapping a `FunctionExpression`
+     * (measured), which is the only async shape that can itself capture. `null`
+     * for a top-level/namespace declaration, a class method, or a synthesized
+     * declaration — none of those is a value that carries `_env`.
+     */
+    expression: FunctionExpression | null = null
   ): Statement[] | null {
     // Every refusal while lowering this construct belongs to this construct,
     // and the wrapper records it even when the abort came from a nested one:
@@ -340,7 +357,7 @@ export class AsyncLowerTransform {
     let priorConstruct = this.currentConstruct;
     this.currentConstruct = declaration;
     let artifacts = this.lowerAsyncFunctionInner(
-      source, declaration, declared, parser, hoisted, thisType
+      source, declaration, declared, parser, hoisted, thisType, expression
     );
     this.currentConstruct = priorConstruct;
     if (artifacts == null) this.recordRefusal(declaration);
@@ -354,7 +371,8 @@ export class AsyncLowerTransform {
     declared: Array<string>,
     parser: Parser,
     hoisted: Array<Statement>,
-    thisType: TypeNode | null
+    thisType: TypeNode | null,
+    expression: FunctionExpression | null
   ): Statement[] | null {
     let signature = declaration.signature;
     let name = declaration.name.text;
@@ -374,6 +392,27 @@ export class AsyncLowerTransform {
     // this-struct carries it across a suspension (closures plan §7.1a).
     if (thisType == null && signature.explicitThisType != null) {
       thisType = signature.explicitThisType;
+    }
+    // §8.3(a): when this async function *is* a closure value, the environment it
+    // captured arrives through `~env` and has to cross the function boundary to
+    // `f$resume`. The closure transform recorded it (`envInfoOf`, keyed by the
+    // expression node -- `docs/closures-plan.md` §3.3), and the carrier is
+    // `state.$env`: the entry copies the received local in, the resume function
+    // re-declares it from the state.
+    let foundEnv = expression != null ? envInfoOf.get(expression) : null;
+    let closureEnv: EnvInfo | null = foundEnv != null ? foundEnv : null;
+    let closureEnvClass = closureEnv != null && closureEnv.kind == EnvKind.Struct
+      ? closureEnv.envClass
+      : null;
+    // `$env` holds one reference, so it cannot carry two environments. A
+    // capturing function with an explicit `this:` needs the this-struct *and*
+    // the captured env in the same field; that is the two-environment shape C5's
+    // parent-chain design owns, and emitting either one alone would produce
+    // wrong code (the second assignment clobbers the first). Refused by name
+    // before any artifact is built, so the AST is left untouched.
+    if (closureEnvClass != null && thisType != null) {
+      return this.refuse(parser, declaration.range,
+        "a capturing function with an explicit `this:` parameter (async lowering)");
     }
     let parameters = signature.parameters;
     for (let i = 0, k = parameters.length; i < k; ++i) {
@@ -711,6 +750,19 @@ export class AsyncLowerTransform {
         )
       ));
     }
+    // state.$env = $closureEnvIn;   — §8.3(a): the environment this function was
+    // created with, carried across the function boundary the resume function
+    // lives on the other side of. The local is the one codegen's prologue fills
+    // from `~env` (`compiler.ts:1833-1841`), because this function's prototype is
+    // `EnvKind.Struct`.
+    if (closureEnvClass != null) {
+      entryStatements.push(Node.createExpressionStatement(
+        assignField(stateIdent, ENV_FIELD,
+          Node.createIdentifierExpression(ENV_IN_LOCAL, range),
+          range
+        )
+      ));
+    }
     // state.handle = new Task<R>();
     entryStatements.push(Node.createExpressionStatement(
       assignField(stateIdent, HANDLE_FIELD,
@@ -755,6 +807,39 @@ export class AsyncLowerTransform {
       ));
     }
     let resumeStatements = new Array<Statement>();
+    // §8.3(a): the resume function is a synthesized declaration, not a closure
+    // value, so nothing fills a received-env local for it. It reads the one its
+    // caller stored, on every entry — including a resumed one, which is why the
+    // declaration is unconditional and first. The type is the concrete env class
+    // the closure transform named; `changetype` is the plan's one cast for a
+    // non-nullable read of a nullable carrier (§8.3).
+    if (closureEnvClass != null) {
+      let envType = typeNode(closureEnvClass, range);
+      resumeStatements.push(Node.createVariableStatement(
+        null,
+        [
+          Node.createVariableDeclaration(
+            Node.createIdentifierExpression(ENV_IN_LOCAL, range),
+            null, CommonFlags.Const,
+            envType,
+            Node.createCallExpression(
+              Node.createIdentifierExpression("changetype", range),
+              [ envType ],
+              [
+                Node.createPropertyAccessExpression(
+                  Node.createIdentifierExpression(resumeVarName, range),
+                  Node.createIdentifierExpression(ENV_FIELD, range),
+                  range
+                )
+              ],
+              range
+            ),
+            range
+          )
+        ],
+        range
+      ));
+    }
     // §4.3: the resume function's parameter list carries no wasm parameters —
     // "it reads them from the state struct". The copy-in is unconditional, so it
     // runs on every entry; a write in an earlier region survives because that
@@ -882,7 +967,9 @@ export class AsyncLowerTransform {
             // Case 4: an inner async function is its own state machine, with its
             // own discriminators starting at 1. Its artifacts are hoisted to the
             // source's top level; its entry stays where it was declared.
-            let artifacts = this.lowerAsyncFunction(source, nested, declared, parser, hoisted);
+            let artifacts = this.lowerAsyncFunction(
+              source, nested, declared, parser, hoisted, null, <FunctionExpression>expression
+            );
             if (!artifacts) return null;
             for (let i = 0, k = artifacts.length; i < k; ++i) {
               if (artifacts[i] !== statement) hoisted.push(artifacts[i]);
