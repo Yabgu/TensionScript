@@ -1,13 +1,20 @@
 (module
- (type $0 (func (param i32) (result i32)))
- (type $1 (func (param i32 i32)))
- (type $2 (func (param i32)))
- (type $3 (func (param i32 i32) (result i32)))
+ (type $0 (func (param i32 i32)))
+ (type $1 (func (param i32) (result i32)))
+ (type $2 (func (param i32 i32) (result i32)))
+ (type $3 (func (param i32)))
  (type $4 (func))
  (type $5 (func (param i32 i32 i32)))
  (type $6 (func (result i32)))
- (type $7 (func (param i32 i32 i32 i32)))
- (type $8 (func (param i32 i32 i64) (result i32)))
+ (type $7 (func (param i32 i32 i32) (result i32)))
+ (type $8 (func (param i32 i32 i32 i32)))
+ (type $9 (func (param i32 f32)))
+ (type $10 (func (param i32 i64 i32) (result i32)))
+ (type $11 (func (param i32 i32 i64) (result i32)))
+ (type $12 (func (param i32 i32) (result i64)))
+ (type $13 (func (param i64) (result i32)))
+ (type $14 (func (param i32) (result i64)))
+ (type $15 (func (param i32 i64)))
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
  (global $async-closure-value/sink (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/total (mut i32) (i32.const 0))
@@ -24,12 +31,18 @@
  (global $~lib/rt/itcms/fromSpace (mut i32) (i32.const 0))
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
  (global $~lib/native/ASC_LOW_MEMORY_LIMIT i32 (i32.const 0))
+ (global $~lib/task-rt/recordFactory (mut i32) (i32.const 0))
+ (global $~lib/task-rt/families (mut i32) (i32.const 0))
+ (global $~lib/task-rt/waitingByKey (mut i32) (i32.const 0))
+ (global $~lib/task-rt/waiters (mut i32) (i32.const 0))
+ (global $~lib/task-rt/ready (mut i32) (i32.const 0))
  (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
- (global $~lib/rt/__rtti_base i32 (i32.const 656))
- (global $~lib/memory/__data_end i32 (i32.const 708))
- (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33476))
- (global $~lib/memory/__heap_base i32 (i32.const 33476))
+ (global $~lib/native/ASC_RUNTIME i32 (i32.const 2))
+ (global $~lib/rt/__rtti_base i32 (i32.const 928))
+ (global $~lib/memory/__data_end i32 (i32.const 1000))
+ (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33768))
+ (global $~lib/memory/__heap_base i32 (i32.const 33768))
  (memory $0 1)
  (data $0 (i32.const 12) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00(\00\00\00A\00l\00l\00o\00c\00a\00t\00i\00o\00n\00 \00t\00o\00o\00 \00l\00a\00r\00g\00e\00\00\00\00\00")
  (data $1 (i32.const 76) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00 \00\00\00~\00l\00i\00b\00/\00r\00t\00/\00i\00t\00c\00m\00s\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00")
@@ -42,7 +55,12 @@
  (data $8 (i32.const 412) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00U\00n\00e\00x\00p\00e\00c\00t\00e\00d\00 \00\'\00n\00u\00l\00l\00\'\00 \00(\00n\00o\00t\00 \00a\00s\00s\00i\00g\00n\00e\00d\00 \00o\00r\00 \00f\00a\00i\00l\00e\00d\00 \00c\00a\00s\00t\00)\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (data $9 (i32.const 540) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00,\00\00\00a\00s\00y\00n\00c\00-\00c\00l\00o\00s\00u\00r\00e\00-\00v\00a\00l\00u\00e\00.\00t\00s\00")
  (data $10 (i32.const 604) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\18\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00.\00t\00s\00\00\00\00\00")
- (data $11 (i32.const 656) "\0c\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00")
+ (data $11 (i32.const 652) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1c\00\00\00I\00n\00v\00a\00l\00i\00d\00 \00l\00e\00n\00g\00t\00h\00")
+ (data $12 (i32.const 700) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $13 (i32.const 764) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00$\00\00\00K\00e\00y\00 \00d\00o\00e\00s\00 \00n\00o\00t\00 \00e\00x\00i\00s\00t\00\00\00\00\00\00\00\00\00")
+ (data $14 (i32.const 828) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\16\00\00\00~\00l\00i\00b\00/\00m\00a\00p\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $15 (i32.const 876) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1a\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00.\00t\00s\00\00\00")
+ (data $16 (i32.const 928) "\11\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00 \00\00\00\10\t\12\00\10A\14\00\02A\00\00\10A\82\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (table $0 2 2 funcref)
  (elem $0 (i32.const 1) $async-closure-value/outer$resume~inner)
  (export "main" (func $async-closure-value/main))
@@ -2328,10 +2346,19 @@
   i32.const 0
   call $~lib/rt/itcms/__link
  )
+ (func $~lib/task-rt/TaskState#set:resume (param $this i32) (param $resume i32)
+  local.get $this
+  local.get $resume
+  i32.store offset=4
+  local.get $this
+  local.get $resume
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
  (func $async-closure-value/outer$State#set:h (param $this i32) (param $h i32)
   local.get $this
   local.get $h
-  i32.store offset=4
+  i32.store offset=8
   local.get $this
   local.get $h
   i32.const 0
@@ -2340,17 +2367,17 @@
  (func $async-closure-value/outer$State#set:resumePoint (param $this i32) (param $resumePoint i32)
   local.get $this
   local.get $resumePoint
-  i32.store offset=16
+  i32.store offset=20
  )
  (func $async-closure-value/outer$State#set:result (param $this i32) (param $result i32)
   local.get $this
   local.get $result
-  i32.store offset=20
+  i32.store offset=24
  )
  (func $async-closure-value/outer$State#set:$closureEnv (param $this i32) (param $$closureEnv i32)
   local.get $this
   local.get $$closureEnv
-  i32.store offset=12
+  i32.store offset=16
   local.get $this
   local.get $$closureEnv
   i32.const 0
@@ -2359,7 +2386,7 @@
  (func $async-closure-value/outer$State#set:$env (param $this i32) (param $$env i32)
   local.get $this
   local.get $$env
-  i32.store offset=8
+  i32.store offset=12
   local.get $this
   local.get $$env
   i32.const 0
@@ -2368,7 +2395,7 @@
  (func $async-closure-value/outer$State#set:$awaited1 (param $this i32) (param $$awaited1 i32)
   local.get $this
   local.get $$awaited1
-  i32.store offset=24
+  i32.store offset=28
   local.get $this
   local.get $$awaited1
   i32.const 0
@@ -2377,7 +2404,7 @@
  (func $async-closure-value/outer$State#set:handle (param $this i32) (param $handle i32)
   local.get $this
   local.get $handle
-  i32.store offset=28
+  i32.store offset=32
   local.get $this
   local.get $handle
   i32.const 0
@@ -2392,20 +2419,57 @@
   i32.const 0
   call $~lib/rt/itcms/__link
  )
- (func $~lib/task-rt/__taskRegister (param $state i32) (result i32)
-  unreachable
+ (func $~lib/task/TaskRecord#set:class_ (param $this i32) (param $class_ i32)
+  local.get $this
+  local.get $class_
+  i32.store
+ )
+ (func $~lib/task/TaskRecord#set:key (param $this i32) (param $key i32)
+  local.get $this
+  local.get $key
+  i32.store offset=4
+ )
+ (func $~lib/task/TaskRecord#set:payload (param $this i32) (param $payload i32)
+  local.get $this
+  local.get $payload
+  i32.store offset=8
+ )
+ (func $~lib/task/TaskRecord#set:status (param $this i32) (param $status i32)
+  local.get $this
+  local.get $status
+  i32.store offset=12
+ )
+ (func $~lib/task/TaskRecord#set:f0 (param $this i32) (param $f0 f32)
+  local.get $this
+  local.get $f0
+  f32.store offset=16
+ )
+ (func $~lib/task/TaskRecord#set:f1 (param $this i32) (param $f1 f32)
+  local.get $this
+  local.get $f1
+  f32.store offset=20
+ )
+ (func $~lib/task/TaskRecord#set:tag (param $this i32) (param $tag i32)
+  local.get $this
+  local.get $tag
+  i32.store offset=24
+ )
+ (func $~lib/task/TaskRecord#set:done (param $this i32) (param $done i32)
+  local.get $this
+  local.get $done
+  i32.store offset=28
  )
  (func $async-closure-value/outer$State#get:h (param $this i32) (result i32)
   local.get $this
-  i32.load offset=4
+  i32.load offset=8
  )
  (func $async-closure-value/outer$State#get:$closureEnv (param $this i32) (result i32)
   local.get $this
-  i32.load offset=12
+  i32.load offset=16
  )
  (func $async-closure-value/outer$State#get:resumePoint (param $this i32) (result i32)
   local.get $this
-  i32.load offset=16
+  i32.load offset=20
  )
  (func $async-closure-value/outer$Env#set:x (param $this i32) (param $x i32)
   local.get $this
@@ -2415,7 +2479,7 @@
  (func $async-closure-value/inner$State#set:g (param $this i32) (param $g i32)
   local.get $this
   local.get $g
-  i32.store offset=4
+  i32.store offset=8
   local.get $this
   local.get $g
   i32.const 0
@@ -2424,17 +2488,17 @@
  (func $async-closure-value/inner$State#set:resumePoint (param $this i32) (param $resumePoint i32)
   local.get $this
   local.get $resumePoint
-  i32.store offset=12
+  i32.store offset=16
  )
  (func $async-closure-value/inner$State#set:result (param $this i32) (param $result i32)
   local.get $this
   local.get $result
-  i32.store offset=16
+  i32.store offset=20
  )
  (func $async-closure-value/inner$State#set:$env (param $this i32) (param $$env i32)
   local.get $this
   local.get $$env
-  i32.store offset=8
+  i32.store offset=12
   local.get $this
   local.get $$env
   i32.const 0
@@ -2443,7 +2507,7 @@
  (func $async-closure-value/inner$State#set:$awaited1 (param $this i32) (param $$awaited1 i32)
   local.get $this
   local.get $$awaited1
-  i32.store offset=20
+  i32.store offset=24
   local.get $this
   local.get $$awaited1
   i32.const 0
@@ -2452,7 +2516,7 @@
  (func $async-closure-value/inner$State#set:handle (param $this i32) (param $handle i32)
   local.get $this
   local.get $handle
-  i32.store offset=24
+  i32.store offset=28
   local.get $this
   local.get $handle
   i32.const 0
@@ -2460,21 +2524,544 @@
  )
  (func $async-closure-value/inner$State#get:$env (param $this i32) (result i32)
   local.get $this
-  i32.load offset=8
+  i32.load offset=12
  )
  (func $async-closure-value/inner$State#get:g (param $this i32) (result i32)
   local.get $this
-  i32.load offset=4
+  i32.load offset=8
  )
  (func $async-closure-value/inner$State#get:resumePoint (param $this i32) (result i32)
   local.get $this
+  i32.load offset=16
+ )
+ (func $~lib/task/TaskRecord#get:done (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=28
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:buckets" (param $this i32) (param $buckets i32)
+  local.get $this
+  local.get $buckets
+  i32.store
+  local.get $this
+  local.get $buckets
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:bucketsMask" (param $this i32) (param $bucketsMask i32)
+  local.get $this
+  local.get $bucketsMask
+  i32.store offset=4
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entries" (param $this i32) (param $entries i32)
+  local.get $this
+  local.get $entries
+  i32.store offset=8
+  local.get $this
+  local.get $entries
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesCapacity" (param $this i32) (param $entriesCapacity i32)
+  local.get $this
+  local.get $entriesCapacity
+  i32.store offset=12
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesOffset" (param $this i32) (param $entriesOffset i32)
+  local.get $this
+  local.get $entriesOffset
+  i32.store offset=16
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesCount" (param $this i32) (param $entriesCount i32)
+  local.get $this
+  local.get $entriesCount
+  i32.store offset=20
+ )
+ (func $~lib/util/hash/HASH<~lib/task/TaskRecord> (param $key i32) (result i32)
+  (local $key|1 i32)
+  (local $len i32)
+  (local $h i32)
+  i32.const 0
+  drop
+  i32.const 1
+  drop
+  i32.const 4
+  i32.const 4
+  i32.eq
+  drop
+  block $~lib/util/hash/hash32|inlined.0 (result i32)
+   local.get $key
+   local.set $key|1
+   i32.const 4
+   local.set $len
+   i32.const 0
+   i32.const 374761393
+   i32.add
+   local.get $len
+   i32.add
+   local.set $h
+   local.get $h
+   local.get $key|1
+   i32.const -1028477379
+   i32.mul
+   i32.add
+   local.set $h
+   local.get $h
+   i32.const 17
+   i32.rotl
+   i32.const 668265263
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 15
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   i32.const -2048144777
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 13
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   i32.const -1028477379
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 16
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   br $~lib/util/hash/hash32|inlined.0
+  end
+  return
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:buckets" (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:bucketsMask" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:taggedNext" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:key" (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:value" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#set:buffer (param $this i32) (param $buffer i32)
+  local.get $this
+  local.get $buffer
+  i32.store
+  local.get $this
+  local.get $buffer
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#set:dataStart (param $this i32) (param $dataStart i32)
+  local.get $this
+  local.get $dataStart
+  i32.store offset=4
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#set:byteLength (param $this i32) (param $byteLength i32)
+  local.get $this
+  local.get $byteLength
+  i32.store offset=8
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#set:length_ (param $this i32) (param $length_ i32)
+  local.get $this
+  local.get $length_
+  i32.store offset=12
+ )
+ (func $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:value" (param $this i32) (param $value i32)
+  local.get $this
+  local.get $value
+  i32.store offset=4
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesOffset" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=16
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesCapacity" (param $this i32) (result i32)
+  local.get $this
   i32.load offset=12
  )
- (func $~lib/task-rt/__taskSettled (param $record i32) (result i32)
-  unreachable
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesCount" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=20
  )
- (func $~lib/task-rt/__taskPark (param $state i32) (param $awaited i32)
-  unreachable
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entries" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:key" (param $this i32) (param $key i32)
+  local.get $this
+  local.get $key
+  i32.store
+ )
+ (func $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:taggedNext" (param $this i32) (param $taggedNext i32)
+  local.get $this
+  local.get $taggedNext
+  i32.store offset=8
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#get:length_ (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=12
+ )
+ (func $~lib/arraybuffer/ArrayBufferView#get:byteLength (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $~lib/arraybuffer/ArrayBufferView#get:buffer (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $~lib/rt/itcms/Object#get:rtSize (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=16
+ )
+ (func $~lib/rt/itcms/__renew (param $oldPtr i32) (param $size i32) (result i32)
+  (local $oldObj i32)
+  (local $newPtr i32)
+  (local $4 i32)
+  (local $5 i32)
+  local.get $oldPtr
+  i32.const 20
+  i32.sub
+  local.set $oldObj
+  local.get $size
+  local.get $oldObj
+  call $~lib/rt/common/BLOCK#get:mmInfo
+  i32.const 3
+  i32.const -1
+  i32.xor
+  i32.and
+  i32.const 16
+  i32.sub
+  i32.le_u
+  if
+   local.get $oldObj
+   local.get $size
+   call $~lib/rt/itcms/Object#set:rtSize
+   local.get $oldPtr
+   return
+  end
+  local.get $size
+  local.get $oldObj
+  call $~lib/rt/itcms/Object#get:rtId
+  call $~lib/rt/itcms/__new
+  local.set $newPtr
+  local.get $newPtr
+  local.get $oldPtr
+  local.get $size
+  local.tee $4
+  local.get $oldObj
+  call $~lib/rt/itcms/Object#get:rtSize
+  local.tee $5
+  local.get $4
+  local.get $5
+  i32.lt_u
+  select
+  memory.copy
+  local.get $newPtr
+  return
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#get:dataStart (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/task/TaskRecord#get:class_ (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:buckets" (param $this i32) (param $buckets i32)
+  local.get $this
+  local.get $buckets
+  i32.store
+  local.get $this
+  local.get $buckets
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:bucketsMask" (param $this i32) (param $bucketsMask i32)
+  local.get $this
+  local.get $bucketsMask
+  i32.store offset=4
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entries" (param $this i32) (param $entries i32)
+  local.get $this
+  local.get $entries
+  i32.store offset=8
+  local.get $this
+  local.get $entries
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesCapacity" (param $this i32) (param $entriesCapacity i32)
+  local.get $this
+  local.get $entriesCapacity
+  i32.store offset=12
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesOffset" (param $this i32) (param $entriesOffset i32)
+  local.get $this
+  local.get $entriesOffset
+  i32.store offset=16
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesCount" (param $this i32) (param $entriesCount i32)
+  local.get $this
+  local.get $entriesCount
+  i32.store offset=20
+ )
+ (func $~lib/util/hash/HASH<i32> (param $key i32) (result i32)
+  (local $key|1 i32)
+  (local $len i32)
+  (local $h i32)
+  i32.const 0
+  drop
+  i32.const 0
+  drop
+  i32.const 0
+  drop
+  i32.const 4
+  i32.const 4
+  i32.le_u
+  drop
+  block $~lib/util/hash/hash32|inlined.1 (result i32)
+   local.get $key
+   local.set $key|1
+   i32.const 4
+   local.set $len
+   i32.const 0
+   i32.const 374761393
+   i32.add
+   local.get $len
+   i32.add
+   local.set $h
+   local.get $h
+   local.get $key|1
+   i32.const -1028477379
+   i32.mul
+   i32.add
+   local.set $h
+   local.get $h
+   i32.const 17
+   i32.rotl
+   i32.const 668265263
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 15
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   i32.const -2048144777
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 13
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   i32.const -1028477379
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 16
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   br $~lib/util/hash/hash32|inlined.1
+  end
+  return
+ )
+ (func $"~lib/map/Map<i32,i32>#get:buckets" (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $"~lib/map/Map<i32,i32>#get:bucketsMask" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $"~lib/map/MapEntry<i32,i32>#get:taggedNext" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $"~lib/map/MapEntry<i32,i32>#get:key" (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $"~lib/map/MapEntry<i32,i32>#get:value" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/task/TaskRecord#get:key (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/task-rt/keyOf (param $family i32) (param $a i32) (result i64)
+  local.get $family
+  i64.extend_i32_s
+  i64.const 32
+  i64.shl
+  local.get $a
+  i64.extend_i32_u
+  i64.or
+  return
+ )
+ (func $~lib/util/hash/HASH<i64> (param $key i64) (result i32)
+  (local $key|1 i64)
+  (local $h i32)
+  i32.const 0
+  drop
+  i32.const 0
+  drop
+  i32.const 0
+  drop
+  i32.const 8
+  i32.const 4
+  i32.le_u
+  drop
+  i32.const 8
+  i32.const 8
+  i32.eq
+  drop
+  block $~lib/util/hash/hash64|inlined.0 (result i32)
+   local.get $key
+   local.set $key|1
+   i32.const 0
+   i32.const 374761393
+   i32.add
+   i32.const 8
+   i32.add
+   local.set $h
+   local.get $h
+   local.get $key|1
+   i32.wrap_i64
+   i32.const -1028477379
+   i32.mul
+   i32.add
+   local.set $h
+   local.get $h
+   i32.const 17
+   i32.rotl
+   i32.const 668265263
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $key|1
+   i64.const 32
+   i64.shr_u
+   i32.wrap_i64
+   i32.const -1028477379
+   i32.mul
+   i32.add
+   local.set $h
+   local.get $h
+   i32.const 17
+   i32.rotl
+   i32.const 668265263
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 15
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   i32.const -2048144777
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 13
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   i32.const -1028477379
+   i32.mul
+   local.set $h
+   local.get $h
+   local.get $h
+   i32.const 16
+   i32.shr_u
+   i32.xor
+   local.set $h
+   local.get $h
+   br $~lib/util/hash/hash64|inlined.0
+  end
+  return
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:buckets" (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:bucketsMask" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:taggedNext" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=12
+ )
+ (func $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:key" (param $this i32) (result i64)
+  local.get $this
+  i64.load
+ )
+ (func $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:value" (param $this i32) (param $value i32)
+  local.get $this
+  local.get $value
+  i32.store offset=8
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesOffset" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=16
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesCapacity" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=12
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesCount" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=20
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entries" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:key" (param $this i32) (param $key i64)
+  local.get $this
+  local.get $key
+  i64.store
+ )
+ (func $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:value" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:taggedNext" (param $this i32) (param $taggedNext i32)
+  local.get $this
+  local.get $taggedNext
+  i32.store offset=12
  )
  (func $async-closure-value/outer$Env#get:x (param $this i32) (result i32)
   local.get $this
@@ -2489,6 +3076,34 @@
  )
  (func $~lib/rt/__visit_globals (param $0 i32)
   (local $1 i32)
+  global.get $~lib/task-rt/families
+  local.tee $1
+  if
+   local.get $1
+   local.get $0
+   call $~lib/rt/itcms/__visit
+  end
+  global.get $~lib/task-rt/waitingByKey
+  local.tee $1
+  if
+   local.get $1
+   local.get $0
+   call $~lib/rt/itcms/__visit
+  end
+  global.get $~lib/task-rt/waiters
+  local.tee $1
+  if
+   local.get $1
+   local.get $0
+   call $~lib/rt/itcms/__visit
+  end
+  global.get $~lib/task-rt/ready
+  local.tee $1
+  if
+   local.get $1
+   local.get $0
+   call $~lib/rt/itcms/__visit
+  end
   global.get $async-closure-value/sink
   local.tee $1
   if
@@ -2497,6 +3112,12 @@
    call $~lib/rt/itcms/__visit
   end
   i32.const 224
+  local.get $0
+  call $~lib/rt/itcms/__visit
+  i32.const 672
+  local.get $0
+  call $~lib/rt/itcms/__visit
+  i32.const 784
   local.get $0
   call $~lib/rt/itcms/__visit
   i32.const 32
@@ -2531,9 +3152,97 @@
   local.get $1
   call $~lib/task-rt/TaskState~visit
   local.get $0
+  i32.load offset=8
+  local.get $1
+  call $~lib/rt/itcms/__visit
+  local.get $0
+  i32.load offset=12
+  local.get $1
+  call $~lib/rt/itcms/__visit
+  local.get $0
+  i32.load offset=16
+  local.get $1
+  call $~lib/rt/itcms/__visit
+  local.get $0
+  i32.load offset=28
+  local.get $1
+  call $~lib/rt/itcms/__visit
+  local.get $0
+  i32.load offset=32
+  local.get $1
+  call $~lib/rt/itcms/__visit
+ )
+ (func $~lib/task-rt/TaskState~visit (param $0 i32) (param $1 i32)
+  (local $2 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  i32.load
+  local.get $1
+  call $~lib/rt/itcms/__visit
+  local.get $0
   i32.load offset=4
   local.get $1
   call $~lib/rt/itcms/__visit
+ )
+ (func $"~lib/map/Map<i32,i32>#get:entries" (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $"~lib/map/Map<i32,i32>~visit" (param $0 i32) (param $1 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  local.get $1
+  call $"~lib/map/Map<i32,i32>#__visit"
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>~visit" (param $0 i32) (param $1 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  local.get $1
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#__visit"
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#get:buffer (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>~visit (param $0 i32) (param $1 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  local.get $1
+  call $~lib/array/Array<~lib/task-rt/TaskState>#__visit
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>~visit" (param $0 i32) (param $1 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  local.get $1
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#__visit"
+ )
+ (func $~lib/function/Function<%28%29=>~lib/task/TaskRecord>#get:_env (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/function/Function<%28%29=>~lib/task/TaskRecord>~visit (param $0 i32) (param $1 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  local.get $1
+  call $~lib/function/Function<%28%29=>~lib/task/TaskRecord>#__visit
+ )
+ (func $async-closure-value/inner$State~visit (param $0 i32) (param $1 i32)
+  (local $2 i32)
+  local.get $0
+  local.get $1
+  call $~lib/task-rt/TaskState~visit
   local.get $0
   i32.load offset=8
   local.get $1
@@ -2548,38 +3257,6 @@
   call $~lib/rt/itcms/__visit
   local.get $0
   i32.load offset=28
-  local.get $1
-  call $~lib/rt/itcms/__visit
- )
- (func $~lib/task-rt/TaskState~visit (param $0 i32) (param $1 i32)
-  (local $2 i32)
-  local.get $0
-  local.get $1
-  call $~lib/object/Object~visit
-  local.get $0
-  i32.load
-  local.get $1
-  call $~lib/rt/itcms/__visit
- )
- (func $async-closure-value/inner$State~visit (param $0 i32) (param $1 i32)
-  (local $2 i32)
-  local.get $0
-  local.get $1
-  call $~lib/task-rt/TaskState~visit
-  local.get $0
-  i32.load offset=4
-  local.get $1
-  call $~lib/rt/itcms/__visit
-  local.get $0
-  i32.load offset=8
-  local.get $1
-  call $~lib/rt/itcms/__visit
-  local.get $0
-  i32.load offset=20
-  local.get $1
-  call $~lib/rt/itcms/__visit
-  local.get $0
-  i32.load offset=24
   local.get $1
   call $~lib/rt/itcms/__visit
  )
@@ -2599,52 +3276,82 @@
   block $invalid
    block $~lib/function/Function<%28~lib/task/Task<i32>%29=>~lib/task/Task<i32>>
     block $async-closure-value/inner$State
-     block $async-closure-value/outer$Env
-      block $~lib/task-rt/TaskEnv
-       block $~lib/task-rt/TaskState
-        block $async-closure-value/outer$State
-         block $~lib/task/TaskRecord
-          block $~lib/task/Task<i32>
-           block $~lib/arraybuffer/ArrayBufferView
-            block $~lib/string/String
-             block $~lib/arraybuffer/ArrayBuffer
-              block $~lib/object/Object
+     block $~lib/function/Function<%28%29=>~lib/task/TaskRecord>
+      block $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>"
+       block $~lib/array/Array<~lib/task-rt/TaskState>
+        block $"~lib/map/Map<i64,~lib/task/TaskRecord>"
+         block $"~lib/map/Map<i32,i32>"
+          block $async-closure-value/outer$Env
+           block $~lib/task-rt/TaskEnv
+            block $~lib/task-rt/TaskState
+             block $async-closure-value/outer$State
+              block $~lib/task/TaskRecord
+               block $~lib/task/Task<i32>
+                block $~lib/arraybuffer/ArrayBufferView
+                 block $~lib/string/String
+                  block $~lib/arraybuffer/ArrayBuffer
+                   block $~lib/object/Object
+                    local.get $0
+                    i32.const 8
+                    i32.sub
+                    i32.load
+                    br_table $~lib/object/Object $~lib/arraybuffer/ArrayBuffer $~lib/string/String $~lib/arraybuffer/ArrayBufferView $~lib/task/Task<i32> $~lib/task/TaskRecord $async-closure-value/outer$State $~lib/task-rt/TaskState $~lib/task-rt/TaskEnv $async-closure-value/outer$Env $"~lib/map/Map<i32,i32>" $"~lib/map/Map<i64,~lib/task/TaskRecord>" $~lib/array/Array<~lib/task-rt/TaskState> $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>" $~lib/function/Function<%28%29=>~lib/task/TaskRecord> $async-closure-value/inner$State $~lib/function/Function<%28~lib/task/Task<i32>%29=>~lib/task/Task<i32>> $invalid
+                   end
+                   return
+                  end
+                  return
+                 end
+                 return
+                end
+                local.get $0
+                local.get $1
+                call $~lib/arraybuffer/ArrayBufferView~visit
+                return
+               end
                local.get $0
-               i32.const 8
-               i32.sub
-               i32.load
-               br_table $~lib/object/Object $~lib/arraybuffer/ArrayBuffer $~lib/string/String $~lib/arraybuffer/ArrayBufferView $~lib/task/Task<i32> $~lib/task/TaskRecord $async-closure-value/outer$State $~lib/task-rt/TaskState $~lib/task-rt/TaskEnv $async-closure-value/outer$Env $async-closure-value/inner$State $~lib/function/Function<%28~lib/task/Task<i32>%29=>~lib/task/Task<i32>> $invalid
+               local.get $1
+               call $~lib/task/Task<i32>~visit
+               return
               end
               return
              end
+             local.get $0
+             local.get $1
+             call $async-closure-value/outer$State~visit
              return
             end
+            local.get $0
+            local.get $1
+            call $~lib/task-rt/TaskState~visit
             return
            end
-           local.get $0
-           local.get $1
-           call $~lib/arraybuffer/ArrayBufferView~visit
            return
           end
-          local.get $0
-          local.get $1
-          call $~lib/task/Task<i32>~visit
           return
          end
+         local.get $0
+         local.get $1
+         call $"~lib/map/Map<i32,i32>~visit"
          return
         end
         local.get $0
         local.get $1
-        call $async-closure-value/outer$State~visit
+        call $"~lib/map/Map<i64,~lib/task/TaskRecord>~visit"
         return
        end
        local.get $0
        local.get $1
-       call $~lib/task-rt/TaskState~visit
+       call $~lib/array/Array<~lib/task-rt/TaskState>~visit
        return
       end
+      local.get $0
+      local.get $1
+      call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>~visit"
       return
      end
+     local.get $0
+     local.get $1
+     call $~lib/function/Function<%28%29=>~lib/task/TaskRecord>~visit
      return
     end
     local.get $0
@@ -2683,8 +3390,8 @@
   global.get $~lib/memory/__data_end
   i32.lt_s
   if
-   i32.const 33504
-   i32.const 33552
+   i32.const 33792
+   i32.const 33840
    i32.const 1
    i32.const 1
    call $~lib/builtins/abort
@@ -2705,7 +3412,7 @@
   i32.eqz
   if
    global.get $~lib/memory/__stack_pointer
-   i32.const 4
+   i32.const 8
    i32.const 7
    call $~lib/rt/itcms/__new
    local.tee $this
@@ -2732,6 +3439,14 @@
   local.get $this
   local.set $1
   global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task-rt/TaskState#set:resume
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
   i32.const 8
   i32.add
   global.set $~lib/memory/__stack_pointer
@@ -2754,7 +3469,7 @@
   i32.eqz
   if
    global.get $~lib/memory/__stack_pointer
-   i32.const 32
+   i32.const 36
    i32.const 6
    call $~lib/rt/itcms/__new
    local.tee $this
@@ -2917,6 +3632,181 @@
   global.set $~lib/memory/__stack_pointer
   local.get $1
  )
+ (func $~lib/task/TaskRecord#constructor (param $this i32) (result i32)
+  (local $1 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  local.get $this
+  i32.eqz
+  if
+   global.get $~lib/memory/__stack_pointer
+   i32.const 32
+   i32.const 5
+   call $~lib/rt/itcms/__new
+   local.tee $this
+   i32.store
+  end
+  global.get $~lib/memory/__stack_pointer
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  call $~lib/object/Object#constructor
+  local.tee $this
+  i32.store
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskRecord#set:class_
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskRecord#set:key
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskRecord#set:payload
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskRecord#set:status
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  f32.const 0
+  call $~lib/task/TaskRecord#set:f0
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  f32.const 0
+  call $~lib/task/TaskRecord#set:f1
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskRecord#set:tag
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskRecord#set:done
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $1
+ )
+ (func $~lib/task-rt/__taskRegister (param $state i32) (result i32)
+  (local $make i32)
+  (local $2 i32)
+  (local $3 i32)
+  (local $4 i32)
+  (local $record i32)
+  (local $6 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 24
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.const 24
+  memory.fill
+  global.get $~lib/memory/__stack_pointer
+  global.get $~lib/task-rt/recordFactory
+  local.tee $make
+  i32.store
+  global.get $~lib/memory/__stack_pointer
+  local.get $make
+  i32.const 0
+  i32.ne
+  if (result i32)
+   global.get $~env
+   local.set $3
+   global.get $~lib/memory/__stack_pointer
+   local.get $make
+   local.tee $2
+   i32.store offset=4
+   local.get $2
+   i32.load offset=4
+   global.set $~env
+   global.get $~lib/memory/__stack_pointer
+   i32.const 0
+   global.set $~argumentsLength
+   local.get $2
+   i32.load
+   call_indirect (type $6)
+   local.tee $4
+   i32.store offset=8
+   local.get $3
+   global.set $~env
+   local.get $4
+  else
+   i32.const 0
+   call $~lib/task/TaskRecord#constructor
+  end
+  local.tee $record
+  i32.store offset=12
+  local.get $state
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=16
+  local.get $6
+  local.get $record
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=20
+  local.get $6
+  call $~lib/task-rt/TaskState#set:record
+  local.get $record
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  i32.const 24
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $6
+  return
+ )
  (func $~lib/task-rt/TaskEnv#constructor (param $this i32) (result i32)
   (local $1 i32)
   global.get $~lib/memory/__stack_pointer
@@ -3018,8 +3908,8 @@
   i32.eqz
   if
    global.get $~lib/memory/__stack_pointer
-   i32.const 28
-   i32.const 10
+   i32.const 32
+   i32.const 15
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -3118,6 +4008,2073 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
   local.get $2
+ )
+ (func $~lib/task-rt/__taskSettled (param $record i32) (result i32)
+  (local $1 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $record
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store
+  local.get $1
+  call $~lib/task/TaskRecord#get:done
+  i32.const 0
+  i32.ne
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $1
+  return
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#constructor" (param $this i32) (result i32)
+  (local $1 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
+  local.get $this
+  i32.eqz
+  if
+   global.get $~lib/memory/__stack_pointer
+   i32.const 24
+   i32.const 13
+   call $~lib/rt/itcms/__new
+   local.tee $this
+   i32.store
+  end
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  i32.const 4
+  i32.const 4
+  i32.mul
+  call $~lib/arraybuffer/ArrayBuffer#constructor
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=8
+  local.get $1
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:buckets"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 4
+  i32.const 1
+  i32.sub
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:bucketsMask"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  i32.const 4
+  block $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.0" (result i32)
+   i32.const 12
+   br $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.0"
+  end
+  i32.mul
+  call $~lib/arraybuffer/ArrayBuffer#constructor
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=8
+  local.get $1
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entries"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 4
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesCapacity"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesOffset"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesCount"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $1
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#find" (param $this i32) (param $key i32) (param $hashCode i32) (result i32)
+  (local $entry i32)
+  (local $taggedNext i32)
+  (local $5 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:buckets"
+  local.get $hashCode
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:bucketsMask"
+  i32.and
+  i32.const 4
+  i32.mul
+  i32.add
+  i32.load
+  local.set $entry
+  loop $while-continue|0
+   local.get $entry
+   if
+    local.get $entry
+    call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:taggedNext"
+    local.set $taggedNext
+    local.get $taggedNext
+    i32.const 1
+    i32.and
+    i32.eqz
+    if (result i32)
+     local.get $entry
+     call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:key"
+     local.get $key
+     i32.eq
+    else
+     i32.const 0
+    end
+    if
+     local.get $entry
+     local.set $5
+     global.get $~lib/memory/__stack_pointer
+     i32.const 4
+     i32.add
+     global.set $~lib/memory/__stack_pointer
+     local.get $5
+     return
+    end
+    local.get $taggedNext
+    i32.const 1
+    i32.const -1
+    i32.xor
+    i32.and
+    local.set $entry
+    br $while-continue|0
+   end
+  end
+  i32.const 0
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $5
+  return
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#has" (param $this i32) (param $key i32) (result i32)
+  (local $2 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
+  local.get $this
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store
+  local.get $2
+  local.get $key
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store offset=4
+  local.get $2
+  local.get $key
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store offset=8
+  local.get $2
+  call $~lib/util/hash/HASH<~lib/task/TaskRecord>
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#find"
+  i32.const 0
+  i32.ne
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $2
+  return
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get" (param $this i32) (param $key i32) (result i32)
+  (local $entry i32)
+  (local $3 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
+  local.get $this
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  local.get $3
+  i32.store
+  local.get $3
+  local.get $key
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  local.get $3
+  i32.store offset=4
+  local.get $3
+  local.get $key
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  local.get $3
+  i32.store offset=8
+  local.get $3
+  call $~lib/util/hash/HASH<~lib/task/TaskRecord>
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#find"
+  local.set $entry
+  local.get $entry
+  i32.eqz
+  if
+   i32.const 784
+   i32.const 848
+   i32.const 105
+   i32.const 17
+   call $~lib/builtins/abort
+   unreachable
+  end
+  local.get $entry
+  call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:value"
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $3
+  return
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#constructor (param $this i32) (param $length i32) (result i32)
+  (local $2 i32)
+  (local $3 i32)
+  (local $bufferSize i32)
+  (local $buffer i32)
+  (local $6 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 16
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store offset=8
+  local.get $this
+  i32.eqz
+  if
+   global.get $~lib/memory/__stack_pointer
+   i32.const 16
+   i32.const 12
+   call $~lib/rt/itcms/__new
+   local.tee $this
+   i32.store
+  end
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=4
+  local.get $6
+  i32.const 0
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:buffer
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=4
+  local.get $6
+  i32.const 0
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:dataStart
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=4
+  local.get $6
+  i32.const 0
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:byteLength
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=4
+  local.get $6
+  i32.const 0
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:length_
+  local.get $length
+  i32.const 1073741820
+  i32.const 2
+  i32.shr_u
+  i32.gt_u
+  if
+   i32.const 672
+   i32.const 896
+   i32.const 70
+   i32.const 60
+   call $~lib/builtins/abort
+   unreachable
+  end
+  local.get $length
+  local.tee $2
+  i32.const 8
+  local.tee $3
+  local.get $2
+  local.get $3
+  i32.gt_u
+  select
+  i32.const 2
+  i32.shl
+  local.set $bufferSize
+  global.get $~lib/memory/__stack_pointer
+  local.get $bufferSize
+  i32.const 1
+  call $~lib/rt/itcms/__new
+  local.tee $buffer
+  i32.store offset=8
+  i32.const 2
+  global.get $~lib/shared/runtime/Runtime.Incremental
+  i32.ne
+  drop
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=4
+  local.get $6
+  local.get $buffer
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=12
+  local.get $6
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:buffer
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=4
+  local.get $6
+  local.get $buffer
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:dataStart
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=4
+  local.get $6
+  local.get $bufferSize
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:byteLength
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  local.get $6
+  i32.store offset=4
+  local.get $6
+  local.get $length
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:length_
+  local.get $this
+  local.set $6
+  global.get $~lib/memory/__stack_pointer
+  i32.const 16
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $6
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#rehash" (param $this i32) (param $newBucketsMask i32)
+  (local $newBucketsCapacity i32)
+  (local $newBuckets i32)
+  (local $newEntriesCapacity i32)
+  (local $newEntries i32)
+  (local $oldPtr i32)
+  (local $oldEnd i32)
+  (local $newPtr i32)
+  (local $oldEntry i32)
+  (local $newEntry i32)
+  (local $oldEntryKey i32)
+  (local $newBucketIndex i32)
+  (local $newBucketPtrBase i32)
+  (local $14 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 20
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.const 20
+  memory.fill
+  local.get $newBucketsMask
+  i32.const 1
+  i32.add
+  local.set $newBucketsCapacity
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  local.get $newBucketsCapacity
+  i32.const 4
+  i32.mul
+  call $~lib/arraybuffer/ArrayBuffer#constructor
+  local.tee $newBuckets
+  i32.store
+  local.get $newBucketsCapacity
+  i32.const 8
+  i32.mul
+  i32.const 3
+  i32.div_s
+  local.set $newEntriesCapacity
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  local.get $newEntriesCapacity
+  block $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.1" (result i32)
+   i32.const 12
+   br $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.1"
+  end
+  i32.mul
+  call $~lib/arraybuffer/ArrayBuffer#constructor
+  local.tee $newEntries
+  i32.store offset=4
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entries"
+  local.set $oldPtr
+  local.get $oldPtr
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesOffset"
+  block $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.2" (result i32)
+   i32.const 12
+   br $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.2"
+  end
+  i32.mul
+  i32.add
+  local.set $oldEnd
+  local.get $newEntries
+  local.set $newPtr
+  loop $while-continue|0
+   local.get $oldPtr
+   local.get $oldEnd
+   i32.ne
+   if
+    local.get $oldPtr
+    local.set $oldEntry
+    local.get $oldEntry
+    call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:taggedNext"
+    i32.const 1
+    i32.and
+    i32.eqz
+    if
+     local.get $newPtr
+     local.set $newEntry
+     global.get $~lib/memory/__stack_pointer
+     local.get $oldEntry
+     call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:key"
+     local.tee $oldEntryKey
+     i32.store offset=12
+     local.get $newEntry
+     local.get $oldEntryKey
+     local.set $14
+     global.get $~lib/memory/__stack_pointer
+     local.get $14
+     i32.store offset=8
+     local.get $14
+     call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:key"
+     local.get $newEntry
+     local.get $oldEntry
+     call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:value"
+     local.set $14
+     global.get $~lib/memory/__stack_pointer
+     local.get $14
+     i32.store offset=8
+     local.get $14
+     call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:value"
+     local.get $oldEntryKey
+     local.set $14
+     global.get $~lib/memory/__stack_pointer
+     local.get $14
+     i32.store offset=8
+     local.get $14
+     call $~lib/util/hash/HASH<~lib/task/TaskRecord>
+     local.get $newBucketsMask
+     i32.and
+     local.set $newBucketIndex
+     local.get $newBuckets
+     local.get $newBucketIndex
+     i32.const 4
+     i32.mul
+     i32.add
+     local.set $newBucketPtrBase
+     local.get $newEntry
+     local.get $newBucketPtrBase
+     i32.load
+     call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:taggedNext"
+     local.get $newBucketPtrBase
+     local.get $newPtr
+     i32.store
+     local.get $newPtr
+     block $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.3" (result i32)
+      i32.const 12
+      br $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.3"
+     end
+     i32.add
+     local.set $newPtr
+    end
+    local.get $oldPtr
+    block $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.4" (result i32)
+     i32.const 12
+     br $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.4"
+    end
+    i32.add
+    local.set $oldPtr
+    br $while-continue|0
+   end
+  end
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $newBuckets
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=16
+  local.get $14
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:buckets"
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $newBucketsMask
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:bucketsMask"
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $newEntries
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=16
+  local.get $14
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entries"
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $newEntriesCapacity
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesCapacity"
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=16
+  local.get $14
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesCount"
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesOffset"
+  global.get $~lib/memory/__stack_pointer
+  i32.const 20
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set" (param $this i32) (param $key i32) (param $value i32) (result i32)
+  (local $hashCode i32)
+  (local $entry i32)
+  (local $entries i32)
+  (local $6 i32)
+  (local $bucketPtrBase i32)
+  (local $8 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
+  local.get $key
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  local.get $8
+  i32.store
+  local.get $8
+  call $~lib/util/hash/HASH<~lib/task/TaskRecord>
+  local.set $hashCode
+  local.get $this
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  local.get $8
+  i32.store
+  local.get $8
+  local.get $key
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  local.get $8
+  i32.store offset=4
+  local.get $8
+  local.get $hashCode
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#find"
+  local.set $entry
+  local.get $entry
+  if
+   local.get $entry
+   local.get $value
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:value"
+   i32.const 1
+   drop
+   local.get $this
+   local.get $value
+   i32.const 1
+   call $~lib/rt/itcms/__link
+  else
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesOffset"
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesCapacity"
+   i32.eq
+   if
+    local.get $this
+    local.set $8
+    global.get $~lib/memory/__stack_pointer
+    local.get $8
+    i32.store
+    local.get $8
+    local.get $this
+    local.set $8
+    global.get $~lib/memory/__stack_pointer
+    local.get $8
+    i32.store offset=4
+    local.get $8
+    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesCount"
+    local.get $this
+    local.set $8
+    global.get $~lib/memory/__stack_pointer
+    local.get $8
+    i32.store offset=4
+    local.get $8
+    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesCapacity"
+    i32.const 3
+    i32.mul
+    i32.const 4
+    i32.div_s
+    i32.lt_s
+    if (result i32)
+     local.get $this
+     local.set $8
+     global.get $~lib/memory/__stack_pointer
+     local.get $8
+     i32.store offset=4
+     local.get $8
+     call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:bucketsMask"
+    else
+     local.get $this
+     local.set $8
+     global.get $~lib/memory/__stack_pointer
+     local.get $8
+     i32.store offset=4
+     local.get $8
+     call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:bucketsMask"
+     i32.const 1
+     i32.shl
+     i32.const 1
+     i32.or
+    end
+    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#rehash"
+   end
+   global.get $~lib/memory/__stack_pointer
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entries"
+   local.tee $entries
+   i32.store offset=8
+   local.get $entries
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store offset=4
+   local.get $8
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesOffset"
+   local.tee $6
+   i32.const 1
+   i32.add
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesOffset"
+   local.get $6
+   block $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.5" (result i32)
+    i32.const 12
+    br $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.5"
+   end
+   i32.mul
+   i32.add
+   local.set $entry
+   local.get $entry
+   local.get $key
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:key"
+   i32.const 1
+   drop
+   local.get $this
+   local.get $key
+   i32.const 1
+   call $~lib/rt/itcms/__link
+   local.get $entry
+   local.get $value
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:value"
+   i32.const 1
+   drop
+   local.get $this
+   local.get $value
+   i32.const 1
+   call $~lib/rt/itcms/__link
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store offset=4
+   local.get $8
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesCount"
+   i32.const 1
+   i32.add
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:entriesCount"
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:buckets"
+   local.get $hashCode
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:bucketsMask"
+   i32.and
+   i32.const 4
+   i32.mul
+   i32.add
+   local.set $bucketPtrBase
+   local.get $entry
+   local.get $bucketPtrBase
+   i32.load
+   call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set:taggedNext"
+   local.get $bucketPtrBase
+   local.get $entry
+   i32.store
+  end
+  local.get $this
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $8
+  return
+ )
+ (func $~lib/array/ensureCapacity (param $array i32) (param $newSize i32) (param $alignLog2 i32) (param $canGrow i32)
+  (local $oldCapacity i32)
+  (local $oldData i32)
+  (local $6 i32)
+  (local $7 i32)
+  (local $newCapacity i32)
+  (local $9 i32)
+  (local $10 i32)
+  (local $11 i32)
+  (local $12 i32)
+  (local $newData i32)
+  (local $14 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $array
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store
+  local.get $14
+  call $~lib/arraybuffer/ArrayBufferView#get:byteLength
+  local.set $oldCapacity
+  local.get $newSize
+  local.get $oldCapacity
+  local.get $alignLog2
+  i32.shr_u
+  i32.gt_u
+  if
+   local.get $newSize
+   i32.const 1073741820
+   local.get $alignLog2
+   i32.shr_u
+   i32.gt_u
+   if
+    i32.const 672
+    i32.const 896
+    i32.const 19
+    i32.const 48
+    call $~lib/builtins/abort
+    unreachable
+   end
+   local.get $array
+   local.set $14
+   global.get $~lib/memory/__stack_pointer
+   local.get $14
+   i32.store
+   local.get $14
+   call $~lib/arraybuffer/ArrayBufferView#get:buffer
+   local.set $oldData
+   local.get $newSize
+   local.tee $6
+   i32.const 8
+   local.tee $7
+   local.get $6
+   local.get $7
+   i32.gt_u
+   select
+   local.get $alignLog2
+   i32.shl
+   local.set $newCapacity
+   local.get $canGrow
+   if
+    local.get $oldCapacity
+    i32.const 1
+    i32.shl
+    local.tee $9
+    i32.const 1073741820
+    local.tee $10
+    local.get $9
+    local.get $10
+    i32.lt_u
+    select
+    local.tee $11
+    local.get $newCapacity
+    local.tee $12
+    local.get $11
+    local.get $12
+    i32.gt_u
+    select
+    local.set $newCapacity
+   end
+   local.get $oldData
+   local.get $newCapacity
+   call $~lib/rt/itcms/__renew
+   local.set $newData
+   i32.const 2
+   global.get $~lib/shared/runtime/Runtime.Incremental
+   i32.ne
+   drop
+   local.get $newData
+   local.get $oldData
+   i32.ne
+   if
+    local.get $array
+    local.get $newData
+    i32.store
+    local.get $array
+    local.get $newData
+    i32.store offset=4
+    local.get $array
+    local.get $newData
+    i32.const 0
+    call $~lib/rt/itcms/__link
+   end
+   local.get $array
+   local.get $newCapacity
+   i32.store offset=8
+  end
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#push (param $this i32) (param $value i32) (result i32)
+  (local $oldLen i32)
+  (local $len i32)
+  (local $4 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $4
+  global.get $~lib/memory/__stack_pointer
+  local.get $4
+  i32.store
+  local.get $4
+  call $~lib/array/Array<~lib/task-rt/TaskState>#get:length_
+  local.set $oldLen
+  local.get $oldLen
+  i32.const 1
+  i32.add
+  local.set $len
+  local.get $this
+  local.get $len
+  i32.const 2
+  i32.const 1
+  call $~lib/array/ensureCapacity
+  i32.const 1
+  drop
+  local.get $this
+  local.set $4
+  global.get $~lib/memory/__stack_pointer
+  local.get $4
+  i32.store
+  local.get $4
+  call $~lib/array/Array<~lib/task-rt/TaskState>#get:dataStart
+  local.get $oldLen
+  i32.const 2
+  i32.shl
+  i32.add
+  local.get $value
+  i32.store
+  local.get $this
+  local.get $value
+  i32.const 1
+  call $~lib/rt/itcms/__link
+  local.get $this
+  local.set $4
+  global.get $~lib/memory/__stack_pointer
+  local.get $4
+  i32.store
+  local.get $4
+  local.get $len
+  call $~lib/array/Array<~lib/task-rt/TaskState>#set:length_
+  local.get $len
+  local.set $4
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $4
+  return
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#constructor" (param $this i32) (result i32)
+  (local $1 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
+  local.get $this
+  i32.eqz
+  if
+   global.get $~lib/memory/__stack_pointer
+   i32.const 24
+   i32.const 11
+   call $~lib/rt/itcms/__new
+   local.tee $this
+   i32.store
+  end
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  i32.const 4
+  i32.const 4
+  i32.mul
+  call $~lib/arraybuffer/ArrayBuffer#constructor
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=8
+  local.get $1
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:buckets"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 4
+  i32.const 1
+  i32.sub
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:bucketsMask"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  i32.const 4
+  block $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.0" (result i32)
+   i32.const 16
+   br $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.0"
+  end
+  i32.mul
+  call $~lib/arraybuffer/ArrayBuffer#constructor
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=8
+  local.get $1
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entries"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 4
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesCapacity"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesOffset"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesCount"
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $1
+ )
+ (func $"~lib/map/Map<i32,i32>#find" (param $this i32) (param $key i32) (param $hashCode i32) (result i32)
+  (local $entry i32)
+  (local $taggedNext i32)
+  (local $5 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $"~lib/map/Map<i32,i32>#get:buckets"
+  local.get $hashCode
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $"~lib/map/Map<i32,i32>#get:bucketsMask"
+  i32.and
+  i32.const 4
+  i32.mul
+  i32.add
+  i32.load
+  local.set $entry
+  loop $while-continue|0
+   local.get $entry
+   if
+    local.get $entry
+    call $"~lib/map/MapEntry<i32,i32>#get:taggedNext"
+    local.set $taggedNext
+    local.get $taggedNext
+    i32.const 1
+    i32.and
+    i32.eqz
+    if (result i32)
+     local.get $entry
+     call $"~lib/map/MapEntry<i32,i32>#get:key"
+     local.get $key
+     i32.eq
+    else
+     i32.const 0
+    end
+    if
+     local.get $entry
+     local.set $5
+     global.get $~lib/memory/__stack_pointer
+     i32.const 4
+     i32.add
+     global.set $~lib/memory/__stack_pointer
+     local.get $5
+     return
+    end
+    local.get $taggedNext
+    i32.const 1
+    i32.const -1
+    i32.xor
+    i32.and
+    local.set $entry
+    br $while-continue|0
+   end
+  end
+  i32.const 0
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $5
+  return
+ )
+ (func $"~lib/map/Map<i32,i32>#has" (param $this i32) (param $key i32) (result i32)
+  (local $2 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store
+  local.get $2
+  local.get $key
+  local.get $key
+  call $~lib/util/hash/HASH<i32>
+  call $"~lib/map/Map<i32,i32>#find"
+  i32.const 0
+  i32.ne
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $2
+  return
+ )
+ (func $"~lib/map/Map<i32,i32>#get" (param $this i32) (param $key i32) (result i32)
+  (local $entry i32)
+  (local $3 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  local.get $3
+  i32.store
+  local.get $3
+  local.get $key
+  local.get $key
+  call $~lib/util/hash/HASH<i32>
+  call $"~lib/map/Map<i32,i32>#find"
+  local.set $entry
+  local.get $entry
+  i32.eqz
+  if
+   i32.const 784
+   i32.const 848
+   i32.const 105
+   i32.const 17
+   call $~lib/builtins/abort
+   unreachable
+  end
+  local.get $entry
+  call $"~lib/map/MapEntry<i32,i32>#get:value"
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $3
+  return
+ )
+ (func $~lib/task-rt/familyOf (param $class_ i32) (result i32)
+  (local $map i32)
+  (local $2 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  global.get $~lib/task-rt/families
+  local.tee $map
+  i32.store
+  local.get $map
+  i32.const 0
+  i32.ne
+  if (result i32)
+   local.get $map
+   local.set $2
+   global.get $~lib/memory/__stack_pointer
+   local.get $2
+   i32.store offset=4
+   local.get $2
+   local.get $class_
+   call $"~lib/map/Map<i32,i32>#has"
+  else
+   i32.const 0
+  end
+  if
+   local.get $map
+   local.set $2
+   global.get $~lib/memory/__stack_pointer
+   local.get $2
+   i32.store offset=4
+   local.get $2
+   local.get $class_
+   call $"~lib/map/Map<i32,i32>#get"
+   local.set $2
+   global.get $~lib/memory/__stack_pointer
+   i32.const 8
+   i32.add
+   global.set $~lib/memory/__stack_pointer
+   local.get $2
+   return
+  end
+  local.get $class_
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $2
+  return
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#find" (param $this i32) (param $key i64) (param $hashCode i32) (result i32)
+  (local $entry i32)
+  (local $taggedNext i32)
+  (local $5 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:buckets"
+  local.get $hashCode
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:bucketsMask"
+  i32.and
+  i32.const 4
+  i32.mul
+  i32.add
+  i32.load
+  local.set $entry
+  loop $while-continue|0
+   local.get $entry
+   if
+    local.get $entry
+    call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:taggedNext"
+    local.set $taggedNext
+    local.get $taggedNext
+    i32.const 1
+    i32.and
+    i32.eqz
+    if (result i32)
+     local.get $entry
+     call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:key"
+     local.get $key
+     i64.eq
+    else
+     i32.const 0
+    end
+    if
+     local.get $entry
+     local.set $5
+     global.get $~lib/memory/__stack_pointer
+     i32.const 4
+     i32.add
+     global.set $~lib/memory/__stack_pointer
+     local.get $5
+     return
+    end
+    local.get $taggedNext
+    i32.const 1
+    i32.const -1
+    i32.xor
+    i32.and
+    local.set $entry
+    br $while-continue|0
+   end
+  end
+  i32.const 0
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $5
+  return
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#rehash" (param $this i32) (param $newBucketsMask i32)
+  (local $newBucketsCapacity i32)
+  (local $newBuckets i32)
+  (local $newEntriesCapacity i32)
+  (local $newEntries i32)
+  (local $oldPtr i32)
+  (local $oldEnd i32)
+  (local $newPtr i32)
+  (local $oldEntry i32)
+  (local $newEntry i32)
+  (local $oldEntryKey i64)
+  (local $newBucketIndex i32)
+  (local $newBucketPtrBase i32)
+  (local $14 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 16
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store offset=8
+  local.get $newBucketsMask
+  i32.const 1
+  i32.add
+  local.set $newBucketsCapacity
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  local.get $newBucketsCapacity
+  i32.const 4
+  i32.mul
+  call $~lib/arraybuffer/ArrayBuffer#constructor
+  local.tee $newBuckets
+  i32.store
+  local.get $newBucketsCapacity
+  i32.const 8
+  i32.mul
+  i32.const 3
+  i32.div_s
+  local.set $newEntriesCapacity
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  local.get $newEntriesCapacity
+  block $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.1" (result i32)
+   i32.const 16
+   br $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.1"
+  end
+  i32.mul
+  call $~lib/arraybuffer/ArrayBuffer#constructor
+  local.tee $newEntries
+  i32.store offset=4
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entries"
+  local.set $oldPtr
+  local.get $oldPtr
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesOffset"
+  block $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.2" (result i32)
+   i32.const 16
+   br $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.2"
+  end
+  i32.mul
+  i32.add
+  local.set $oldEnd
+  local.get $newEntries
+  local.set $newPtr
+  loop $while-continue|0
+   local.get $oldPtr
+   local.get $oldEnd
+   i32.ne
+   if
+    local.get $oldPtr
+    local.set $oldEntry
+    local.get $oldEntry
+    call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:taggedNext"
+    i32.const 1
+    i32.and
+    i32.eqz
+    if
+     local.get $newPtr
+     local.set $newEntry
+     local.get $oldEntry
+     call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:key"
+     local.set $oldEntryKey
+     local.get $newEntry
+     local.get $oldEntryKey
+     call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:key"
+     local.get $newEntry
+     local.get $oldEntry
+     call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:value"
+     local.set $14
+     global.get $~lib/memory/__stack_pointer
+     local.get $14
+     i32.store offset=8
+     local.get $14
+     call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:value"
+     local.get $oldEntryKey
+     call $~lib/util/hash/HASH<i64>
+     local.get $newBucketsMask
+     i32.and
+     local.set $newBucketIndex
+     local.get $newBuckets
+     local.get $newBucketIndex
+     i32.const 4
+     i32.mul
+     i32.add
+     local.set $newBucketPtrBase
+     local.get $newEntry
+     local.get $newBucketPtrBase
+     i32.load
+     call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:taggedNext"
+     local.get $newBucketPtrBase
+     local.get $newPtr
+     i32.store
+     local.get $newPtr
+     block $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.3" (result i32)
+      i32.const 16
+      br $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.3"
+     end
+     i32.add
+     local.set $newPtr
+    end
+    local.get $oldPtr
+    block $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.4" (result i32)
+     i32.const 16
+     br $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.4"
+    end
+    i32.add
+    local.set $oldPtr
+    br $while-continue|0
+   end
+  end
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $newBuckets
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=12
+  local.get $14
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:buckets"
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $newBucketsMask
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:bucketsMask"
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $newEntries
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=12
+  local.get $14
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entries"
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $newEntriesCapacity
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesCapacity"
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=8
+  local.get $14
+  local.get $this
+  local.set $14
+  global.get $~lib/memory/__stack_pointer
+  local.get $14
+  i32.store offset=12
+  local.get $14
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesCount"
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesOffset"
+  global.get $~lib/memory/__stack_pointer
+  i32.const 16
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#set" (param $this i32) (param $key i64) (param $value i32) (result i32)
+  (local $hashCode i32)
+  (local $entry i32)
+  (local $entries i32)
+  (local $6 i32)
+  (local $bucketPtrBase i32)
+  (local $8 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
+  local.get $key
+  call $~lib/util/hash/HASH<i64>
+  local.set $hashCode
+  local.get $this
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  local.get $8
+  i32.store
+  local.get $8
+  local.get $key
+  local.get $hashCode
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#find"
+  local.set $entry
+  local.get $entry
+  if
+   local.get $entry
+   local.get $value
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:value"
+   i32.const 1
+   drop
+   local.get $this
+   local.get $value
+   i32.const 1
+   call $~lib/rt/itcms/__link
+  else
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesOffset"
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesCapacity"
+   i32.eq
+   if
+    local.get $this
+    local.set $8
+    global.get $~lib/memory/__stack_pointer
+    local.get $8
+    i32.store
+    local.get $8
+    local.get $this
+    local.set $8
+    global.get $~lib/memory/__stack_pointer
+    local.get $8
+    i32.store offset=4
+    local.get $8
+    call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesCount"
+    local.get $this
+    local.set $8
+    global.get $~lib/memory/__stack_pointer
+    local.get $8
+    i32.store offset=4
+    local.get $8
+    call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesCapacity"
+    i32.const 3
+    i32.mul
+    i32.const 4
+    i32.div_s
+    i32.lt_s
+    if (result i32)
+     local.get $this
+     local.set $8
+     global.get $~lib/memory/__stack_pointer
+     local.get $8
+     i32.store offset=4
+     local.get $8
+     call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:bucketsMask"
+    else
+     local.get $this
+     local.set $8
+     global.get $~lib/memory/__stack_pointer
+     local.get $8
+     i32.store offset=4
+     local.get $8
+     call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:bucketsMask"
+     i32.const 1
+     i32.shl
+     i32.const 1
+     i32.or
+    end
+    call $"~lib/map/Map<i64,~lib/task/TaskRecord>#rehash"
+   end
+   global.get $~lib/memory/__stack_pointer
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entries"
+   local.tee $entries
+   i32.store offset=8
+   local.get $entries
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store offset=4
+   local.get $8
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesOffset"
+   local.tee $6
+   i32.const 1
+   i32.add
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesOffset"
+   local.get $6
+   block $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.5" (result i32)
+    i32.const 16
+    br $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.5"
+   end
+   i32.mul
+   i32.add
+   local.set $entry
+   local.get $entry
+   local.get $key
+   call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:key"
+   i32.const 0
+   drop
+   local.get $entry
+   local.get $value
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:value"
+   i32.const 1
+   drop
+   local.get $this
+   local.get $value
+   i32.const 1
+   call $~lib/rt/itcms/__link
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store offset=4
+   local.get $8
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesCount"
+   i32.const 1
+   i32.add
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set:entriesCount"
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:buckets"
+   local.get $hashCode
+   local.get $this
+   local.set $8
+   global.get $~lib/memory/__stack_pointer
+   local.get $8
+   i32.store
+   local.get $8
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:bucketsMask"
+   i32.and
+   i32.const 4
+   i32.mul
+   i32.add
+   local.set $bucketPtrBase
+   local.get $entry
+   local.get $bucketPtrBase
+   i32.load
+   call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#set:taggedNext"
+   local.get $bucketPtrBase
+   local.get $entry
+   i32.store
+  end
+  local.get $this
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $8
+  return
+ )
+ (func $~lib/task-rt/__taskPark (param $state i32) (param $awaited i32)
+  (local $byRecord i32)
+  (local $list i32)
+  (local $byKey i32)
+  (local $5 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 24
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.const 24
+  memory.fill
+  global.get $~lib/memory/__stack_pointer
+  global.get $~lib/task-rt/waiters
+  local.tee $byRecord
+  i32.store
+  local.get $byRecord
+  i32.const 0
+  i32.eq
+  if
+   global.get $~lib/memory/__stack_pointer
+   i32.const 0
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#constructor"
+   local.tee $byRecord
+   i32.store
+   local.get $byRecord
+   global.set $~lib/task-rt/waiters
+  end
+  i32.const 0
+  local.set $list
+  local.get $byRecord
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=4
+  local.get $5
+  local.get $awaited
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=8
+  local.get $5
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#has"
+  if
+   global.get $~lib/memory/__stack_pointer
+   local.get $byRecord
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=4
+   local.get $5
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=8
+   local.get $5
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get"
+   local.tee $list
+   i32.store offset=12
+  end
+  local.get $list
+  i32.const 0
+  i32.eq
+  if
+   global.get $~lib/memory/__stack_pointer
+   i32.const 0
+   i32.const 0
+   call $~lib/array/Array<~lib/task-rt/TaskState>#constructor
+   local.tee $list
+   i32.store offset=12
+   local.get $byRecord
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=4
+   local.get $5
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=8
+   local.get $5
+   local.get $list
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=16
+   local.get $5
+   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set"
+   drop
+  end
+  local.get $list
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=4
+  local.get $5
+  local.get $state
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=8
+  local.get $5
+  call $~lib/array/Array<~lib/task-rt/TaskState>#push
+  drop
+  local.get $awaited
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=4
+  local.get $5
+  call $~lib/task/TaskRecord#get:class_
+  i32.const 0
+  i32.ne
+  if
+   global.get $~lib/memory/__stack_pointer
+   global.get $~lib/task-rt/waitingByKey
+   local.tee $byKey
+   i32.store offset=20
+   local.get $byKey
+   i32.const 0
+   i32.eq
+   if
+    global.get $~lib/memory/__stack_pointer
+    i32.const 0
+    call $"~lib/map/Map<i64,~lib/task/TaskRecord>#constructor"
+    local.tee $byKey
+    i32.store offset=20
+    local.get $byKey
+    global.set $~lib/task-rt/waitingByKey
+   end
+   local.get $byKey
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=4
+   local.get $5
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=16
+   local.get $5
+   call $~lib/task/TaskRecord#get:class_
+   call $~lib/task-rt/familyOf
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=16
+   local.get $5
+   call $~lib/task/TaskRecord#get:key
+   call $~lib/task-rt/keyOf
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=8
+   local.get $5
+   call $"~lib/map/Map<i64,~lib/task/TaskRecord>#set"
+   drop
+  end
+  global.get $~lib/memory/__stack_pointer
+  i32.const 24
+  i32.add
+  global.set $~lib/memory/__stack_pointer
  )
  (func $async-closure-value/inner$resume (param $state i32)
   (local $$closureEnvIn i32)
@@ -3479,7 +6436,7 @@
   global.get $~lib/memory/__stack_pointer
   global.get $~lib/memory/__stack_pointer
   i32.const 8
-  i32.const 11
+  i32.const 16
   call $~lib/rt/itcms/__new
   local.tee $3
   i32.store offset=12
@@ -3638,7 +6595,7 @@
    global.set $~argumentsLength
    local.get $5
    i32.load
-   call_indirect (type $0)
+   call_indirect (type $1)
    local.tee $7
    i32.store offset=32
    local.get $6
@@ -3775,6 +6732,337 @@
   local.get $2
   return
  )
+ (func $"~lib/map/Map<i32,i32>#__visit" (param $this i32) (param $cookie i32)
+  (local $entries i32)
+  (local $3 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  local.get $3
+  i32.store
+  local.get $3
+  call $"~lib/map/Map<i32,i32>#get:buckets"
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  local.get $this
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  local.get $3
+  i32.store
+  local.get $3
+  call $"~lib/map/Map<i32,i32>#get:entries"
+  local.set $entries
+  i32.const 0
+  drop
+  local.get $entries
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $"~lib/map/Map<i64,~lib/task/TaskRecord>#__visit" (param $this i32) (param $cookie i32)
+  (local $entries i32)
+  (local $cur i32)
+  (local $end i32)
+  (local $entry i32)
+  (local $val i32)
+  (local $7 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $7
+  global.get $~lib/memory/__stack_pointer
+  local.get $7
+  i32.store
+  local.get $7
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:buckets"
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  local.get $this
+  local.set $7
+  global.get $~lib/memory/__stack_pointer
+  local.get $7
+  i32.store
+  local.get $7
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entries"
+  local.set $entries
+  i32.const 1
+  drop
+  local.get $entries
+  local.set $cur
+  local.get $cur
+  local.get $this
+  local.set $7
+  global.get $~lib/memory/__stack_pointer
+  local.get $7
+  i32.store
+  local.get $7
+  call $"~lib/map/Map<i64,~lib/task/TaskRecord>#get:entriesOffset"
+  block $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.6" (result i32)
+   i32.const 16
+   br $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.6"
+  end
+  i32.mul
+  i32.add
+  local.set $end
+  loop $while-continue|0
+   local.get $cur
+   local.get $end
+   i32.lt_u
+   if
+    local.get $cur
+    local.set $entry
+    local.get $entry
+    call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:taggedNext"
+    i32.const 1
+    i32.and
+    i32.eqz
+    if
+     i32.const 0
+     drop
+     i32.const 1
+     drop
+     local.get $entry
+     call $"~lib/map/MapEntry<i64,~lib/task/TaskRecord>#get:value"
+     local.set $val
+     i32.const 0
+     drop
+     local.get $val
+     local.get $cookie
+     call $~lib/rt/itcms/__visit
+    end
+    local.get $cur
+    block $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.7" (result i32)
+     i32.const 16
+     br $"~lib/map/ENTRY_SIZE<i64,~lib/task/TaskRecord>|inlined.7"
+    end
+    i32.add
+    local.set $cur
+    br $while-continue|0
+   end
+  end
+  local.get $entries
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $~lib/array/Array<~lib/task-rt/TaskState>#__visit (param $this i32) (param $cookie i32)
+  (local $cur i32)
+  (local $end i32)
+  (local $val i32)
+  (local $5 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  i32.const 1
+  drop
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $~lib/array/Array<~lib/task-rt/TaskState>#get:dataStart
+  local.set $cur
+  local.get $cur
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $~lib/array/Array<~lib/task-rt/TaskState>#get:length_
+  i32.const 2
+  i32.shl
+  i32.add
+  local.set $end
+  loop $while-continue|0
+   local.get $cur
+   local.get $end
+   i32.lt_u
+   if
+    local.get $cur
+    i32.load
+    local.set $val
+    local.get $val
+    if
+     local.get $val
+     local.get $cookie
+     call $~lib/rt/itcms/__visit
+    end
+    local.get $cur
+    i32.const 4
+    i32.add
+    local.set $cur
+    br $while-continue|0
+   end
+  end
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $~lib/array/Array<~lib/task-rt/TaskState>#get:buffer
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#__visit" (param $this i32) (param $cookie i32)
+  (local $entries i32)
+  (local $cur i32)
+  (local $end i32)
+  (local $entry i32)
+  (local $val i32)
+  (local $val|7 i32)
+  (local $8 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  local.get $8
+  i32.store
+  local.get $8
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:buckets"
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  local.get $this
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  local.get $8
+  i32.store
+  local.get $8
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entries"
+  local.set $entries
+  i32.const 1
+  drop
+  local.get $entries
+  local.set $cur
+  local.get $cur
+  local.get $this
+  local.set $8
+  global.get $~lib/memory/__stack_pointer
+  local.get $8
+  i32.store
+  local.get $8
+  call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:entriesOffset"
+  block $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.6" (result i32)
+   i32.const 12
+   br $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.6"
+  end
+  i32.mul
+  i32.add
+  local.set $end
+  loop $while-continue|0
+   local.get $cur
+   local.get $end
+   i32.lt_u
+   if
+    local.get $cur
+    local.set $entry
+    local.get $entry
+    call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:taggedNext"
+    i32.const 1
+    i32.and
+    i32.eqz
+    if
+     i32.const 1
+     drop
+     local.get $entry
+     call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:key"
+     local.set $val
+     i32.const 0
+     drop
+     local.get $val
+     local.get $cookie
+     call $~lib/rt/itcms/__visit
+     i32.const 1
+     drop
+     local.get $entry
+     call $"~lib/map/MapEntry<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get:value"
+     local.set $val|7
+     i32.const 0
+     drop
+     local.get $val|7
+     local.get $cookie
+     call $~lib/rt/itcms/__visit
+    end
+    local.get $cur
+    block $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.7" (result i32)
+     i32.const 12
+     br $"~lib/map/ENTRY_SIZE<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>|inlined.7"
+    end
+    i32.add
+    local.set $cur
+    br $while-continue|0
+   end
+  end
+  local.get $entries
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $~lib/function/Function<%28%29=>~lib/task/TaskRecord>#__visit (param $this i32) (param $cookie i32)
+  (local $2 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store
+  local.get $2
+  call $~lib/function/Function<%28%29=>~lib/task/TaskRecord>#get:_env
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
  (func $~lib/function/Function<%28~lib/task/Task<i32>%29=>~lib/task/Task<i32>>#__visit (param $this i32) (param $cookie i32)
   (local $2 i32)
   global.get $~lib/memory/__stack_pointer
@@ -3840,7 +7128,7 @@
   i32.store
   global.get $~lib/memory/__stack_pointer
   local.get $this
-  i32.load offset=28
+  i32.load offset=32
   local.tee $1
   i32.store
   local.get $1
@@ -3874,7 +7162,7 @@
   i32.store
   global.get $~lib/memory/__stack_pointer
   local.get $this
-  i32.load offset=24
+  i32.load offset=28
   local.tee $1
   i32.store
   local.get $1
@@ -3917,7 +7205,7 @@
   else
    i32.const 432
    i32.const 624
-   i32.const 55
+   i32.const 89
    i32.const 3
    call $~lib/builtins/abort
    unreachable
@@ -3942,7 +7230,7 @@
   i32.store
   global.get $~lib/memory/__stack_pointer
   local.get $this
-  i32.load offset=20
+  i32.load offset=24
   local.tee $1
   i32.store
   local.get $1
@@ -3963,6 +7251,47 @@
   global.set $~lib/memory/__stack_pointer
   local.get $2
  )
+ (func $~lib/arraybuffer/ArrayBuffer#constructor (param $this i32) (param $length i32) (result i32)
+  (local $buffer i32)
+  (local $3 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $length
+  i32.const 1073741820
+  i32.gt_u
+  if
+   i32.const 672
+   i32.const 720
+   i32.const 52
+   i32.const 43
+   call $~lib/builtins/abort
+   unreachable
+  end
+  global.get $~lib/memory/__stack_pointer
+  local.get $length
+  i32.const 1
+  call $~lib/rt/itcms/__new
+  local.tee $buffer
+  i32.store
+  i32.const 2
+  global.get $~lib/shared/runtime/Runtime.Incremental
+  i32.ne
+  drop
+  local.get $buffer
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $3
+  return
+ )
  (func $async-closure-value/outer$State#get:$awaited1 (param $this i32) (result i32)
   (local $1 i32)
   (local $2 i32)
@@ -3976,7 +7305,7 @@
   i32.store
   global.get $~lib/memory/__stack_pointer
   local.get $this
-  i32.load offset=24
+  i32.load offset=28
   local.tee $1
   i32.store
   local.get $1
