@@ -1412,10 +1412,43 @@ export class AsyncLowerTransform {
   private emitSeq(seq: PlanSeq, ctx: EmitContext): Array<Statement> {
     let out = new Array<Statement>();
     let plans = seq.plans;
+    // Consecutive statements with no await of their own share one skip
+    // condition (`resumePoint == 0`), so they share one guard block. That is
+    // both smaller output and the reason a `let` stays visible to the
+    // statements after it: per-statement guards ended each declaration's scope
+    // at its own closing brace (measured: `await h; let x = 5; return x;`
+    // → TS2304 on `x`).
+    let run = new Array<Statement>();
     for (let i = 0, k = plans.length; i < k; ++i) {
-      pushAll(out, this.emitPlan(plans[i], ctx));
+      let plan = plans[i];
+      if (
+        ctx.guarded &&
+        plan.kind == PlanKind.Plain &&
+        plan.lo == 0 &&
+        plan.info == null &&
+        !plan.nestedFunction &&
+        plan.node.kind != NodeKind.FunctionDeclaration
+      ) {
+        pushAll(run, rewriteStatement(plan.node, ctx));
+        continue;
+      }
+      this.flushRun(run, out, ctx);
+      pushAll(out, this.emitPlan(plan, ctx));
     }
+    this.flushRun(run, out, ctx);
     return out;
+  }
+
+  /** Emits the accumulated guard-free statements as one guarded block. */
+  private flushRun(run: Array<Statement>, out: Array<Statement>, ctx: EmitContext): void {
+    if (run.length == 0) return;
+    out.push(Node.createIfStatement(
+      isZero(resumePointRead(ctx.stateName, run[0].range), run[0].range),
+      Node.createBlockStatement(run.slice(0), run[0].range),
+      null,
+      run[0].range
+    ));
+    run.length = 0;
   }
 
   /** Emits one planned statement. */
@@ -2051,7 +2084,17 @@ class EmitContext {
      * return v + 1; }` failed with TS2304 once it was called). A body with no
      * await is emitted straight.
      */
-    public guarded: bool = true
+    public guarded: bool = true,
+    /**
+     * Locals declared at the resume body's top level and read by a *later*
+     * statement. Each was a `let` inside its own `if (resumePoint == K)` guard,
+     * so its scope ended at the guard and the next statement could not see it
+     * (measured: `await h; let x: i32 = 5; return x;` → TS2304 on `x`). They are
+     * declared once at the top of `f$resume` and assigned in their region —
+     * the standard state-machine shape, and the same rewrite the lifting rule
+     * already performs for a local that *crosses* an await (§4.3).
+     */
+    public hoisted: Set<string> | null = null
   ) {}
 
   /** A fresh temporary name for an `if`'s condition. */
@@ -2404,11 +2447,15 @@ function rewriteStatement(statement: Statement, ctx: EmitContext): Array<Stateme
   }
   if (statement.kind == NodeKind.Variable) {
     let declarations = (<VariableStatement>statement).declarations;
-    let lifted: bool = false;
+    let moved: bool = false;
     for (let i = 0, k = declarations.length; i < k; ++i) {
-      if (ctx.lifting.hasLocal(declarations[i].name.text)) { lifted = true; break; }
+      let name = declarations[i].name.text;
+      if (ctx.lifting.hasLocal(name) || (ctx.hoisted != null && ctx.hoisted.has(name))) {
+        moved = true;
+        break;
+      }
     }
-    if (!lifted) return [ statement ]; // a plain local: nothing changes
+    if (!moved) return [ statement ]; // a plain local: nothing changes
     // A lifted local already exists — the copy-in declared it at function scope.
     // Its declarator becomes an assignment, in source order; declarators that were
     // not lifted keep their declaration (a mixed `let a = 1, b = 2;` stays
@@ -2416,7 +2463,8 @@ function rewriteStatement(statement: Statement, ctx: EmitContext): Array<Stateme
     let out = new Array<Statement>();
     for (let i = 0, k = declarations.length; i < k; ++i) {
       let declaration = declarations[i];
-      if (!ctx.lifting.hasLocal(declaration.name.text)) {
+      let name = declaration.name.text;
+      if (!ctx.lifting.hasLocal(name) && (ctx.hoisted == null || !ctx.hoisted.has(name))) {
         out.push(Node.createVariableStatement(null, [ declaration ], declaration.range));
         continue;
       }
@@ -2425,7 +2473,7 @@ function rewriteStatement(statement: Statement, ctx: EmitContext): Array<Stateme
         // `let v: T = expr;` → `v = expr;`. The await-bearing declarator keeps
         // its `await` node in place, which is what codegen reads (§4.7.4).
         out.push(Node.createExpressionStatement(
-          simpleAssign(declaration.name.text, initializer, declaration.range)
+          simpleAssign(name, initializer, declaration.range)
         ));
       }
     }

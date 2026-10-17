@@ -959,7 +959,7 @@
    local.get $1
    global.set $~lib/rt/itcms/iter
   end
-  block $__inlined_func$~lib/rt/itcms/Object#unlink$388
+  block $__inlined_func$~lib/rt/itcms/Object#unlink$386
    local.get $0
    i32.load offset=4
    i32.const -4
@@ -983,7 +983,7 @@
      call $~lib/builtins/abort
      unreachable
     end
-    br $__inlined_func$~lib/rt/itcms/Object#unlink$388
+    br $__inlined_func$~lib/rt/itcms/Object#unlink$386
    end
    local.get $0
    i32.load offset=8
@@ -3132,7 +3132,7 @@
     select
     local.set $1
    end
-   block $__inlined_func$~lib/rt/itcms/__renew$378
+   block $__inlined_func$~lib/rt/itcms/__renew$376
     local.get $3
     i32.const 20
     i32.sub
@@ -3150,7 +3150,7 @@
      i32.store offset=16
      local.get $3
      local.set $2
-     br $__inlined_func$~lib/rt/itcms/__renew$378
+     br $__inlined_func$~lib/rt/itcms/__renew$376
     end
     local.get $1
     local.get $4
@@ -3492,14 +3492,6 @@
      global.set $~lib/memory/__stack_pointer
      local.get $1
      i32.store offset=8
-    end
-    global.get $~lib/memory/__stack_pointer
-    local.get $0
-    i32.store
-    local.get $0
-    i32.load offset=20
-    i32.eqz
-    if
      global.get $~lib/memory/__stack_pointer
      local.get $1
      i32.store
@@ -3514,10 +3506,10 @@
     call $~lib/rt/itcms/__new
     local.tee $4
     i32.store offset=12
-    local.get $1
+    local.get $0
     i32.const 2
     i32.store
-    local.get $1
+    local.get $0
     local.get $1
     i32.store offset=4
     local.get $4
@@ -3641,14 +3633,6 @@
      call_indirect (type $0)
      i32.store offset=32
      global.set $~env
-    end
-    global.get $~lib/memory/__stack_pointer
-    local.get $0
-    i32.store
-    local.get $0
-    i32.load offset=20
-    i32.eqz
-    if
      global.get $~lib/memory/__stack_pointer
      local.get $0
      i32.store
@@ -4722,7 +4706,7 @@
    i32.add
    i32.load
    local.set $3
-   block $"__inlined_func$~lib/map/Map<i64,~lib/task/TaskRecord>#find$381"
+   block $"__inlined_func$~lib/map/Map<i64,~lib/task/TaskRecord>#find$379"
     loop $while-continue|0
      local.get $3
      if
@@ -4744,7 +4728,7 @@
        i32.const 4
        i32.add
        global.set $~lib/memory/__stack_pointer
-       br $"__inlined_func$~lib/map/Map<i64,~lib/task/TaskRecord>#find$381"
+       br $"__inlined_func$~lib/map/Map<i64,~lib/task/TaskRecord>#find$379"
       end
       local.get $5
       i32.const -2
