@@ -105,6 +105,11 @@ let waiters: Map<TaskRecord, Array<TaskState>> | null = null;
 /** The ready queue: states whose record settled, in delivery order (§6.5). */
 let ready: Array<TaskState> | null = null;
 
+/** §3.2's `payload` offset — the record's integer and `bool` result slot. */
+const RECORD_PAYLOAD: usize = 8;
+/** §3.2's `f0` offset — `f32` results, and the low half of the 64-bit ones. */
+const RECORD_F0: usize = 16;
+
 /** `(family << 32) | (a & 0xffffffff)`, the correlation key (§3.1). */
 function keyOf(family: i32, a: i32): i64 {
   return (<i64>family << 32) | <i64>(<u32>a);
@@ -206,22 +211,27 @@ export function __taskDeliver(class_: i32, a: i32, b: i32, f0: i32, f1: i32): vo
   // `status` stays 0 — and nothing delivers in 4a, so nothing observes it.
   record.status = 0;
   record.done = 1;
-  // Wake the states parked on it, in the order they parked. The list is cleared
-  // so a second delivery for the same record (a re-used slot) does not wake the
-  // same task twice.
+  wake(record);
+}
+
+/**
+ * Moves the states parked on `record` to the ready queue, in the order they
+ * parked. The list is cleared so a second completion for the same record (a
+ * re-used slot) does not wake the same task twice.
+ */
+function wake(record: TaskRecord): void {
   let byRecord = waiters;
-  if (byRecord != null) {
-    let list: Array<TaskState> | null = null;
-    if (byRecord.has(record)) list = byRecord.get(record);
-    if (list != null && list.length != 0) {
-      let queue = ready;
-      if (queue == null) {
-        queue = new Array<TaskState>();
-        ready = queue;
-      }
-      for (let i = 0, k = list.length; i < k; ++i) queue.push(list[i]);
-      list.length = 0;
+  if (byRecord == null) return;
+  let list: Array<TaskState> | null = null;
+  if (byRecord.has(record)) list = byRecord.get(record);
+  if (list != null && list.length != 0) {
+    let queue = ready;
+    if (queue == null) {
+      queue = new Array<TaskState>();
+      ready = queue;
     }
+    for (let i = 0, k = list.length; i < k; ++i) queue.push(list[i]);
+    list.length = 0;
   }
 }
 
@@ -246,6 +256,58 @@ export function __taskTick(): void {
   // §6.4's dropped-completion rule lands here (4e): compare the drop rollup
   // against the last observed value, and wake every task parked on a family
   // whose counter advanced with `status = -EIO`.
+}
+
+/**
+ * The zero of `T`, for the state struct's lifted-local initializers.
+ *
+ * `changetype<T>(0)` is the only spelling the lowering can emit without knowing
+ * whether `T` is a float, an integer or a reference — and it does not compile
+ * for a float (measured: AS202, an i32 literal changed to f64). The branches
+ * here are compile-time constants per instantiation, so exactly one line of
+ * each is emitted.
+ */
+export function __asyncZero<T>(): T {
+  if (isFloat<T>()) return <T>0.0;
+  if (isInteger<T>()) return <T>0;
+  return changetype<T>(0);
+}
+
+/**
+ * Completes a task from inside the guest: `done`, `status = 0`, and the states
+ * parked on its record are queued for resume (§4.7.3, Phase 4b).
+ *
+ * The value half is {@link __taskCompleteResult}; this is what a `void` body's
+ * terminal calls. Split because `T` has to be named at the call site.
+ */
+export function __taskComplete(state: TaskState): void {
+  let record = state.record;
+  record.status = 0;
+  record.done = 1;
+  wake(record);
+}
+
+/**
+ * Completes a task with a value: stores it into the record at §3.2's offset for
+ * `R`, then {@link __taskComplete}.
+ *
+ * The offset mapping is codegen's read, mirrored exactly (`compiler.ts:8025-8027`):
+ * `f32` and the 64-bit kinds live at `f0` (16), everything narrower at `payload`
+ * (8). It is decided by `sizeof`/`isFloat` rather than by a name here, so a
+ * type alias resolves the same way it does at the read — the reason this is
+ * generic rather than a store the transform emits itself.
+ */
+export function __taskCompleteResult<R>(state: TaskState, value: R): void {
+  let record = state.record;
+  let base = changetype<usize>(record);
+  if (sizeof<R>() == 4 && isFloat<R>()) {
+    store<f32>(base + RECORD_F0, <f32>value);
+  } else if (sizeof<R>() > 4) {
+    store<R>(base + RECORD_F0, value);
+  } else {
+    store<R>(base + RECORD_PAYLOAD, value);
+  }
+  __taskComplete(state);
 }
 
 /** Whether any task is ready to resume — the frame loop's `wait(0)` test (§6.3). */
