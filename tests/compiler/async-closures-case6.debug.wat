@@ -39,10 +39,10 @@
  (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/native/ASC_RUNTIME i32 (i32.const 2))
- (global $~lib/rt/__rtti_base i32 (i32.const 944))
- (global $~lib/memory/__data_end i32 (i32.const 1012))
- (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33780))
- (global $~lib/memory/__heap_base i32 (i32.const 33780))
+ (global $~lib/rt/__rtti_base i32 (i32.const 976))
+ (global $~lib/memory/__data_end i32 (i32.const 1048))
+ (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33816))
+ (global $~lib/memory/__heap_base i32 (i32.const 33816))
  (memory $0 1)
  (data $0 (i32.const 12) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00(\00\00\00A\00l\00l\00o\00c\00a\00t\00i\00o\00n\00 \00t\00o\00o\00 \00l\00a\00r\00g\00e\00\00\00\00\00")
  (data $1 (i32.const 76) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00 \00\00\00~\00l\00i\00b\00/\00r\00t\00/\00i\00t\00c\00m\00s\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00")
@@ -60,9 +60,10 @@
  (data $13 (i32.const 780) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00$\00\00\00K\00e\00y\00 \00d\00o\00e\00s\00 \00n\00o\00t\00 \00e\00x\00i\00s\00t\00\00\00\00\00\00\00\00\00")
  (data $14 (i32.const 844) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\16\00\00\00~\00l\00i\00b\00/\00m\00a\00p\00.\00t\00s\00\00\00\00\00\00\00")
  (data $15 (i32.const 892) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1a\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00.\00t\00s\00\00\00")
- (data $16 (i32.const 944) "\10\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00 \00\00\00\10\t\12\00\10A\14\00\02A\00\00\10A\82\00\00\00\00\00\00\00\00\00")
- (table $0 2 2 funcref)
- (elem $0 (i32.const 1) $async-closures-case6/outer$resume~inner)
+ (data $16 (i32.const 940) "\1c\00\00\00\00\00\00\00\00\00\00\00\10\00\00\00\08\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00")
+ (data $17 (i32.const 976) "\11\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00 \00\00\00\10\t\12\00\10A\14\00\02A\00\00\10A\82\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (table $0 3 3 funcref)
+ (elem $0 (i32.const 1) $async-closures-case6/outer$resume~inner $async-closures-case6/outer$resume)
  (export "main" (func $async-closures-case6/main))
  (export "memory" (memory $0))
  (start $~start)
@@ -3192,90 +3193,108 @@
   local.get $1
   call $~lib/function/Function<%28%29=>i32>#__visit
  )
+ (func $~lib/function/Function<%28async-closures-case6/outer$State%29=>void>#get:_env (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/function/Function<%28async-closures-case6/outer$State%29=>void>~visit (param $0 i32) (param $1 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  local.get $1
+  call $~lib/function/Function<%28async-closures-case6/outer$State%29=>void>#__visit
+ )
  (func $~lib/rt/__visit_members (param $0 i32) (param $1 i32)
   block $invalid
-   block $~lib/function/Function<%28%29=>i32>
-    block $~lib/function/Function<%28%29=>~lib/task/TaskRecord>
-     block $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>"
-      block $~lib/array/Array<~lib/task-rt/TaskState>
-       block $"~lib/map/Map<i64,~lib/task/TaskRecord>"
-        block $"~lib/map/Map<i32,i32>"
-         block $async-closures-case6/outer$Env
-          block $~lib/task-rt/TaskEnv
-           block $~lib/task-rt/TaskState
-            block $async-closures-case6/outer$State
-             block $~lib/task/TaskRecord
-              block $~lib/task/Task<i32>
-               block $~lib/arraybuffer/ArrayBufferView
-                block $~lib/string/String
-                 block $~lib/arraybuffer/ArrayBuffer
-                  block $~lib/object/Object
-                   local.get $0
-                   i32.const 8
-                   i32.sub
-                   i32.load
-                   br_table $~lib/object/Object $~lib/arraybuffer/ArrayBuffer $~lib/string/String $~lib/arraybuffer/ArrayBufferView $~lib/task/Task<i32> $~lib/task/TaskRecord $async-closures-case6/outer$State $~lib/task-rt/TaskState $~lib/task-rt/TaskEnv $async-closures-case6/outer$Env $"~lib/map/Map<i32,i32>" $"~lib/map/Map<i64,~lib/task/TaskRecord>" $~lib/array/Array<~lib/task-rt/TaskState> $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>" $~lib/function/Function<%28%29=>~lib/task/TaskRecord> $~lib/function/Function<%28%29=>i32> $invalid
+   block $~lib/function/Function<%28async-closures-case6/outer$State%29=>void>
+    block $~lib/function/Function<%28%29=>i32>
+     block $~lib/function/Function<%28%29=>~lib/task/TaskRecord>
+      block $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>"
+       block $~lib/array/Array<~lib/task-rt/TaskState>
+        block $"~lib/map/Map<i64,~lib/task/TaskRecord>"
+         block $"~lib/map/Map<i32,i32>"
+          block $async-closures-case6/outer$Env
+           block $~lib/task-rt/TaskEnv
+            block $~lib/task-rt/TaskState
+             block $async-closures-case6/outer$State
+              block $~lib/task/TaskRecord
+               block $~lib/task/Task<i32>
+                block $~lib/arraybuffer/ArrayBufferView
+                 block $~lib/string/String
+                  block $~lib/arraybuffer/ArrayBuffer
+                   block $~lib/object/Object
+                    local.get $0
+                    i32.const 8
+                    i32.sub
+                    i32.load
+                    br_table $~lib/object/Object $~lib/arraybuffer/ArrayBuffer $~lib/string/String $~lib/arraybuffer/ArrayBufferView $~lib/task/Task<i32> $~lib/task/TaskRecord $async-closures-case6/outer$State $~lib/task-rt/TaskState $~lib/task-rt/TaskEnv $async-closures-case6/outer$Env $"~lib/map/Map<i32,i32>" $"~lib/map/Map<i64,~lib/task/TaskRecord>" $~lib/array/Array<~lib/task-rt/TaskState> $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>" $~lib/function/Function<%28%29=>~lib/task/TaskRecord> $~lib/function/Function<%28%29=>i32> $~lib/function/Function<%28async-closures-case6/outer$State%29=>void> $invalid
+                   end
+                   return
                   end
                   return
                  end
                  return
                 end
+                local.get $0
+                local.get $1
+                call $~lib/arraybuffer/ArrayBufferView~visit
                 return
                end
                local.get $0
                local.get $1
-               call $~lib/arraybuffer/ArrayBufferView~visit
+               call $~lib/task/Task<i32>~visit
                return
               end
-              local.get $0
-              local.get $1
-              call $~lib/task/Task<i32>~visit
               return
              end
+             local.get $0
+             local.get $1
+             call $async-closures-case6/outer$State~visit
              return
             end
             local.get $0
             local.get $1
-            call $async-closures-case6/outer$State~visit
+            call $~lib/task-rt/TaskState~visit
             return
            end
-           local.get $0
-           local.get $1
-           call $~lib/task-rt/TaskState~visit
            return
           end
           return
          end
+         local.get $0
+         local.get $1
+         call $"~lib/map/Map<i32,i32>~visit"
          return
         end
         local.get $0
         local.get $1
-        call $"~lib/map/Map<i32,i32>~visit"
+        call $"~lib/map/Map<i64,~lib/task/TaskRecord>~visit"
         return
        end
        local.get $0
        local.get $1
-       call $"~lib/map/Map<i64,~lib/task/TaskRecord>~visit"
+       call $~lib/array/Array<~lib/task-rt/TaskState>~visit
        return
       end
       local.get $0
       local.get $1
-      call $~lib/array/Array<~lib/task-rt/TaskState>~visit
+      call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>~visit"
       return
      end
      local.get $0
      local.get $1
-     call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>~visit"
+     call $~lib/function/Function<%28%29=>~lib/task/TaskRecord>~visit
      return
     end
     local.get $0
     local.get $1
-    call $~lib/function/Function<%28%29=>~lib/task/TaskRecord>~visit
+    call $~lib/function/Function<%28%29=>i32>~visit
     return
    end
    local.get $0
    local.get $1
-   call $~lib/function/Function<%28%29=>i32>~visit
+   call $~lib/function/Function<%28async-closures-case6/outer$State%29=>void>~visit
    return
   end
   unreachable
@@ -3304,8 +3323,8 @@
   global.get $~lib/memory/__data_end
   i32.lt_s
   if
-   i32.const 33808
-   i32.const 33856
+   i32.const 33840
+   i32.const 33888
    i32.const 1
    i32.const 1
    call $~lib/builtins/abort
@@ -6244,6 +6263,19 @@
   local.get $2
   i32.store
   local.get $2
+  i32.const 960
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store offset=8
+  local.get $2
+  call $~lib/task-rt/TaskState#set:resume
+  local.get $state
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store
+  local.get $2
   call $async-closures-case6/outer$resume
   local.get $state
   local.set $2
@@ -6608,6 +6640,30 @@
   i32.store
   local.get $2
   call $~lib/function/Function<%28%29=>i32>#get:_env
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $~lib/function/Function<%28async-closures-case6/outer$State%29=>void>#__visit (param $this i32) (param $cookie i32)
+  (local $2 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store
+  local.get $2
+  call $~lib/function/Function<%28async-closures-case6/outer$State%29=>void>#get:_env
   local.get $cookie
   call $~lib/rt/itcms/__visit
   global.get $~lib/memory/__stack_pointer
