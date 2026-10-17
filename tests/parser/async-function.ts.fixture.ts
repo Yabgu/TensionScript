@@ -19,8 +19,3 @@ async function returns(): i32 {
 function notAsync(): void {
   plain();
 }
-// ERROR 100: "Not implemented: Async functions" in async-function.ts(8,1+5)
-// ERROR 100: "Not implemented: Async functions" in async-function.ts(10,1+5)
-// ERROR 100: "Not implemented: Async functions" in async-function.ts(14,8+5)
-// ERROR 100: "Not implemented: Async functions" in async-function.ts(20,1+5)
-// ERROR 100: "Not implemented: Async functions" in async-function.ts(29,1+5)

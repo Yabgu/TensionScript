@@ -1,14 +1,20 @@
-// An async function reaches the compiler and is refused by name.
+// An async shape the transform refuses reaches the compiler and is refused by
+// name.
 //
-// Phase 1 recognizes `async`/`await` and builds the AST; there is no lowering
-// yet. The guarantee this pins is that the pipeline reports
-// `AS100: Not implemented: Async functions` and **emits no code**, rather than
-// walking an expression it does not understand into codegen's
-// unhandled-kind `assert(false)` -- which is what `yield` does today.
-// See ASYNC_PHASE1.md.
+// The parser no longer diagnoses `async` at all (Phase 3, commit 7b): lowering
+// and refusal both live in the `afterParse` transforms, so this fixture pins
+// that a *refused* shape still stops the pipeline with a named `AS100` and
+// emits no code, rather than walking a construct the compiler does not
+// understand into codegen's unhandled-kind `assert(false)`.
+//
+// The shape is a static async method: `this` there is the class object, not a
+// receiver parameter, so there is no value the resume function's this-struct
+// could hold (async plan §4.8; closures plan §7.1a).
 
-async function notYet(): void {}
+class NotYet {
+  static async notYet(): void {}
+}
 
 export function main(): void {
-  notYet();
+  NotYet.notYet();
 }
