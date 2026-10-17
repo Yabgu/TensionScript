@@ -868,6 +868,43 @@ export function main(): i32 { return 1; }
     [ "a capturing function with an explicit `this:` parameter (async lowering)" ]);
 }
 
+// 8e. A type argument in an async body is refused *by name*.
+//
+// `<T>expr` used to answer `false` from the expression walk with no
+// diagnostic: the plan failed, the declaration stayed as parsed, and the only
+// symptom was codegen's defensive "the async lowering transform did not run"
+// at the `await` — a message that names neither the cast nor its position.
+{
+  const cast = run(`
+async function f(h: Task<i32>): i32 {
+  let v: i32 = await h;
+  let x: i32 = <i32>v;
+  return x;
+}
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("a `<T>` cast in an async body is refused by name",
+    refusals(cast), [ "a type argument in an async body (async lowering)" ]);
+  check("  ...and no artifact is emitted for it",
+    cast.names().some(name => name.includes("f$")), false);
+
+  // The contrast: everything the walk accepts still lowers — a call, a
+  // property access, a parenthesized expression, an element access.
+  const clean = run(`
+async function f(h: Task<i32>): i32 {
+  let v: i32 = await h;
+  let a: i32 = id(v) + v;
+  return a;
+}
+function id(x: i32): i32 { return x; }
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("an async body with calls and operators still lowers", refusals(clean), []);
+  check("  ...and emits its artifacts", clean.names()[0], "f$State");
+}
+
 // 9. Refusals: every shape this revision does not lower is named, not missed.
 
 const REFUSALS = [
