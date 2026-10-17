@@ -79,6 +79,32 @@ function run(source) {
 }
 
 /**
+ * Compiles `source` through **both** `afterParse` transforms, in the order the
+ * CLI applies them (`cli/index.js:697-701`): closures first, then async. The
+ * §8.3(a) shapes need it — the closure transform is what records that a nested
+ * async function is a `Struct` closure (`envInfoOf`), and without that record
+ * the async transform has nothing to carry into `state.$env`.
+ */
+function runBoth(source) {
+  const program = buildProgram([ [ "probe.ts", source ] ]);
+  for (const Transform of [ asc.ClosureLowerTransform, asc.AsyncLowerTransform ]) {
+    Object.assign(Transform.prototype, { program });
+    new Transform().afterParse(program.parser);
+  }
+  const file = program.sources.find(source => source.internalPath === "probe");
+  return {
+    program,
+    file,
+    names: () => file.statements.map(statement => statement.name ? statement.name.text : String(statement.kind)),
+    wat: () => {
+      if (program.__wat) return program.__wat;
+      program.initialize();
+      return (program.__wat = asc.compile(program).toText(true));
+    }
+  };
+}
+
+/**
  * The run's refusals, by the *gap* they name. The parser reports no `async`
  * diagnostic at all since commit 7b deleted its guard, so everything here comes
  * from a transform — and a guard that came back would show up as an extra entry
@@ -751,6 +777,86 @@ export function probe(): i32 { return 1; }
 `);
   check("a static async method is still refused by name (no change)",
     refusals(calledStatic), [ "async static methods (async lowering)" ]);
+}
+
+// 8d. §8.3(a): the async function *is* a closure value.
+//
+// A bare `async function inner() {}` written in a function body parses as an
+// expression statement wrapping a `FunctionExpression` (measured), the only
+// async shape that can itself capture. The environment it captured arrives
+// through `~env` at the entry, but the body runs in `f$resume`, a synthesized
+// free function with no `_env` of its own — so the entry stores the received
+// local in `state.$env` and the resume re-declares it from there. Before this
+// landed, the shape did not compile at all (`TS2304` on `$closureEnvIn`).
+{
+  const captured = runBoth(`
+async function outer(h: Task<i32>): i32 {
+  let x: i32 = 1;
+  async function inner(g: Task<i32>): i32 { await g; return x; }
+  await h;
+  inner(changetype<Task<i32>>(0));
+  return x;
+}
+let sink: Task<i32> | null = null;
+export function main(): i32 { sink = outer(changetype<Task<i32>>(0)); return 1; }
+`);
+  check("§8.3(a): an async closure value compiles", compileErrors(captured), []);
+  check("  ...with no refusal", refusals(captured), []);
+  const wat = captured.wat();
+  const entry = funcBody(wat, "probe/outer$resume~inner");
+  check("  ...the entry reads the received environment from ~env",
+    entry.includes("global.get $~env"), true);
+  check("  ...and stores it in the state struct's $env",
+    /global\.get \$~env[\s\S]{0,200}?inner\$State#set:\$env/.test(entry), true);
+  check("  ...before the resume function runs",
+    entry.indexOf("inner$State#set:$env") < entry.indexOf("call $probe/inner$resume"), true);
+  const resume = funcBody(wat, "probe/inner$resume");
+  check("  ...the resume re-declares it from $env first",
+    /func \$probe\/inner\$resume[\s\S]{0,160}?inner\$State#get:\$env/.test(wat), true);
+  const park = resume.indexOf("__taskPark");
+  check("  ...reads the captured binding through the environment", /outer\$Env#get:x/.test(resume), true);
+  check("  ...after the suspension, not before it",
+    resume.indexOf("outer$Env#get:x", park) > 0, true);
+  check("  ...and the binding has no copy on the state struct",
+    /inner\$State#(get|set):x/.test(wat), false);
+
+  // §8.3(b) is the contrast and must be untouched: an async function that
+  // *contains* a closure owns the env, lifts it as `$closureEnv`, and leaves
+  // `$env` null.
+  const containing = runBoth(`
+async function outer(h: Task<i32>): i32 {
+  let x: i32 = 1;
+  function inner(): i32 { return x; }
+  await h;
+  return inner();
+}
+export function probe(): Task<i32> { return outer(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+`);
+  check("§8.3(b): an async function containing a closure still lowers", refusals(containing), []);
+  const containingWat = containing.wat();
+  check("  ...with the env lifted as a state field",
+    /outer\$State#get:\$closureEnv/.test(containingWat), true);
+  check("  ...and `$env` never populated for it",
+    /outer\$State#set:\$env[\s\S]{0,40}?local\.get \$\$closureEnv/.test(containingWat), false);
+
+  // The collision: `$env` holds one reference, so a capturing function with an
+  // explicit `this:` cannot carry both the this-struct and the captured env.
+  // Refused by name — two-environment captures are C5's design (plan §4.8).
+  const collision = runBoth(`
+class C { y: i32 = 7; }
+async function outer(h: Task<i32>): i32 {
+  let x: i32 = 1;
+  async function f(this: C): i32 { return x + this.y; }
+  await h;
+  f.call(new C());
+  return x;
+}
+export function main(): i32 { return 1; }
+`);
+  check("a capturing function with an explicit `this:` is refused by name",
+    refusals(collision),
+    [ "a capturing function with an explicit `this:` parameter (async lowering)" ]);
 }
 
 // 9. Refusals: every shape this revision does not lower is named, not missed.
