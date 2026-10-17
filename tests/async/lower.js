@@ -842,6 +842,20 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check("  ...and the walk reports nothing for it", refusals(nested), []);
 }
 
+// 12a-ter. The single-identifier arrow is a separate parser production
+// (`ArrowKind.Single`, `parser.ts:3940`) from the parenthesized arrow, so it
+// gets its own coverage: the parser guard protected it separately, and the
+// transform's message is the replacement once that guard is deleted.
+
+{
+  const atTop = run(`const f = async x => x; export function main(): i32 { return 1; }`);
+  check("an async single-identifier arrow is refused by name", refusals(atTop), [ "async arrow functions (async lowering)" ]);
+  check("  ...and emits no artifact", atTop.names().some(name => name.includes("$")), false);
+
+  const nested = run(`function g(): i32 { const f = async x => x; return 1; } export function main(): i32 { return 1; }`);
+  check("  ...and in a non-async body it is refused by the walk, same message", refusals(nested), [ "async arrow functions (async lowering)" ]);
+}
+
 // 12b. The shapes the lowering pass does reach still lower, with no refusal.
 // (These are re-checks of what earlier sections cover, from the walk's angle: a
 // walk that fired too eagerly would add a message here.)
