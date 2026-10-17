@@ -1,12 +1,12 @@
 // A `Program` assembled the way the CLI assembles one, for tests that need to
 // *resolve* code rather than only parse it.
 //
-// Why this exists: an `async` construct carries a parse-time diagnostic
-// (AS100 "Not implemented: Async functions", ASYNC_PHASE1.md) until the
-// lowering lands, and any reported error stops `asc` before compilation — so a
-// `tests/compiler` fixture cannot reach the resolver. These tests drive the
-// resolver directly through the public `Program` API instead, which is the same
-// entry point the compiler uses for expression resolution
+// Why this exists: these tests need to inspect what the `afterParse`
+// transforms produce *before* the compiler consumes it, and a refusal reported
+// on the parser stops the CLI before compilation — so a `tests/compiler`
+// fixture cannot reach the resolver or the codegen path deliberately. The
+// harness drives the program through the public `Program` API instead, which is
+// the same entry point the compiler uses for expression resolution
 // (`Compiler#compileExpression` -> `Resolver#resolveExpression`), minus the
 // codegen step Phase 3 owns. Nothing here is a mock: it is the CLI's own
 // construction sequence —

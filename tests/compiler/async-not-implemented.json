@@ -2,6 +2,6 @@
   "asc_flags": [
   ],
   "stderr": [
-    "AS100: Not implemented: Async functions"
+    "AS100: Not implemented: async static methods (async lowering)"
   ]
 }

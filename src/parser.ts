@@ -319,15 +319,6 @@ export class Parser extends DiagnosticEmitter {
               DiagnosticCode._0_modifier_cannot_be_used_here,
               tn.range(asyncStart, asyncEnd), "async"
             ); // recoverable
-          } else {
-            // TODO(lowering): delete this once the async lowering transform
-            // exists (docs/async-await-plan-v2.md §4.5). Until then the AST is
-            // built and the pipeline stops here with a named error instead of
-            // reaching codegen's unhandled-kind assert(false).
-            this.error(
-              DiagnosticCode.Not_implemented_0,
-              tn.range(asyncStart, asyncEnd), "Async functions"
-            ); // recoverable
           }
         }
         decorators = null;
@@ -2494,14 +2485,6 @@ export class Parser extends DiagnosticEmitter {
         tn.range(startPos, tn.pos),
         asyncMethod
       );
-      if (asyncMethod) {
-        // TODO(lowering): delete once the async lowering transform exists
-        // (docs/async-await-plan-v2.md §4.5).
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          tn.range(asyncStart, asyncEnd), "Async functions"
-        ); // recoverable
-      }
       if (!(isInterface && tn.skip(Token.Comma))) {
         tn.skip(Token.Semicolon);
       }
@@ -3894,11 +3877,6 @@ export class Parser extends DiagnosticEmitter {
             let functionExpression = this.parseFunctionExpression(tn, true);
             if (!functionExpression) return null;
             functionExpression.range.start = startPos; // from `async`, not `function`
-            // TODO(lowering): delete once the async lowering transform exists.
-            this.error(
-              DiagnosticCode.Not_implemented_0,
-              tn.range(startPos, asyncEnd), "Async functions"
-            );
             return functionExpression;
           }
           case Token.OpenParen: {
@@ -3906,11 +3884,6 @@ export class Parser extends DiagnosticEmitter {
             let arrow = this.parseFunctionExpression(tn, true);
             if (!arrow) return null;
             arrow.range.start = startPos; // from `async`, not `(`
-            // TODO(lowering): delete once the async lowering transform exists.
-            this.error(
-              DiagnosticCode.Not_implemented_0,
-              tn.range(startPos, asyncEnd), "Async functions"
-            );
             return arrow;
           }
           case Token.Identifier: {
@@ -3937,11 +3910,6 @@ export class Parser extends DiagnosticEmitter {
                   true
                 );
                 if (!arrow) return null;
-                // TODO(lowering): delete once the async lowering transform exists.
-                this.error(
-                  DiagnosticCode.Not_implemented_0,
-                  tn.range(startPos, asyncEnd), "Async functions"
-                );
                 return arrow;
               }
             }

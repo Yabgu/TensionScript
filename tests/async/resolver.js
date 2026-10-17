@@ -36,9 +36,10 @@ function check(name, actual, expected) {
   }
 }
 
-// The parse-time guard every `async` construct carries until the lowering lands
-// (ASYNC_PHASE1.md). One code, and it is expected wherever a case writes `async`.
-const ASYNC_NOT_IMPLEMENTED = 100;
+// The parser reports no diagnostic for `async` since Phase 3 commit 7b deleted
+// its guard: lowering and refusal both live in the `afterParse` transforms, and
+// these cases drive the resolver without them. Every case that used to expect
+// that guard now expects exactly what the resolver itself reports.
 // 'await' outside an async function -- TypeScript's own code (AS1308).
 const AWAIT_OUTSIDE_ASYNC = 1308;
 // "'async' modifier cannot be used here." -- TypeScript's code for the
@@ -59,7 +60,7 @@ console.log("type of await");
   const f = resolveTopLevel(program, "f");
   const expression = f.prototype.bodyNode.statements[0].value; // await h
   check("await h  (h: Task<i32>)  is i32", typeOf(program, expression, f.flow), "i32");
-  check("  ...with only the async guard reported", diagnosticCodes(program), [ASYNC_NOT_IMPLEMENTED]);
+  check("  ...and reports nothing extra", diagnosticCodes(program), []);
 }
 
 {
@@ -86,7 +87,7 @@ console.log("type of await");
   const f = resolveTopLevel(program, "f");
   const expression = f.prototype.bodyNode.statements[0].value;
   check("await 1  is i32 (not a task)", typeOf(program, expression, f.flow), "i32");
-  check("  ...and reports nothing extra", diagnosticCodes(program), [ASYNC_NOT_IMPLEMENTED]);
+  check("  ...and reports nothing extra", diagnosticCodes(program), []);
 }
 
 {
@@ -115,7 +116,7 @@ console.log("type of a call to an async function");
   const use = resolveTopLevel(program, "use");
   const call = use.prototype.bodyNode.statements[0].expression;
   check("f()  (async function f(): i32)  is Task<i32>", typeOf(program, call, use.flow), "~lib/task/Task<i32>");
-  check("  ...with only the async guard reported", diagnosticCodes(program), [ASYNC_NOT_IMPLEMENTED]);
+  check("  ...and reports nothing extra", diagnosticCodes(program), []);
 }
 
 {
@@ -213,21 +214,20 @@ console.log("await inside a nested function");
     typeOf(program, arrow, outer.flow),
     "() => i32"
   );
-  // Two guards: one for `outer`, one for the arrow -- each async construct
-  // carries its own. The 1110 ("Type expected.") is *not* async-specific: an
-  // arrow with an omitted return type resolved directly reports it whether or
-  // not it is async, which the plain control below pins.
+  // The 1110 ("Type expected.") is *not* async-specific: an arrow with an
+  // omitted return type resolved directly reports it whether or not it is
+  // async, which the plain control below pins. `async` adds nothing.
   check(
-    "  ...with the two async guards and the pre-existing arrow 1110",
+    "  ...with the pre-existing arrow 1110 and no async diagnostic",
     diagnosticCodes(program),
-    [ASYNC_NOT_IMPLEMENTED, ASYNC_NOT_IMPLEMENTED, 1110]
+    [1110]
   );
 }
 
 {
   // The control for the 1110 above: a *plain* arrow with an omitted return type,
-  // resolved the same way, reports the same single diagnostic. Async adds the
-  // AS100 guard and nothing else.
+  // resolved the same way, reports the same single diagnostic. Async adds
+  // nothing.
   const program = buildProgram([[
     "probe.ts",
     `function outer(h: i32): i32 {
@@ -288,7 +288,7 @@ console.log("error paths");
   check(
     "await in a non-async function nested in an async one is reported",
     diagnosticCodes(program),
-    [AWAIT_OUTSIDE_ASYNC, ASYNC_NOT_IMPLEMENTED]
+    [AWAIT_OUTSIDE_ASYNC]
   );
 }
 
