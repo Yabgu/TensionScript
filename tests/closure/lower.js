@@ -1205,14 +1205,15 @@ export function main(): i32 { return new C().m(); }
     r.names().includes("m$Env") || r.wat().includes("m$Env#get:n"), true);
 }
 
-// 10. C5a phase 1: multi-scope `needed` (plan §4.7.2).
+// 10. C5a: the chain — analysis (§4.7.2) and emission (§4.7.3).
 //
-// The analysis now records *every* environment a closure must reach, innermost
-// first, and `needed` is the head. Emission does not build the chain yet, so
-// the shapes the chain exists for are refused *after* the analysis, with a
-// message that names phase 1. These checks assert both halves: what the
-// analysis recorded, and that the hard-stop fires for exactly the shapes whose
-// emission is missing.
+// The analysis records every environment a closure must reach, innermost
+// first, and `needed` is the head. Emission then builds the chain: a `$parent`
+// field on every env with an owning ancestor, a parented constructor, and one
+// `$parent!` per hop at a reference that crosses scopes. These checks assert
+// the analysis (`dumpEnvAnalysis`), the emitted shape, and the value — a shape
+// assertion alone would not catch a wrong hop count that lands on a plausible
+// object.
 {
   // One scope: unchanged from C1-C4, and now observable. The owner allocates
   // the env; the closure receives it; nothing is parented.
@@ -1231,57 +1232,78 @@ export function main(): i32 {
   check("C5a-1: the closure is Struct and receives", [ closure.kind, closure.receivesEnv, closure.ownEnv ], [ "struct", true, false ]);
   check("C5a-1: the closure's head is the owner's env", [ closure.envClass, closure.parentClass ], [ "main$Env", null ]);
   check("C5a-1: the chain is one env deep", closure.needed, [ "main$body:1" ]);
+  check("C5a-1: no env class carries `$parent` at one scope deep",
+    /#get:\$parent/.test(r.wat()), false);
 }
 
 {
-  // The canonical two-scope shape: a loop header and the body block. The
-  // closure references both, so its chain is two envs deep and emission is not
-  // implemented yet — the hard-stop, not the old refusal.
-  const r = run(`
+  // The canonical two-scope shape: a loop header and the body block.
+  const source = `
 export function main(): i32 {
+  let sum: i32 = 0;
   const fns = new Array<() => i32>();
   for (let i: i32 = 0; i < 3; i++) {
     let now: i32 = i * 10;
     fns.push((): i32 => i + now);
   }
-  return fns.length;
+  for (let k: i32 = 0; k < fns.length; k++) sum += fns[k]();
+  return sum;
 }
-`);
-  check("C5a-2: the canonical two-scope loop is refused by the phase-1 hard-stop",
-    refusals(r), [ "a capture across more than one environment (closures lowering, phase 1)" ]);
+`;
+  const r = run(source);
+  check("C5a-2: the canonical two-scope loop is lowered", refusals(r), []);
   const closure = r.analysis().find(record => record.kind === "struct");
   check("C5a-2: the analysis recorded two envs, innermost first", closure.needed,
     [ "main$block:3", "main$block:2" ]);
   check("C5a-2: the head is the innermost env", closure.envClass, "main$Env$2");
+  const wat = r.wat();
+  // The body env is parented to the loop-header env: the class has the link,
+  // and its constructor takes the header local.
+  check("C5a-2: the body env class carries `$parent`",
+    [ /main\$Env\$2#get:\$parent/.test(wat), /main\$Env\$2#set:\$parent/.test(wat) ], [ true, true ]);
+  check("C5a-2: the header env class is the root",
+    /main\$Env\$1#get:\$parent/.test(wat), false);
+  // Arity, not parameter names: the harness compiles without debug names, so
+  // the constructor is asserted on the AST. `main$Env$1` is a loop header (a
+  // `source` parameter for the clone); `main$Env$2` is parented (a `parent`
+  // parameter) and is not a loop header, so it has exactly one.
+  const envClasses = r.file.statements.filter(statement =>
+    statement.name && statement.name.text.startsWith("main$Env"));
+  const ctorParams = className => {
+    const cls = envClasses.find(statement => statement.name.text === className);
+    const ctor = cls.members.find(member => member.name.text === "constructor");
+    return ctor.signature.parameters.length;
+  };
+  check("C5a-2: the body env's constructor takes one parent parameter",
+    [ ctorParams("main$Env$1"), ctorParams("main$Env$2") ], [ 1, 1 ]);
+  // The hop: `i` is one link out, `now` is direct.
+  check("C5a-2: the header binding is read through `$parent!`",
+    /main~anonymous\|0\)[\s\S]*?main\$Env\$2#get:\$parent[\s\S]*?main\$Env\$1#get:i/.test(wat), true);
+  check("C5a-2: the body binding is a direct field read",
+    /main~anonymous\|0\)[\s\S]*?main\$Env\$2#get:now/.test(wat), true);
+  check("C5a-2: value 0 + 11 + 22", (await execute(source)).value, 33);
 }
 
 {
-  // Two owning blocks, no loop: the same shape without the clone machinery.
-  const r = run(`
+  // Two owning blocks, no loop: the same chain without the clone machinery.
+  const source = `
 export function main(): i32 {
   let out: i32 = 0;
-  {
-    let a: i32 = 1;
-    {
-      let b: i32 = 2;
-      const g = (): i32 => a + b;
-      out = g();
-    }
-  }
+  { let a: i32 = 1; { let b: i32 = 2; const g = (): i32 => a + b; out = g(); } }
   return out;
 }
-`);
-  check("C5a-3: two nested blocks are refused by the phase-1 hard-stop",
-    refusals(r), [ "a capture across more than one environment (closures lowering, phase 1)" ]);
-  const closure = r.analysis().find(record => record.kind === "struct");
-  check("C5a-3: both block envs are recorded", closure.needed.length, 2);
+`;
+  const r = run(source);
+  check("C5a-3: two nested blocks are lowered", refusals(r), []);
+  check("C5a-3: both block envs are recorded",
+    r.analysis().find(record => record.kind === "struct").needed.length, 2);
+  check("C5a-3: value 1 + 2", (await execute(source)).value, 3);
 }
 
 {
-  // A nested owner: the closure's own body allocates an env, which emission
-  // does not yet handle — a different phase-1 message, and the analysis must
-  // still have run (the inner arrow's need is recorded).
-  const r = run(`
+  // A nested owner: the closure's own body allocates an env, and the inner
+  // arrow receives it. The class is named after the owning function (F3).
+  const source = `
 export function main(): i32 {
   const f = (): i32 => {
     let b: i32 = 1;
@@ -1290,43 +1312,113 @@ export function main(): i32 {
   };
   return f();
 }
-`);
-  check("C5a-4: a nested owner is refused by the phase-1 hard-stop",
-    refusals(r), [ "a capture from a nested function's body (closures lowering, phase 1)" ]);
+`;
+  const r = run(source);
+  check("C5a-4: a nested owner is lowered", refusals(r), []);
   const records = r.analysis();
   const owner = records.find(record => record.name === "main");
-  const inner = records.find(record => record.kind === "struct");
-  check("C5a-4: the owner is not the only allocator", owner.ownEnv, false);
-  check("C5a-4: the inner arrow still has its analysis", inner.needed.length, 1);
+  const nested = records.find(record => record.ownEnv === true && record.name !== "main");
+  check("C5a-4: the owner allocates nothing", owner.ownEnv, false);
+  check("C5a-4: the nested owner allocates its own env", nested.ownEnv, true);
+  check("C5a-4: the class is named after the owning function (F3)",
+    r.names(), [ "main$f$Env", "main" ]);
+  check("C5a-4: value 1", (await execute(source)).value, 1);
 }
 
 {
   // Three scopes: outer's body, mid's body, g's body, captured by one arrow.
-  const r = run(`
+  const source = `
 export function main(): i32 {
   let a: i32 = 1;
   const mid = (): i32 => {
     let b: i32 = 2;
-    const g = (): i32 => {
-      let c: i32 = 3;
-      const h = (): i32 => a + b + c;
-      return h();
-    };
+    const g = (): i32 => { let c: i32 = 3; const h = (): i32 => a + b + c; return h(); };
     return g();
   };
   return mid();
 }
-`);
-  check("C5a-5: the three-scope shape is refused as a nested owner",
-    refusals(r), [ "a capture from a nested function's body (closures lowering, phase 1)" ]);
+`;
+  const r = run(source);
+  check("C5a-5: the three-scope shape is lowered", refusals(r), []);
   const chain = r.analysis().find(record => record.needed.length === 3);
   check("C5a-5: the arrow's chain has three envs", chain.needed.length, 3);
   check("C5a-5: the outermost env is the owner's body", chain.needed[2], "main$body:1");
+  check("C5a-5: value 1 + 2 + 3", (await execute(source)).value, 6);
+}
+
+{
+  // Mutation through the link: the write and the outer read touch one field.
+  const source = `
+export function main(): i32 {
+  let a: i32 = 1;
+  {
+    let b: i32 = 2;
+    const f = (): i32 => { a += 10; return b; };
+    f();
+  }
+  return a;
+}
+`;
+  check("C5a-6: two-scope mutation is lowered", refusals(run(source)), []);
+  check("C5a-6: value 11", (await execute(source)).value, 11);
+}
+
+{
+  // Escaped: the closures outlive the loop and their frame.
+  const source = `
+function make(): Array<() => i32> {
+  const out = new Array<() => i32>();
+  for (let i: i32 = 0; i < 3; i++) {
+    let now: i32 = i * 10;
+    out.push((): i32 => i + now);
+  }
+  return out;
+}
+export function main(): i32 {
+  const fns = make();
+  let sum: i32 = 0;
+  for (let k: i32 = 0; k < fns.length; k++) sum += fns[k]();
+  return sum;
+}
+`;
+  check("C5a-7: an escaped two-scope chain is lowered", refusals(run(source)), []);
+  check("C5a-7: value 0 + 11 + 22 after the frame is gone", (await execute(source)).value, 33);
+}
+
+{
+  // `this` plus one local: the receiver lives in the same env (C2b), unchanged.
+  const r = run(`
+class C { x: i32 = 7; m(): i32 { let n: i32 = 1; const f = (): i32 => this.x + n; return f(); } }
+export function main(): i32 { return new C().m(); }
+`);
+  check("C5a-8: `this` plus one local is still one env", refusals(r), []);
+}
+
+{
+  // `this` plus two scopes: the receiver is a field of the innermost env, and
+  // the header binding hops over it. The value proves both.
+  const source = `
+class C {
+  x: i32 = 7;
+  m(): i32 {
+    let out: i32 = 0;
+    for (let i: i32 = 0; i < 2; i++) {
+      let n: i32 = 1;
+      const f = (): i32 => this.x + i + n;
+      out += f();
+    }
+    return out;
+  }
+}
+export function main(): i32 { return new C().m(); }
+`;
+  check("C5a-9: `this` plus two scopes is lowered", refusals(run(source)), []);
+  check("C5a-9: value (7+0+1) + (7+1+1)", (await execute(source)).value, 17);
 }
 
 {
   // Transitive capture through a non-owning intermediate (case 10) is a
-  // one-env shape and still lowers: no hard-stop.
+  // one-env shape and stays one env deep.
   const r = run(`
 function outer(): i32 {
   let a: i32 = 1;
@@ -1338,41 +1430,103 @@ function outer(): i32 {
 }
 export function main(): i32 { return outer(); }
 `);
-  check("C5a-6: a non-owning intermediate is not refused", refusals(r), []);
+  check("C5a-10: a non-owning intermediate forwards the one env", refusals(r), []);
   const mid = r.analysis().find(record => record.name === "mid");
-  check("C5a-6: the intermediate receives the one env it forwards", mid.needed, [ "outer$body:1" ]);
+  check("C5a-10: the intermediate receives the one env it forwards", mid.needed, [ "outer$body:1" ]);
 }
 
 {
-  // `this` plus one local: the receiver lives in the same env, so the chain is
-  // one deep and the shape still lowers (C2b).
-  const r = run(`
-class C { x: i32 = 7; m(): i32 { let n: i32 = 1; const f = (): i32 => this.x + n; return f(); } }
-export function main(): i32 { return new C().m(); }
-`);
-  check("C5a-7: `this` plus one local is still one env", refusals(r), []);
-}
-
-{
-  // `this` inside a two-scope chain: the receiver's env is the head, but the
-  // capture itself needs two envs, so the hard-stop fires.
+  // A receiver whose env would be owned by a nested owner stays refused: the
+  // nested function's `~env` already IS that env, so there is no receiver at
+  // its entry to store. Measured; the two-carrier unification is C5b's.
   const r = run(`
 class C {
   x: i32 = 7;
   m(): i32 {
-    let out: i32 = 0;
-    for (let i: i32 = 0; i < 2; i++) {
-      let n: i32 = 1;
-      const f = (): i32 => this.x + i + n;
-      out = f();
-    }
-    return out;
+    const f = (): i32 => { let b: i32 = 1; const g = (): i32 => this.x + b; return g(); };
+    return f();
   }
 }
 export function main(): i32 { return new C().m(); }
 `);
-  check("C5a-8: `this` plus two scopes is refused by the phase-1 hard-stop",
-    refusals(r), [ "a capture across more than one environment (closures lowering, phase 1)" ]);
+  check("C5a-11: a receiver in a nested owner's env is refused by name",
+    refusals(r), [ "a receiver captured by an arrow with its own environment (closures lowering)" ]);
+}
+
+{
+  // The `$init$` flag hops with the value (F7): a read-before-assignment in an
+  // outer scope, read from an inner block's closure, aborts with its name.
+  const out = await execute(`
+export function main(): i32 {
+  let x: i32;
+  { let y: i32 = 1; const g = (): i32 => x + y; return g(); }
+}
+`);
+  check("C5a-12: the `$init$` guard hops with the value", out, { error: "reading an uninitialized captured binding x" });
+}
+
+{
+  // Mutation at three depths in one closure: each write lands in its own env,
+  // and the outer scope reads the outermost write afterwards.
+  const source = `
+export function main(): i32 {
+  let a: i32 = 1;
+  const mid = (): i32 => {
+    let b: i32 = 2;
+    const g = (): i32 => { let c: i32 = 3; const h = (): i32 => { a += 100; b += 10; c += 1; return a + b + c; }; return h(); };
+    return g();
+  };
+  return mid();
+}
+`;
+  check("C5a-13: three-scope mutation is lowered", refusals(run(source)), []);
+  check("C5a-13: value 101 + 12 + 4", (await execute(source)).value, 117);
+}
+
+{
+  // A nested owner that owns an env but needs none is NOT a Struct closure: its
+  // `_env` is 0, its env is allocated inside its own call, and it may be a host
+  // callback. That is the post-finalise coverage answer for `structFunctions`.
+  const r = run(`
+function reg(a: () => void, b: (p: u32) => void): i32 { return 0; }
+export function main(): i32 {
+  const f = (): void => { let b: i32 = 1; const h = (): void => { b++; }; h(); };
+  return reg(f, (p: u32): void => {});
+}
+`);
+  check("C5a-14: a nested owner that needs no env is a valid host callback", refusals(r), []);
+}
+
+{
+  // A loop-header env that is itself parented: the class is cloned per
+  // iteration AND links to the enclosing block env, so its constructor has
+  // both optional parameters — `(source, parent)` — and a fresh allocation
+  // passes `null` for the source with the parent second. The value proves the
+  // argument did not land in `source` (measured once: it did, and the loop's
+  // own local was handed over as a `source` of the wrong type).
+  const source = `
+export function main(): i32 {
+  let out: i32 = 0;
+  {
+    let b: i32 = 5;
+    const g = (): i32 => b;
+    for (let i: i32 = 0; i < 2; i++) {
+      const f = (): i32 => i;
+      out += f();
+    }
+    out += g();
+  }
+  return out;
+}
+`;
+  const r = run(source);
+  check("C5a-15: a parented loop header is lowered", refusals(r), []);
+  const loopClass = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "main$Env$2");
+  const ctor = loopClass.members.find(member => member.name.text === "constructor");
+  check("C5a-15: the loop header's constructor takes (source, parent)",
+    ctor.signature.parameters.length, 2);
+  check("C5a-15: value 0 + 1 + 5", (await execute(source)).value, 6);
 }
 
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);
