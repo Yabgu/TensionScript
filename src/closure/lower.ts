@@ -47,13 +47,16 @@ import {
   BlockStatement,
   CallExpression,
   ClassDeclaration,
+  ClassExpression,
   CommaExpression,
   ContinueStatement,
   DeclarationStatement,
   DoStatement,
   ElementAccessExpression,
+  EnumDeclaration,
   Expression,
   ExpressionStatement,
+  FieldDeclaration,
   ForOfStatement,
   ForStatement,
   FunctionDeclaration,
@@ -83,6 +86,7 @@ import {
   ThisExpression,
   ThrowStatement,
   TryStatement,
+  TypeDeclaration,
   TypeNode,
   UnaryPostfixExpression,
   UnaryPrefixExpression,
@@ -104,6 +108,70 @@ const ENV_SUFFIX = "$Env";
 const INIT_HELPER = "__closureInit";
 /** The environment field that carries the receiver, when an arrow captures it. */
 const THIS_FIELD = "$this";
+/** The chain link C5a adds to a parented environment (`$parent`). */
+const PARENT_FIELD = "$parent";
+/** The async state struct's carrier field (§8.3); reserved here because the
+ *  closure transform and the async transform share one reserved namespace. */
+const STATE_ENV_FIELD = "$env";
+/** The async state struct's per-await record fields (`$awaited<N>`). */
+const AWAITED_FIELD_PREFIX = "$awaited";
+
+/**
+ * Whether `name` is one the lowering declares or synthesizes, in either
+ * transform (`docs/closures-plan.md` §4.6, §4.7.4; review finding F14).
+ *
+ * The closure transform synthesizes `$closureEnv`, `$closureEnv$<n>`,
+ * `$closureEnvIn` (locals), `$this`, `$parent`, `$init$<name>` (env fields) and
+ * `<owner>$Env` (a class, matched by the synthesized-name check, not here). The
+ * async transform synthesizes `$env`, `$awaited<N>`, `resumePoint`, `handle`,
+ * and inherits `record`.
+ *
+ * **`resumePoint`, `handle` and `record` are deliberately absent.** They are
+ * ordinary words a user may reasonably write, and the async transform already
+ * refuses them at the only sites they can collide — a parameter, and a local
+ * that is being lifted into the state struct (`isReservedStateField`,
+ * `src/async/lower.ts:2871-2880`). A program-wide refusal would reject
+ * `let handle: i32` in any program that also has a closure, for no collision.
+ * `result` is absent too: the state struct no longer has that field (§4.7.3
+ * retired it), so no name is synthesized — measured, a local named `result`
+ * crossing an await compiles.
+ */
+function isReservedName(name: string): bool {
+  let length = name.length;
+  if (length == 0) return false;
+  // `$closureEnv`, `$closureEnv$<n>` (§5.6), `$closureEnvIn`.
+  if (hasPrefix(name, ENV_LOCAL)) {
+    if (length == ENV_LOCAL.length) return true;
+    if (name.charCodeAt(ENV_LOCAL.length) == 36 /* $ */) return true;
+  }
+  if (hasPrefix(name, ENV_IN_LOCAL)) return true;
+  if (name == THIS_FIELD) return true;
+  if (name == PARENT_FIELD) return true;
+  if (name == STATE_ENV_FIELD) return true;
+  if (hasPrefix(name, INIT_PREFIX)) return true;
+  // `$awaited1`, `$awaited99` — digits only. `$awaitedX` is not a name the
+  // transform can produce, so it stays available to a user.
+  if (hasPrefix(name, AWAITED_FIELD_PREFIX)) {
+    let from = AWAITED_FIELD_PREFIX.length;
+    if (from >= length) return false;
+    for (let i = from; i < length; ++i) {
+      let c = name.charCodeAt(i);
+      if (c < 48 /* 0 */ || c > 57 /* 9 */) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+/** Whether `text` begins with `prefix`; allocation-free (no substring). */
+function hasPrefix(text: string, prefix: string): bool {
+  let length = prefix.length;
+  if (text.length < length) return false;
+  for (let i = 0; i < length; ++i) {
+    if (text.charCodeAt(i) != prefix.charCodeAt(i)) return false;
+  }
+  return true;
+}
 
 /** The in-tree `afterParse` `Transform`. */
 export class ClosureLowerTransform {
@@ -111,16 +179,118 @@ export class ClosureLowerTransform {
   /** The program being compiled. Assigned by the CLI onto the prototype. */
   readonly program!: Program;
 
-  /** `Transform#afterParse` — runs after parsing, before async lowering. */
+  /** Analyses computed in the collect phase, consumed by the emit phase. */
+  private analyses: Map<FunctionDeclaration, OwnerAnalysis> | null = null;
+
+  /**
+   * `Transform#afterParse` — runs after parsing, before async lowering, in two
+   * phases: **collect** (analyse every owner, mutate nothing) and **emit**
+   * (synthesize and rewrite).
+   *
+   * The split exists for §4.6's reserved-name guard (review finding F14). The
+   * guard must run *before* the transform synthesizes anything, or its own
+   * `$closureEnv`/`$this`/`$parent` declarations would be seen as user
+   * identifiers; and it must run only when the pass would synthesize at all, so
+   * a program with no capture and no async keeps its `$parent` variable. The
+   * collect phase is what answers "would this pass synthesize" — it is the
+   * transform's own detection, run once and reused by the emit phase.
+   */
   afterParse(parser: Parser): void {
     let sources = this.program.sources;
+    this.analyses = null;
+    let synthesizes = false;
+    let scan = new ReservedScan();
     for (let i = 0, k = sources.length; i < k; ++i) {
       let source = sources[i];
       // Library sources are never lowered: std declares no closure, and skipping
       // them keeps this transform out of the standard library's own compilation.
       if (source.isLibrary) continue;
+      if (this.collectStatementList(source.statements, parser)) synthesizes = true;
+      scan.visitStatements(source.statements);
+    }
+    // The async transform synthesizes the state struct's names, so a program it
+    // will lower needs the same guard. Its names and this transform's do not
+    // overlap, and one reserved set covers both (§4.6).
+    if (scan.sawAsync) synthesizes = true;
+    if (synthesizes && scan.refuse(parser)) return; // reported; the AST is as parsed
+    for (let i = 0, k = sources.length; i < k; ++i) {
+      let source = sources[i];
+      if (source.isLibrary) continue;
       this.lowerStatementList(source, source.statements, parser);
     }
+  }
+
+  /** Records an owner's analysis for phase two; allocates on the first owner. */
+  private recordAnalysis(declaration: FunctionDeclaration, analysis: OwnerAnalysis): void {
+    let analyses = this.analyses;
+    if (analyses == null) {
+      analyses = new Map<FunctionDeclaration, OwnerAnalysis>();
+      this.analyses = analyses;
+    }
+    analyses.set(declaration, analysis);
+  }
+
+  /**
+   * Phase one for one statement list: runs every owner's analysis, records it
+   * for phase two, and answers whether any owner has a capture this pass will
+   * lower. Mutates nothing.
+   */
+  private collectStatementList(statements: Statement[], parser: Parser): bool {
+    let captures = false;
+    for (let i = 0, k = statements.length; i < k; ++i) {
+      let statement = statements[i];
+      switch (statement.kind) {
+        case NodeKind.FunctionDeclaration: {
+          let declaration = <FunctionDeclaration>statement;
+          if (declaration.body == null) break;
+          let analysis = new OwnerAnalysis(this, parser, declaration);
+          analysis.run();
+          this.recordAnalysis(declaration, analysis);
+          if (analysis.hasCaptures() && !analysis.refused) captures = true;
+          break;
+        }
+        case NodeKind.NamespaceDeclaration: {
+          if (this.collectStatementList((<NamespaceDeclaration>statement).members, parser)) captures = true;
+          break;
+        }
+        case NodeKind.ClassDeclaration: {
+          let className = (<ClassDeclaration>statement).name.text;
+          let members = (<ClassDeclaration>statement).members;
+          for (let j = 0, l = members.length; j < l; ++j) {
+            if (members[j].kind != NodeKind.MethodDeclaration) continue;
+            let method = <MethodDeclaration>members[j];
+            if (method.body == null || method.is(CommonFlags.Static)) continue;
+            let analysis = new OwnerAnalysis(this, parser, method, typeNode(className, method.range));
+            analysis.run();
+            this.recordAnalysis(method, analysis);
+            if (analysis.hasCaptures() && !analysis.refused) captures = true;
+          }
+          break;
+        }
+        case NodeKind.Variable: {
+          // A top-level function expression that owns captured bindings is a
+          // nested owner, and this revision supports a top-level declaration
+          // only — refused here, before phase two emits anything.
+          let declarations = (<VariableStatement>statement).declarations;
+          for (let j = 0, l = declarations.length; j < l; ++j) {
+            let initializer = declarations[j].initializer;
+            if (initializer == null || initializer.kind != NodeKind.Function) continue;
+            let nested = <FunctionExpression>initializer;
+            if (nested.declaration.body == null) continue;
+            let analysis = new OwnerAnalysis(this, parser, nested.declaration);
+            analysis.run();
+            this.recordAnalysis(nested.declaration, analysis);
+            if (analysis.hasCaptures() && !analysis.refused) {
+              analysis.refuse(nested.declaration.range,
+                "a capture from a top-level function expression (closures lowering)");
+            }
+          }
+          break;
+        }
+        default: break;
+      }
+    }
+    return captures;
   }
 
   /** Lowers the closures declared by one statement list, in place. */
@@ -136,8 +306,7 @@ export class ClosureLowerTransform {
             out.push(statement);
             break;
           }
-          let analysis = new OwnerAnalysis(this, parser, declaration);
-          analysis.run();
+          let analysis = assert(assert(this.analyses).get(declaration));
           if (!analysis.hasCaptures()) {
             out.push(statement);
             break;
@@ -173,23 +342,9 @@ export class ClosureLowerTransform {
           break;
         }
         case NodeKind.Variable: {
-          // A top-level function expression that owns captured bindings is a
-          // nested owner; this revision supports a top-level *declaration* only.
-          let declarations = (<VariableStatement>statement).declarations;
-          for (let j = 0, l = declarations.length; j < l; ++j) {
-            let initializer = declarations[j].initializer;
-            if (initializer && initializer.kind == NodeKind.Function) {
-              let nested = <FunctionExpression>initializer;
-              if (nested.declaration.body != null) {
-                let analysis = new OwnerAnalysis(this, parser, nested.declaration);
-                analysis.run();
-                if (analysis.hasCaptures() && !analysis.refused) {
-                  analysis.refuse(nested.declaration.range,
-                    "a capture from a top-level function expression (closures lowering)");
-                }
-              }
-            }
-          }
+          // A top-level function expression that captures is refused in the
+          // collect phase (this revision supports a top-level *declaration*
+          // only), so the statement is emitted exactly as parsed.
           out.push(statement);
           break;
         }
@@ -215,7 +370,6 @@ export class ClosureLowerTransform {
    */
   private lowerMethods(declaration: ClassDeclaration, parser: Parser): Array<ClassDeclaration> {
     let out = new Array<ClassDeclaration>();
-    let className = declaration.name.text;
     let members = declaration.members;
     for (let i = 0, k = members.length; i < k; ++i) {
       let member = members[i];
@@ -225,14 +379,345 @@ export class ClosureLowerTransform {
       // A static method has no receiver; `this` there is the class object and a
       // `$this` field would name a value that does not exist as a parameter.
       if (method.is(CommonFlags.Static)) continue;
-      let analysis = new OwnerAnalysis(this, parser, method, typeNode(className, method.range));
-      analysis.run();
+      let analysis = assert(assert(this.analyses).get(method));
       if (!analysis.hasCaptures() || analysis.refused) continue;
       let classes = analysis.makeEnvClasses();
       for (let j = 0, l = classes.length; j < l; ++j) out.push(classes[j]);
       analysis.rewrite();
     }
     return out;
+  }
+}
+
+// --- the reserved-name scan (review F14) ------------------------------------
+
+/** The first declaration of one reserved name, in source order. */
+class ReservedNameHit {
+  constructor(
+    public name: string,
+    public range: Range
+  ) {}
+}
+
+/**
+ * §4.6's reserved-name guard, as a whole-program declaration walk.
+ *
+ * **What it is for.** The lowering declares `$closureEnv`, `$closureEnvIn`,
+ * `$closureEnv$<n>`, `$this`, `$parent`, `$init$<name>`, and (async) `$env`,
+ * `$awaited<N>`. A user declaration with one of those names is not a name the
+ * user gets to keep: in a capturing scope the transform would emit a second
+ * declaration of the same name, and C5's `$parent` would turn a user binding
+ * into the chain link. Measured before the guard: `let $parent: i32 = 7;
+ * const f = (): i32 => $parent;` compiled into `main$Env.$parent`, which is the
+ * field C5a is about to introduce.
+ *
+ * **What it is not.** It does not refuse ordinary words. `resumePoint`,
+ * `handle` and `record` are the async state struct's names, but they collide
+ * only when a local is lifted into the struct, and the async transform already
+ * refuses exactly those sites (`isReservedStateField`, `src/async/lower.ts`).
+ * `result` is not a field at all any more. Refusing the three flatly would
+ * reject `let handle: i32` in any program that happens to contain a closure,
+ * which is the over-refusal this pass must not do.
+ *
+ * **When it runs.** Only when the pass would synthesize a name: some owner has
+ * a capture, or the program declares an async function (§4.6's gate). A
+ * program with neither keeps every name it wrote — measured and asserted.
+ *
+ * **Cost.** No allocation on a clean program: `hits` stays null and nothing is
+ * pushed. The walk visits declarations and the expressions that can contain a
+ * nested function; it never resolves names.
+ */
+class ReservedScan {
+  /** The first declaration of each reserved name. Allocated on first hit. */
+  private hits: Array<ReservedNameHit> | null = null;
+  /** Whether any declaration in the program is async. */
+  sawAsync: bool = false;
+
+  /** Records a declaration name, if reserved; one hit per name. */
+  private check(name: string, range: Range): void {
+    if (!isReservedName(name)) return;
+    let hits = this.hits;
+    if (hits == null) {
+      hits = new Array<ReservedNameHit>();
+      this.hits = hits;
+    } else {
+      for (let i = 0, k = hits.length; i < k; ++i) {
+        if (hits[i].name == name) return;
+      }
+    }
+    hits.push(new ReservedNameHit(name, range));
+  }
+
+  /** Reports every hit; answers whether anything was reported. */
+  refuse(parser: Parser): bool {
+    let hits = this.hits;
+    if (hits == null) return false;
+    for (let i = 0, k = hits.length; i < k; ++i) {
+      parser.error(
+        DiagnosticCode.Not_implemented_0,
+        hits[i].range,
+        "a user identifier named '" + hits[i].name + "' (closures lowering)"
+      );
+    }
+    return true;
+  }
+
+  visitStatements(statements: Statement[]): void {
+    for (let i = 0, k = statements.length; i < k; ++i) this.visitStatement(statements[i]);
+  }
+
+  private visitStatement(statement: Statement): void {
+    switch (statement.kind) {
+      case NodeKind.Block: {
+        this.visitStatements((<BlockStatement>statement).statements);
+        break;
+      }
+      case NodeKind.Do: {
+        let loop = <DoStatement>statement;
+        this.visitStatement(loop.body);
+        this.visitExpression(loop.condition);
+        break;
+      }
+      case NodeKind.Expression: {
+        this.visitExpression((<ExpressionStatement>statement).expression);
+        break;
+      }
+      case NodeKind.For: {
+        let loop = <ForStatement>statement;
+        if (loop.initializer != null) this.visitStatement(loop.initializer);
+        if (loop.condition != null) this.visitExpression(loop.condition);
+        if (loop.incrementor != null) this.visitExpression(loop.incrementor);
+        this.visitStatement(loop.body);
+        break;
+      }
+      case NodeKind.ForOf: {
+        let loop = <ForOfStatement>statement;
+        this.visitStatement(loop.variable);
+        this.visitExpression(loop.iterable);
+        this.visitStatement(loop.body);
+        break;
+      }
+      case NodeKind.If: {
+        let ifs = <IfStatement>statement;
+        this.visitExpression(ifs.condition);
+        this.visitStatement(ifs.ifTrue);
+        if (ifs.ifFalse != null) this.visitStatement(ifs.ifFalse);
+        break;
+      }
+      case NodeKind.Return: {
+        let value = (<ReturnStatement>statement).value;
+        if (value != null) this.visitExpression(value);
+        break;
+      }
+      case NodeKind.Switch: {
+        let switchStatement = <SwitchStatement>statement;
+        this.visitExpression(switchStatement.condition);
+        let cases = switchStatement.cases;
+        for (let i = 0, k = cases.length; i < k; ++i) {
+          let label = cases[i].label;
+          if (label != null) this.visitExpression(label);
+          this.visitStatements(cases[i].statements);
+        }
+        break;
+      }
+      case NodeKind.Throw: {
+        this.visitExpression((<ThrowStatement>statement).value);
+        break;
+      }
+      case NodeKind.Try: {
+        let tryStatement = <TryStatement>statement;
+        this.visitStatements(tryStatement.bodyStatements);
+        let catchVariable = tryStatement.catchVariable;
+        if (catchVariable != null) this.check(catchVariable.text, catchVariable.range);
+        if (tryStatement.catchStatements != null) this.visitStatements(tryStatement.catchStatements);
+        if (tryStatement.finallyStatements != null) this.visitStatements(tryStatement.finallyStatements);
+        break;
+      }
+      case NodeKind.Variable: {
+        let declarations = (<VariableStatement>statement).declarations;
+        for (let i = 0, k = declarations.length; i < k; ++i) {
+          let declaration = declarations[i];
+          this.check(declaration.name.text, declaration.name.range);
+          if (declaration.initializer != null) this.visitExpression(declaration.initializer);
+        }
+        break;
+      }
+      case NodeKind.While: {
+        let loop = <WhileStatement>statement;
+        this.visitExpression(loop.condition);
+        this.visitStatement(loop.body);
+        break;
+      }
+      case NodeKind.FunctionDeclaration:
+      case NodeKind.MethodDeclaration: {
+        this.visitFunction(<FunctionDeclaration>statement);
+        break;
+      }
+      case NodeKind.ClassDeclaration: {
+        this.visitClass(<ClassDeclaration>statement);
+        break;
+      }
+      case NodeKind.EnumDeclaration: {
+        let enumeration = <EnumDeclaration>statement;
+        this.check(enumeration.name.text, enumeration.name.range);
+        let values = enumeration.values;
+        for (let i = 0, k = values.length; i < k; ++i) {
+          this.check(values[i].name.text, values[i].name.range);
+          let initializer = values[i].initializer;
+          if (initializer != null) this.visitExpression(initializer);
+        }
+        break;
+      }
+      case NodeKind.NamespaceDeclaration: {
+        let namespace = <NamespaceDeclaration>statement;
+        this.check(namespace.name.text, namespace.name.range);
+        this.visitStatements(namespace.members);
+        break;
+      }
+      case NodeKind.TypeDeclaration: {
+        let type = <TypeDeclaration>statement;
+        this.check(type.name.text, type.name.range);
+        break;
+      }
+      default: break;
+    }
+  }
+
+  private visitFunction(declaration: FunctionDeclaration): void {
+    let name = declaration.name;
+    if (name.text.length != 0) this.check(name.text, name.range);
+    if (declaration.isAsync) this.sawAsync = true;
+    let parameters = declaration.signature.parameters;
+    for (let i = 0, k = parameters.length; i < k; ++i) {
+      let parameter = parameters[i];
+      this.check(parameter.name.text, parameter.name.range);
+      if (parameter.initializer != null) this.visitExpression(parameter.initializer);
+    }
+    let body = declaration.body;
+    if (body != null) this.visitStatement(body);
+  }
+
+  private visitClass(declaration: ClassDeclaration): void {
+    let name = declaration.name;
+    if (name.text.length != 0) this.check(name.text, name.range);
+    let members = declaration.members;
+    for (let i = 0, k = members.length; i < k; ++i) {
+      let member = members[i];
+      switch (member.kind) {
+        case NodeKind.FieldDeclaration: {
+          let field = <FieldDeclaration>member;
+          this.check(field.name.text, field.name.range);
+          if (field.initializer != null) this.visitExpression(field.initializer);
+          break;
+        }
+        case NodeKind.MethodDeclaration: {
+          this.visitFunction(<MethodDeclaration>member);
+          break;
+        }
+        default: break;
+      }
+    }
+  }
+
+  private visitExpression(expression: Expression): void {
+    switch (expression.kind) {
+      case NodeKind.Assertion: {
+        this.visitExpression((<AssertionExpression>expression).expression);
+        break;
+      }
+      case NodeKind.Binary: {
+        let binary = <BinaryExpression>expression;
+        this.visitExpression(binary.left);
+        this.visitExpression(binary.right);
+        break;
+      }
+      case NodeKind.Call: {
+        let call = <CallExpression>expression;
+        this.visitExpression(call.expression);
+        let args = call.args;
+        for (let i = 0, k = args.length; i < k; ++i) this.visitExpression(args[i]);
+        break;
+      }
+      case NodeKind.Class: {
+        this.visitClass((<ClassExpression>expression).declaration);
+        break;
+      }
+      case NodeKind.Comma: {
+        let expressions = (<CommaExpression>expression).expressions;
+        for (let i = 0, k = expressions.length; i < k; ++i) this.visitExpression(expressions[i]);
+        break;
+      }
+      case NodeKind.ElementAccess: {
+        let access = <ElementAccessExpression>expression;
+        this.visitExpression(access.expression);
+        this.visitExpression(access.elementExpression);
+        break;
+      }
+      case NodeKind.Function: {
+        this.visitFunction((<FunctionExpression>expression).declaration);
+        break;
+      }
+      case NodeKind.InstanceOf: {
+        this.visitExpression((<InstanceOfExpression>expression).expression);
+        break;
+      }
+      case NodeKind.Literal: {
+        let literal = <LiteralExpression>expression;
+        switch (literal.literalKind) {
+          case LiteralKind.Template: {
+            let expressions = (<TemplateLiteralExpression>literal).expressions;
+            for (let i = 0, k = expressions.length; i < k; ++i) this.visitExpression(expressions[i]);
+            break;
+          }
+          case LiteralKind.Array: {
+            let elements = (<ArrayLiteralExpression>literal).elementExpressions;
+            for (let i = 0, k = elements.length; i < k; ++i) this.visitExpression(elements[i]);
+            break;
+          }
+          case LiteralKind.Object: {
+            let values = (<ObjectLiteralExpression>literal).values;
+            for (let i = 0, k = values.length; i < k; ++i) this.visitExpression(values[i]);
+            break;
+          }
+          default: break;
+        }
+        break;
+      }
+      case NodeKind.New: {
+        let args = (<NewExpression>expression).args;
+        for (let i = 0, k = args.length; i < k; ++i) this.visitExpression(args[i]);
+        break;
+      }
+      case NodeKind.Parenthesized: {
+        this.visitExpression((<ParenthesizedExpression>expression).expression);
+        break;
+      }
+      case NodeKind.PropertyAccess: {
+        // The property name is a reference, not a declaration.
+        this.visitExpression((<PropertyAccessExpression>expression).expression);
+        break;
+      }
+      case NodeKind.Ternary: {
+        let ternary = <TernaryExpression>expression;
+        this.visitExpression(ternary.condition);
+        this.visitExpression(ternary.ifThen);
+        this.visitExpression(ternary.ifElse);
+        break;
+      }
+      case NodeKind.UnaryPrefix: {
+        this.visitExpression((<UnaryPrefixExpression>expression).operand);
+        break;
+      }
+      case NodeKind.UnaryPostfix: {
+        this.visitExpression((<UnaryPostfixExpression>expression).operand);
+        break;
+      }
+      case NodeKind.Await: {
+        this.visitExpression((<AwaitExpression>expression).operand);
+        break;
+      }
+      default: break;
+    }
   }
 }
 
