@@ -1034,6 +1034,12 @@ export class Program extends DiagnosticEmitter {
       this.makeNativeTypeDeclaration(CommonNames.returnof, CommonFlags.Export | CommonFlags.Generic),
       DecoratorFlags.Builtin
     ));
+    this.nativeFile.add(CommonNames.thisof, new TypeDefinition(
+      CommonNames.thisof,
+      this.nativeFile,
+      this.makeNativeTypeDeclaration(CommonNames.thisof, CommonFlags.Export | CommonFlags.Generic),
+      DecoratorFlags.Builtin
+    ));
     this.nativeFile.add(CommonNames.nonnull, new TypeDefinition(
       CommonNames.nonnull,
       this.nativeFile,

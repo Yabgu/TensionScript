@@ -1605,12 +1605,12 @@ export function main(): i32 { return 0; }
   // captured binding is reached through the link (§8.3's second read-back
   // shape). The refusal is gone.
   //
-  // **Value deferred, with the cause measured.** Calling a *hoisted nested*
-  // async entry with `.call` fails in this fork with `TS2304: Cannot find name
-  // 'thisof'` (`~lib/function.ts:24`) — reproduced on the ccf888c6 baseline
-  // with a nested async function that captures nothing, so it predates C5b and
-  // is not the carrier. The carrier itself is asserted below; the value test
-  // lands when that call form compiles.
+  // **Value measured.** `await f.call(...)` used to fail with `TS2304: Cannot
+  // find name 'thisof'` (`~lib/function.ts:24`) — the fork never registered
+  // `thisof`, the `this` type of a function type. `thisof` is registered as of
+  // 0.4.1 (`src/builtins.ts`), so the value test lives in
+  // `tests/async/runtime.js` ("C5b case 21 ... 1 + 7" = 8). The carrier itself
+  // is also asserted below.
   const r = run(`
 import { Task } from "~lib/task";
 class C { y: i32 = 7;
