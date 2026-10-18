@@ -1110,6 +1110,19 @@ export class AsyncLowerTransform {
         if (!body) return null;
         if (body.lo != 0) this.liftDeclaredIn(parser, body, lifting);
         let init = loop.initializer;
+        // A header declaration in an awaiting loop is lifted, not merely
+        // hoisted: it must be visible to the condition and incrementor *and*
+        // survive the park, and only the state struct does both. Its copy-in
+        // then declares it at `f$resume`'s scope, so `i` in `i < 3` and `i++`
+        // resolves (§4.3, the same rule as any local inside an await-bearing
+        // construct). Measured before: `for (let i: i32 = 0; i < 3; i++) { …
+        // await t; }` → TS2304 on `i`.
+        if (body.lo != 0 && init != null && init.kind == NodeKind.Variable) {
+          let headerDeclarations = (<VariableStatement>init).declarations;
+          for (let j = 0, l = headerDeclarations.length; j < l; ++j) {
+            if (!this.liftDeclarator(parser, headerDeclarations[j], lifting)) return null;
+          }
+        }
         if (init != null) {
           let initPlan = this.planStatement(
             parser, init, new PlanCursor(), false, source, hoisted, declared, lifting
