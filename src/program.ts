@@ -34,6 +34,7 @@
 // │ └─ClassPrototype         Prototype of concrete class instances
 // └─File                     File, analogous to Source in the AST
 
+import { EnvKind } from "./closure/ir";
 import {
   CommonFlags,
   PATH_DELIMITER,
@@ -543,6 +544,30 @@ export class Program extends DiagnosticEmitter {
   }
   private _functionPrototype: ClassPrototype | null = null;
 
+  /**
+   * Gets the standard `Task` prototype, or `null` when the program does not
+   * provide it.
+   *
+   * `Task<T>` is the handle type an `async` function's call yields and what
+   * `await` unwraps (`docs/async-await-plan-v2.md` §1.2 rule 2, §2.4). Unlike
+   * the other standard prototypes this one is *optional*: a program assembled
+   * without the standard library (a bare `new Program()` in a unit test, say)
+   * has no `Task`, and the resolver must not throw while looking at code that
+   * never mentions async — so absence answers `null` and the async rules have
+   * no observable effect there. Every program the CLI builds parses
+   * `~lib/task.ts`, so absence means "no standard library", not "no async".
+   */
+  get taskPrototype(): ClassPrototype | null {
+    let cached = this._taskPrototype;
+    if (!cached) {
+      let element = this.elementsByName.get(CommonNames.Task);
+      if (!element || element.kind != ElementKind.ClassPrototype) return null;
+      this._taskPrototype = cached = <ClassPrototype>element;
+    }
+    return cached;
+  }
+  private _taskPrototype: ClassPrototype | null = null;
+
   /** Gets the standard `Int8Array` prototype. */
   get int8ArrayPrototype(): ClassPrototype {
     let cached = this._int8ArrayPrototype;
@@ -1007,6 +1032,12 @@ export class Program extends DiagnosticEmitter {
       CommonNames.returnof,
       this.nativeFile,
       this.makeNativeTypeDeclaration(CommonNames.returnof, CommonFlags.Export | CommonFlags.Generic),
+      DecoratorFlags.Builtin
+    ));
+    this.nativeFile.add(CommonNames.thisof, new TypeDefinition(
+      CommonNames.thisof,
+      this.nativeFile,
+      this.makeNativeTypeDeclaration(CommonNames.thisof, CommonFlags.Export | CommonFlags.Generic),
       DecoratorFlags.Builtin
     ));
     this.nativeFile.add(CommonNames.nonnull, new TypeDefinition(
@@ -3696,6 +3727,18 @@ export class FunctionPrototype extends DeclaredElement {
   operatorKind: OperatorKind = OperatorKind.Invalid;
   /** Whether this arrow function captures `this` from an enclosing function. */
   capturesThis: bool = false;
+  /**
+   * What this function's `_env` word means, when it is a closure value
+   * (`docs/closures-plan.md` §4.5). `None` for every ordinary function.
+   *
+   * Set by `Compiler#compileFunctionExpression` from the closure transform's
+   * side table, keyed by the `FunctionExpression` node — the prototype for a
+   * function expression is created there (`compiler.ts:7342`), after the
+   * declaration is cloned, so a declaration-keyed table would miss it.
+   */
+  envKind: EnvKind = EnvKind.None;
+  /** The synthesized environment class's name, when `envKind` is `Struct`. */
+  envClass: string | null = null;
   /** Already resolved instances. */
   instances: Map<string,Function> | null = null;
   /** Methods overriding this one, if any. These are unbound. */
@@ -3744,6 +3787,26 @@ export class FunctionPrototype extends DeclaredElement {
   /** Gets the arrow function kind. */
   get arrowKind(): ArrowKind {
     return (<FunctionDeclaration>this.declaration).arrowKind;
+  }
+
+  /**
+   * Whether this function is `async`.
+   *
+   * Derived from the declaration, the single source of truth the parser sets
+   * (`src/ast.ts`, `FunctionDeclaration.isAsync`) — the same shape as
+   * {@link arrowKind}, and for the same reason: a clone, a bound prototype
+   * (`toBound`) or a resolved instance must not be able to drift from it.
+   *
+   * `async` is only legal on a plain function or method. TypeScript refuses it
+   * on a constructor (its 1089) and on an accessor (its 1042), and the parser
+   * refuses those from source, so the flags decide here too: a declaration a
+   * transform synthesized cannot smuggle the trait onto a construct the
+   * language does not allow it on. A call through a bound async method still
+   * yields `Task<T>`; a constructor never can.
+   */
+  get isAsync(): bool {
+    return (<FunctionDeclaration>this.declaration).isAsync
+      && !this.isAny(CommonFlags.Constructor | CommonFlags.Get | CommonFlags.Set);
   }
 
   /** Creates a clone of this prototype that is bound to a concrete class instead. */

@@ -8,7 +8,7 @@
     "tensionscript",
     "wasm"
   ],
-  "version": "0.2.0",
+  "version": "0.4.1",
   "author": "Daniel Wirtz <dcode+assemblyscript@dcode.io>",
   "license": "Apache-2.0",
   "homepage": "https://github.com/Yabgu/Tension",
@@ -81,8 +81,9 @@
     "build": "node scripts/build",
     "watch": "node scripts/build --watch",
     "coverage": "npx c8 -- npm test",
-    "test": "npm run test:parser && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli",
+    "test": "npm run test:parser && npm run test:async && npm run test:closure && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli",
     "test:parser": "node --enable-source-maps tests/parser",
+    "test:async": "node --enable-source-maps tests/async/resolver.js && node --enable-source-maps tests/async/lower.js && node --enable-source-maps tests/async/runtime.js",
     "test:compiler": "node --enable-source-maps --no-warnings tests/compiler",
     "test:browser": "node --enable-source-maps tests/browser",
     "test:asconfig": "cd tests/asconfig && npm run test",
@@ -97,7 +98,8 @@
     "bootstrap": "npm run bootstrap:debug && npm run bootstrap:release",
     "bootstrap:debug": "node bin/tensionscript.js --config src/asconfig.json --target debug && node bin/tensionscript.js --config src/asconfig.json --target debug-bootstrap --wasm ./build/assemblyscript.debug.js && node bin/tensionscript.js --config src/asconfig.json --target debug-bootstrap --wasm ./build/assemblyscript.debug-bootstrap.js && git --no-pager diff --no-index build/assemblyscript.debug.wast build/assemblyscript.debug-bootstrap.wast",
     "bootstrap:release": "node bin/tensionscript.js --config src/asconfig.json --target release && node bin/tensionscript.js --config src/asconfig.json --target release-bootstrap --wasm ./build/assemblyscript.release.js && node bin/tensionscript.js --config src/asconfig.json --target release-bootstrap --wasm ./build/assemblyscript.release-bootstrap.js && git --no-pager diff --no-index build/assemblyscript.release.wast build/assemblyscript.release-bootstrap.wast",
-    "bootstrap:rtraced": "node bin/tensionscript.js --config src/asconfig.json --target rtraced && node bin/tensionscript.js --config src/asconfig.json --target rtraced --wasm ./build/assemblyscript.rtraced.js"
+    "bootstrap:rtraced": "node bin/tensionscript.js --config src/asconfig.json --target rtraced && node bin/tensionscript.js --config src/asconfig.json --target rtraced --wasm ./build/assemblyscript.rtraced.js",
+    "test:closure": "node --enable-source-maps tests/closure/lower.js"
   },
   "files": [
     "bin/",
