@@ -318,15 +318,19 @@ export function main(): i32 {
 // — refusals, each by name ——————————————————————————————————————————————————
 
 {
+  // D10's boundary after C6a: the syntax arm names what an initializer's syntax
+  // can name (`let x = 1` now compiles — case 25), and everything that needs
+  // resolution is still refused by name. A call is the canonical remainder.
   const r = run(`
+function value(): i32 { return 1; }
 function outer(): i32 {
-  let x = 1;
+  let x = value();
   function inner(): i32 { return x; }
   return inner();
 }
 export function main(): i32 { return outer(); }
 `);
-  check("D10: a captured local without a declared type is refused by name",
+  check("D10: a captured local the syntax arm cannot name is refused by name",
     refusals(r), [ "a captured local without a declared type (closures lowering)" ]);
 }
 {
@@ -1636,6 +1640,139 @@ export function main(): i32 { return 0; }
   const ctor = thisEnv.members.find(member => member.name.text === "constructor");
   check("C5b-21: its constructor takes (source, parent)",
     ctor.signature.parameters.map(parameter => parameter.name.text), [ "source", "parent" ]);
+}
+
+// --- C6a: the syntax arm (D10's syntax cases) and the D11 guard -----------
+//
+// `docs/closures-plan.md` §4.6. A capture the user left unannotated is named
+// from the initializer's own syntax, on demand at the capture site, and the
+// type is written onto the declaration — the same field the environment class
+// takes and the async transform reads.
+{
+  const r = run(`
+export function probe(): i32 {
+  let n = 0;
+  const f: () => i32 = (): i32 => n + 5;
+  return f();
+}
+`);
+  check("C6a: an inferred capture is accepted", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "probe$Env");
+  const field = env.members.find(member => member.name && member.name.text === "n");
+  check("C6a: its field is typed from the literal", field.type.name.identifier.text, "i32");
+}
+
+{
+  const r = run(`
+export function probe(): i32 {
+  let s = "xy";
+  const f: () => i32 = (): i32 => s.length;
+  return f();
+}
+`);
+  check("C6a: a string literal capture is accepted", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "probe$Env");
+  const field = env.members.find(member => member.name && member.name.text === "s");
+  check("C6a: its field is typed string", field.type.name.identifier.text, "string");
+}
+
+{
+  const r = run(`
+class Foo { v: i32 = 3; }
+export function probe(): i32 {
+  let p = new Foo();
+  const f: () => i32 = (): i32 => p.v;
+  return f();
+}
+`);
+  check("C6a: a `new` capture is accepted", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "probe$Env");
+  const field = env.members.find(member => member.name && member.name.text === "p");
+  check("C6a: its field is typed from the NewExpression", field.type.name.identifier.text, "Foo");
+}
+
+{
+  const r = run(`
+export function probe(): i32 {
+  let a: i32 = 2;
+  let b = a + 3;
+  const f: () => i32 = (): i32 => b;
+  return f();
+}
+`);
+  check("C6a: a binary expression over a typed local is accepted", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "probe$Env");
+  const field = env.members.find(member => member.name && member.name.text === "b");
+  check("C6a: its field takes the operands' common type", field.type.name.identifier.text, "i32");
+}
+
+{
+  // A call needs resolution: still refused, and that is C6c's shape.
+  const r = run(`
+function g(): i32 { return 7; }
+export function probe(): i32 {
+  let x = g();
+  const f: () => i32 = (): i32 => x;
+  return f();
+}
+`);
+  check("C6a: a call initializer is still refused, by name",
+    refusals(r), [ "a captured local without a declared type (closures lowering)" ]);
+}
+
+{
+  // D11's guard: a class type parameter used to slip through and fail later as
+  // TS2304 + cascading TS2339. It is a named refusal now.
+  const r = run(`
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+  m(): i32 { let x: T = this.v; const f: () => T = (): T => x; return 0; }
+}
+export function main(): i32 { return new Box<i32>(1).m(); }
+`);
+  check("C6a: a class type parameter is refused by name",
+    refusals(r), [ "a captured local typed by a class type parameter (closures lowering)" ]);
+}
+
+{
+  // The bootstrap gate's shape stays refused until C6b: the env class would
+  // have to be generic.
+  const r = run(`
+export function merge<K,V>(map1: Map<K,V>): i32 {
+  let out = new Map<K,V>(map1);
+  const f: () => i32 = (): i32 => out.size;
+  return f();
+}
+export function main(): i32 { return 0; }
+`);
+  check("C6a: a generic owner's inferred capture is still refused (D11)",
+    refusals(r), [ "a captured local typed by a type parameter (closures lowering)" ]);
+}
+
+{
+  // End to end: the inferred annotation is a real type, not just an AST fact.
+  check("C6a: an inferred literal capture runs",
+    await execute(`
+export function probe(): i32 {
+  let n = 0;
+  const f: () => i32 = (): i32 => n + 5;
+  return f();
+}
+`, "probe"), { value: 5 });
+  check("C6a: an inferred `new` capture runs",
+    await execute(`
+class Foo { v: i32 = 3; }
+export function probe(): i32 {
+  let p = new Foo();
+  const f: () => i32 = (): i32 => p.v;
+  return f();
+}
+`, "probe"), { value: 3 });
 }
 
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);
