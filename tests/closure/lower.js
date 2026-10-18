@@ -1073,5 +1073,132 @@ export function main(): i32 { return 1; }
     refusals(r), [ "this in an async function body (async lowering)" ]);
 }
 
+// 9. The reserved-name guard (F14): a name the lowering synthesizes is not
+//    a name a user keeps — but only in a program that synthesizes at all.
+//
+// Measured before the guard: `let $parent: i32 = 7; const f = () => $parent;`
+// compiled into `main$Env.$parent`, the field C5a adds. A program with no
+// capture and no async has no environment and no state struct, so its `$parent`
+// is harmless and must keep compiling — that is the gate this section pins.
+{
+  const SYNTHESIZED = [
+    "$parent", "$this", "$env", "$closureEnv", "$closureEnvIn", "$closureEnv$1",
+    "$init$x", "$awaited1", "$awaited99"
+  ];
+  for (const name of SYNTHESIZED) {
+    const r = run(`
+export function main(): i32 {
+  let ${name}: i32 = 1;
+  const g = (): i32 => ${name};
+  return g();
+}
+`);
+    check(`F14: a captured local named '${name}' is refused`,
+      refusals(r), [ `a user identifier named '${name}' (closures lowering)` ]);
+  }
+}
+
+{
+  // The gate: with neither a capture nor an async function, nothing is
+  // synthesized, so the name is the user's.
+  const r = run(`
+export function main(): i32 {
+  let $parent: i32 = 1;
+  let $this: i32 = 2;
+  let $closureEnv: i32 = 3;
+  return $parent + $this + $closureEnv;
+}
+`);
+  check("F14: a program with no closure and no async keeps its `$` names", refusals(r), []);
+  check("F14: ...and it still compiles to a value", r.wat().includes("(func $probe/main") || r.wat().includes("(func $main"), true);
+}
+
+{
+  // An async function is enough to arm the guard: the async transform
+  // synthesizes the state struct's names in the same reserved namespace.
+  const r = run(`
+async function f(h: Task<i32>): i32 {
+  let $parent: i32 = 1;
+  await h;
+  return $parent;
+}
+export function main(): i32 { return 0; }
+`);
+  check("F14: an async-only program arms the guard",
+    refusals(r), [ "a user identifier named '$parent' (closures lowering)" ]);
+}
+
+{
+  // `$awaitedX` is not a name the transform can produce, so a user keeps it.
+  const r = run(`
+export function main(): i32 {
+  let $awaitedX: i32 = 1;
+  const g = (): i32 => $awaitedX;
+  return g();
+}
+`);
+  check("F14: `$awaitedX` (not digits) is not reserved", refusals(r), []);
+}
+
+{
+  // Ordinary words are not refused by the flat scan. `handle` collides only
+  // when it is lifted into the state struct, where the async transform's own
+  // guard reports it — and `result` is not a state field at all any more.
+  const plain = run(`
+export function main(): i32 {
+  let result: i32 = 1;
+  let handle: i32 = 2;
+  let record: i32 = 3;
+  let resumePoint: i32 = 4;
+  const g = (): i32 => result;
+  return g() + handle + record + resumePoint;
+}
+`);
+  check("F14: `result`/`handle`/`record`/`resumePoint` are not reserved flatly",
+    refusals(plain), []);
+  const lifted = run(`
+async function f(h: Task<i32>): i32 {
+  let handle: i32 = 1;
+  await h;
+  return handle;
+}
+export function main(): i32 { return 0; }
+`);
+  check("F14: a lifted `handle` is still refused, by the async guard",
+    refusals(lifted), [ "a local whose name is reserved by the state struct (async lowering)" ]);
+}
+
+{
+  // Every declaration position is scanned: parameter, function, class, field,
+  // method, for-header, catch variable, and a local inside a nested function.
+  const positions = [
+    [ "a parameter", `export function main($parent: i32): i32 { let m: i32 = 1; const g = (): i32 => m; return g(); }` ],
+    [ "a function name", `export function $parent(): i32 { return 1; }\nexport function main(): i32 { let m: i32 = 1; const g = (): i32 => m; return g(); }` ],
+    [ "a class name", `class $parent { x: i32 = 1; }\nexport function main(): i32 { let m: i32 = 1; const g = (): i32 => m; return g(); }` ],
+    [ "a field name", `class C { $parent: i32 = 1; }\nexport function main(): i32 { let m: i32 = 1; const g = (): i32 => m; return g(); }` ],
+    [ "a method name", `class C { $parent(): i32 { return 1; } }\nexport function main(): i32 { let m: i32 = 1; const g = (): i32 => m; return g(); }` ],
+    [ "a for-header", `export function main(): i32 { let s: i32 = 0; for (let $parent: i32 = 0; $parent < 2; $parent++) { let m: i32 = 1; const g = (): i32 => m; s += g(); } return s; }` ],
+    [ "a catch variable", `export function main(): i32 { try { } catch ($parent) { } let m: i32 = 1; const g = (): i32 => m; return g(); }` ],
+    [ "a nested function's local", `export function main(): i32 { const h = (): i32 => { let $parent: i32 = 1; return $parent; }; let m: i32 = 1; const g = (): i32 => m; return g(); }` ]
+  ];
+  for (const [ where, source ] of positions) {
+    const r = run(source);
+    check(`F14: ${where} named '$parent' is refused`,
+      refusals(r), [ "a user identifier named '$parent' (closures lowering)" ]);
+  }
+}
+
+{
+  // The transform's own names are untouched: this program synthesizes
+  // `$closureEnv`, `$closureEnvIn` and `$this`, and the guard must not see them.
+  const r = run(`
+class C { x: i32 = 7; m(): i32 { let n: i32 = 1; const f = (): i32 => this.x + n; return f(); } }
+export function main(): i32 { return new C().m(); }
+`);
+  check("F14: the transform's own synthesized names are not refused", refusals(r), []);
+  check("F14: ...and the environment is emitted as before",
+    r.names().includes("m$Env") || r.wat().includes("m$Env#get:n"), true);
+}
+
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);
 if (failures !== 0) process.exitCode = 1;
