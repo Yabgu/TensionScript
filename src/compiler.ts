@@ -1835,7 +1835,27 @@ export class Compiler extends DiagnosticEmitter {
       let source = instance.declaration.range.source;
       let file = assert(this.program.filesByName.get(source.internalPath));
       let classPrototype = <ClassPrototype>assert(file.getMember(envClassName));
-      let classInstance = assert(this.resolver.resolveClass(classPrototype, null, new Map(), ReportMode.Swallow));
+      // C6b: a generic owner's env class is itself generic
+      // (`docs/closures-plan.md` §4.6), so it is instantiated with the type
+      // arguments this flow binds for the class's parameters. A non-generic
+      // class has none and takes the unchanged path.
+      let envTypeParameterNodes = classPrototype.typeParameterNodes;
+      let envTypeArguments: Type[] | null = null;
+      if (envTypeParameterNodes != null && envTypeParameterNodes.length > 0) {
+        let contextual = flow.contextualTypeArguments;
+        let args = new Array<Type>(envTypeParameterNodes.length);
+        for (let i = 0, k = envTypeParameterNodes.length; i < k; ++i) {
+          let name = envTypeParameterNodes[i].name.text;
+          let arg = contextual != null ? contextual.get(name) : null;
+          if (arg == null) {
+            this.error(DiagnosticCode.Type_argument_expected, instance.declaration.range);
+            return false;
+          }
+          args[i] = arg;
+        }
+        envTypeArguments = args;
+      }
+      let classInstance = assert(this.resolver.resolveClass(classPrototype, envTypeArguments, new Map(), ReportMode.Swallow));
       let envIn = flow.addScopedLocal(CLOSURE_ENV_IN_LOCAL, classInstance.type);
       flow.setLocalFlag(envIn.index, LocalFlags.Initialized);
     }

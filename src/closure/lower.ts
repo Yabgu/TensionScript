@@ -91,6 +91,7 @@ import {
   TryStatement,
   TypeDeclaration,
   TypeNode,
+  TypeParameterNode,
   UnaryPostfixExpression,
   UnaryPrefixExpression,
   VariableDeclaration,
@@ -1126,6 +1127,15 @@ class OwnerAnalysis {
    */
   private classTypeParameters: Set<string> = new Set();
 
+  /**
+   * The type parameters this owner's environment classes declare, outermost
+   * first: a method's class parameters, then the function's own. A hoisted
+   * class can only use a parameter it declares itself, so this list is what
+   * makes a generic owner's env expressible at all (C6b, `docs/closures-plan.md`
+   * §4.6). Empty for a non-generic owner, which keeps its class unchanged.
+   */
+  envTypeParameters: Array<string> = new Array();
+
   /** Every `this` expression found inside an arrow. */
   thisUses: Array<ThisUse> = new Array();
 
@@ -1177,8 +1187,18 @@ class OwnerAnalysis {
       let classTypeParameters = ownerClass.typeParameters;
       if (classTypeParameters) {
         for (let i = 0, k = classTypeParameters.length; i < k; ++i) {
-          this.classTypeParameters.add(classTypeParameters[i].name.text);
+          let name = classTypeParameters[i].name.text;
+          this.classTypeParameters.add(name);
+          this.envTypeParameters.push(name);
         }
+      }
+    }
+    let ownTypeParameters = owner.typeParameters;
+    if (ownTypeParameters) {
+      for (let i = 0, k = ownTypeParameters.length; i < k; ++i) {
+        let name = ownTypeParameters[i].name.text;
+        this.typeParameters.add(name);
+        if (!this.classTypeParameters.has(name)) this.envTypeParameters.push(name);
       }
     }
   }
@@ -1997,16 +2017,21 @@ class OwnerAnalysis {
       }
     }
     if (binding.type != null) {
-      // Two messages, because the two sets land differently: a function
-      // parameter is nameable by a generic env class in the owner's own
-      // parameters (C6b), a class parameter is not in scope at the hoisted
-      // class (C6a refuses it by name today).
-      if (mentionsTypeParameter(binding.type, this.typeParameters)) {
-        this.refuse(identifier.range,
-          "a captured local typed by a type parameter (closures lowering)");
-      } else if (mentionsTypeParameter(binding.type, this.classTypeParameters)) {
-        this.refuse(identifier.range,
-          "a captured local typed by a class type parameter (closures lowering)");
+      // C6b: the env class declares the owner's type parameters and every
+      // reference supplies them, so a parameter-typed capture is expressible —
+      // except inside an **async** function, whose transform still names the
+      // environment class without type arguments (`src/async/lower.ts`'s
+      // `typeNode(bodyEnvType, …)` sites). That shape keeps its named refusal
+      // instead of turning into a bare `TS2558`; extending it is its own phase,
+      // because the async transform would have to carry the parameter list too.
+      if (
+        mentionsTypeParameter(binding.type, this.typeParameters) ||
+        mentionsTypeParameter(binding.type, this.classTypeParameters)
+      ) {
+        if (inAsyncBody(binding.scope)) {
+          this.refuse(identifier.range,
+            "a captured local typed by a type parameter in an async body (closures lowering)");
+        }
       }
     }
     if (writeTarget && binding.isConst) {
@@ -2100,6 +2125,20 @@ class OwnerAnalysis {
     return out;
   }
 
+  /** The type arguments every reference to this owner's env classes carries. */
+  private envTypeArgs(range: Range): TypeNode[] | null {
+    let names = this.envTypeParameters;
+    let k = names.length;
+    if (k == 0) return null;
+    let out = new Array<TypeNode>(k);
+    for (let i = 0; i < k; ++i) {
+      out[i] = Node.createNamedType(
+        Node.createSimpleTypeName(names[i], range), null, false, range
+      );
+    }
+    return out;
+  }
+
   private makeEnvClass(scope: Scope): ClassDeclaration {
     let fields = new Array<DeclarationStatement>();
     let range = scope.range;
@@ -2174,7 +2213,8 @@ class OwnerAnalysis {
         // never null, but the class is shared by every instance of the scope
         // shape and the type must admit the constructor's default.
         Node.createNamedType(
-          Node.createSimpleTypeName(assert(parentScope.className), range), null, true, range
+          Node.createSimpleTypeName(assert(parentScope.className), range),
+          this.envTypeArgs(range), true, range
         ),
         Node.createNullExpression(range),
         range
@@ -2195,7 +2235,8 @@ class OwnerAnalysis {
           ParameterKind.Optional,
           Node.createIdentifierExpression(sourceName, range),
           Node.createNamedType(
-            Node.createSimpleTypeName(selfName, range), null, true, range
+            Node.createSimpleTypeName(selfName, range),
+            this.envTypeArgs(range), true, range
           ),
           Node.createNullExpression(range),
           range
@@ -2206,7 +2247,8 @@ class OwnerAnalysis {
           ParameterKind.Optional,
           Node.createIdentifierExpression(parentName, range),
           Node.createNamedType(
-            Node.createSimpleTypeName(assert(parentScope.className), range), null, true, range
+            Node.createSimpleTypeName(assert(parentScope.className), range),
+            this.envTypeArgs(range), true, range
           ),
           Node.createNullExpression(range),
           range
@@ -2291,10 +2333,24 @@ class OwnerAnalysis {
         range
       ));
     }
+    let envTypeParameters: Array<TypeParameterNode> | null = null;
+    let names = this.envTypeParameters;
+    if (names.length > 0) {
+      envTypeParameters = new Array<TypeParameterNode>(names.length);
+      for (let i = 0, k = names.length; i < k; ++i) {
+        envTypeParameters[i] = Node.createTypeParameter(
+          Node.createIdentifierExpression(names[i], range), null, null, range
+        );
+      }
+    }
     return Node.createClassDeclaration(
       Node.createIdentifierExpression(assert(scope.className), range),
-      null, CommonFlags.None,
       null,
+      // The parser sets `Generic` from the presence of type parameters; a
+      // synthesized class must say so itself, or the resolver refuses every
+      // `X$Env<K,V>` reference as "not generic".
+      envTypeParameters != null ? CommonFlags.Generic : CommonFlags.None,
+      envTypeParameters,
       typeNode("TaskEnv", range),
       null,
       fields,
@@ -2425,8 +2481,14 @@ class OwnerAnalysis {
         Node.createVariableDeclaration(
           Node.createIdentifierExpression(assert(scope.localName), scope.range),
           null, CommonFlags.Let,
-          typeNode(className, scope.range),
-          Node.createNewExpression(Node.createSimpleTypeName(className, scope.range), null, args, scope.range),
+          Node.createNamedType(
+            Node.createSimpleTypeName(className, scope.range),
+            this.envTypeArgs(scope.range), false, scope.range
+          ),
+          Node.createNewExpression(
+            Node.createSimpleTypeName(className, scope.range),
+            this.envTypeArgs(scope.range), args, scope.range
+          ),
           scope.range
         )
       ],
@@ -2739,7 +2801,7 @@ class OwnerAnalysis {
         Node.createIdentifierExpression(localName, scope.range),
         Node.createNewExpression(
           Node.createSimpleTypeName(className, scope.range),
-          null,
+          this.envTypeArgs(scope.range),
           [ Node.createIdentifierExpression(localName, scope.range) ],
           scope.range
         ),
@@ -3174,6 +3236,21 @@ function needsNullInitializer(type: TypeNode): bool {
     name == "isize" || name == "usize" || name == "bool" ||
     name == "f32" || name == "f64" || name == "v128"
   );
+}
+
+/**
+ * Whether any function owning a scope on this chain is `async`. A type
+ * parameter the environment class carries needs the class to be *instantiated*
+ * at every reference, and the async transform's synthesized types do not spell
+ * arguments yet (§4.6's C6b note).
+ */
+function inAsyncBody(scope: Scope): bool {
+  let current: Scope | null = scope;
+  while (current != null) {
+    if (current.ownerFunction.isAsync) return true;
+    current = current.parent;
+  }
+  return false;
 }
 
 /** Whether a type node names one of `names`, recursively (D11's check). */
