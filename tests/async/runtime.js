@@ -712,6 +712,38 @@ export function probe(): i32 {
   check("C5b case 21: the this-struct carries the receiver and the chain link",
     /f\$ThisEnv#set:\$this/.test(collision.wat) &&
     /f\$ThisEnv#set:\$parent/.test(collision.wat), true);
+
+  // Divergence 3 (C6a): an unannotated local that crosses an await. The state
+  // field needs a type, and the transform runs before resolution — so the
+  // syntax arm names it from the initializer and writes it onto the
+  // declaration, which is the field this transform already reads.
+  const inferred = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
+
+async function untyped(job: i32): i32 {
+  let n = 40;
+  let r: TaskRecord = new TaskRecord();
+  r.class_ = 4;
+  r.key = job;
+  let h: Task<i32> = new Task<i32>();
+  h._record = r;
+  await h;
+  return n + 2;
+}
+
+export function probe(): i32 {
+  let t: Task<i32> = untyped(31);
+  if (__taskHasRunnable()) return -1;   // parked, nothing running yet
+  __taskDeliver(4, 31, 0, 0, 0);        // the completion arrives after the park
+  __taskTick();
+  return t._record.payload;
+}
+`);
+  check("Divergence 3 (C6a): an inferred local survives the suspension",
+    inferred.run("probe"), 42);
+  check("Divergence 3 (C6a): its state field is typed from the literal",
+    /untyped\$State#set:n/.test(inferred.wat), true);
 }
 
 // 7. Early completions (4e-1): a delivery that arrives before the await.
