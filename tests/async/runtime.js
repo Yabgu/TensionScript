@@ -640,6 +640,114 @@ export function probe(): i32 {
   check("case 6 (a, closure across a real park): 40 + 2 + 0", six.run("probe"), 42);
 }
 
+// 7. Early completions (4e-1): a delivery that arrives before the await.
+//
+// `__taskDeliver` keys on `(family, key)`, which `__taskPark` writes — so
+// without a buffer a completion delivered first would be dropped and the task
+// would park forever. The buffer holds it until a park claims it.
+
+console.log("early completions");
+
+{
+  const HEAD = `
+import { Task, TaskRecord } from "~lib/task";
+import { __taskDeliver, __taskTick, __taskHasRunnable, __taskBufferedEvictions } from "~lib/task-rt";
+
+let frames: i32 = 0;
+
+async function g(h: Task<i32>): i32 {
+  frames = frames + 1;          // runs before the await
+  let v: i32 = await h;
+  frames = frames + 10;         // runs after it
+  return v;
+}
+
+function stamped(key: i32): TaskRecord {
+  let r: TaskRecord = new TaskRecord();
+  r.class_ = 4;
+  r.key = key;
+  return r;
+}
+`;
+
+  // (1) buffer hit: the completion is delivered before the await.
+  const early = compile(`${HEAD}
+export function probe(): i32 {
+  __taskDeliver(4, 77, 41, 0, 0);          // no task is waiting yet
+  let r: TaskRecord = stamped(77);
+  let h: Task<i32> = new Task<i32>();
+  h._record = r;
+  let t: Task<i32> = g(h);
+  if (!__taskHasRunnable()) return -1;     // the park claimed it and queued it
+  __taskTick();
+  if (frames != 11) return -2;             // both halves of the body ran
+  return r.payload;
+}
+`);
+  check("an early completion is claimed by the park (41)", early.run("probe"), 41);
+
+  // (2) the normal path: delivered after the park. Same value.
+  const late = compile(`${HEAD}
+export function probe(): i32 {
+  let r: TaskRecord = stamped(78);
+  let h: Task<i32> = new Task<i32>();
+  h._record = r;
+  let t: Task<i32> = g(h);
+  if (__taskHasRunnable()) return -1;      // parked, nothing running
+  __taskDeliver(4, 78, 41, 0, 0);          // the completion arrives after
+  if (!__taskHasRunnable()) return -2;
+  __taskTick();
+  if (frames != 11) return -3;
+  return r.payload;
+}
+`);
+  check("a completion delivered after the park gives the same value (41)", late.run("probe"), 41);
+
+  // (3) no delivery at all: the parked path stays reachable.
+  const parked = compile(`${HEAD}
+export function probe(): i32 {
+  let r: TaskRecord = stamped(79);
+  let h: Task<i32> = new Task<i32>();
+  h._record = r;
+  let t: Task<i32> = g(h);
+  if (__taskHasRunnable()) return -1;
+  __taskTick();
+  if (__taskHasRunnable()) return -2;
+  if (r.done != 0) return -3;              // still parked, still unsettled
+  return frames;                           // only the pre-await half ran
+}
+`);
+  check("an undelivered task stays parked (only the pre-await half ran)", parked.run("probe"), 1);
+
+  // (4) eviction: 256 unclaimed deliveries, then one more evicts the oldest.
+  const evict = compile(`${HEAD}
+export function probe(): i32 {
+  // A distinct family keeps these away from every other test's keys.
+  for (let i: i32 = 1; i <= 257; i++) __taskDeliver(40, i, i, 0, 0);
+  if (__taskBufferedEvictions() != 1) return -__taskBufferedEvictions();
+  // The oldest (key 1) was evicted: an await on it parks instead of hitting.
+  let r: TaskRecord = new TaskRecord();
+  r.class_ = 40;
+  r.key = 1;
+  let h: Task<i32> = new Task<i32>();
+  h._record = r;
+  let t: Task<i32> = g(h);
+  if (__taskHasRunnable()) return -100;    // it must have parked
+  // The newest (key 257) is still buffered: an await on it completes.
+  let r2: TaskRecord = new TaskRecord();
+  r2.class_ = 40;
+  r2.key = 257;
+  let h2: Task<i32> = new Task<i32>();
+  h2._record = r2;
+  let t2: Task<i32> = g(h2);
+  if (!__taskHasRunnable()) return -101;
+  __taskTick();
+  return r2.payload;
+}
+`);
+  check("the buffer evicts oldest-first at 256 (newest survives, 257)", evict.run("probe"), 257);
+}
+
 console.log();
 if (failures) {
   console.log(`FAILURE: ${failures} of ${checks} checks failed`);
