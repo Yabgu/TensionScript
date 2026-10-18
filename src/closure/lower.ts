@@ -173,6 +173,35 @@ function hasPrefix(text: string, prefix: string): bool {
   return true;
 }
 
+/**
+ * One function's chain facts, as the analysis computed them (§4.7.2).
+ *
+ * Produced by `ClosureLowerTransform#dumpEnvAnalysis`, which exists because
+ * most of these facts are invisible until C5a phase 2 emits `$parent`: a test
+ * can see `envClass` in the wat, but not `ownEnv`, `receivesEnv` or
+ * `parentClass`, and the phase-1 hard-stop proves only that a shape was
+ * refused — not *what* the analysis recorded before refusing. This is a test
+ * hook, not a supported API.
+ */
+export class EnvAnalysisRecord {
+  constructor(
+    /** The function's name. */
+    public name: string,
+    /** `"struct"` (`_env` is an env), `"receiver"` (this-only arrow), `"none"`. */
+    public kind: string,
+    /** The head env class `_env` names, when `kind == "struct"`. */
+    public envClass: string | null,
+    /** This function's body (or a nested scope of it) owns an env. */
+    public ownEnv: bool,
+    /** This function is a closure value and receives an env. */
+    public receivesEnv: boolean,
+    /** The class this function's own body env links to (§5.2), or null. */
+    public parentClass: string | null,
+    /** Every env this function must reach, innermost first. */
+    public needed: Array<string>
+  ) {}
+}
+
 /** The in-tree `afterParse` `Transform`. */
 export class ClosureLowerTransform {
 
@@ -218,6 +247,27 @@ export class ClosureLowerTransform {
       if (source.isLibrary) continue;
       this.lowerStatementList(source, source.statements, parser);
     }
+  }
+
+  /**
+   * The chain analysis of the last `afterParse` run, one record per analysed
+   * function including the owners themselves (tests only, C5a phase 1).
+   *
+   * The owner record exists because `EnvInfo` is keyed by the nested function's
+   * expression node (`ir.ts`): a top-level owner has no entry there, and its
+   * `ownEnv` is exactly what a one-scope test needs to see.
+   */
+  dumpEnvAnalysis(): Array<EnvAnalysisRecord> {
+    let out = new Array<EnvAnalysisRecord>();
+    let analyses = this.analyses;
+    if (analyses == null) return out;
+    for (const analysis of analyses.values()) {
+      let infos = analysis.allInfos;
+      for (let j = 0, jk = infos.length; j < jk; ++j) {
+        out.push(analysis.describe(infos[j], j));
+      }
+    }
+    return out;
   }
 
   /** Records an owner's analysis for phase two; allocates on the first owner. */
@@ -851,8 +901,43 @@ class FunctionInfo {
 
   children: Array<FunctionInfo> = new Array();
 
-  /** The single environment this function needs delivered, if any. */
+  /**
+   * The scopes this function's **own** body captures from, in discovery order
+   * (§4.7.2). Distinct from `neededScopes`, which also carries what a child
+   * needs delivered and the parent link of an owned body env.
+   */
+  directCaptures: Array<Scope> | null = null;
+
+  /**
+   * Every environment this function must be able to reach, in discovery order
+   * (§4.7.2): its own captures, the heads its children need delivered, and —
+   * for a function that owns a body env — that env's parent (§5.2). All of
+   * them are on one lexical path, so `needed` is well defined.
+   */
+  neededScopes: Array<Scope> | null = null;
+
+  /**
+   * The innermost of `neededScopes`: the environment this function's `_env`
+   * names, the start of its `$parent` walk (§3.3, §4.7.1). Maintained by
+   * `recordNeed`; finalised by `OwnerAnalysis#finalizeNeeds`.
+   */
   needed: Scope | null = null;
+
+  /**
+   * The name a test (and a reader of the analysis dump) can identify this
+   * function by: its own name, or the binding it is assigned to at its
+   * declaration (`const mid = () => …`). Empty for an anonymous expression.
+   */
+  displayName: string = "";
+
+  /** Whether this function's body (or a nested scope of it) owns an env. */
+  ownEnv: bool = false;
+
+  /**
+   * The env this function's **own body env** links to (§5.2), when the body
+   * owns one and an owning ancestor exists. `null` at a root.
+   */
+  bodyParent: Scope | null = null;
 
   /** Whether a `this` reference in this function belongs to an outer function. */
   usesThis: bool = false;
@@ -870,6 +955,66 @@ class FunctionInfo {
     public isAsync: bool,
     public parent: FunctionInfo | null
   ) {}
+
+  /** Records one scope this function's own body captures from. */
+  recordCapture(scope: Scope): void {
+    let captures = this.directCaptures;
+    if (captures == null) {
+      captures = new Array<Scope>();
+      this.directCaptures = captures;
+    } else if (captures.includes(scope)) {
+      return;
+    }
+    captures.push(scope);
+  }
+
+  /** Records one environment this function must reach; keeps `needed` innermost. */
+  recordNeed(scope: Scope): void {
+    let scopes = this.neededScopes;
+    if (scopes == null) {
+      scopes = new Array<Scope>();
+      this.neededScopes = scopes;
+    } else if (scopes.includes(scope)) {
+      return;
+    }
+    scopes.push(scope);
+    let needed = this.needed;
+    if (needed == null || scopeDepth(scope) > scopeDepth(needed)) this.needed = scope;
+  }
+
+  /** Drops every need, so `finalizeNeeds` can rebuild the set from scratch. */
+  resetNeeds(): void {
+    this.neededScopes = null;
+    this.needed = null;
+  }
+}
+
+/** The nearest ancestor scope that owns an environment, if any (§5.2). */
+function nearestOwningAncestor(scope: Scope): Scope | null {
+  let current: Scope | null = scope.parent;
+  while (current != null) {
+    if (current.captured.length > 0) return current;
+    current = current.parent;
+  }
+  return null;
+}
+
+/** A stable label for one scope, for the analysis dump: owner, kind and depth. */
+function scopeLabel(scope: Scope): string {
+  let owner = scope.ownerFunction.name.text;
+  let kind = scope.kind == ScopeKind.Function ? "$body" : "$block";
+  return owner + kind + ":" + scopeDepth(scope).toString();
+}
+
+/** How deeply `scope` is nested; the root scope is depth 0. */
+function scopeDepth(scope: Scope): i32 {
+  let depth: i32 = 0;
+  let current: Scope | null = scope;
+  while (current != null) {
+    ++depth;
+    current = current.parent;
+  }
+  return depth;
 }
 
 /** Capture analysis and the rewrite decision for one owner function. */
@@ -912,9 +1057,6 @@ class OwnerAnalysis {
 
   /** Variable declaration -> its binding. */
   bindingOf: Map<VariableDeclaration, Binding> = new Map();
-
-  /** The env scope visible at a creation site; `null` would mean "received". */
-  creationScope: Map<FunctionExpression, Scope | null> = new Map();
 
   /** Whether anything was captured at all. */
   captures: bool = false;
@@ -976,6 +1118,97 @@ class OwnerAnalysis {
     return this.plainBlocks.has(scope);
   }
 
+  /** One function's chain facts, for the transform's test hook. */
+  describe(info: FunctionInfo, index: i32): EnvAnalysisRecord {
+    let needed = new Array<string>();
+    let scopes = info.neededScopes;
+    if (scopes != null) {
+      // Innermost first (§4.7.1's chain order). Sorted on a copy: a test hook
+      // must not reorder the analysis it is reporting.
+      let ordered = new Array<Scope>();
+      for (let i = 0, k = scopes.length; i < k; ++i) ordered.push(scopes[i]);
+      for (let i = 1, k = ordered.length; i < k; ++i) {
+        let scope = ordered[i];
+        let depth = scopeDepth(scope);
+        let j = i - 1;
+        while (j >= 0 && scopeDepth(ordered[j]) < depth) {
+          ordered[j + 1] = ordered[j];
+          --j;
+        }
+        ordered[j + 1] = scope;
+      }
+      for (let i = 0, k = ordered.length; i < k; ++i) needed.push(scopeLabel(ordered[i]));
+    }
+    let kind = info.needed != null
+      ? "struct"
+      : (info.usesThis ? "receiver" : "none");
+    // An arrow or a function expression has no name; the index keeps records
+    // distinguishable rather than collapsing them all to "".
+    let name = info.node.name.text;
+    if (name.length == 0) name = info.displayName;
+    if (name.length == 0) name = "$anonymous" + index.toString();
+    return new EnvAnalysisRecord(
+      name,
+      kind,
+      info.needed != null ? info.needed.className : null,
+      info.ownEnv,
+      info.needed != null,
+      info.bodyParent != null ? info.bodyParent.className : null,
+      needed
+    );
+  }
+
+  /**
+   * Finalises the chain facts (§4.7.2), bottom-up over the function tree.
+   *
+   * A function's `needed` is the innermost environment it must reach: its own
+   * captures, the heads its children need delivered, and the parent of a body
+   * env it owns (§5.2). Children are processed first, so a parent sees each
+   * child's final head. The passes are three, in this order:
+   *
+   *   1. own-env: a scope owns iff a nested function captured one of its
+   *      bindings — known only after the walk;
+   *   2. per function: rebuild `neededScopes` from the direct captures, the
+   *      children's heads (when deliverable), and the body env's parent;
+   *   3. the body parent is the nearest owning ancestor of the function's body
+   *      scope, so its `$parent` link is what lets a deeper closure hop outward.
+   */
+  private finalizeNeeds(): void {
+    let scopes = this.scopes;
+    let infos = this.allInfos;
+    for (let i = 0, k = infos.length; i < k; ++i) {
+      infos[i].ownEnv = false;
+      infos[i].bodyParent = null;
+    }
+    for (let i = 0, k = scopes.length; i < k; ++i) {
+      let scope = scopes[i];
+      if (scope.captured.length == 0) continue;
+      let ownerInfo = this.infos.get(scope.ownerFunction);
+      if (ownerInfo != null) ownerInfo.ownEnv = true;
+    }
+    for (let i = infos.length - 1; i >= 0; --i) {
+      let info = infos[i];
+      info.resetNeeds();
+      let direct = info.directCaptures;
+      if (direct != null) {
+        for (let j = 0, jk = direct.length; j < jk; ++j) info.recordNeed(direct[j]);
+      }
+      let children = info.children;
+      for (let j = 0, jk = children.length; j < jk; ++j) {
+        let head = children[j].needed;
+        if (head != null && this.isDeliverable(info, head)) info.recordNeed(head);
+      }
+      let body = info.ownsScope;
+      if (body != null && body.captured.length > 0) {
+        let parent = nearestOwningAncestor(body);
+        if (parent != null) {
+          info.bodyParent = parent;
+          info.recordNeed(parent);
+        }
+      }
+    }
+  }
+
   /** Runs the analysis over the owner's body. */
   run(): void {
     let info = this.analyzeFunction(this.owner, null, false, null, null);
@@ -988,16 +1221,40 @@ class OwnerAnalysis {
         if (ref.write) this.writes.add(ref.identifier);
       }
     }
+    // The chain facts (§4.7.2): every function's head, its own env, and its
+    // body env's parent. This needs the completed capture sets, so it runs
+    // after the walk and before anything reads `needed`.
+    this.finalizeNeeds();
+    // C5a phase 1's hard-stop. The analysis now records every environment a
+    // closure needs (§4.7.2); emission does not build the chain yet (§4.7.3),
+    // so the shapes the chain exists for are refused *after* the analysis, by
+    // name. Phase 2 removes these two refusals, not the analysis.
+    let scopes = this.scopes;
+    for (let i = 0, k = scopes.length; i < k; ++i) {
+      let scope = scopes[i];
+      if (scope.captured.length == 0 || scope.ownerFunction === this.owner) continue;
+      this.refuse(scope.range,
+        "a capture from a nested function's body (closures lowering, phase 1)");
+      break;
+    }
+    if (!this.refused) {
+      let infos = this.allInfos;
+      for (let i = 0, k = infos.length; i < k; ++i) {
+        let neededScopes = infos[i].neededScopes;
+        if (neededScopes != null && neededScopes.length > 1) {
+          this.refuse(infos[i].node.range,
+            "a capture across more than one environment (closures lowering, phase 1)");
+          break;
+        }
+      }
+    }
     // Assign environment names, and refuse the shapes C1 does not lower.
     let blockIndex = 0;
     let ownerName = this.owner.name.text;
     for (let i = 0, k = this.scopes.length; i < k; ++i) {
       let scope = this.scopes[i];
       if (scope.captured.length == 0) continue;
-      if (scope.ownerFunction !== this.owner) {
-        this.refuse(scope.range, "a capture from a nested function's body (closures lowering)");
-        continue;
-      }
+      if (scope.ownerFunction !== this.owner) continue; // hard-stop above
       if (
         scope.kind == ScopeKind.Block &&
         !this.isPlainBlock(scope) &&
@@ -1028,8 +1285,10 @@ class OwnerAnalysis {
         continue;
       }
       if (env.ownerFunction !== this.owner) {
+        // The environment holding the receiver belongs to a nested owner,
+        // which the phase-1 hard-stop already refused.
         this.refuse(use.expression.range,
-          "a capture across more than one environment (closures lowering)");
+          "a capture from a nested function's body (closures lowering, phase 1)");
         continue;
       }
       env.needsThis = true;
@@ -1076,28 +1335,37 @@ class OwnerAnalysis {
       }
     }
 
+    // Provisional: enough for the host-callback guard below, which runs during
+    // this walk. `finalizeNeeds` recomputes every head once all captures and
+    // all scopes are known.
     if (info.needed != null && expression != null) this.structFunctions.add(expression);
 
-    // Propagate children's needs upward: a function that creates a closure
-    // needing an environment must itself be handed that environment.
+    // Propagate children's heads upward: a function that creates a closure
+    // needing an environment must itself be handed that environment — unless
+    // it owns that environment, or the environment is created inside its own
+    // body (a nested-owner chain, which `run()` refuses).
     for (let i = 0, k = info.children.length; i < k; ++i) {
       let child = info.children[i];
-      if (child.needed != null) {
-        if (child.needed.ownerFunction !== node) {
-          this.needScope(info, child.needed, child.node.range);
-        }
-      }
+      let head = child.needed;
+      if (head != null && this.isDeliverable(info, head)) info.recordNeed(head);
     }
     return info;
   }
 
-  /** Records that `info` needs `scope` delivered, refusing a second one (C1). */
-  private needScope(info: FunctionInfo, scope: Scope, range: Range): void {
-    if (info.needed == null) {
-      info.needed = scope;
-    } else if (info.needed !== scope) {
-      this.refuse(range, "a capture across more than one environment (closures lowering)");
+  /**
+   * Whether `scope`'s environment can be handed to `info` at its creation:
+   * it must not be one of `info`'s own scopes, and it must not be created
+   * inside `info`'s body (a scope created later cannot be received earlier).
+   */
+  private isDeliverable(info: FunctionInfo, scope: Scope): bool {
+    if (scope.ownerFunction === info.node) return false;
+    let body = info.ownsScope;
+    let current: Scope | null = scope;
+    while (current != null) {
+      if (current === body) return false;
+      current = current.parent;
     }
+    return true;
   }
 
   private walkStatements(statements: Statement[], scope: Scope, info: FunctionInfo): void {
@@ -1278,6 +1546,10 @@ class OwnerAnalysis {
     if (initializer != null && initializer.kind == NodeKind.Function) {
       let closure = <FunctionExpression>initializer;
       if (this.structFunctions.has(closure)) binding.closureValue = closure;
+      // A function expression has no name of its own; the binding it is
+      // declared into is the name a reader (and the analysis dump) uses.
+      let info = this.infos.get(closure.declaration);
+      if (info != null) info.displayName = declaration.name.text;
     }
     binding.isConst = (declaration.flags & CommonFlags.Const) != 0;
     scope.bindings.set(binding.name, binding);
@@ -1320,21 +1592,16 @@ class OwnerAnalysis {
       case NodeKind.Function: {
         let functionExpression = <FunctionExpression>expression;
         let declaration = functionExpression.declaration;
-        let child = this.analyzeFunction(
+        this.analyzeFunction(
           declaration,
           functionExpression,
           declaration.arrowKind != ArrowKind.None,
           scope,
           info
         );
-        if (child.needed != null) {
-          // The env at this site is the owning scope's local when this function
-          // owns it, and the received env otherwise.
-          this.creationScope.set(
-            functionExpression,
-            child.needed.ownerFunction === info.node ? child.needed : null
-          );
-        }
+        // The env stored at this site is decided at rewrite time, from the
+        // child's final head (`finalizeNeeds`), not here: the head can move
+        // outward when an owned body env needs a parent (§4.7.2, §5.2).
         return;
       }
       case NodeKind.Literal: {
@@ -1496,12 +1763,12 @@ class OwnerAnalysis {
       this.refuse(identifier.range,
         "an assignment to a captured constant (closures lowering)");
     }
-    if (binding.scope.ownerFunction !== this.owner) {
-      this.refuse(identifier.range,
-        "a capture from a nested function's body (closures lowering)");
-    }
+    // A capture from a scope owned by a *nested* function is C5a's nested-owner
+    // shape (§4.7.3). The analysis records it; `run()` refuses it with the
+    // phase-1 message, because emission does not yet allocate that owner's env.
     info.capturesLocal = true;
-    this.needScope(info, binding.scope, identifier.range);
+    info.recordCapture(binding.scope);
+    info.recordNeed(binding.scope);
     if (!binding.scope.captured.includes(binding)) binding.scope.captured.push(binding);
   }
 
@@ -2242,10 +2509,19 @@ class OwnerAnalysis {
         let info = this.infos.get(functionExpression.declaration);
         if (info != null) {
           this.rewriteFunctionBody(info);
-          if (info.needed != null) {
-            let className = assert(info.needed.className);
-            envInfoOf.set(functionExpression, new EnvInfo(EnvKind.Struct, className));
-            let created = this.creationScope.get(functionExpression);
+          let head = info.needed;
+          if (head != null) {
+            let className = assert(head.className);
+            // §3.3's four facts, all final now: the head class `_env` names,
+            // whether this function's body owns an env, that it receives one
+            // (kind Struct), and the class its own body env links to (§5.2).
+            let parentClass = info.bodyParent != null ? assert(info.bodyParent.className) : null;
+            envInfoOf.set(functionExpression, new EnvInfo(
+              EnvKind.Struct, className, info.ownEnv, true, parentClass
+            ));
+            // The local at this creation site: the head's own local when the
+            // creating function owns that scope, otherwise the env it received.
+            let created = head.ownerFunction === currentFunction ? head : null;
             creationEnvOf.set(
               functionExpression,
               created != null ? assert(created.localName) : ENV_IN_LOCAL

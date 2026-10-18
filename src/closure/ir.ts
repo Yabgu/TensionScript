@@ -34,16 +34,34 @@ export const enum EnvKind {
   Struct
 }
 
-/** What the closure transform decided for one nested function. */
+/**
+ * What the closure transform decided for one nested function
+ * (`docs/closures-plan.md` §3.3, as amended by C5a).
+ */
 export class EnvInfo {
   constructor(
     /** What `_env` means for this function. */
     public kind: EnvKind = EnvKind.None,
     /**
-     * The synthesized environment class this function reads, as a source-level
-     * type name. `null` for `None` and `Receiver`.
+     * The synthesized class of the environment this function's `_env` names —
+     * its **head** env (§4.7.1). `null` for `None` and `Receiver`.
      */
-    public envClass: string | null = null
+    public envClass: string | null = null,
+    /**
+     * This function's body (or one of its nested scopes) allocates an
+     * environment (§3.3).
+     */
+    public ownEnv: boolean = false,
+    /**
+     * This function is a closure value: it has `$closureEnvIn` and a prologue
+     * (§3.3). True exactly when `kind == Struct`.
+     */
+    public receivesEnv: boolean = false,
+    /**
+     * The class of the env this function's **OWN body env** links to (C5a);
+     * `null` at a root, or when the body owns nothing (§3.3).
+     */
+    public parentClass: string | null = null
   ) {}
 }
 

@@ -50,14 +50,19 @@ const NOT_IMPLEMENTED = 100;
 /** Compiles `source` through the closure transform, then async (the CLI order). */
 function run(source) {
   const program = buildProgram([ [ "probe.ts", source ] ]);
+  let closure = null;
   for (const Transform of [ asc.ClosureLowerTransform, asc.AsyncLowerTransform ]) {
     Object.assign(Transform.prototype, { program });
-    new Transform().afterParse(program.parser);
+    const transform = new Transform();
+    if (Transform === asc.ClosureLowerTransform) closure = transform;
+    transform.afterParse(program.parser);
   }
   const file = program.sources.find(source => source.internalPath === "probe");
   return {
     program,
     file,
+    /** The closure transform's chain analysis (C5a phase 1's test hook). */
+    analysis: () => closure.dumpEnvAnalysis(),
     names: () => file.statements.map(statement => statement.name ? statement.name.text : String(statement.kind)),
     wat: () => {
       if (program.__wat) return program.__wat;
@@ -1198,6 +1203,176 @@ export function main(): i32 { return new C().m(); }
   check("F14: the transform's own synthesized names are not refused", refusals(r), []);
   check("F14: ...and the environment is emitted as before",
     r.names().includes("m$Env") || r.wat().includes("m$Env#get:n"), true);
+}
+
+// 10. C5a phase 1: multi-scope `needed` (plan §4.7.2).
+//
+// The analysis now records *every* environment a closure must reach, innermost
+// first, and `needed` is the head. Emission does not build the chain yet, so
+// the shapes the chain exists for are refused *after* the analysis, with a
+// message that names phase 1. These checks assert both halves: what the
+// analysis recorded, and that the hard-stop fires for exactly the shapes whose
+// emission is missing.
+{
+  // One scope: unchanged from C1-C4, and now observable. The owner allocates
+  // the env; the closure receives it; nothing is parented.
+  const r = run(`
+export function main(): i32 {
+  let n: i32 = 1;
+  const f = (): i32 => n;
+  return f();
+}
+`);
+  check("C5a-1: a one-scope capture is not refused", refusals(r), []);
+  const records = r.analysis();
+  const owner = records.find(record => record.name === "main");
+  const closure = records.find(record => record.kind === "struct");
+  check("C5a-1: the owner's env is recorded", [ owner.ownEnv, owner.receivesEnv, owner.parentClass ], [ true, false, null ]);
+  check("C5a-1: the closure is Struct and receives", [ closure.kind, closure.receivesEnv, closure.ownEnv ], [ "struct", true, false ]);
+  check("C5a-1: the closure's head is the owner's env", [ closure.envClass, closure.parentClass ], [ "main$Env", null ]);
+  check("C5a-1: the chain is one env deep", closure.needed, [ "main$body:1" ]);
+}
+
+{
+  // The canonical two-scope shape: a loop header and the body block. The
+  // closure references both, so its chain is two envs deep and emission is not
+  // implemented yet — the hard-stop, not the old refusal.
+  const r = run(`
+export function main(): i32 {
+  const fns = new Array<() => i32>();
+  for (let i: i32 = 0; i < 3; i++) {
+    let now: i32 = i * 10;
+    fns.push((): i32 => i + now);
+  }
+  return fns.length;
+}
+`);
+  check("C5a-2: the canonical two-scope loop is refused by the phase-1 hard-stop",
+    refusals(r), [ "a capture across more than one environment (closures lowering, phase 1)" ]);
+  const closure = r.analysis().find(record => record.kind === "struct");
+  check("C5a-2: the analysis recorded two envs, innermost first", closure.needed,
+    [ "main$block:3", "main$block:2" ]);
+  check("C5a-2: the head is the innermost env", closure.envClass, "main$Env$2");
+}
+
+{
+  // Two owning blocks, no loop: the same shape without the clone machinery.
+  const r = run(`
+export function main(): i32 {
+  let out: i32 = 0;
+  {
+    let a: i32 = 1;
+    {
+      let b: i32 = 2;
+      const g = (): i32 => a + b;
+      out = g();
+    }
+  }
+  return out;
+}
+`);
+  check("C5a-3: two nested blocks are refused by the phase-1 hard-stop",
+    refusals(r), [ "a capture across more than one environment (closures lowering, phase 1)" ]);
+  const closure = r.analysis().find(record => record.kind === "struct");
+  check("C5a-3: both block envs are recorded", closure.needed.length, 2);
+}
+
+{
+  // A nested owner: the closure's own body allocates an env, which emission
+  // does not yet handle — a different phase-1 message, and the analysis must
+  // still have run (the inner arrow's need is recorded).
+  const r = run(`
+export function main(): i32 {
+  const f = (): i32 => {
+    let b: i32 = 1;
+    const h = (): i32 => b;
+    return h();
+  };
+  return f();
+}
+`);
+  check("C5a-4: a nested owner is refused by the phase-1 hard-stop",
+    refusals(r), [ "a capture from a nested function's body (closures lowering, phase 1)" ]);
+  const records = r.analysis();
+  const owner = records.find(record => record.name === "main");
+  const inner = records.find(record => record.kind === "struct");
+  check("C5a-4: the owner is not the only allocator", owner.ownEnv, false);
+  check("C5a-4: the inner arrow still has its analysis", inner.needed.length, 1);
+}
+
+{
+  // Three scopes: outer's body, mid's body, g's body, captured by one arrow.
+  const r = run(`
+export function main(): i32 {
+  let a: i32 = 1;
+  const mid = (): i32 => {
+    let b: i32 = 2;
+    const g = (): i32 => {
+      let c: i32 = 3;
+      const h = (): i32 => a + b + c;
+      return h();
+    };
+    return g();
+  };
+  return mid();
+}
+`);
+  check("C5a-5: the three-scope shape is refused as a nested owner",
+    refusals(r), [ "a capture from a nested function's body (closures lowering, phase 1)" ]);
+  const chain = r.analysis().find(record => record.needed.length === 3);
+  check("C5a-5: the arrow's chain has three envs", chain.needed.length, 3);
+  check("C5a-5: the outermost env is the owner's body", chain.needed[2], "main$body:1");
+}
+
+{
+  // Transitive capture through a non-owning intermediate (case 10) is a
+  // one-env shape and still lowers: no hard-stop.
+  const r = run(`
+function outer(): i32 {
+  let a: i32 = 1;
+  const mid = (): i32 => {
+    const inner = (): i32 => a;
+    return inner();
+  };
+  return mid();
+}
+export function main(): i32 { return outer(); }
+`);
+  check("C5a-6: a non-owning intermediate is not refused", refusals(r), []);
+  const mid = r.analysis().find(record => record.name === "mid");
+  check("C5a-6: the intermediate receives the one env it forwards", mid.needed, [ "outer$body:1" ]);
+}
+
+{
+  // `this` plus one local: the receiver lives in the same env, so the chain is
+  // one deep and the shape still lowers (C2b).
+  const r = run(`
+class C { x: i32 = 7; m(): i32 { let n: i32 = 1; const f = (): i32 => this.x + n; return f(); } }
+export function main(): i32 { return new C().m(); }
+`);
+  check("C5a-7: `this` plus one local is still one env", refusals(r), []);
+}
+
+{
+  // `this` inside a two-scope chain: the receiver's env is the head, but the
+  // capture itself needs two envs, so the hard-stop fires.
+  const r = run(`
+class C {
+  x: i32 = 7;
+  m(): i32 {
+    let out: i32 = 0;
+    for (let i: i32 = 0; i < 2; i++) {
+      let n: i32 = 1;
+      const f = (): i32 => this.x + i + n;
+      out = f();
+    }
+    return out;
+  }
+}
+export function main(): i32 { return new C().m(); }
+`);
+  check("C5a-8: `this` plus two scopes is refused by the phase-1 hard-stop",
+    refusals(r), [ "a capture across more than one environment (closures lowering, phase 1)" ]);
 }
 
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);
