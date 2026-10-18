@@ -96,7 +96,7 @@ import {
   VariableStatement,
   WhileStatement
 } from "../ast";
-import { EnvKind, EnvInfo, envInfoOf, creationEnvOf } from "./ir";
+import { EnvKind, EnvInfo, envInfoOf, creationEnvOf, ownerEnvOf } from "./ir";
 
 /** The local that holds the environment a function **owns**. */
 const ENV_LOCAL = "$closureEnv";
@@ -885,7 +885,13 @@ class ThisUse {
   constructor(
     public expression: ThisExpression,
     /** The arrow chain, innermost first. */
-    public arrows: Array<FunctionInfo>
+    public arrows: Array<FunctionInfo>,
+    /**
+     * The nearest enclosing non-arrow function: the lexical owner of `this`
+     * (§4.4). Its body scope is where `$this` lives (C5b), whether or not it is
+     * also the arrow's head.
+     */
+    public receiver: FunctionInfo
   ) {}
 }
 
@@ -999,11 +1005,20 @@ class FunctionInfo {
   }
 }
 
+/**
+ * Whether a scope owns an environment: it declares a captured binding, or it
+ * carries the receiver for an arrow (`needsThis`) — C5b's `$this`-only env is a
+ * real env class with one field.
+ */
+function scopeOwns(scope: Scope): bool {
+  return scope.captured.length > 0 || scope.needsThis;
+}
+
 /** The nearest ancestor scope that owns an environment, if any (§5.2). */
 function nearestOwningAncestor(scope: Scope): Scope | null {
   let current: Scope | null = scope.parent;
   while (current != null) {
-    if (current.captured.length > 0) return current;
+    if (scopeOwns(current)) return current;
     current = current.parent;
   }
   return null;
@@ -1080,6 +1095,9 @@ class OwnerAnalysis {
   /** Every `this` expression found inside an arrow. */
   thisUses: Array<ThisUse> = new Array();
 
+  /** Whether the owner's own body reads `this` (C5b). */
+  ownerBodyUsesThis: bool = false;
+
   /** Closure values passed to a host callback, checked again after finalising. */
   hostCallbackCandidates: Array<HostCallbackCandidate> = new Array();
 
@@ -1122,9 +1140,15 @@ class OwnerAnalysis {
     }
   }
 
-  /** Whether the owner has anything to rewrite. */
+  /**
+   * Whether the owner has anything to rewrite.
+   *
+   * A **this-only** arrow is normally handled by the shipped Receiver path and
+   * sets no capture; C5b turns one into a `Struct` when it sits in an async
+   * body (§4.7.5), and that decision is recorded in `thisRefs`. Both count.
+   */
   hasCaptures(): bool {
-    return this.captures;
+    return this.captures || this.thisRefs.size > 0;
   }
 
   /** Reports `Not implemented: <what>` and marks the owner refused. */
@@ -1178,6 +1202,75 @@ class OwnerAnalysis {
       info.bodyParent != null ? info.bodyParent.className : null,
       needed
     );
+  }
+
+  /**
+   * Attributes every `this` to the scope that carries it (C5b, §4.7.5).
+   *
+   * The carrier is the **receiver's** scope — the body scope of the nearest
+   * enclosing non-arrow function (§4.4) — not necessarily the arrow's head.
+   * Two placements:
+   *
+   * - **head** when the head env is owned by the same function as the receiver:
+   *   the receiver is `this` at that scope's entry, so the field is initialized
+   *   there. This is the shipped C2b rule, unchanged.
+   * - **the receiver's body scope** otherwise: the head env is allocated inside
+   *   a *different* function (a nested owner), where the receiver is not a
+   *   value. That scope therefore owns an env (possibly carrying nothing but
+   *   `$this`), and the arrow reaches it through `$parent` like any binding.
+   *
+   * A **this-only arrow in an async body** also becomes `Struct` here: its
+   * `_env` must be the env that carries the receiver, because the resume
+   * function has no `this` to deliver through the Receiver path.
+   */
+  private attributeThis(): void {
+    let uses = this.thisUses;
+    for (let i = 0, k = uses.length; i < k; ++i) {
+      let use = uses[i];
+      let innermost = use.arrows[0];
+      let receiverScope = use.receiver.ownsScope;
+      if (receiverScope == null) continue;
+      let head = innermost.needed;
+      if (head == null) {
+        // A this-only arrow: the shipped Receiver path, unless the function
+        // creating it has no `this` — an async body, whose resume is free.
+        if (!use.receiver.isAsync) continue;
+        innermost.recordCapture(receiverScope);
+        innermost.recordNeed(receiverScope);
+        receiverScope.needsThis = true;
+        this.thisRefs.set(use.expression, receiverScope);
+        continue;
+      }
+      if (this.ownerThisType == null) {
+        this.refuse(use.expression.range, "this in a capturing arrow (closures lowering)");
+        continue;
+      }
+      // The carrier and the reference target are the same scope: `this` is read
+      // from the field on whatever env holds it.
+      let carrier: Scope;
+      if (head.ownerFunction === receiverScope.ownerFunction) {
+        // Same function: the receiver is `this` at the head's scope entry.
+        head.needsThis = true;
+        carrier = head;
+      } else {
+        // A nested owner's env is the head; the receiver is not a value there.
+        receiverScope.needsThis = true;
+        carrier = receiverScope;
+      }
+      this.thisRefs.set(use.expression, carrier);
+    }
+    // The owner's own body reading `this`: an async owner's body moves into a
+    // free resume function, so the receiver must be a field of the body env —
+    // which means the body owns one even if nothing is captured (§4.7.5).
+    if (this.ownerBodyUsesThis && this.owner.isAsync && this.ownerThisType != null) {
+      let root = this.infos.get(this.owner);
+      let body = root != null ? root.ownsScope : null;
+      // Only an env that already exists carries the receiver: a method with no
+      // captures keeps the async transform's one-field this-struct, which is
+      // already one object for one scope. The dual-class shape this fixes is the
+      // one where a body env exists *and* the receiver needs a home (§4.7.5).
+      if (body != null && scopeOwns(body)) body.needsThis = true;
+    }
   }
 
   /**
@@ -1257,7 +1350,8 @@ class OwnerAnalysis {
     }
     for (let i = 0, k = scopes.length; i < k; ++i) {
       let scope = scopes[i];
-      if (scope.captured.length == 0) continue;
+      // A `$this`-only env is a real env class (C5b), so it counts as owning.
+      if (!scopeOwns(scope)) continue;
       let ownerInfo = this.infos.get(scope.ownerFunction);
       if (ownerInfo != null) ownerInfo.ownEnv = true;
     }
@@ -1300,11 +1394,18 @@ class OwnerAnalysis {
     // body env's parent. This needs the completed capture sets, so it runs
     // after the walk and before anything reads `needed`.
     this.finalizeNeeds();
+    // C5b: `$this` is attributed to the *receiver's* scope (§4.7.5, §7.1).
+    // This must run before naming, because a scope that owns nothing but the
+    // receiver still owns an env class.
+    this.attributeThis();
+    // Finalising again picks up the captures the attribution added (a this-only
+    // arrow in an async body becomes a Struct closure over the receiver's env).
+    this.finalizeNeeds();
     // The host-callback guard (9.1) ran during the walk, when `needed` was
-    // provisional. Finalising can only ADD a need (a nested owner's body parent),
-    // so re-check every recorded candidate against the final kind; a nested
-    // owner passed to a host callback is now a Struct closure and must be
-    // refused like any other.
+    // provisional. Finalising can only ADD a need (a nested owner's body parent,
+    // or a receiver's env), so re-check every recorded candidate against the
+    // final kind; a nested owner passed to a host callback is now a Struct
+    // closure and must be refused like any other.
     let candidates = this.hostCallbackCandidates;
     for (let i = 0, k = candidates.length; i < k; ++i) {
       let candidate = candidates[i];
@@ -1321,7 +1422,7 @@ class OwnerAnalysis {
     let blockIndex = 0;
     for (let i = 0, k = this.scopes.length; i < k; ++i) {
       let scope = this.scopes[i];
-      if (scope.captured.length == 0) continue;
+      if (!scopeOwns(scope)) continue;
       if (
         scope.kind == ScopeKind.Block &&
         !this.isPlainBlock(scope) &&
@@ -1342,36 +1443,22 @@ class OwnerAnalysis {
         );
       }
     }
-    // `this` in an arrow: the shipped `Receiver` path when the arrow captures
-    // nothing else, and a `$this` field when it does (§7.1).
-    let uses = this.thisUses;
-    for (let i = 0, k = uses.length; i < k; ++i) {
-      let use = uses[i];
-      let innermost = use.arrows[0];
-      let env = innermost.needed;
-      if (env == null) continue; // Receiver: delivered by the shipped path
-      if (this.ownerThisType == null) {
-        this.refuse(use.expression.range, "this in a capturing arrow (closures lowering)");
-        continue;
-      }
-      // `$this` is field 0 of the innermost env the arrow needs (§7.1). When
-      // that env belongs to the analysis root, the receiver is `this` at the
-      // scope entry and the field is initialized there.
-      //
-      // When it belongs to a NESTED owner the receiver has no carrier: the
-      // nested function's `~env` already is that env (an arrow's `_env` is the
-      // env, not a receiver), so there is no `this` at its entry to store —
-      // measured: initializing the field there compiles the arrow's `this` from
-      // `~env` and fails with TS2332 plus a `usize`-vs-class mismatch. That is
-      // the same two-carrier shape C5b unifies for the async this-struct, so it
-      // stays refused here, by name, rather than half-lowered.
-      if (env.ownerFunction !== this.owner) {
-        this.refuse(use.expression.range,
-          "a receiver captured by an arrow with its own environment (closures lowering)");
-        continue;
-      }
-      env.needsThis = true;
-      this.thisRefs.set(use.expression, env);
+    // C5b: publish the env each analysed function's own body owns, for the
+    // async transform (§4.7.5, §8.3). `ownerEnvOf` is keyed by the declaration;
+    // a method or a top-level function has no `FunctionExpression` to key
+    // `envInfoOf` with, and the async transform needs its own body's class.
+    for (let i = 0, k = this.allInfos.length; i < k; ++i) {
+      let info = this.allInfos[i];
+      let body = info.ownsScope;
+      if (body == null || body.className == null) continue;
+      ownerEnvOf.set(info.node, new EnvInfo(
+        EnvKind.None,
+        body.className,
+        true,
+        false,
+        info.bodyParent != null ? info.bodyParent.className : null,
+        body.needsThis
+      ));
     }
     if (info.needed != null) {
       this.refuse(this.owner.range,
@@ -1653,7 +1740,14 @@ class OwnerAnalysis {
         return;
       }
       case NodeKind.This: {
-        this.markThis(<ThisExpression>expression, info);
+        if (info.node === this.owner) {
+          // `this` in the owner's own body (§4.7.5). Only an async owner needs
+          // a field for it: its body moves into `f$resume`, where `this` is not
+          // a parameter. A non-async owner keeps the plain `this`.
+          this.ownerBodyUsesThis = true;
+        } else {
+          this.markThis(<ThisExpression>expression, info);
+        }
         return;
       }
       case NodeKind.Super: {
@@ -1918,7 +2012,9 @@ class OwnerAnalysis {
       arrows.push(current);
       current = current.parent;
     }
-    if (arrows.length > 0) this.thisUses.push(new ThisUse(expression, arrows));
+    if (arrows.length > 0 && current != null) {
+      this.thisUses.push(new ThisUse(expression, arrows, current));
+    }
   }
 
   // --- emission -------------------------------------------------------------
@@ -2575,10 +2671,14 @@ class OwnerAnalysis {
       case NodeKind.This: {
         let env = this.thisRefs.get(<ThisExpression>expression);
         if (env == null) return expression; // Receiver path: leave it alone
-        let localName = env.ownerFunction === currentFunction
-          ? assert(env.localName)
-          : ENV_IN_LOCAL;
-        return this.fieldOn(localName, THIS_FIELD, expression.range);
+        // `$this` is a field of the receiver's env (§4.7.5). That env is the
+        // head in the common case; when a nested owner's env is the head, the
+        // receiver is reached by the same `$parent!` walk as any binding.
+        return this.fieldFrom(
+          this.envExprForScope(env, currentFunction, expression.range),
+          THIS_FIELD,
+          expression.range
+        );
       }
       case NodeKind.Identifier: {
         let identifier = <IdentifierExpression>expression;
@@ -2697,7 +2797,7 @@ class OwnerAnalysis {
             // (kind Struct), and the class its own body env links to (§5.2).
             let parentClass = info.bodyParent != null ? assert(info.bodyParent.className) : null;
             envInfoOf.set(functionExpression, new EnvInfo(
-              EnvKind.Struct, className, info.ownEnv, true, parentClass
+              EnvKind.Struct, className, info.ownEnv, true, parentClass, head.needsThis
             ));
             // The local at this creation site: the head's own local when the
             // creating function owns that scope, otherwise the env it received.
@@ -2839,14 +2939,23 @@ class OwnerAnalysis {
     currentFunction: FunctionDeclaration,
     range: Range
   ): Expression {
-    if (binding.scope.ownerFunction === currentFunction) {
-      return Node.createIdentifierExpression(assert(binding.scope.localName), range);
+    return this.envExprForScope(binding.scope, currentFunction, range);
+  }
+
+  /** The same walk, for a scope rather than a binding (`$this` uses it too). */
+  private envExprForScope(
+    scope: Scope,
+    currentFunction: FunctionDeclaration,
+    range: Range
+  ): Expression {
+    if (scope.ownerFunction === currentFunction) {
+      return Node.createIdentifierExpression(assert(scope.localName), range);
     }
     let info = assert(this.infos.get(currentFunction));
     let head = assert(info.needed);
     let env: Expression = Node.createIdentifierExpression(ENV_IN_LOCAL, range);
     let current: Scope = head;
-    while (current !== binding.scope) {
+    while (current !== scope) {
       env = Node.createAssertionExpression(
         AssertionKind.NonNull,
         this.fieldFrom(env, PARENT_FIELD, range),

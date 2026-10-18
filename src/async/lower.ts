@@ -100,7 +100,7 @@ import { Parser } from "../parser";
 import { Program } from "../program";
 import { Token } from "../tokenizer";
 import { awaitSites, AwaitSite } from "./ir";
-import { creationEnvOf, envInfoOf, EnvInfo, EnvKind } from "../closure/ir";
+import { creationEnvOf, envInfoOf, ownerEnvOf, EnvInfo, EnvKind } from "../closure/ir";
 import {
   validateAsyncConstructs,
   MESSAGE_ASYNC_ARROW,
@@ -108,6 +108,7 @@ import {
 } from "./validate";
 import {
   ArrowKind,
+  AssertionKind,
   ArrayLiteralExpression,
   AssertionExpression,
   AwaitExpression,
@@ -201,6 +202,13 @@ const RESUME_FIELD = "resume";
 /** The state struct's environment reference (§4.4). */
 const ENV_FIELD = "$env";
 /**
+ * The body env's local, read back from `state.$env` in `f$resume` (C5b) and
+ * used as the entry's temporary when the entry allocates it. It is the closure
+ * transform's name for the same object, so a closure creation inside the body
+ * reads the local it was rewritten to read (`creationEnvOf`, §3.3).
+ */
+const ENV_LOCAL = "$closureEnv";
+/**
  * The local that holds the environment a `Struct` closure **received** through
  * `~env`. Codegen creates it for a `EnvKind.Struct` function
  * (`compiler.ts:455`, `:1833-1841`); the closure transform names it when it
@@ -210,6 +218,8 @@ const ENV_FIELD = "$env";
 const ENV_IN_LOCAL = "$closureEnvIn";
 /** The this-struct's receiver field, at field 0 (§7.4). */
 const THIS_FIELD = "$this";
+/** The chain link (§5.2), read by the second `$env` shape (C5b). */
+const PARENT_FIELD = "$parent";
 /** Prefix of the synthesized condition temporaries of `if` statements. */
 const COND_TEMP_PREFIX = "$cond";
 
@@ -423,16 +433,25 @@ export class AsyncLowerTransform {
     let closureEnvClass = closureEnv != null && closureEnv.kind == EnvKind.Struct
       ? closureEnv.envClass
       : null;
-    // `$env` holds one reference, so it cannot carry two environments. A
-    // capturing function with an explicit `this:` needs the this-struct *and*
-    // the captured env in the same field; that is the two-environment shape C5's
-    // parent-chain design owns, and emitting either one alone would produce
-    // wrong code (the second assignment clobbers the first). Refused by name
-    // before any artifact is built, so the AST is left untouched.
-    if (closureEnvClass != null && thisType != null) {
-      return this.refuse(parser, declaration.range,
-        "a capturing function with an explicit `this:` parameter (async lowering)");
-    }
+
+    // C5b, §4.7.5: the environment this function's **own body** owns, when the
+    // closure transform found one. `ownerEnvOf` is keyed by the declaration
+    // because a method is not a closure value and has no expression to key
+    // `envInfoOf` with. When it exists it is the function-scope env — it
+    // carries `$this` when the scope has a receiver — and `$env` holds it, so
+    // one scope instance has one object.
+    let foundOwnerEnv = ownerEnvOf.get(declaration);
+    let ownerEnv: EnvInfo | null = foundOwnerEnv != null ? foundOwnerEnv : null;
+    let bodyEnvClass = ownerEnv != null && ownerEnv.ownEnv ? ownerEnv.envClass : null;
+    let bodyEnvHasThis = bodyEnvClass != null && ownerEnv != null && ownerEnv.hasThis;
+    let bodyEnvParent = ownerEnv != null ? ownerEnv.parentClass : null;
+    // The body env is the head only when it also carries the receiver: that is
+    // the object the resume would otherwise have no way to see. An env-only
+    // body keeps the existing lifting (a `$closureEnv` state field) and leaves
+    // `$env` to the received env (§8.3(b)).
+    let headIsBodyEnv = bodyEnvClass != null && bodyEnvHasThis;
+    let headIsThis = !headIsBodyEnv && thisType != null;
+    let headIsReceived = !headIsBodyEnv && !headIsThis && closureEnvClass != null;
     let parameters = signature.parameters;
     for (let i = 0, k = parameters.length; i < k; ++i) {
       let parameter = parameters[i];
@@ -463,16 +482,17 @@ export class AsyncLowerTransform {
     // in `state.$env` (a one-field this-struct), and every `this` in the body
     // becomes a read of that field. Reads, not a hoisted local: a local would
     // need lifting, and the field is always current by construction.
-    let thisEnvName = thisType != null ? name + "$ThisEnv" : "";
+    let thisEnvName = headIsThis ? name + "$ThisEnv" : "";
     let thisEnvClass: ClassDeclaration | null = null;
-    if (thisType != null) {
+    if (headIsThis) {
+      let receiverType = assert(thisType);
       let thisField = Node.createFieldDeclaration(
         Node.createIdentifierExpression(THIS_FIELD, range),
         null, CommonFlags.Instance,
-        thisType,
+        receiverType,
         Node.createCallExpression(
           Node.createIdentifierExpression("changetype", range),
-          [ thisType ],
+          [ receiverType ],
           [ intLiteral(0, range) ],
           range
         ),
@@ -485,37 +505,74 @@ export class AsyncLowerTransform {
       // to compile until this constructor existed; the emitted diagnostic
       // pointed at the method, because the synthesized node carries its range).
       // `super()` first: `TaskEnv` is a base class (AS2377).
+      // C5b, §8.3's second read-back shape: when the function is *also* a
+      // closure value, its received env is not the head; the this-struct is,
+      // and the received env is `$parent`. The collision (capture + explicit
+      // `this:`) is exactly this shape.
       let ctorParamName = "source";
-      let ctorParam = Node.createParameter(
+      let ctorParams = new Array<ParameterNode>();
+      ctorParams.push(Node.createParameter(
         ParameterKind.Default,
         Node.createIdentifierExpression(ctorParamName, range),
-        thisType,
+        receiverType,
         null,
         range
-      );
-      let ctorBody = Node.createBlockStatement([
-        Node.createExpressionStatement(
-          Node.createCallExpression(Node.createSuperExpression(range), null, [], range)
-        ),
-        Node.createExpressionStatement(
+      ));
+      let fields = new Array<DeclarationStatement>();
+      fields.push(thisField);
+      let ctorStatements = new Array<Statement>();
+      ctorStatements.push(Node.createExpressionStatement(
+        Node.createCallExpression(Node.createSuperExpression(range), null, [], range)
+      ));
+      ctorStatements.push(Node.createExpressionStatement(
+        Node.createBinaryExpression(
+          Token.Equals,
+          Node.createPropertyAccessExpression(
+            Node.createThisExpression(range),
+            Node.createIdentifierExpression(THIS_FIELD, range),
+            range
+          ),
+          Node.createIdentifierExpression(ctorParamName, range),
+          range
+        )
+      ));
+      if (closureEnvClass != null) {
+        let parentName = "parent";
+        ctorParams.push(Node.createParameter(
+          ParameterKind.Default,
+          Node.createIdentifierExpression(parentName, range),
+          typeNode(closureEnvClass, range),
+          null,
+          range
+        ));
+        fields.push(Node.createFieldDeclaration(
+          Node.createIdentifierExpression(PARENT_FIELD, range),
+          null, CommonFlags.Instance,
+          Node.createNamedType(
+            Node.createSimpleTypeName(closureEnvClass, range), null, true, range
+          ),
+          Node.createNullExpression(range),
+          range
+        ));
+        ctorStatements.push(Node.createExpressionStatement(
           Node.createBinaryExpression(
             Token.Equals,
             Node.createPropertyAccessExpression(
               Node.createThisExpression(range),
-              Node.createIdentifierExpression(THIS_FIELD, range),
+              Node.createIdentifierExpression(PARENT_FIELD, range),
               range
             ),
-            Node.createIdentifierExpression(ctorParamName, range),
+            Node.createIdentifierExpression(parentName, range),
             range
           )
-        )
-      ], range);
+        ));
+      }
       let thisEnvCtor = Node.createMethodDeclaration(
         Node.createConstructorExpression(range),
         null, CommonFlags.Constructor | CommonFlags.Instance,
         null,
-        Node.createFunctionType([ ctorParam ], typeNode("void", range), null, false, range),
-        ctorBody,
+        Node.createFunctionType(ctorParams, typeNode("void", range), null, false, range),
+        Node.createBlockStatement(ctorStatements, range),
         range
       );
       thisEnvClass = Node.createClassDeclaration(
@@ -524,10 +581,22 @@ export class AsyncLowerTransform {
         null,
         typeNode(TASK_ENV_NAME, range),
         null,
-        [ thisField, thisEnvCtor ],
+        [ ...fields, thisEnvCtor ],
         range
       );
-      replaceThis(block.statements, thisEnvName, stateVarNameOf(block, parameters));
+    }
+    // C5b: when the body env is the head, the entry allocates it (where `this`
+    // is) and the resume reads it from `state.$env`. The closure transform's
+    // own allocation and its `$this` initializer must therefore leave the body
+    // — the initializer reads `this`, which the resume does not have.
+    if (headIsBodyEnv) stripBodyEnvAllocation(block);
+    // `this` in the body is read from whichever object is the head: the body
+    // env when it owns one (§4.7.5), otherwise the this-struct.
+    // No carrier means no receiver to rewrite: a free async function's `this`
+    // stays as parsed, so the async validation still refuses it by name.
+    if (headIsBodyEnv || headIsThis) {
+      let thisCarrier = headIsBodyEnv ? assert(bodyEnvClass) : thisEnvName;
+      replaceThis(block.statements, thisCarrier, stateVarNameOf(block, parameters));
     }
 
     // --- the plan: awaits, structure, and what has to be lifted -------------
@@ -751,28 +820,67 @@ export class AsyncLowerTransform {
       ],
       range
     ));
-    // state.$env = new f$ThisEnv(this);   — §7.4: the receiver the resume
-    // function cannot otherwise see. Populated unconditionally, and before the
-    // prefix runs, so `this.x` is valid from the first statement.
-    if (thisType != null) {
+    // The head (§4.7.5, §8.3): **one** object per scope instance, chosen here.
+    //
+    //   1. the function's own body env, when it owns one — allocated in the
+    //      *entry*, because that is where `this` exists; the resume reads it;
+    //   2. otherwise the this-struct, when it has a receiver;
+    //   3. otherwise the env it received.
+    //
+    // `$env` holds that head, so `f$resume` has exactly one field to read and
+    // the two read-back shapes are `$env` and `$env.$parent!`.
+    if (headIsBodyEnv) {
+      let bodyEnvType = assert(bodyEnvClass);
+      let args = new Array<Expression>();
+      // The body env's constructor is `(source, parent)` (§5.2); this is a
+      // fresh allocation, so `source` is null and the parent — when the body
+      // env links to an enclosing env — is the one the function received. A
+      // body env is a function scope, so its only possible owning ancestor is
+      // an enclosing function's env, which is exactly `$closureEnvIn`.
+      if (bodyEnvParent != null) {
+        args.push(Node.createNullExpression(range));
+        args.push(Node.createIdentifierExpression(ENV_IN_LOCAL, range));
+      }
+      entryStatements.push(Node.createVariableStatement(
+        null,
+        [
+          Node.createVariableDeclaration(
+            Node.createIdentifierExpression(ENV_LOCAL, range),
+            null, CommonFlags.Let,
+            typeNode(bodyEnvType, range),
+            Node.createNewExpression(Node.createSimpleTypeName(bodyEnvType, range), null, args, range),
+            range
+          )
+        ],
+        range
+      ));
+      if (bodyEnvHasThis) {
+        entryStatements.push(Node.createExpressionStatement(
+          assignField(
+            Node.createIdentifierExpression(ENV_LOCAL, range),
+            THIS_FIELD,
+            Node.createThisExpression(range),
+            range
+          )
+        ));
+      }
       entryStatements.push(Node.createExpressionStatement(
         assignField(stateIdent, ENV_FIELD,
-          Node.createNewExpression(
-            Node.createSimpleTypeName(thisEnvName, range),
-            null,
-            [ Node.createThisExpression(range) ],
-            range
-          ),
+          Node.createIdentifierExpression(ENV_LOCAL, range),
           range
         )
       ));
-    }
-    // state.$env = $closureEnvIn;   — §8.3(a): the environment this function was
-    // created with, carried across the function boundary the resume function
-    // lives on the other side of. The local is the one codegen's prologue fills
-    // from `~env` (`compiler.ts:1833-1841`), because this function's prototype is
-    // `EnvKind.Struct`.
-    if (closureEnvClass != null) {
+    } else if (headIsThis) {
+      let args = new Array<Expression>();
+      args.push(Node.createThisExpression(range));
+      if (closureEnvClass != null) args.push(Node.createIdentifierExpression(ENV_IN_LOCAL, range));
+      entryStatements.push(Node.createExpressionStatement(
+        assignField(stateIdent, ENV_FIELD,
+          Node.createNewExpression(Node.createSimpleTypeName(thisEnvName, range), null, args, range),
+          range
+        )
+      ));
+    } else if (headIsReceived) {
       entryStatements.push(Node.createExpressionStatement(
         assignField(stateIdent, ENV_FIELD,
           Node.createIdentifierExpression(ENV_IN_LOCAL, range),
@@ -868,6 +976,36 @@ export class AsyncLowerTransform {
     // declaration is unconditional and first. The type is the concrete env class
     // the closure transform named; `changetype` is the plan's one cast for a
     // non-nullable read of a nullable carrier (§8.3).
+    let headExpression: Expression = Node.createPropertyAccessExpression(
+      Node.createIdentifierExpression(resumeVarName, range),
+      Node.createIdentifierExpression(ENV_FIELD, range),
+      range
+    );
+    // The two read-back shapes (§8.3): when the head *is* the received env it
+    // is `state.$env`; when the head is the body env or the this-struct, the
+    // received env is the head's `$parent` (C5b's chain link).
+    // The head is typed `TaskEnv`, so the concrete class is named before the
+    // field is read — the same `changetype` the plan uses for `record!`-style
+    // non-nullable carriers (§8.3).
+    let headClass = headIsBodyEnv ? assert(bodyEnvClass) : thisEnvName;
+    let headAccess = Node.createCallExpression(
+      Node.createIdentifierExpression("changetype", range),
+      [ typeNode(headClass, range) ],
+      [ headExpression ],
+      range
+    );
+    let receivedExpression: Expression = headIsReceived
+      ? headExpression
+      : Node.createAssertionExpression(
+          AssertionKind.NonNull,
+          Node.createPropertyAccessExpression(
+            headAccess,
+            Node.createIdentifierExpression(PARENT_FIELD, range),
+            range
+          ),
+          null,
+          range
+        );
     if (closureEnvClass != null) {
       let envType = typeNode(closureEnvClass, range);
       resumeStatements.push(Node.createVariableStatement(
@@ -880,13 +1018,30 @@ export class AsyncLowerTransform {
             Node.createCallExpression(
               Node.createIdentifierExpression("changetype", range),
               [ envType ],
-              [
-                Node.createPropertyAccessExpression(
-                  Node.createIdentifierExpression(resumeVarName, range),
-                  Node.createIdentifierExpression(ENV_FIELD, range),
-                  range
-                )
-              ],
+              [ receivedExpression ],
+              range
+            ),
+            range
+          )
+        ],
+        range
+      ));
+    }
+    // C5b: the body env is the head, so the resume reads it instead of
+    // allocating it. One object, one home (§4.7.5).
+    if (headIsBodyEnv) {
+      let bodyEnvType = assert(bodyEnvClass);
+      resumeStatements.push(Node.createVariableStatement(
+        null,
+        [
+          Node.createVariableDeclaration(
+            Node.createIdentifierExpression(ENV_LOCAL, range),
+            null, CommonFlags.Const,
+            typeNode(bodyEnvType, range),
+            Node.createCallExpression(
+              Node.createIdentifierExpression("changetype", range),
+              [ typeNode(bodyEnvType, range) ],
+              [ headExpression ],
               range
             ),
             range
@@ -2662,6 +2817,38 @@ function hasName(parameters: ParameterNode[], block: BlockStatement, name: strin
  */
 function stateVarNameOf(block: BlockStatement, parameters: ParameterNode[]): string {
   return nameForState(parameters, block);
+}
+
+/**
+ * Removes the closure transform's body-env allocation (and its `$this`
+ * initializer) from a body that is about to move into `f$resume` (C5b).
+ *
+ * The two statements are the transform's (§5.3): a `let $closureEnv = new …`
+ * at the body's first statement, followed by `$closureEnv.$this = this` when
+ * the scope carries the receiver. Both belong at the **entry** when the body
+ * env is the async head: the entry has `this`, and the resume reads the object
+ * from `state.$env` instead of allocating a second one (§4.7.5).
+ */
+function stripBodyEnvAllocation(block: BlockStatement): void {
+  let statements = block.statements;
+  let first = statements.length > 0 ? statements[0] : null;
+  if (first == null || first.kind != NodeKind.Variable) return;
+  let declarations = (<VariableStatement>first).declarations;
+  if (declarations.length != 1) return;
+  if (declarations[0].name.text != ENV_LOCAL) return;
+  statements.shift();
+  let next = statements.length > 0 ? statements[0] : null;
+  if (next == null || next.kind != NodeKind.Expression) return;
+  let expression = (<ExpressionStatement>next).expression;
+  if (expression.kind != NodeKind.Binary) return;
+  let binary = <BinaryExpression>expression;
+  if (binary.operator != Token.Equals) return;
+  if (binary.left.kind != NodeKind.PropertyAccess) return;
+  let access = <PropertyAccessExpression>binary.left;
+  if (access.expression.kind != NodeKind.Identifier) return;
+  if ((<IdentifierExpression>access.expression).text != ENV_LOCAL) return;
+  if (access.property.text != THIS_FIELD) return;
+  statements.shift();
 }
 
 /**

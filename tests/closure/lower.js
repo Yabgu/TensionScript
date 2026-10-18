@@ -1436,10 +1436,11 @@ export function main(): i32 { return outer(); }
 }
 
 {
-  // A receiver whose env would be owned by a nested owner stays refused: the
-  // nested function's `~env` already IS that env, so there is no receiver at
-  // its entry to store. Measured; the two-carrier unification is C5b's.
-  const r = run(`
+  // C5b, case 23: a receiver whose env belongs to a *nested owner*. The
+  // receiver is attributed to its own lexical scope (the method's body), that
+  // scope owns an env, and the arrow hops to it — so the shape lowers and the
+  // value proves the hop.
+  const source = `
 class C {
   x: i32 = 7;
   m(): i32 {
@@ -1448,9 +1449,12 @@ class C {
   }
 }
 export function main(): i32 { return new C().m(); }
-`);
-  check("C5a-11: a receiver in a nested owner's env is refused by name",
-    refusals(r), [ "a receiver captured by an arrow with its own environment (closures lowering)" ]);
+`;
+  const r = run(source);
+  check("C5b-23: a receiver in a nested owner's env is lowered", refusals(r), []);
+  check("C5b-23: the receiver's scope owns an env of its own",
+    r.analysis().filter(record => record.ownEnv === true).length >= 2, true);
+  check("C5b-23: value 7 + 1", (await execute(source)).value, 8);
 }
 
 {
@@ -1527,6 +1531,111 @@ export function main(): i32 {
   check("C5a-15: the loop header's constructor takes (source, parent)",
     ctor.signature.parameters.length, 2);
   check("C5a-15: value 0 + 1 + 5", (await execute(source)).value, 6);
+}
+
+// 11. C5b: one env per scope instance, and the three shapes that needed it.
+//
+// The dual-class emission is gone: a scope with a captured binding *and* a
+// receiver has one class carrying `$this` at field 0 and the bindings after it
+// (§4.7.5). The receiver travels through `state.$env` into the resume function,
+// so an async body's `this` and a this-only arrow's `this` are fields of that
+// one object.
+{
+  // Case 23 shape: an async method owns a captured local and reads `this`.
+  // Before C5b this emitted both `m$Env` and `m$ThisEnv` — one scope, two
+  // objects. Now: one class, one `$env`.
+  const r = run(`
+import { Task } from "~lib/task";
+class C { y: i32 = 7;
+  async m(h: Task<i32>): i32 {
+    let x: i32 = 1;
+    const g: () => i32 = (): i32 => x;
+    await h;
+    return g() + this.y;
+  }
+}
+export function main(): i32 { return 0; }
+`);
+  check("C5b-23: the unified shape is lowered", refusals(r), []);
+  const envClasses = r.file.statements.filter(statement =>
+    statement.name && /^m\$\w*Env$/.test(statement.name.text));
+  check("C5b-23: exactly one env class for the method's scope",
+    envClasses.map(statement => statement.name.text), [ "m$Env" ]);
+  const fields = envClasses[0].members
+    .filter(member => member.name && member.name.text !== "constructor")
+    .map(member => member.name.text);
+  check("C5b-23: `$this` is field 0, then the captured binding",
+    fields, [ "$this", "x" ]);
+  check("C5b-23: no separate this-struct is synthesized",
+    /m\$ThisEnv/.test(r.wat()), false);
+}
+
+{
+  // Case 22 shape: a this-only arrow in an async body. Before C5b the resolver
+  // answered TS2332 (the arrow read `~env` as a receiver, and `f$resume` has no
+  // `this`); now the arrow is Struct over the body env that carries `$this`.
+  const r = run(`
+import { Task } from "~lib/task";
+class C { y: i32 = 7;
+  async m(h: Task<i32>): i32 {
+    const g: () => i32 = (): i32 => this.y;
+    await h;
+    return g();
+  }
+}
+export function main(): i32 { return 0; }
+`);
+  check("C5b-22: a this-only arrow in an async body is lowered", refusals(r), []);
+  const analysis = r.analysis();
+  const arrow = analysis.find(record => record.receivesEnv === true);
+  check("C5b-22: the arrow becomes Struct over the body env",
+    [ arrow.kind, arrow.needed.length ], [ "struct", 1 ]);
+  const bodyEnv = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "m$Env");
+  check("C5b-22: the body env carries `$this` and nothing else",
+    bodyEnv.members
+      .filter(member => member.name && member.name.text !== "constructor")
+      .map(member => member.name.text),
+    [ "$this" ]);
+}
+
+{
+  // Case 21 shape: capture + explicit `this:` — the collision. `$env` holds one
+  // object: the this-struct, whose `$parent` is the received env, so the
+  // captured binding is reached through the link (§8.3's second read-back
+  // shape). The refusal is gone.
+  //
+  // **Value deferred, with the cause measured.** Calling a *hoisted nested*
+  // async entry with `.call` fails in this fork with `TS2304: Cannot find name
+  // 'thisof'` (`~lib/function.ts:24`) — reproduced on the ccf888c6 baseline
+  // with a nested async function that captures nothing, so it predates C5b and
+  // is not the carrier. The carrier itself is asserted below; the value test
+  // lands when that call form compiles.
+  const r = run(`
+import { Task } from "~lib/task";
+class C { y: i32 = 7;
+  async m(h: Task<i32>): i32 {
+    let x: i32 = 1;
+    async function f(this: C): i32 { return x + this.y; }
+    await h;
+    return x;
+  }
+}
+export function main(): i32 { return 0; }
+`);
+  check("C5b-21: the collision is no longer refused", refusals(r), []);
+  const thisEnv = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "f$ThisEnv");
+  const fields = thisEnv.members
+    .filter(member => member.name && member.name.text !== "constructor")
+    .map(member => member.name.text + ":" + (member.type && member.type.name
+      ? member.type.name.identifier.text + (member.type.isNullable ? "|null" : "")
+      : "?"));
+  check("C5b-21: the this-struct carries the receiver and the chain link",
+    fields, [ "$this:C", "$parent:m$Env|null" ]);
+  const ctor = thisEnv.members.find(member => member.name.text === "constructor");
+  check("C5b-21: its constructor takes (source, parent)",
+    ctor.signature.parameters.map(parameter => parameter.name.text), [ "source", "parent" ]);
 }
 
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);

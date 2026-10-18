@@ -849,9 +849,12 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check("  ...and `$env` never populated for it",
     /outer\$State#set:\$env[\s\S]{0,40}?local\.get \$\$closureEnv/.test(containingWat), false);
 
-  // The collision: `$env` holds one reference, so a capturing function with an
-  // explicit `this:` cannot carry both the this-struct and the captured env.
-  // Refused by name — two-environment captures are C5's design (plan §4.8).
+  // The collision — capture + an explicit `this:` — is **un-refused** (C5b,
+  // plan §4.7.5). `$env` still holds one reference: the this-struct, whose
+  // `$parent` is the captured environment, so the closure reads its binding
+  // through the link (§8.3's second read-back shape). The carrier is asserted
+  // here; the value is in tests/closure/lower.js (C5b-21), where the call form
+  // is measured too.
   const collision = runBoth(`
 class C { y: i32 = 7; }
 async function outer(h: Task<i32>): i32 {
@@ -863,9 +866,16 @@ async function outer(h: Task<i32>): i32 {
 }
 export function main(): i32 { return 1; }
 `);
-  check("a capturing function with an explicit `this:` is refused by name",
-    refusals(collision),
-    [ "a capturing function with an explicit `this:` parameter (async lowering)" ]);
+  check("a capturing function with an explicit `this:` is lowered",
+    refusals(collision), []);
+  const thisEnv = collision.file.statements.find(statement =>
+    statement.name && statement.name.text === "f$ThisEnv");
+  check("  ...the this-struct carries the chain link",
+    thisEnv.members
+      .filter(member => member.name && member.name.text !== "constructor")
+      .map(member => member.name.text + ":" + (member.type && member.type.name
+        ? member.type.name.identifier.text : "?")),
+    [ "$this:C", "$parent:outer$Env" ]);
 }
 
 // 8e. A type argument in an async body is refused *by name*.

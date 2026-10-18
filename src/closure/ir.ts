@@ -13,7 +13,7 @@
  * shipped this-only arrow path.
  */
 
-import { FunctionExpression } from "../ast";
+import { FunctionDeclaration, FunctionExpression } from "../ast";
 
 /**
  * What a function's `_env` word means.
@@ -61,9 +61,27 @@ export class EnvInfo {
      * The class of the env this function's **OWN body env** links to (C5a);
      * `null` at a root, or when the body owns nothing (§3.3).
      */
-    public parentClass: string | null = null
+    public parentClass: string | null = null,
+    /**
+     * C5b: the head env carries `$this` at field 0 (§4.7.5). True when the
+     * function's scope has a receiver and either the body or an arrow needs it.
+     */
+    public hasThis: boolean = false
   ) {}
 }
+
+/**
+ * The environment **owned by a function's own body**, keyed by its declaration
+ * (§3.3). One record per analysed function that owns one, including nested
+ * owners and the analysis root.
+ *
+ * Why this is separate from `envInfoOf`: that table answers "what does this
+ * function value's `_env` mean", and is keyed by the `FunctionExpression` a
+ * closure is created from. A method or a top-level function is not a closure
+ * value and has no such expression, but the async transform still needs to know
+ * what its body allocates — that is what this table answers (C5b, §4.7.5).
+ */
+export const ownerEnvOf = new Map<FunctionDeclaration, EnvInfo>();
 
 /**
  * One entry per nested `FunctionExpression` the transform rewrote. Keyed by the
