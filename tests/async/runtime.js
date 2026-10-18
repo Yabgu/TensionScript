@@ -676,6 +676,42 @@ export function probe(): i32 {
     /two\$State#get:\$closureEnv\$1/.test(twoScopes.wat), true);
   check("C5a case 20: the block env's class is the head and is parented",
     /two\$Env\$1#get:\$parent/.test(twoScopes.wat), true);
+
+  // C5b case 21: a capture plus an explicit `this:` in a nested async entry —
+  // the collision. The awaited `.call` is the shape that forces
+  // `Function#call`'s declared `thisof<T>` parameter to resolve; the fork
+  // registers `thisof` as of 0.4.1, so the value is measurable. The this-struct
+  // carries the receiver and the chain link, which the wat assertions pin.
+  const collision = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
+
+class C { y: i32 = 7;
+  async m(job: i32): i32 {
+    let x: i32 = 1;
+    async function f(this: C): i32 { return x + this.y; }
+    let r: TaskRecord = new TaskRecord();
+    r.class_ = 4;
+    r.key = job;
+    let h: Task<i32> = new Task<i32>();
+    h._record = r;
+    await h;
+    return await f.call(new C());
+  }
+}
+
+export function probe(): i32 {
+  let t: Task<i32> = new C().m(13);
+  if (__taskHasRunnable()) return -1;   // parked, nothing running yet
+  __taskDeliver(4, 13, 0, 0, 0);        // the completion arrives after the park
+  __taskTick();
+  return t._record.payload;
+}
+`);
+  check("C5b case 21 (collision, awaited `.call`): 1 + 7", collision.run("probe"), 8);
+  check("C5b case 21: the this-struct carries the receiver and the chain link",
+    /f\$ThisEnv#set:\$this/.test(collision.wat) &&
+    /f\$ThisEnv#set:\$parent/.test(collision.wat), true);
 }
 
 // 7. Early completions (4e-1): a delivery that arrives before the await.
