@@ -307,6 +307,45 @@ function bufferCompletion(class_: i32, key: i64, b: i32, f0: i32, f1: i32): void
   buffer.set(key, entry);
 }
 
+/**
+ * §6.4's dropped-completion rule, guest side: the framework measured `count`
+ * completions lost for `family` and hands the delta here; this wakes up to
+ * `count` tasks parked on that family with `status = -EIO` ("completion
+ * lost"), oldest-first.
+ *
+ * **Who computes what, and why.** The drop counters live in the arena's wire
+ * types (`TableHeader.dropped`, per class), which are framework knowledge — std
+ * must not learn the arena's layout (§4.7's D9 split). So the framework reads
+ * the counters and calls this; std owns the wake policy and the status.
+ *
+ * **Attribution is per family, not per task** (§6.4's Phase 4 ruling): a drop is
+ * counted per class, never per record, so the runtime cannot say *which* job was
+ * lost. It wakes the oldest parked tasks in the family, up to the delta, and the
+ * guest recovers through the capability's own table — the region is the truth.
+ */
+export function __taskReportDrops(family: i32, count: i32): void {
+  if (count <= 0) return;
+  let woken: i32 = 0;
+  // Oldest-first: `waitingByKey` iterates in insertion order, and a park
+  // inserted its entry when it happened.
+  let byKey = waitingByKey;
+  if (byKey == null) return;
+  let keys = byKey.keys();
+  for (let i = 0, k = keys.length; i < k && woken < count; ++i) {
+    let key = keys[i];
+    if (<i32>(key >> 32) != family) continue;
+    let record = byKey.get(key);
+    byKey.delete(key);
+    // §3.4: a lost completion is a status, not an exception. The payload stays
+    // 0 — nothing was delivered — and the guest reads the capability's table
+    // to learn what really happened.
+    record.status = -5; // -EIO
+    record.done = 1;
+    wake(record);
+    ++woken;
+  }
+}
+
 /** Deliveries that arrived at a full buffer (each evicted one older entry). */
 export function __taskBufferedOverflows(): i32 {
   return bufferedOverflows;
