@@ -827,7 +827,7 @@ export function main(): i32 { sink = outer(changetype<Task<i32>>(0)); return 1; 
   check("  ...after the suspension, not before it",
     resume.indexOf("outer$Env#get:x", park) > 0, true);
   check("  ...and the binding has no copy on the state struct",
-    /inner\$State#(get|set):x/.test(wat), false);
+    /inner\$State#(get|set):x/.test(wat), false);
 
   // §8.3(b) is the contrast and must be untouched: an async function that
   // *contains* a closure owns the env, lifts it as `$closureEnv`, and leaves
