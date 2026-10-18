@@ -43,6 +43,7 @@ import {
   UnaryPostfixExpression,
   UnaryExpression,
   UnaryPrefixExpression,
+  AwaitExpression,
   ClassExpression,
   ObjectLiteralExpression,
 
@@ -214,6 +215,10 @@ export class ASTBuilder {
       }
       case NodeKind.UnaryPrefix: {
         this.visitUnaryPrefixExpression(<UnaryPrefixExpression>node);
+        break;
+      }
+      case NodeKind.Await: {
+        this.visitAwaitExpression(<AwaitExpression>node);
         break;
       }
 
@@ -654,6 +659,7 @@ export class ASTBuilder {
 
   visitFunctionExpression(node: FunctionExpression): void {
     let declaration = node.declaration;
+    if (declaration.isAsync) this.sb.push("async ");
     if (!declaration.arrowKind) {
       if (declaration.name.text.length) {
         this.sb.push("function ");
@@ -805,6 +811,13 @@ export class ASTBuilder {
 
   visitUnaryPrefixExpression(node: UnaryPrefixExpression): void {
     this.sb.push(operatorTokenToString(node.operator));
+    this.visitNode(node.operand);
+  }
+
+  /** `await` has no operator *token* (`Token.Await` is the node kind), so it
+   * cannot go through `operatorTokenToString`: the keyword is spelled here. */
+  visitAwaitExpression(node: AwaitExpression): void {
+    this.sb.push("await ");
     this.visitNode(node.operand);
   }
 
@@ -1153,6 +1166,7 @@ export class ASTBuilder {
       this.serializeExternalModifiers(node);
       this.serializeAccessModifiers(node);
     }
+    if (node.isAsync) sb.push("async ");
     if (node.name.text.length) {
       sb.push("function ");
     } else {
@@ -1358,6 +1372,7 @@ export class ASTBuilder {
       }
     }
     this.serializeAccessModifiers(node);
+    if (node.isAsync) this.sb.push("async ");
     if (node.is(CommonFlags.Get)) {
       this.sb.push("get ");
     } else if (node.is(CommonFlags.Set)) {

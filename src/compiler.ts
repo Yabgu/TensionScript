@@ -7,6 +7,7 @@
 let mangleImportName_moduleName: string = "";
 let mangleImportName_elementName: string = "";
 
+import { EnvKind, envInfoOf, creationEnvOf } from "./closure/ir";
 import {
   BuiltinNames,
   BuiltinFunctionContext,
@@ -24,6 +25,10 @@ import {
   DiagnosticCode,
   DiagnosticEmitter
 } from "./diagnostics";
+
+import {
+  awaitSites
+} from "./async/ir";
 
 import {
   Module,
@@ -138,6 +143,7 @@ import {
   FieldDeclaration,
   ForStatement,
   ForOfStatement,
+  AwaitExpression,
   FunctionDeclaration,
   IfStatement,
   ImportStatement,
@@ -439,6 +445,14 @@ export const runtimeGlobals = [ "__rtti_base" ];
  * memory corruption.
  */
 const FUNCTION_INDEX_OFFSET: u32 = 0;
+
+/**
+ * The local the closure transform gives a `Struct` closure for the environment
+ * it was handed (`docs/closures-plan.md` §6.1). It is the first statement of
+ * the function's body, and the prologue below overwrites the zero the
+ * declaration stores into it.
+ */
+const CLOSURE_ENV_IN_LOCAL = "$closureEnvIn";
 
 export class Compiler extends DiagnosticEmitter {
 
@@ -1811,6 +1825,21 @@ export class Compiler extends DiagnosticEmitter {
       : null;
     let bodyStartIndex = stmts.length;
 
+    // A `Struct` closure receives its environment through the hidden `~env`
+    // global. The local that holds it is created here, before the body is
+    // compiled, so the resolver's lookup for the transform's `$closureEnvIn`
+    // references finds it -- and so its initialized flag is set before the
+    // first read (`docs/closures-plan.md` §6.1, §6.4).
+    if (instance.prototype.envKind == EnvKind.Struct) {
+      let envClassName = assert(instance.prototype.envClass);
+      let source = instance.declaration.range.source;
+      let file = assert(this.program.filesByName.get(source.internalPath));
+      let classPrototype = <ClassPrototype>assert(file.getMember(envClassName));
+      let classInstance = assert(this.resolver.resolveClass(classPrototype, null, new Map(), ReportMode.Swallow));
+      let envIn = flow.addScopedLocal(CLOSURE_ENV_IN_LOCAL, classInstance.type);
+      flow.setLocalFlag(envIn.index, LocalFlags.Initialized);
+    }
+
     // compile statements
     if (bodyNode.kind == NodeKind.Block) {
       stmts = this.compileStatements((<BlockStatement>bodyNode).statements, stmts);
@@ -1930,6 +1959,29 @@ export class Compiler extends DiagnosticEmitter {
       }
       stmts[bodyStartIndex] = prologue;
       flow.setLocalFlag(capturedThis.index, LocalFlags.Initialized);
+    }
+
+    // A closure with a non-`this` capture receives its environment through the
+    // same hidden global (`docs/closures-plan.md` §6.4): `makeCallIndirect`
+    // stores the callee's `_env` there, and this prologue reads it once, at
+    // entry, into the local the transform declared as the body's first
+    // statement. Reading it once is what keeps a nested call from clobbering
+    // the binding -- the same property the `this` prologue above has.
+    //
+    // The declaration stores a zero (`changetype<EnvClass>(0)`); the prologue is
+    // placed directly after it, so the zero exists only to satisfy the local's
+    // initialization and is never observed.
+    if (instance.prototype.envKind == EnvKind.Struct) {
+      let envIn = assert(flow.lookupLocal(CLOSURE_ENV_IN_LOCAL));
+      let prologue = module.local_set(
+        envIn.index,
+        module.global_get(this.ensureEnvGlobal(), this.options.sizeTypeRef),
+        envIn.type.isManaged
+      );
+      for (let i = stmts.length - 1; i >= bodyStartIndex; --i) {
+        stmts[i + 1] = stmts[i];
+      }
+      stmts[bodyStartIndex] = prologue;
     }
 
     return true;
@@ -3583,6 +3635,10 @@ export class Compiler extends DiagnosticEmitter {
       }
       case NodeKind.UnaryPrefix: {
         expr = this.compileUnaryPrefixExpression(<UnaryPrefixExpression>expression, contextualType, constraints);
+        break;
+      }
+      case NodeKind.Await: {
+        expr = this.compileLoweredAwaitExpression(<AwaitExpression>expression);
         break;
       }
       case NodeKind.Compiled: {
@@ -7338,6 +7394,14 @@ export class Compiler extends DiagnosticEmitter {
       declaration,
       DecoratorFlags.None
     );
+    // The closure transform records what this function's `_env` will mean,
+    // keyed by the expression node -- the declaration above is a clone, so a
+    // declaration-keyed table would not find it (`docs/closures-plan.md` §3.3).
+    let closureInfo = envInfoOf.get(expression);
+    if (closureInfo) {
+      prototype.envKind = closureInfo.kind;
+      prototype.envClass = closureInfo.envClass;
+    }
     let instance: Function | null;
     let contextualTypeArguments = cloneMap(flow.contextualTypeArguments);
     let module = this.module;
@@ -7459,7 +7523,9 @@ export class Compiler extends DiagnosticEmitter {
     // function value keeps the static instance with `_env = 0` (plan D6).
     let valueType = this.currentType;
     let expr: ExpressionRef;
-    if (instance.prototype.capturesThis) {
+    if (instance.prototype.envKind == EnvKind.Struct) {
+      expr = this.makeEnvFunctionValue(instance, assert(creationEnvOf.get(expression)));
+    } else if (instance.prototype.capturesThis) {
       expr = this.makeCapturingFunctionValue(instance);
     } else {
       let offset = this.ensureRuntimeFunction(instance); // reports
@@ -7543,6 +7609,42 @@ export class Compiler extends DiagnosticEmitter {
     ));
     stmts.push(module.store(this.options.usizeType.byteSize, ptrExpr,
       module.local_get(thisLocal.index, thisLocal.type.toRef()),
+      this.options.sizeTypeRef, this.options.usizeType.byteSize
+    ));
+    stmts.push(module.local_get(ptrLocal.index, classInstance.type.toRef()));
+    return module.flatten(stmts, classInstance.type.toRef());
+  }
+
+  /**
+   * Materialises a runtime function value for a closure with a non-`this`
+   * capture: a heap `Function<T>` instance whose `_env` names the environment
+   * the creating scope allocated (`docs/closures-plan.md` §6.3).
+   *
+   * The only difference from `makeCapturingFunctionValue` is where the
+   * environment expression comes from: that method stores the creating
+   * function's receiver (`this`), this one stores the env local the closure
+   * transform recorded for the creation site. `_env` is written without
+   * `__link` for the same reason: the instance is freshly allocated and white.
+   */
+  private makeEnvFunctionValue(instance: Function, envLocalName: string): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let resolver = this.resolver;
+    let classInstance = assert(resolver.resolveClass(this.program.functionPrototype, [ instance.type ]));
+    this.assertFunctionLayout(classInstance);
+
+    let envLocal = assert(flow.lookupLocal(envLocalName));
+
+    let stmts = new Array<ExpressionRef>();
+    let ptrLocal = flow.getTempLocal(classInstance.type);
+    stmts.push(module.local_set(ptrLocal.index, this.makeAllocation(classInstance), classInstance.type.isManaged));
+    let ptrExpr = module.local_get(ptrLocal.index, classInstance.type.toRef());
+    stmts.push(module.store(4, ptrExpr,
+      module.i32(this.ensureFunctionTableIndex(instance)),
+      TypeRef.I32, FUNCTION_INDEX_OFFSET
+    ));
+    stmts.push(module.store(this.options.usizeType.byteSize, ptrExpr,
+      module.local_get(envLocal.index, envLocal.type.toRef()),
       this.options.sizeTypeRef, this.options.usizeType.byteSize
     ));
     stmts.push(module.local_get(ptrLocal.index, classInstance.type.toRef()));
@@ -7861,6 +7963,83 @@ export class Compiler extends DiagnosticEmitter {
       contextualType,
       expression
     ));
+  }
+
+  /**
+   * Compiles the typed read of a lowered `await` — the one thing codegen keeps
+   * of the async lowering (`docs/async-await-plan-v2.md` §4.7.4).
+   *
+   * The lowering (`src/async/lower.ts`) turns the suspension into state and
+   * leaves the `AwaitExpression` in the tree; its operand is deliberately not
+   * compiled here, because the operand's value was produced *before* the
+   * suspension and parked with the task. `T` comes from the resolver's arm
+   * (`resolver.ts:1194`, §2.3's rule), the record pointer from the lowering's
+   * side table (§5.5), and the value from the record at §3.2's offsets:
+   * integers and `bool` in `payload` (offset 8), `f32` in `f0` and the 64-bit
+   * kinds in `f0`/`f1` (offset 16). The emission mirrors `builtin_load`
+   * (`builtins.ts:2471-2478`), so the read is an ordinary aligned load.
+   *
+   * A reference-typed result is refused: §3.3 rules it out of v2 — the
+   * producers cannot supply guest pointers, so a reference is obtained from the
+   * capability's own reader at the await site instead.
+   */
+  private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {
+    let site = awaitSites.get(expression);
+    if (!site) {
+      // No lowering ran, or this await is one the transform did not take. Say so
+      // rather than emitting a read of a record that does not exist.
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "the async lowering transform did not run"
+      );
+      return this.module.unreachable();
+    }
+    let type = this.resolver.resolveExpression(expression, this.currentFlow, Type.auto, ReportMode.Report);
+    if (!type) return this.module.unreachable();
+    if (type == Type.void) {
+      // `await h;` as a statement reads nothing: the task's completion is the
+      // whole effect, and §3.2 has no word for it.
+      this.currentType = Type.void;
+      return this.module.nop();
+    }
+    if (type.isReference) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "a reference-typed await result"
+      );
+      return this.module.unreachable();
+    }
+    if (!type.isMemory) {
+      this.error(
+        DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+        expression.range,
+        "await",
+        type.toString()
+      );
+      return this.module.unreachable();
+    }
+    let offset: i32;
+    if (type == Type.f32 || type == Type.f64 || type == Type.i64 || type == Type.u64) {
+      offset = 16; // `f0` — and `f1` beyond it for the 64-bit kinds
+    } else {
+      offset = 8; // `payload`
+    }
+    // The state field is a `TaskRecord` reference; its value *is* the record
+    // pointer, so it compiles as the field's own type and is used as the load's
+    // address. Asking for `usize` here would be asking for a conversion the
+    // language does not have (`AS2322`).
+    let record = this.compileExpression(site.recordExpression, Type.auto, Constraints.None);
+    this.currentType = type;
+    return this.module.load(
+      type.byteSize,
+      type.isSignedIntegerValue,
+      record,
+      type.toRef(),
+      offset,
+      type.byteSize
+    );
   }
 
   private compileInstanceOfExpression(

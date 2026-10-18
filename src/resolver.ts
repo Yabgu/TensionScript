@@ -65,6 +65,7 @@ import {
   IntegerLiteralExpression,
   UnaryPrefixExpression,
   UnaryPostfixExpression,
+  AwaitExpression,
   AssertionKind,
   BinaryExpression,
   ThisExpression,
@@ -1045,6 +1046,14 @@ export class Resolver extends DiagnosticEmitter {
           ctxFlow, ctxType, reportMode
         );
       }
+      case NodeKind.Await: {
+        let type = this.resolveAwaitExpression(
+          <AwaitExpression>node,
+          ctxFlow,
+          reportMode
+        );
+        return type ? this.getElementOfType(type) : null;
+      }
     }
     assert(false);
     return null;
@@ -1182,9 +1191,71 @@ export class Resolver extends DiagnosticEmitter {
           ctxFlow, ctxType, reportMode
         );
       }
+      case NodeKind.Await: {
+        return this.resolveAwaitExpression(
+          <AwaitExpression>node,
+          ctxFlow,
+          reportMode
+        );
+      }
     }
     assert(false);
     return null;
+  }
+
+  /**
+   * Resolves an `await` expression to its static type.
+   *
+   * `await h` where `h` is a `Task<T>` has type `T` -- the awaited type of the
+   * operand (`docs/async-await-plan-v2.md` §1.2 rule 2). Awaiting anything else
+   * is TypeScript's rule for an operand that is not a task: the operand's own
+   * type, unchanged, so `await 1` is `i32` and `await "x"` is `string`.
+   *
+   * Two things this deliberately does not do:
+   *
+   * - **It does not re-report an `await` outside an `async` function.** That is
+   *   a grammar rule, reported once by the parser as `AS1308` -- TypeScript's own
+   *   code and text, and its own stage. A second report from here would give one
+   *   mistake two diagnostics.
+   * - **It does not push a want-type down to the operand.** The plan's arm sketch
+   *   (`§2.3`, "propagate T as the operand's want-type") describes the operand as
+   *   a `Task<T>`-typed expression, so the honest push would be `Task<T>` -- and
+   *   that means *instantiating* a class per await for a context that may be
+   *   `void`, nullable or unrelated. The operand therefore resolves on its own
+   *   (`Type.auto`); the cost is that contextual inference through `await` (a
+   *   generic call whose argument type only the context can fix) does not
+   *   happen, which no §1.2 rule requires. Recorded in the phase report.
+   */
+  private resolveAwaitExpression(
+    /** The expression to resolve. */
+    node: AwaitExpression,
+    /** Contextual flow. */
+    ctxFlow: Flow,
+    /** How to proceed with eventual diagnostics. */
+    reportMode: ReportMode = ReportMode.Report
+  ): Type | null {
+    let operandType = this.resolveExpression(node.operand, ctxFlow, Type.auto, reportMode);
+    if (!operandType) return null;
+    let valueType = this.resolveTaskValueType(operandType);
+    return valueType != null ? valueType : operandType;
+  }
+
+  /**
+   * Gets the `T` of a `Task<T>` type, or `null` when the type is not a task.
+   *
+   * Matching is by class identity against the standard library's `Task`, not by
+   * name: a user class that happens to be called `Task` is not one, and a
+   * `Task` that a future alias renames still is. A program without the standard
+   * library has no `Task` at all, and then no type is a task.
+   */
+  private resolveTaskValueType(type: Type): Type | null {
+    let classInstance = type.getClass();
+    if (!classInstance) return null;
+    let taskPrototype = this.program.taskPrototype;
+    if (!taskPrototype) return null;
+    let typeArguments = classInstance.getTypeArgumentsTo(taskPrototype);
+    if (!typeArguments || typeArguments.length != 1) return null;
+    return typeArguments[0];
   }
 
   /** Looks up the program element the specified identifier expression refers to. */
@@ -2588,7 +2659,18 @@ export class Resolver extends DiagnosticEmitter {
         // fall-through
       }
       case ElementKind.Function: {
-        return (<Function>target).signature.returnType;
+        let functionInstance = <Function>target;
+        // A call to an `async` function yields `Task<T>`, not `T`: the
+        // declaration's return type is the *resolved* value type, and the
+        // handle is what the call produces (`docs/async-await-plan-v2.md` §1.2
+        // rule 2, §2.3). The trait lives on the element and never in the
+        // Signature, because two functions differing only in `async`-ness must
+        // not collide in `program.uniqueSignatures` (§2.3).
+        if (functionInstance.prototype.isAsync) {
+          let taskType = this.resolveAsyncCallType(functionInstance, reportMode);
+          if (taskType) return taskType;
+        }
+        return functionInstance.signature.returnType;
       }
       case ElementKind.PropertyPrototype: {
         let propertyInstance = this.resolveProperty(<PropertyPrototype>target, reportMode);
@@ -2604,6 +2686,13 @@ export class Resolver extends DiagnosticEmitter {
         // fall-through
       }
       case ElementKind.Class: {
+        // A call through a *function value* cannot see `async`: the trait lives
+        // on the element, and the Signature a function type carries is
+        // deliberately free of it (§2.3's interning note), so `arr.map(asyncFn)`
+        // types the callback's call as `T` rather than `Task<T>`. That is the
+        // price of the interning decision, recorded in the phase report;
+        // lifting it means a per-Signature `async` bit with its own interning
+        // key, which is a type-system change beyond this phase.
         let typeArguments = (<Class>target).getTypeArgumentsTo(this.program.functionPrototype);
         if (!(typeArguments && typeArguments.length)) break;
         let signature = assert(typeArguments[0].getSignature());
@@ -2617,6 +2706,31 @@ export class Resolver extends DiagnosticEmitter {
       );
     }
     return null;
+  }
+
+  /**
+   * The `Task<T>` a call to an `async function f(): T` yields.
+   *
+   * `T` is the declaration's return type — the type the body's `return`
+   * produces — and the call wraps it in the standard library's handle;
+   * `await` unwraps it again (§1.2 rules 1 and 2). `T` may be `void`: an
+   * `async function f(): void` yields `Task<void>`, which instantiates through
+   * the ordinary class machinery like any other type argument.
+   *
+   * A program without the standard library's `Task` answers `null`, and the
+   * caller falls back to the plain return type: a program assembled without the
+   * runtime has no task type for the trait to name.
+   */
+  private resolveAsyncCallType(
+    /** The resolved function being called. */
+    instance: Function,
+    /** How to proceed with eventual diagnostics. */
+    reportMode: ReportMode = ReportMode.Report
+  ): Type | null {
+    let taskPrototype = this.program.taskPrototype;
+    if (!taskPrototype) return null;
+    let taskInstance = this.resolveClass(taskPrototype, [ instance.signature.returnType ], new Map(), reportMode);
+    return taskInstance ? taskInstance.type : null;
   }
 
   /** Looks up the program element the specified comma expression refers to. */

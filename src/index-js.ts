@@ -15,5 +15,7 @@ export * from "./resolver";
 export * from "./tokenizer";
 export * from "./types";
 export * from "./extra/ast";
+export * from "./async/lower";
+export * from "./closure/lower";
 import * as util from "./util";
 export { util };
