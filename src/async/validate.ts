@@ -80,7 +80,6 @@ import {
   InstanceOfExpression,
   LiteralExpression,
   LiteralKind,
-  MethodDeclaration,
   NamespaceDeclaration,
   NewExpression,
   Node,
