@@ -334,6 +334,8 @@ export function main(): i32 { return outer(); }
     refusals(r), [ "a captured local without a declared type (closures lowering)" ]);
 }
 {
+  // D11 after C6b: the environment class declares the owner's type parameters
+  // and every reference supplies them, so the shape lowers instead of refusing.
   const r = run(`
 function outer<T>(v: T): T {
   let x: T = v;
@@ -342,8 +344,13 @@ function outer<T>(v: T): T {
 }
 export function main(): i32 { return outer<i32>(1); }
 `);
-  check("D11: a captured local typed by a type parameter is refused by name",
-    refusals(r), [ "a captured local typed by a type parameter (closures lowering)" ]);
+  check("D11: a captured local typed by a type parameter is lowered (C6b)", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "outer$Env");
+  check("D11: the env class declares the owner's type parameter",
+    env.typeParameters.map(parameter => parameter.name.text), [ "T" ]);
+  check("D11: the class is flagged generic",
+    (env.flags & asc.CommonFlags.Generic) !== 0, true);
 }
 {
   // C3a replaces the C1 refusal: a for-header binding is captured by cloning the
@@ -1725,8 +1732,8 @@ export function probe(): i32 {
 }
 
 {
-  // D11's guard: a class type parameter used to slip through and fail later as
-  // TS2304 + cascading TS2339. It is a named refusal now.
+  // C6a made this a named refusal (it used to fail later as TS2304); C6b makes
+  // it work: the env class carries the class's parameter.
   const r = run(`
 class Box<T> {
   v: T;
@@ -1735,13 +1742,16 @@ class Box<T> {
 }
 export function main(): i32 { return new Box<i32>(1).m(); }
 `);
-  check("C6a: a class type parameter is refused by name",
-    refusals(r), [ "a captured local typed by a class type parameter (closures lowering)" ]);
+  check("C6b: a class type parameter is lowered, not refused", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "m$Env");
+  check("C6b: the env class carries the class's parameter",
+    env.typeParameters.map(parameter => parameter.name.text), [ "T" ]);
 }
 
 {
-  // The bootstrap gate's shape stays refused until C6b: the env class would
-  // have to be generic.
+  // The bootstrap gate's shape (`src/util/collections.ts:29`, reduced): an
+  // inferred capture whose type mentions the owner's type parameters.
   const r = run(`
 export function merge<K,V>(map1: Map<K,V>): i32 {
   let out = new Map<K,V>(map1);
@@ -1750,8 +1760,11 @@ export function merge<K,V>(map1: Map<K,V>): i32 {
 }
 export function main(): i32 { return 0; }
 `);
-  check("C6a: a generic owner's inferred capture is still refused (D11)",
-    refusals(r), [ "a captured local typed by a type parameter (closures lowering)" ]);
+  check("C6b: the gate's shape is lowered, not refused", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "merge$Env");
+  check("C6b: its env class declares both parameters",
+    env.typeParameters.map(parameter => parameter.name.text), [ "K", "V" ]);
 }
 
 {
@@ -1773,6 +1786,49 @@ export function probe(): i32 {
   return f();
 }
 `, "probe"), { value: 3 });
+}
+
+// --- C6b: generic env classes ---------------------------------------------
+//
+// The hoisted env class declares its owner's type parameters, and every
+// reference — allocation, clone, `$parent`, the constructor — supplies them.
+{
+  check("C6b: a generic owner's capture runs",
+    await execute(`
+export function merge<K,V>(map1: Map<K,V>): i32 {
+  let out: Map<K,V> = map1;
+  const f: () => i32 = (): i32 => out.size;
+  return f();
+}
+export function probe(): i32 {
+  let m = new Map<i32,i32>();
+  m.set(1, 2);
+  m.set(3, 4);
+  return merge<i32,i32>(m);
+}
+`, "probe"), { value: 2 });
+}
+
+{
+  // The async transform's synthesized types do not spell type arguments yet, so
+  // a type-parameter capture in an async body keeps a named refusal rather
+  // than turning into a bare TS2558. That is the one shape C6b does not take.
+  const r = run(`
+import { Task } from "~lib/task";
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+  async m(h: Task<i32>): i32 {
+    let x: T = this.v;
+    const f: () => T = (): T => x;
+    await h;
+    return 0;
+  }
+}
+export function main(): i32 { return 0; }
+`);
+  check("C6b: a type-parameter capture in an async body is refused by name",
+    refusals(r), [ "a captured local typed by a type parameter in an async body (closures lowering)" ]);
 }
 
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);
