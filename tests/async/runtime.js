@@ -638,6 +638,44 @@ export function probe(): i32 {
 }
 `);
   check("case 6 (a, closure across a real park): 40 + 2 + 0", six.run("probe"), 42);
+
+  // C5a case 20 (b): an async function whose closure captures from TWO scopes
+  // — the function body and a block — and reads both after a real park. The
+  // block env is the head, its `$parent` is the body env, and the closure hops
+  // one link for the body binding. Delivered after the park, as above, so the
+  // suspension is genuine.
+  const twoScopes = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
+
+async function two(): i32 {
+  let a: i32 = 1;
+  {
+    let b: i32 = 2;
+    const g: () => i32 = (): i32 => a + b;
+    let r: TaskRecord = new TaskRecord();
+    r.class_ = 4;
+    r.key = 11;
+    let h: Task<i32> = new Task<i32>();
+    h._record = r;
+    await h;
+    return g();
+  }
+}
+
+export function probe(): i32 {
+  let t: Task<i32> = two();
+  if (__taskHasRunnable()) return -1;   // parked, nothing running yet
+  __taskDeliver(4, 11, 0, 0, 0);        // the completion arrives after the park
+  __taskTick();
+  return t._record.payload;
+}
+`);
+  check("C5a case 20 (b, two-scope async across a park): 1 + 2", twoScopes.run("probe"), 3);
+  check("C5a case 20: the block env was lifted across the await",
+    /two\$State#get:\$closureEnv\$1/.test(twoScopes.wat), true);
+  check("C5a case 20: the block env's class is the head and is parented",
+    /two\$Env\$1#get:\$parent/.test(twoScopes.wat), true);
 }
 
 // 7. Early completions (4e-1): a delivery that arrives before the await.
