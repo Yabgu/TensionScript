@@ -952,6 +952,37 @@ function builtin_resolveReturnOfType(ctx: BuiltinTypesContext): Type | null {
 }
 builtinTypes.set(CommonNames.returnof, builtin_resolveReturnOfType);
 
+function builtin_resolveThisOfType(ctx: BuiltinTypesContext): Type | null {
+  let resolver = ctx.resolver;
+  let node = ctx.node;
+  let ctxElement = ctx.ctxElement;
+  let ctxTypes = ctx.ctxTypes;
+  let reportMode = ctx.reportMode;
+  const typeArgumentNode = resolver.ensureOneTypeArgument(node, reportMode);
+  if (!typeArgumentNode) return null;
+  let typeArgument = resolver.resolveType(typeArgumentNode, null, ctxElement, ctxTypes, reportMode);
+  if (!typeArgument) return null;
+  let signatureReference = typeArgument.getSignature();
+  if (signatureReference) {
+    let thisType = signatureReference.thisType;
+    // `thisof<T>` is the `this` type of function type `T`. A plain function has
+    // none, and `Function#call` then accepts only `null` -- a rule the builtin
+    // itself enforces (`builtin_function_call`), not the parameter type. `any`
+    // is the neutral carrier for the declaration (`thisof<T> | null`), which
+    // must stay well-formed for every `T`; it widens no accepted program,
+    // because the builtin never compiles the operand through this parameter.
+    return thisType ? thisType : Type.any;
+  }
+  if (reportMode == ReportMode.Report) {
+    resolver.error(
+      DiagnosticCode.Type_0_has_no_call_signatures,
+      typeArgumentNode.range, typeArgument.toString()
+    );
+  }
+  return null;
+}
+builtinTypes.set(CommonNames.thisof, builtin_resolveThisOfType);
+
 function builtin_resolveNonnullableType(ctx: BuiltinTypesContext): Type | null {
   let resolver = ctx.resolver;
   let node = ctx.node;
