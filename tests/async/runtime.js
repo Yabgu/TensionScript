@@ -748,6 +748,77 @@ export function probe(): i32 {
   check("the buffer evicts oldest-first at 256 (newest survives, 257)", evict.run("probe"), 257);
 }
 
+// 8. Dropped completions (4e-2, §6.4): the framework counts, std wakes.
+//
+// `__taskReportDrops(family, count)` is what the framework calls with the delta
+// it read from the arena's per-class drop counter. Std wakes up to `count`
+// tasks parked on that family with `status = -EIO`, oldest-first, and leaves the
+// rest parked.
+
+console.log("dropped completions");
+
+{
+  const HEAD = `
+import { Task, TaskRecord } from "~lib/task";
+import { __taskTick, __taskHasRunnable, __taskReportDrops } from "~lib/task-rt";
+
+async function g(h: Task<i32>): i32 { let v: i32 = await h; return v; }
+
+function stamped(key: i32): TaskRecord {
+  let r: TaskRecord = new TaskRecord();
+  r.class_ = 4;
+  r.key = key;
+  return r;
+}
+`;
+
+  // Attribution: two parked on one family, one drop — the oldest wakes with
+  // -EIO, the other stays parked.
+  const one = compile(`${HEAD}
+export function probe(): i32 {
+  let r1: TaskRecord = stamped(5);
+  let h1: Task<i32> = new Task<i32>(); h1._record = r1; g(h1);
+  let r2: TaskRecord = stamped(6);
+  let h2: Task<i32> = new Task<i32>(); h2._record = r2; g(h2);
+  __taskReportDrops(4, 1);
+  if (!__taskHasRunnable()) return -1;      // one woke
+  __taskTick();
+  if (r1.status != -5) return -2;           // -EIO on the oldest
+  if (r2.status == -5) return -3;           // the other untouched
+  if (__taskHasRunnable()) return -4;       // and nothing else running
+  return r2.done == 0 ? 100 : -5;           // still parked
+}
+`);
+  check("one drop wakes one task with -EIO, the other stays parked", one.run("probe"), 100);
+
+  // Count larger than the parked set: wake all, no overrun.
+  const all = compile(`${HEAD}
+export function probe(): i32 {
+  let r1: TaskRecord = stamped(11);
+  let h1: Task<i32> = new Task<i32>(); h1._record = r1; g(h1);
+  __taskReportDrops(4, 9);
+  __taskTick();
+  return r1.status;
+}
+`);
+  check("a drop count above the parked set wakes all of them", all.run("probe"), -5);
+
+  // A delivery for the same record after the -EIO wake must not overwrite it.
+  const late = compile(`${HEAD}
+import { __taskDeliver } from "~lib/task-rt";
+export function probe(): i32 {
+  let r1: TaskRecord = stamped(21);
+  let h1: Task<i32> = new Task<i32>(); h1._record = r1; g(h1);
+  __taskReportDrops(4, 1);
+  __taskTick();
+  if (r1.status != -5) return -1;
+  __taskDeliver(4, 21, 7, 0, 0);            // arrives after the task already woke
+  return r1.status;                          // still -EIO, not 0
+}
+`);
+  check("a post-wake delivery does not overwrite -EIO", late.run("probe"), -5);
+}
+
 console.log();
 if (failures) {
   console.log(`FAILURE: ${failures} of ${checks} checks failed`);
