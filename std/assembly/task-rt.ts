@@ -105,6 +105,43 @@ let waiters: Map<TaskRecord, Array<TaskState>> | null = null;
 /** The ready queue: states whose record settled, in delivery order (§6.5). */
 let ready: Array<TaskState> | null = null;
 
+/**
+ * One completion that arrived before any task parked on its key (§4b of the
+ * scope, 4e-1). A *managed* class with primitive fields, so the map's own
+ * generated visitor traces it — the buffer is the entry's only root.
+ *
+ * Five words, because `__taskDeliver` receives five: a buffered entry must
+ * reproduce the immediate path exactly when a later park claims it.
+ */
+class BufferedCompletion {
+  class_: i32 = 0;
+  payload: i32 = 0;
+  f0: f32 = 0;
+  f1: f32 = 0;
+}
+
+/**
+ * `(family, key) → a completion nobody has claimed yet`. Delivery order is
+ * `Map` insertion order, which is what makes eviction oldest-first.
+ *
+ * **The boundary, stated:** at most {@link BUFFER_LIMIT} entries. When a new
+ * delivery arrives at a full buffer the oldest is evicted silently (counted in
+ * `__taskBufferedEvictions`) and the new one is stored (counted in
+ * `__taskBufferedOverflows`). A delivery is never refused and never aborts: a
+ * guest that has stopped awaiting would otherwise turn a slow job into a hang,
+ * which is the failure this buffer exists to remove. 256 is two orders of
+ * magnitude above the live-job ceiling every capability in the tree has, so
+ * overflow means "the guest is not awaiting", and dropping the oldest is the
+ * right guess about which future will never come.
+ */
+let buffered: Map<i64, BufferedCompletion> | null = null;
+/** The buffer's ceiling. See `buffered`. */
+const BUFFER_LIMIT: i32 = 256;
+/** Deliveries that found a full buffer (each evicted one old entry). */
+let bufferedOverflows: i32 = 0;
+/** Entries evicted to make room for a newer delivery. */
+let bufferedEvictions: i32 = 0;
+
 /** §3.2's `payload` offset — the record's integer and `bool` result slot. */
 const RECORD_PAYLOAD: usize = 8;
 /** §3.2's `f0` offset — `f32` results, and the low half of the 64-bit ones. */
@@ -154,6 +191,34 @@ export function __taskSettled(record: TaskRecord): bool {
  * delivery that arrives before the park would still find a valid resume point.
  */
 export function __taskPark(state: TaskState, awaited: TaskRecord): void {
+  // §4b: the completion may already be here — delivered before this park ran.
+  // Claiming it is what keeps the task from waiting forever: fill the record,
+  // mark it settled, and queue the state, so the transform's
+  // `if (!__taskSettled) { park; return }` sees a settled record on its *next*
+  // check — actually, on the *same* run: `__taskSettled` was checked before
+  // this call, which is why the state is queued here rather than left parked.
+  if (awaited.class_ != 0) {
+    let buffer = buffered;
+    let key = keyOf(familyOf(awaited.class_), awaited.key);
+    if (buffer != null && buffer.has(key)) {
+      let entry = buffer.get(key);
+      awaited.class_ = entry.class_;
+      awaited.payload = entry.payload;
+      awaited.f0 = entry.f0;
+      awaited.f1 = entry.f1;
+      awaited.status = 0;
+      awaited.done = 1;
+      buffer.delete(key);
+      // No `waitingByKey` registration: this task is not waiting any more.
+      let queue = ready;
+      if (queue == null) {
+        queue = new Array<TaskState>();
+        ready = queue;
+      }
+      queue.push(state);
+      return;
+    }
+  }
   let byRecord = waiters;
   if (byRecord == null) {
     byRecord = new Map();
@@ -197,10 +262,16 @@ export function __taskPark(state: TaskState, awaited: TaskRecord): void {
  * time would read a slot that may hold a different event.
  */
 export function __taskDeliver(class_: i32, a: i32, b: i32, f0: i32, f1: i32): void {
+  let family = familyOf(class_);
+  let key = keyOf(family, a);
   let byKey = waitingByKey;
-  if (byKey == null) return;
-  let key = keyOf(familyOf(class_), a);
-  if (!byKey.has(key)) return; // not ours: an input or log class riding the same path
+  if (byKey == null || !byKey.has(key)) {
+    // Nobody is waiting *yet*: buffer it, so a park that happens later finds
+    // the completion instead of waiting for one that already arrived (§4b).
+    // Only stamped records take part — a task's own record needs no key.
+    if (class_ != 0) bufferCompletion(class_, key, b, f0, f1);
+    return;
+  }
   let record = byKey.get(key);
   record.class_ = class_;
   record.payload = b;
@@ -212,6 +283,38 @@ export function __taskDeliver(class_: i32, a: i32, b: i32, f0: i32, f1: i32): vo
   record.status = 0;
   record.done = 1;
   wake(record);
+}
+
+/** Stores one unclaimed completion, evicting the oldest if the buffer is full. */
+function bufferCompletion(class_: i32, key: i64, b: i32, f0: i32, f1: i32): void {
+  let buffer = buffered;
+  if (buffer == null) {
+    buffer = new Map();
+    buffered = buffer;
+  }
+  if (buffer.size >= BUFFER_LIMIT) {
+    // Oldest-first: `Map` iterates in insertion order.
+    let oldest = buffer.keys()[0];
+    buffer.delete(oldest);
+    ++bufferedEvictions;
+    ++bufferedOverflows;
+  }
+  let entry = new BufferedCompletion();
+  entry.class_ = class_;
+  entry.payload = b;
+  entry.f0 = reinterpret<f32>(f0);
+  entry.f1 = reinterpret<f32>(f1);
+  buffer.set(key, entry);
+}
+
+/** Deliveries that arrived at a full buffer (each evicted one older entry). */
+export function __taskBufferedOverflows(): i32 {
+  return bufferedOverflows;
+}
+
+/** Buffered entries evicted to make room for a newer delivery. */
+export function __taskBufferedEvictions(): i32 {
+  return bufferedEvictions;
 }
 
 /**
