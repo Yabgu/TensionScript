@@ -489,6 +489,157 @@ export function probe(): i32 {
   check("a tick takes its queue at entry and leaves nothing behind", r.run("probe"), 0);
 }
 
+// 6. The six async cases as values (§8.1's cases 1-6), each labelled with the
+// delivery shape it uses.
+//
+// **(b) settled record** — the awaited record already carries `done = 1`, so the
+// await falls through. This exercises the *transform's* control flow across a
+// suspension point (branches, loops, nesting, closures) without depending on
+// the dispatcher's ordering; that is what these cases are for.
+// **(a) delivered after the park** — the task parks first, then a completion is
+// delivered and a tick resumes it. The dispatcher's ordering is proved by
+// `a delivered completion wakes the parked task` above, and by 4c's OGRE
+// harness, which is the end-to-end proof.
+
+console.log("cases 1-6 as values");
+
+{
+  const SETTLED = `
+import { Task, TaskRecord } from "~lib/task";
+import { __taskTick } from "~lib/task-rt";
+
+let key: i32 = 1;
+function settled(v: i32): Task<i32> {
+  let r: TaskRecord = new TaskRecord();
+  r.class_ = 4;
+  r.key = key++;
+  r.payload = v;
+  r.done = 1;
+  let t: Task<i32> = new Task<i32>();
+  t._record = r;
+  return t;
+}
+`;
+
+  // Case 1 (b): an await in a loop, all three iterations, no double resume.
+  const one = compile(`${SETTLED}
+async function sumTo(): i32 {
+  let sum: i32 = 0;
+  for (let i: i32 = 0; i < 3; i++) {
+    let t: Task<i32> = settled((i + 1) * 10);
+    let v: i32 = await t;
+    sum += v;
+  }
+  return sum;
+}
+export function probe(): i32 { let t: Task<i32> = sumTo(); __taskTick(); return t._record.payload; }
+`);
+  check("case 1 (b, loop): three iterations sum to 60", one.run("probe"), 60);
+
+  // Case 2 (b): the taken branch's await resolves; the other branch is untouched.
+  const two = compile(`${SETTLED}
+async function branch(flag: bool): i32 {
+  let r: i32 = 0;
+  if (flag) { let t: Task<i32> = settled(7); let v: i32 = await t; r = v; }
+  else { r = 3; }
+  return r + 100;
+}
+export function probe(): i32 {
+  let a: Task<i32> = branch(true);
+  let b: Task<i32> = branch(false);
+  __taskTick();
+  return a._record.payload * 1000 + b._record.payload;
+}
+`);
+  check("case 2 (b, conditional): the taken branch awaits, the other does not", two.run("probe"), 107103);
+
+  // Case 3 (b): three depths — straight, conditional, loop.
+  const three = compile(`${SETTLED}
+async function depths(): i32 {
+  let a: i32 = 0;
+  let t1: Task<i32> = settled(1);
+  let v1: i32 = await t1;
+  a += v1;
+  if (true) { let t2: Task<i32> = settled(2); let v2: i32 = await t2; a += v2; }
+  let n: i32 = 0;
+  while (n < 2) { let t3: Task<i32> = settled(4); let v3: i32 = await t3; a += v3; n++; }
+  return a;
+}
+export function probe(): i32 { let t: Task<i32> = depths(); __taskTick(); return t._record.payload; }
+`);
+  check("case 3 (b, three depths): 1 + 2 + 4 + 4", three.run("probe"), 11);
+
+  // Case 4 (b): nested async functions, each its own machine.
+  const four = compile(`${SETTLED}
+async function inner(v: i32): i32 {
+  let t: Task<i32> = settled(v);
+  let x: i32 = await t;
+  return x * 2;
+}
+async function outer(): i32 {
+  let t: Task<i32> = settled(5);
+  let a: i32 = await t;
+  let b: i32 = await inner(10);
+  return a + b;
+}
+export function probe(): i32 { let t: Task<i32> = outer(); __taskTick(); return t._record.payload; }
+`);
+  check("case 4 (b, nested): 5 + inner(10) = 25", four.run("probe"), 25);
+
+  // Case 5 (b): early return before the await, and after it.
+  const five = compile(`${SETTLED}
+async function early(h: bool): i32 {
+  if (h) return 7;
+  let t: Task<i32> = settled(9);
+  await t;
+  return 9;
+}
+export function probe(): i32 {
+  let a: Task<i32> = early(true);
+  let b: Task<i32> = early(false);
+  __taskTick();
+  return a._record.payload * 100 + b._record.payload;
+}
+`);
+  check("case 5 (b, early return): 7 before the await, 9 after it", five.run("probe"), 709);
+
+  // Case 6 (a): a closure's captured binding across a real park — delivered
+  // only after the task has parked, which is the dispatcher's real ordering.
+  const six = compile(`
+import { Task, TaskRecord } from "~lib/task";
+import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
+
+let captured: i32 = 0;
+
+async function closes(job: i32): i32 {
+  let x: i32 = 40;
+  function add(n: i32): i32 { return x + n; }
+  let r: TaskRecord = new TaskRecord();
+  r.class_ = 4;
+  r.key = job;
+  let h: Task<i32> = new Task<i32>();
+  h._record = r;
+  let v: i32 = await h;
+  captured = add(2) + v;
+  return captured;
+}
+
+export function probe(): i32 {
+  let r: TaskRecord = new TaskRecord();
+  r.class_ = 4;
+  r.key = 9;
+  let h: Task<i32> = new Task<i32>();
+  h._record = r;
+  let t: Task<i32> = closes(9);
+  if (__taskHasRunnable()) return -1;   // parked, nothing running yet
+  __taskDeliver(4, 9, 0, 0, 0);         // the completion arrives after the park
+  __taskTick();
+  return t._record.payload;
+}
+`);
+  check("case 6 (a, closure across a real park): 40 + 2 + 0", six.run("probe"), 42);
+}
+
 console.log();
 if (failures) {
   console.log(`FAILURE: ${failures} of ${checks} checks failed`);
