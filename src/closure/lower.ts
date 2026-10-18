@@ -42,6 +42,7 @@ import {
   ArrowKind,
   ArrayLiteralExpression,
   AssertionExpression,
+  AssertionKind,
   AwaitExpression,
   BinaryExpression,
   BlockStatement,
@@ -74,6 +75,7 @@ import {
   NodeKind,
   ObjectLiteralExpression,
   ParameterKind,
+  ParameterNode,
   ParenthesizedExpression,
   PropertyAccessExpression,
   ReturnStatement,
@@ -251,7 +253,7 @@ export class ClosureLowerTransform {
 
   /**
    * The chain analysis of the last `afterParse` run, one record per analysed
-   * function including the owners themselves (tests only, C5a phase 1).
+   * function including the owners themselves (tests only, C5a).
    *
    * The owner record exists because `EnvInfo` is keyed by the nested function's
    * expression node (`ir.ts`): a top-level owner has no entry there, and its
@@ -887,6 +889,14 @@ class ThisUse {
   ) {}
 }
 
+/** One closure value passed to a host callback, pending its final `kind`. */
+class HostCallbackCandidate {
+  constructor(
+    public declaration: FunctionDeclaration,
+    public range: Range
+  ) {}
+}
+
 /** One identifier reference that resolved to a declared binding. */
 class IdentifierRef {
   constructor(
@@ -1070,6 +1080,18 @@ class OwnerAnalysis {
   /** Every `this` expression found inside an arrow. */
   thisUses: Array<ThisUse> = new Array();
 
+  /** Closure values passed to a host callback, checked again after finalising. */
+  hostCallbackCandidates: Array<HostCallbackCandidate> = new Array();
+
+  /** The chosen class-name component per owning function (§4.7.3). */
+  private ownerNames: Map<FunctionDeclaration, string> = new Map();
+
+  /** Synthesized class names already used, so two owners cannot merge. */
+  private classNames: Set<string> = new Set();
+
+  /** Counter for owners with neither a name nor a binding (§4.7.3). */
+  private anonymousOwners: i32 = 0;
+
   /** Function expressions that need an environment (so their `_env` is a struct). */
   structFunctions: Set<FunctionExpression> = new Set();
 
@@ -1159,6 +1181,59 @@ class OwnerAnalysis {
   }
 
   /**
+   * The name path of the function that owns a scope (§4.7.3, F3): the enclosing
+   * owners' names joined by `$`, ending with the owner's own. A named function
+   * uses its name; an anonymous expression uses the binding it is declared into
+   * (`const mid = () => …`); a truly anonymous one gets `$anon<k>`.
+   */
+  private ownerPrefix(owner: FunctionDeclaration): string {
+    let info = this.infos.get(owner);
+    if (info == null) return owner.name.text;
+    let names = new Array<string>();
+    let current: FunctionInfo | null = info;
+    while (current != null) {
+      names.push(this.ownerNameOf(current));
+      current = current.parent;
+    }
+    let prefix = "";
+    for (let i = names.length - 1; i >= 0; --i) {
+      if (prefix.length != 0) prefix += "$";
+      prefix += names[i];
+    }
+    return prefix;
+  }
+
+  /** One function's contribution to its class name (§4.7.3). */
+  private ownerNameOf(info: FunctionInfo): string {
+    let named = this.ownerNames.get(info.node);
+    if (named != null) return named;
+    let name = info.node.name.text;
+    if (name.length == 0) name = info.displayName;
+    if (name.length == 0) {
+      ++this.anonymousOwners;
+      name = "$anon" + this.anonymousOwners.toString();
+    }
+    this.ownerNames.set(info.node, name);
+    return name;
+  }
+
+  /**
+   * Appends a counter when a synthesized class name is already taken. Two
+   * nested owners can share a display name (sibling blocks, shadowing), and
+   * two classes with one name would silently merge.
+   */
+  private uniqueClassName(base: string, range: Range): string {
+    let name = base;
+    let counter = 0;
+    while (this.classNames.has(name)) {
+      ++counter;
+      name = base + "$" + counter.toString();
+    }
+    this.classNames.add(name);
+    return name;
+  }
+
+  /**
    * Finalises the chain facts (§4.7.2), bottom-up over the function tree.
    *
    * A function's `needed` is the innermost environment it must reach: its own
@@ -1225,36 +1300,28 @@ class OwnerAnalysis {
     // body env's parent. This needs the completed capture sets, so it runs
     // after the walk and before anything reads `needed`.
     this.finalizeNeeds();
-    // C5a phase 1's hard-stop. The analysis now records every environment a
-    // closure needs (§4.7.2); emission does not build the chain yet (§4.7.3),
-    // so the shapes the chain exists for are refused *after* the analysis, by
-    // name. Phase 2 removes these two refusals, not the analysis.
-    let scopes = this.scopes;
-    for (let i = 0, k = scopes.length; i < k; ++i) {
-      let scope = scopes[i];
-      if (scope.captured.length == 0 || scope.ownerFunction === this.owner) continue;
-      this.refuse(scope.range,
-        "a capture from a nested function's body (closures lowering, phase 1)");
-      break;
-    }
-    if (!this.refused) {
-      let infos = this.allInfos;
-      for (let i = 0, k = infos.length; i < k; ++i) {
-        let neededScopes = infos[i].neededScopes;
-        if (neededScopes != null && neededScopes.length > 1) {
-          this.refuse(infos[i].node.range,
-            "a capture across more than one environment (closures lowering, phase 1)");
-          break;
-        }
+    // The host-callback guard (9.1) ran during the walk, when `needed` was
+    // provisional. Finalising can only ADD a need (a nested owner's body parent),
+    // so re-check every recorded candidate against the final kind; a nested
+    // owner passed to a host callback is now a Struct closure and must be
+    // refused like any other.
+    let candidates = this.hostCallbackCandidates;
+    for (let i = 0, k = candidates.length; i < k; ++i) {
+      let candidate = candidates[i];
+      let info = this.infos.get(candidate.declaration);
+      if (info != null && info.needed != null) {
+        this.refuse(candidate.range, "a closure captured by a host callback (closures lowering)");
+        break;
       }
     }
-    // Assign environment names, and refuse the shapes C1 does not lower.
+    // Assign environment names (§5.2, §4.7.3), and refuse the scopes C1 does
+    // not lower. Every owning scope is named, including one owned by a nested
+    // function — its class is named after the OWNING function (F3), never after
+    // the expression's site, because a nested owner can be anonymous.
     let blockIndex = 0;
-    let ownerName = this.owner.name.text;
     for (let i = 0, k = this.scopes.length; i < k; ++i) {
       let scope = this.scopes[i];
       if (scope.captured.length == 0) continue;
-      if (scope.ownerFunction !== this.owner) continue; // hard-stop above
       if (
         scope.kind == ScopeKind.Block &&
         !this.isPlainBlock(scope) &&
@@ -1263,13 +1330,16 @@ class OwnerAnalysis {
         this.refuse(scope.range, "a capture from a switch or try scope (closures lowering)");
         continue;
       }
+      let prefix = this.ownerPrefix(scope.ownerFunction);
       if (scope.kind == ScopeKind.Function) {
         scope.localName = ENV_LOCAL;
-        scope.className = ownerName + ENV_SUFFIX;
+        scope.className = this.uniqueClassName(prefix + ENV_SUFFIX, scope.range);
       } else {
         ++blockIndex;
         scope.localName = ENV_LOCAL + "$" + blockIndex.toString();
-        scope.className = ownerName + ENV_SUFFIX + "$" + blockIndex.toString();
+        scope.className = this.uniqueClassName(
+          prefix + ENV_SUFFIX + "$" + blockIndex.toString(), scope.range
+        );
       }
     }
     // `this` in an arrow: the shipped `Receiver` path when the arrow captures
@@ -1284,11 +1354,20 @@ class OwnerAnalysis {
         this.refuse(use.expression.range, "this in a capturing arrow (closures lowering)");
         continue;
       }
+      // `$this` is field 0 of the innermost env the arrow needs (§7.1). When
+      // that env belongs to the analysis root, the receiver is `this` at the
+      // scope entry and the field is initialized there.
+      //
+      // When it belongs to a NESTED owner the receiver has no carrier: the
+      // nested function's `~env` already is that env (an arrow's `_env` is the
+      // env, not a receiver), so there is no `this` at its entry to store —
+      // measured: initializing the field there compiles the arrow's `this` from
+      // `~env` and fails with TS2332 plus a `usize`-vs-class mismatch. That is
+      // the same two-carrier shape C5b unifies for the async this-struct, so it
+      // stays refused here, by name, rather than half-lowered.
       if (env.ownerFunction !== this.owner) {
-        // The environment holding the receiver belongs to a nested owner,
-        // which the phase-1 hard-stop already refused.
         this.refuse(use.expression.range,
-          "a capture from a nested function's body (closures lowering, phase 1)");
+          "a receiver captured by an arrow with its own environment (closures lowering)");
         continue;
       }
       env.needsThis = true;
@@ -1660,10 +1739,17 @@ class OwnerAnalysis {
         }
         if (isHostCallbackRegistration(call)) {
           for (let i = 0, k = args.length; i < k; ++i) {
-            let closure = this.structClosureIn(args[i], scope);
+            let closure = this.closureValueIn(args[i], scope);
             if (closure != null) {
-              this.refuse(closure.range,
-                "a closure captured by a host callback (closures lowering)");
+              // Recorded, not decided: a closure whose `needed` is still null
+              // may become Struct once `finalizeNeeds` adds a body parent.
+              let info = this.infos.get(closure.declaration);
+              if (info != null && info.needed != null) {
+                this.refuse(closure.range,
+                  "a closure captured by a host callback (closures lowering)");
+              } else {
+                this.hostCallbackCandidates.push(new HostCallbackCandidate(closure.declaration, closure.range));
+              }
             }
           }
         }
@@ -1792,6 +1878,23 @@ class OwnerAnalysis {
    * (`tension-framework/assembly/runtime/callbacks.ts:34-36`). This transform
    * refuses only the shape it creates (`docs/closures-plan.md` §9.1).
    */
+  /**
+   * The closure value an argument denotes, ignoring whether it is Struct: the
+   * host-callback guard needs the expression now and the KIND later, after
+   * `finalizeNeeds` (§4.7.3).
+   */
+  private closureValueIn(argument: Expression, scope: Scope): FunctionExpression | null {
+    if (argument.kind == NodeKind.Function) return <FunctionExpression>argument;
+    if (argument.kind == NodeKind.Identifier) {
+      let name = (<IdentifierExpression>argument).text;
+      let named = scope.resolveFunctionValue(name);
+      if (named != null) return named;
+      let binding = scope.resolve(name);
+      if (binding != null && binding.closureValue != null) return binding.closureValue;
+    }
+    return null;
+  }
+
   private structClosureIn(argument: Expression, scope: Scope): FunctionExpression | null {
     if (argument.kind == NodeKind.Function) {
       let closure = <FunctionExpression>argument;
@@ -1876,18 +1979,84 @@ class OwnerAnalysis {
         range
       ));
     }
-    // A loop-header environment is cloned once per iteration (§5.4), so its
-    // class carries the copy constructor that clone calls. `super()` is
-    // required of a derived constructor (AS2377); every field is copied,
-    // including `$this` (the receiver does not change between iterations) and
-    // the `$init$` flags (a binding already assigned stays assigned).
-    if (scope.isLoopHeader) {
+    // `$parent` is the chain link (§5.2): it exists when this scope has a
+    // nearest ancestor scope that owns an environment, and is typed as that
+    // ancestor's class, so a hop needs no cast. The ROOT env of a chain has no
+    // field at all rather than a permanently null one.
+    let parentScope = nearestOwningAncestor(scope);
+    if (parentScope != null) {
+      fields.push(Node.createFieldDeclaration(
+        Node.createIdentifierExpression(PARENT_FIELD, range),
+        null, CommonFlags.Instance,
+        // Nullable, exactly as §5.2 writes it: the root of a *linked* env is
+        // never null, but the class is shared by every instance of the scope
+        // shape and the type must admit the constructor's default.
+        Node.createNamedType(
+          Node.createSimpleTypeName(assert(parentScope.className), range), null, true, range
+        ),
+        Node.createNullExpression(range),
+        range
+      ));
+    }
+    // A constructor exists when the class needs one for either reason: a
+    // loop-header env is cloned once per iteration (§5.4), and a parented env
+    // is constructed with its parent (§5.2). AS has no overloads, so this is
+    // ONE constructor with two optional parameters — `source` first, then
+    // `parent` — and `source` wins when both are given.
+    if (scope.isLoopHeader || parentScope != null) {
       let selfName = assert(scope.className);
-      let parameterName = "source";
+      let sourceName = "source";
+      let parentName = "parent";
+      let parameters = new Array<ParameterNode>();
+      if (scope.isLoopHeader) {
+        parameters.push(Node.createParameter(
+          ParameterKind.Optional,
+          Node.createIdentifierExpression(sourceName, range),
+          Node.createNamedType(
+            Node.createSimpleTypeName(selfName, range), null, true, range
+          ),
+          Node.createNullExpression(range),
+          range
+        ));
+      }
+      if (parentScope != null) {
+        parameters.push(Node.createParameter(
+          ParameterKind.Optional,
+          Node.createIdentifierExpression(parentName, range),
+          Node.createNamedType(
+            Node.createSimpleTypeName(assert(parentScope.className), range), null, true, range
+          ),
+          Node.createNullExpression(range),
+          range
+        ));
+      }
       let statements = new Array<Statement>();
       statements.push(Node.createExpressionStatement(
         Node.createCallExpression(Node.createSuperExpression(range), null, [], range)
       ));
+      // The link: a clone keeps the parent it was made from; a fresh
+      // allocation takes the one it was handed. `source` wins when both exist.
+      if (parentScope != null) {
+        let parentValue: Expression;
+        if (scope.isLoopHeader) {
+          parentValue = Node.createTernaryExpression(
+            Node.createBinaryExpression(
+              Token.Exclamation_Equals,
+              Node.createIdentifierExpression(sourceName, range),
+              Node.createNullExpression(range),
+              range
+            ),
+            this.fieldOn(sourceName, PARENT_FIELD, range),
+            Node.createIdentifierExpression(parentName, range),
+            range
+          );
+        } else {
+          parentValue = Node.createIdentifierExpression(parentName, range);
+        }
+        statements.push(Node.createExpressionStatement(
+          this.assign(this.fieldOn("this", PARENT_FIELD, range), parentValue, range)
+        ));
+      }
       let copies = new Array<Statement>();
       let all = new Array<string>();
       if (scope.needsThis) all.push(THIS_FIELD);
@@ -1895,20 +2064,22 @@ class OwnerAnalysis {
         all.push(bindings[i].name);
         if (bindings[i].hasInitFlag) all.push(INIT_PREFIX + bindings[i].name);
       }
-      for (let i = 0, k = all.length; i < k; ++i) {
-        copies.push(Node.createExpressionStatement(
-          this.assign(
-            this.fieldOn("this", all[i], range),
-            this.fieldOn(parameterName, all[i], range),
-            range
-          )
-        ));
+      if (scope.isLoopHeader) {
+        for (let i = 0, k = all.length; i < k; ++i) {
+          copies.push(Node.createExpressionStatement(
+            this.assign(
+              this.fieldOn("this", all[i], range),
+              this.fieldOn(sourceName, all[i], range),
+              range
+            )
+          ));
+        }
       }
       if (copies.length > 0) {
         statements.push(Node.createIfStatement(
           Node.createBinaryExpression(
             Token.Exclamation_Equals,
-            Node.createIdentifierExpression(parameterName, range),
+            Node.createIdentifierExpression(sourceName, range),
             Node.createNullExpression(range),
             range
           ),
@@ -1922,23 +2093,13 @@ class OwnerAnalysis {
         null, CommonFlags.Constructor | CommonFlags.Instance,
         null,
         Node.createFunctionType(
-          [
-            // `Optional` *with* an initializer, which is exactly how the
-            // parser represents a defaulted parameter (`parser.ts:1490-1515`):
-            // `Default` would make it required (`resolver.ts:392-400`), and an
-            // optional parameter without an initializer is refused by the
-            // varargs stub (`compiler.ts:6794-6797`). The plain `new X$Env()`
-            // allocation stays valid, and `null` is the "first allocation" case.
-            Node.createParameter(
-              ParameterKind.Optional,
-              Node.createIdentifierExpression(parameterName, range),
-              Node.createNamedType(
-                Node.createSimpleTypeName(selfName, range), null, true, range
-              ),
-              Node.createNullExpression(range),
-              range
-            )
-          ],
+          // `Optional` *with* an initializer, which is exactly how the parser
+          // represents a defaulted parameter (`parser.ts:1490-1515`): `Default`
+          // would make it required (`resolver.ts:392-400`), and an optional
+          // parameter without an initializer is refused by the varargs stub
+          // (`compiler.ts:6794-6797`). The plain `new X$Env()` allocation stays
+          // valid, and `null` is the "first allocation" case.
+          parameters,
           typeNode("void", range),
           null,
           false,
@@ -2054,9 +2215,28 @@ class OwnerAnalysis {
     return out;
   }
 
-  /** `let $closureEnv: X$Env = new X$Env();` */
+  /**
+   * `let $closureEnv: X$Env = new X$Env(parentLocal);` — or with no argument at
+   * the root of a chain (§5.3, §5.2).
+   *
+   * The parent expression is the nearest owning ancestor's local when that
+   * scope belongs to the same function (a block or loop env), and
+   * `$closureEnvIn` when it belongs to an enclosing function (a nested owner's
+   * body env, whose parent arrived through `_env`).
+   */
   private makeEnvAllocation(scope: Scope): Statement {
     let className = assert(scope.className);
+    let args = new Array<Expression>();
+    // A loop-header class's constructor is `(source, parent)` (§5.2), and this
+    // is a fresh allocation, not a clone: `source` is `null` and the parent, if
+    // any, is the second argument.
+    if (scope.isLoopHeader) args.push(Node.createNullExpression(scope.range));
+    let parentScope = nearestOwningAncestor(scope);
+    if (parentScope != null) {
+      args.push(parentScope.ownerFunction === scope.ownerFunction
+        ? Node.createIdentifierExpression(assert(parentScope.localName), scope.range)
+        : Node.createIdentifierExpression(ENV_IN_LOCAL, scope.range));
+    }
     return Node.createVariableStatement(
       null,
       [
@@ -2064,7 +2244,7 @@ class OwnerAnalysis {
           Node.createIdentifierExpression(assert(scope.localName), scope.range),
           null, CommonFlags.Let,
           typeNode(className, scope.range),
-          Node.createNewExpression(Node.createSimpleTypeName(className, scope.range), null, [], scope.range),
+          Node.createNewExpression(Node.createSimpleTypeName(className, scope.range), null, args, scope.range),
           scope.range
         )
       ],
@@ -2639,10 +2819,52 @@ class OwnerAnalysis {
 
   /** The env expression for a binding, inside `currentFunction`. */
   private fieldOfFor(binding: Binding, currentFunction: FunctionDeclaration, range: Range): Expression {
+    return this.fieldFrom(this.envExprFor(binding, currentFunction, range), binding.name, range);
+  }
+
+  /**
+   * The environment a reference reaches `binding` through (§6.2): the owner's
+   * own local at depth 0, or the received head followed by one `$parent!` per
+   * owning scope between the head and the binding.
+   *
+   * **Why only closures hop.** Inside the owner's own body every owning scope's
+   * local is lexically visible (blocks nest), so the binding's own scope's local
+   * is always usable — `k = 0` by construction. A closure has only
+   * `$closureEnvIn`, its head, and must walk outward. The walk is exact because
+   * each env's `$parent` is typed as its nearest owning ancestor, the same
+   * relation used here to count hops.
+   */
+  private envExprFor(
+    binding: Binding,
+    currentFunction: FunctionDeclaration,
+    range: Range
+  ): Expression {
     if (binding.scope.ownerFunction === currentFunction) {
-      return this.fieldOf(binding.scope, binding, range);
+      return Node.createIdentifierExpression(assert(binding.scope.localName), range);
     }
-    return this.fieldOn(ENV_IN_LOCAL, binding.name, range);
+    let info = assert(this.infos.get(currentFunction));
+    let head = assert(info.needed);
+    let env: Expression = Node.createIdentifierExpression(ENV_IN_LOCAL, range);
+    let current: Scope = head;
+    while (current !== binding.scope) {
+      env = Node.createAssertionExpression(
+        AssertionKind.NonNull,
+        this.fieldFrom(env, PARENT_FIELD, range),
+        null,
+        range
+      );
+      current = assert(nearestOwningAncestor(current));
+    }
+    return env;
+  }
+
+  /** A property access on any expression (the hop's base is not a local). */
+  private fieldFrom(base: Expression, fieldName: string, range: Range): PropertyAccessExpression {
+    return Node.createPropertyAccessExpression(
+      base,
+      Node.createIdentifierExpression(fieldName, range),
+      range
+    );
   }
 
   private fieldOf(scope: Scope, binding: Binding, range: Range): Expression {
@@ -2658,11 +2880,9 @@ class OwnerAnalysis {
   }
 
   private flagField(binding: Binding, currentFunction: FunctionDeclaration, range: Range): Expression {
-    return this.fieldOn(
-      binding.scope.ownerFunction === currentFunction ? assert(binding.scope.localName) : ENV_IN_LOCAL,
-      INIT_PREFIX + binding.name,
-      range
-    );
+    // The same walk as the value (§4.7.2, F7): a flag read must never come from
+    // a different object than the value it guards.
+    return this.fieldFrom(this.envExprFor(binding, currentFunction, range), INIT_PREFIX + binding.name, range);
   }
 
   private guard(
