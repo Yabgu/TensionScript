@@ -40,45 +40,81 @@ conforming runtime preserves; the declaration a completion class makes.
   but nothing here requires or forbids it.
 - A memory model beyond "a parked task's state is reachable until it resumes".
 - Language syntax for error handling. `await` does not throw; the status word
-  is the error surface (§1.3).
+  is the error surface (§1.4).
 
 ---
 
 ## 1. `Task<T>`
 
-### 1.1 A Task is a descriptor of a pending completion
+### 1.1 A Task is a descriptor and a continuation
 
 `Task<T>` is the value an `async function f(): T` returns. It is a *handle*, not
-the work: it names one pending completion and the place its result will land.
-The runtime, not the guest, owns the completion.
+the work: it names one pending completion, and it is the handle to **that
+particular execution** of `f` — not to the function, and not to a future call.
 
-A Task carries two things:
+A Task carries three things:
 
-- **identity** — the `(class, key)` pair naming what is awaited (§1.4);
-- **result** — a payload and a status (§1.3).
+- **identity** — the `(class, key)` pair naming what is awaited (§1.5);
+- **continuation** — how that execution resumes from where it parked (§1.2);
+- **result** — a payload and a status (§1.4).
 
 The class's declaration (§5) says how the completion arrives and how many
 times.
 
-### 1.2 `await`
+**Where the Task comes from, and why that is in the contract.** A Task is
+created by the **entry of an async function**, not by the caller and not by the
+runtime: the call runs the function's synchronous prefix, creates the Task, and
+returns it. The language emits that creation and the `park` that follows; a
+guest never constructs a Task by hand. What the function does after it resumes
+is ordinary code — the contract is only about how it gets there.
+
+This is what makes `Task<T>` a language feature rather than a runtime object: a
+Task without a function body's captured state names a completion nobody can
+continue, and a function body without a Task has no place to park.
+
+### 1.2 The continuation
+
+A Task's **continuation** is an opaque reference to how its execution resumes.
+
+The contract does **not** say what a continuation is. It says what a
+continuation must **do**:
+
+> resume the function's execution **exactly once**, with the completion's
+> result, at the point it parked.
+
+Nothing else is normative. A continuation may be a pair of words, a reference
+to an engine-level continuation object, a closure, or a table index — the
+contract is indifferent. What it may not be is *visible to the guest*: a guest
+never inspects, copies, or compares a continuation, which is why its
+representation can change between backends without changing a program.
+
+**The continuation is stored, not passed.** It is recorded when the Task is
+created and held by the executor under the task id (§2.1). `park` does not
+carry it, and `wake` does not receive it — both name the task, and the executor
+resolves the name. The reason is in §2.1: the continuation's representation is
+the one thing a mechanism *does* change, and an interface that carries it
+would have to pick a type for it.
+
+### 1.3 `await`
 
 `await t`, where `t: Task<T>`:
 
-1. If `t` is already settled, yields its value immediately. **No suspension
+1. If `t` is already settled, produces its value immediately. **No suspension
    happens.** A settled await is ordinary straight-line code.
 2. Otherwise the current task suspends: exactly one `park` (§2.1). The task's
-   continuation is recorded before the park, so a completion that arrives
-   during the park can find it.
+   continuation was recorded at the Task's creation (§1.2), so it is already
+   reachable when the park registers the task; a completion that arrives during
+   the park finds it.
 3. The task resumes exactly once, at the continuation, with the result
-   available. `await` yields the payload.
+   available. `await` produces the payload.
 
-`await` never throws. Failure is a status (§1.3), not an exception.
+`await` never throws. Failure is a status (§1.4), not an exception.
 
 A task that awaits in a loop performs one park per iteration; each park is a
 separate unit of exactly-once (§4.1). The task's identity may be stable across
 parks; the *suspension* is what is counted.
 
-### 1.3 Result: payload and status
+### 1.4 Result: payload and status
 
 Every completion delivers two words of result:
 
@@ -93,7 +129,7 @@ what the value slot holds on failure is the class's declaration. A capability
 that encodes failure as a negative *payload* (the OGRE loader's errno returns)
 is a convention layered on this contract, not the contract itself.
 
-### 1.4 Identity: `(class, key)`
+### 1.5 Identity: `(class, key)`
 
 - **class** — a completion class declared by the runtime (§5). It names the
   kind of thing that completes and the shape of its wake.
@@ -104,7 +140,7 @@ The pair is the rendezvous. Two awaits with the same class and key are the same
 rendezvous, and a runtime MUST refuse a second concurrent park on one pair
 (§4.9) rather than silently sharing it.
 
-### 1.5 Wake shapes
+### 1.6 Wake shapes
 
 A class declares one of three shapes:
 
@@ -121,13 +157,19 @@ A class declares one of three shapes:
 The language does not enumerate classes. A runtime declares them; a guest
 program sees only `Task<T>` and the class's result convention.
 
-### 1.6 Backend-agnostic
+### 1.7 Backend-agnostic
 
 The contract is stated in terms of Task, park, and wake — not in terms of a
 mechanism. Backend A realizes a park as a call that returns from the resume
 function; Backend B realizes it as a continuation suspend. Both MUST satisfy
 §2–§4. This is why the contract is Task-first: the mechanism is replaceable,
 the guarantees are not.
+
+**The continuation is the seam this rests on.** §1.2 fixes what a continuation
+must do and nothing about what it is, so replacing the suspension mechanism —
+a state machine for an engine-level continuation — changes the continuation's
+representation and changes no line of this contract. §6 lists four
+framework-supplied strategies as illustrations.
 
 ---
 
@@ -143,10 +185,27 @@ progress.
 park(task_id: u64, class: i32, key: i32): void
 ```
 
-- **One call per suspension.** The runtime records `(class, key) → task_id`.
-  This record is the only registration; there is no second "register" call.
-- **Called after the continuation is recorded.** The guest MUST be resumable
-  from the park the moment the call returns.
+**The continuation is not a parameter, and that is a decision, not an
+omission.** The alternative shape — `park(task_id, class, key, continuation)`,
+with the continuation in the interface — was measured and rejected: no single
+ABI type carries every mechanism's continuation. A state machine's is a pair of
+32-bit words; WasmFX's is a `(ref $ct)`, a reference type that cannot be passed
+as an integer; a thread-pool dispatch is a slot index or a function reference.
+A signature that carried the continuation would have to *choose* a
+representation, which is the mechanism leaking into the contract. So the
+continuation is recorded at Task creation and held under the task id, and the
+interface stays three integers.
+
+- **The executor maintains a task table keyed by `task_id`; each entry carries
+  the task's continuation.** This is normative: without it `wake(ids)` has
+  nothing to resolve an id to. The table's shape, its size, and what a
+  continuation *is* remain the framework's.
+- **One call per suspension.** The runtime records `(class, key) → task_id` in
+  that table. This record is the only registration; there is no second
+  "register" call.
+- **Called after the continuation is recorded.** The continuation was recorded
+  when the Task was created (§1.2), so the guest MUST be resumable from the
+  park the moment the call returns.
 - **The call returns.** It does not block the owner thread. The *suspension* is
   the guest returning to the executor, not the host call spinning.
 - **At most one outstanding park per `task_id`.** A second park for a live
@@ -164,7 +223,10 @@ wake(ids: u64[]): void
 - **Called on the Store's owner thread only.** A runtime whose Store is
   single-threaded (every WebAssembly embedding) must not call `wake` from a
   producer or manager thread; the manager hands ids to the owner (§3.4).
-- **Each id is resumed exactly once**, with its completion's result.
+- **Each id is resolved through the task table and its continuation invoked
+  exactly once**, with its completion's result. *How* the invocation happens —
+  a function call, a continuation resume, a dispatch to another thread, a
+  callback — is the executor's choice and is not specified here (§6).
 - **Batched.** Multiple ids per call are valid and expected. Within a batch,
   resume order is list order (§4.5).
 - **An id that is not parked is a runtime error.** The host MUST NOT invent
@@ -244,6 +306,11 @@ Every `park` is resumed by exactly one `wake`. Not zero (a hang), not two (a
 double resume). The unit is the park, not the task: a task that parks in a loop
 is resumed once per iteration.
 
+Stated over the mechanism, so it survives a backend swap:
+
+> A Task's continuation is invoked exactly once per park. The mechanism of
+> invocation is the framework's choice; the guarantee is the contract's.
+
 ### 4.2 Exactly-once delivery
 
 The completion's result — payload and status — is copied to the task exactly
@@ -296,7 +363,7 @@ becomes an unbounded wait is the failure this invariant exists to forbid.
 
 ### 4.8 A settled await never suspends
 
-`await` on a settled task yields immediately and parks nothing. A runtime that
+`await` on a settled task produces its value immediately and parks nothing. A runtime that
 parks and immediately resumes is observably wrong: the continuation must not
 run twice, and no park may be registered for a task that did not suspend.
 
@@ -318,7 +385,7 @@ A completion class is runtime-declared. Its declaration MUST state:
 |---|---|
 | **id** | the wire identity; stable for the runtime's lifetime |
 | **capacity** | the maximum number of live keys (the key space bound) |
-| **wake shape** | one-shot, stream, or repeated (§1.5) |
+| **wake shape** | one-shot, stream, or repeated (§1.6) |
 | **coalescing** | for a stream: how many signals may be outstanding per key before a claim |
 | **ordering** | per-class FIFO, or another declared order |
 | **failure vocabulary** | the status values the class may deliver, by name |
@@ -360,6 +427,33 @@ observed to break §2–§4.
 - **The buffer's location and size.** In the guest, in the host, or split; the
   contract requires the claim-before-arrival behavior of §4.3.
 - **The id allocation.** Sequential, encoded, or opaque.
+- **The resume mechanism.** A callback that unblocks, a state-machine resume
+  function, a WasmFX `resume`, a dispatch to a thread — the contract names
+  `wake`, the executor names how resume happens. See §6.1.
+
+### 6.1 Framework-supplied resume strategies — illustrative, not prescriptive
+
+Each row is one way a framework may satisfy §1.2 and §4.1. None is required;
+none is privileged. The point of listing them is to show that the same
+contract covers all four, so no reader mistakes any one of them for the rule.
+
+| Strategy | The continuation is | The executor invokes it by |
+|---|---|---|
+| **State machine** (Backend A) | a state record plus a resume function — `(state_ptr, resume_fn)` | calling `resume_fn(state_ptr)` |
+| **WasmFX** (Backend B) | a `(ref $ct)` | executing `resume` on it |
+| **Thread pool** | a task id plus a dispatch function — `(task_id, dispatch_fn)` | dispatching to a worker thread |
+| **Callback-based** | a registered callback | invoking the callback |
+
+Two consequences worth stating, because they are what the amendment buys:
+
+- **The guest never sees which one is in use.** §1.2 makes the continuation
+  opaque to guest code, so a program compiled against one strategy runs
+  unchanged against another.
+- **Only the strategy knows whether a resume has a stack.** Backend A's resume
+  returns *from* a function that parked; WasmFX's `resume` switches *into* a
+  suspended continuation; a thread pool's dispatch may run the continuation on
+  a different stack entirely. The contract requires exactly-once, so it cannot
+  require any of these shapes.
 
 ---
 
@@ -442,6 +536,7 @@ names here may change without changing any normative sentence above.
 | park | `__taskPark(state, awaited)` — `std/assembly/task-rt.ts:193` |
 | wake (pull today) | `__taskTick()` — `std/assembly/task-rt.ts:389`; called by `rt.runReady()` |
 | delivery | `__taskDeliver(class, a, b, f0, f1)` — `std/assembly/task-rt.ts:264` |
+| continuation | `TaskState.resume` — `std/assembly/task-rt.ts:79`, **one instance** of §1.2, not the definition |
 | executor | the guest's `waitingByKey` map plus the host epoch's callback invoke |
 | class declaration | `arena.rs`'s `CLASSES`, capacities, modes (the frozen layout) |
 | class table version | `RECORDED_LAYOUT_HASH` (`arena.rs`) |
@@ -450,3 +545,15 @@ The mismatch this table exposes is the point of the contract: the shipped
 runtime's *wake* is a drain (`__taskTick`), and the guest must call it. The
 contract's `wake(ids)` is push. Closing that gap is Tension 0.7.0's job; the
 language-level guarantees above already say what "closed" means.
+
+**`TaskState.resume` is an instance, not the definition.** It is Backend A's
+continuation — a function reference stored on the state record. A framework
+that resumes differently has a different continuation and satisfies §1.2
+identically; nothing in the normative text names this field, and §6 lists the
+strategies that replace it.
+
+The same reading applies to `park`: the shipped `__taskPark(state, awaited)`
+passes the state record, which is Backend A's continuation-by-argument. The
+contract's `park` names only the task (§2.1); the argument is this
+implementation's way of satisfying "the task table's entry carries the
+continuation", not a requirement the contract makes.
