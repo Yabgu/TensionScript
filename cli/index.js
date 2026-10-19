@@ -499,12 +499,30 @@ export async function main(argv, options) {
     }
   }
 
+  // Snapshot the compiler's own std file names *before* `--lib` merges user
+  // libraries into the same map below. After that merge, membership in
+  // `libraryFiles` no longer means "std", and `Source.isLibrary` never did: it
+  // encodes flat-vs-nested by path shape, so std's `rt/`, `shared/`, `util/`
+  // and `bindings/` files look exactly like a user package under `~lib/`
+  // (`docs/resource-async-scope.md`, amendment 2).
+  const stdLibraryNames = new Set(Object.keys(libraryFiles));
+
+  /** Marks the sources the parse just added as the compiler's own std. */
+  function markStdSources(before) {
+    const sources = program.sources;
+    for (let i = before, k = sources.length; i < k; ++i) {
+      program.stdSources.add(sources[i]);
+    }
+  }
+
   // Parse library files
   Object.keys(libraryFiles).forEach(libPath => {
     if (libPath.includes("/")) return; // in sub-directory: imported on demand
     let begin = stats.begin();
     stats.parseCount++;
+    const before = program.sources.length;
     assemblyscript.parse(program, libraryFiles[libPath], libraryPrefix + libPath + extension, false);
+    markStdSources(before);
     stats.parseTime += stats.end(begin);
   });
   let customLibDirs = [];
@@ -639,8 +657,17 @@ export async function main(argv, options) {
         const file = files[i];
         const begin = stats.begin();
         stats.parseCount++;
+        const before = program.sources.length;
         if (file) {
           assemblyscript.parse(program, file.sourceText, file.sourcePath, false);
+          // A std file imported from one of std's sub-directories (`rt/common`,
+          // `shared/runtime`, …) is served from `libraryFiles` like a user
+          // package is, so the requested path is what decides — against the
+          // pre-`--lib` snapshot, never against the merged map.
+          if (internalPath.startsWith(libraryPrefix)) {
+            const plainName = internalPath.substring(libraryPrefix.length);
+            if (stdLibraryNames.has(plainName)) markStdSources(before);
+          }
         } else {
           assemblyscript.parse(program, null, internalPath + extension, false);
         }

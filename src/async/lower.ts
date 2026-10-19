@@ -257,10 +257,16 @@ export class AsyncLowerTransform {
     let sources = this.program.sources;
     for (let i = 0, k = sources.length; i < k; ++i) {
       let source = sources[i];
-      // Library sources are never lowered: the standard library and the runtime
-      // declare no `async` function, and skipping them keeps the transform out
-      // of the standard library's own compilation path entirely.
-      if (source.isLibrary) continue;
+      // The compiler's *own* standard library is never lowered: it declares no
+      // `async` function, and skipping it keeps the transform out of std's
+      // compilation path entirely.
+      //
+      // The test is `stdSources`, not `Source.isLibrary`: the latter encodes
+      // flat-vs-nested by path shape, so it is true for a user package under
+      // `~lib/` as well (`docs/resource-async-scope.md`, amendment 2). A
+      // package installed through `file:` is user code and must lower — that is
+      // what lets a framework declare an `async` function at all.
+      if (this.program.stdSources.has(source)) continue;
       // Phase 1: lower (or refuse by name) everything this pass reaches.
       this.lowerStatementList(source, source.statements, parser);
       // Phase 2 (commit 7): refuse by name the `async` constructs phase 1 never
