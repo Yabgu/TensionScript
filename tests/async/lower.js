@@ -511,14 +511,31 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
   check("  ...with no refusal", refusals(r), []);
 }
 {
-  // A lifted local needs a type the state field can carry.
+  // A lifted local needs a type the state field can carry. Since C6a the syntax
+  // arm names the ones an initializer's syntax can name (`let v = 1` now lifts),
+  // so what remains refused is the shape that needs resolution.
+  const r = run(`
+async function f(h: Task<i32>): i32 { let v = value(); await h; return v; }
+export function probe(): Task<i32> { return f(make()); }
+function make(): Task<i32> { return changetype<Task<i32>>(0); }
+function value(): i32 { return 1; }
+`);
+  check("an untyped local the syntax arm cannot name is still refused, by name",
+    refusals(r).includes("a local without a declared type that crosses an await (async lowering)"), true);
+}
+{
+  // And the one it can name lifts, with the inferred annotation as the field.
   const r = run(`
 async function f(h: Task<i32>): i32 { let v = 1; await h; return v; }
 export function probe(): Task<i32> { return f(make()); }
 function make(): Task<i32> { return changetype<Task<i32>>(0); }
 `);
-  check("an untyped local that crosses an await is refused by name",
-    refusals(r).includes("a local without a declared type that crosses an await (async lowering)"), true);
+  check("an untyped local with a literal initializer lifts (C6a)",
+    refusals(r), []);
+  const fields = r.file.statements[0].members
+    .filter(member => member.kind === asc.NodeKind.FieldDeclaration)
+    .map(member => member.name.text);
+  check("its field reaches the state struct", fields.includes("v"), true);
 }
 
 // 8. The six correctness cases (§4.1, §4.3) — shape only; values are Phase 4.
@@ -827,7 +844,7 @@ export function main(): i32 { sink = outer(changetype<Task<i32>>(0)); return 1; 
   check("  ...after the suspension, not before it",
     resume.indexOf("outer$Env#get:x", park) > 0, true);
   check("  ...and the binding has no copy on the state struct",
-    /inner\$State#(get|set):x/.test(wat), false);
+    /inner\$State#(get|set):x/.test(wat), false);
 
   // §8.3(b) is the contrast and must be untouched: an async function that
   // *contains* a closure owns the env, lifts it as `$closureEnv`, and leaves

@@ -17,8 +17,7 @@ import {
   resolveTopLevel,
   typeOf,
   diagnosticCodes,
-  diagnosticTexts,
-  assemblyscript as asc
+  diagnosticTexts
 } from "./harness.js";
 
 let failures = 0;

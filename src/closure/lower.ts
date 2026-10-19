@@ -38,6 +38,7 @@ import { DiagnosticCode, Range } from "../diagnostics";
 import { Parser } from "../parser";
 import { Program } from "../program";
 import { Token } from "../tokenizer";
+import { inferTypeFromInitializer } from "../inference";
 import {
   ArrowKind,
   ArrayLiteralExpression,
@@ -90,6 +91,7 @@ import {
   TryStatement,
   TypeDeclaration,
   TypeNode,
+  TypeParameterNode,
   UnaryPostfixExpression,
   UnaryPrefixExpression,
   VariableDeclaration,
@@ -312,7 +314,9 @@ export class ClosureLowerTransform {
             if (members[j].kind != NodeKind.MethodDeclaration) continue;
             let method = <MethodDeclaration>members[j];
             if (method.body == null || method.is(CommonFlags.Static)) continue;
-            let analysis = new OwnerAnalysis(this, parser, method, typeNode(className, method.range));
+            let analysis = new OwnerAnalysis(
+              this, parser, method, typeNode(className, method.range), <ClassDeclaration>statement
+            );
             analysis.run();
             this.recordAnalysis(method, analysis);
             if (analysis.hasCaptures() && !analysis.refused) captures = true;
@@ -865,6 +869,29 @@ class Scope {
     return null;
   }
 
+  /**
+   * The declared type of every binding visible here, innermost declaration
+   * winning. Built only when an untyped capture must be named — the syntax arm —
+   * so a pass with nothing to infer allocates nothing.
+   */
+  knownTypes(): Map<string, TypeNode> {
+    let out = new Map<string, TypeNode>();
+    let scope: Scope | null = this;
+    while (scope != null) {
+      let bindings = scope.bindings;
+      let keys = Map_keys(bindings);
+      for (let i = 0, k = keys.length; i < k; ++i) {
+        let key = unchecked(keys[i]);
+        if (out.has(key)) continue;
+        let binding = assert(bindings.get(key));
+        let type = binding.type;
+        if (type != null) out.set(key, type);
+      }
+      scope = scope.parent;
+    }
+    return out;
+  }
+
   /** Resolves a name through the scope chain; `null` when not declared. */
   resolve(name: string): Binding | null {
     let scope: Scope | null = this;
@@ -1092,6 +1119,23 @@ class OwnerAnalysis {
   /** Type parameter names of the owner, for the D11 check. */
   private typeParameters: Set<string> = new Set();
 
+  /**
+   * Type parameter names of the owner's class, when the owner is a method. The
+   * guard has to see these too: without them a declaration typed by `T` in
+   * `class Box<T>` slipped through unrefused and failed later as `TS2304`,
+   * which is the silent failure §4.6 forbids (C6a).
+   */
+  private classTypeParameters: Set<string> = new Set();
+
+  /**
+   * The type parameters this owner's environment classes declare, outermost
+   * first: a method's class parameters, then the function's own. A hoisted
+   * class can only use a parameter it declares itself, so this list is what
+   * makes a generic owner's env expressible at all (C6b, `docs/closures-plan.md`
+   * §4.6). Empty for a non-generic owner, which keeps its class unchanged.
+   */
+  envTypeParameters: Array<string> = new Array();
+
   /** Every `this` expression found inside an arrow. */
   thisUses: Array<ThisUse> = new Array();
 
@@ -1127,7 +1171,8 @@ class OwnerAnalysis {
     private transform: ClosureLowerTransform,
     private parser: Parser,
     public owner: FunctionDeclaration,
-    ownerThisType: TypeNode | null = null
+    ownerThisType: TypeNode | null = null,
+    ownerClass: ClassDeclaration | null = null
   ) {
     this.ownerThisType = ownerThisType != null
       ? ownerThisType
@@ -1136,6 +1181,24 @@ class OwnerAnalysis {
     if (typeParameters) {
       for (let i = 0, k = typeParameters.length; i < k; ++i) {
         this.typeParameters.add(typeParameters[i].name.text);
+      }
+    }
+    if (ownerClass != null) {
+      let classTypeParameters = ownerClass.typeParameters;
+      if (classTypeParameters) {
+        for (let i = 0, k = classTypeParameters.length; i < k; ++i) {
+          let name = classTypeParameters[i].name.text;
+          this.classTypeParameters.add(name);
+          this.envTypeParameters.push(name);
+        }
+      }
+    }
+    let ownTypeParameters = owner.typeParameters;
+    if (ownTypeParameters) {
+      for (let i = 0, k = ownTypeParameters.length; i < k; ++i) {
+        let name = ownTypeParameters[i].name.text;
+        this.typeParameters.add(name);
+        if (!this.classTypeParameters.has(name)) this.envTypeParameters.push(name);
       }
     }
   }
@@ -1933,11 +1996,43 @@ class OwnerAnalysis {
     // managed state field — `docs/closures-plan.md` §8.3(b). No async-specific
     // code is involved, which is the layering the two plans were built for.
     if (binding.type == null) {
-      this.refuse(identifier.range,
-        "a captured local without a declared type (closures lowering)");
-    } else if (mentionsTypeParameter(binding.type, this.typeParameters)) {
-      this.refuse(identifier.range,
-        "a captured local typed by a type parameter (closures lowering)");
+      // The syntax arm (C6a, §4.6): name the type from the initializer's own
+      // syntax, and write it onto the declaration so the async transform reads
+      // the same fact (§4.7.4, Divergence 3). Shapes the table cannot name are
+      // still refused — that is C6c's remainder, not a gap here.
+      let initializer: Expression | null = null;
+      let declaration = binding.declaration;
+      if (declaration.kind == NodeKind.VariableDeclaration) {
+        initializer = (<VariableDeclaration>declaration).initializer;
+      }
+      let inferred = inferTypeFromInitializer(initializer, binding.scope.knownTypes(), 0);
+      if (inferred != null) {
+        binding.type = inferred;
+        if (declaration.kind == NodeKind.VariableDeclaration) {
+          (<VariableDeclaration>declaration).type = inferred;
+        }
+      } else {
+        this.refuse(identifier.range,
+          "a captured local without a declared type (closures lowering)");
+      }
+    }
+    if (binding.type != null) {
+      // C6b: the env class declares the owner's type parameters and every
+      // reference supplies them, so a parameter-typed capture is expressible —
+      // except inside an **async** function, whose transform still names the
+      // environment class without type arguments (`src/async/lower.ts`'s
+      // `typeNode(bodyEnvType, …)` sites). That shape keeps its named refusal
+      // instead of turning into a bare `TS2558`; extending it is its own phase,
+      // because the async transform would have to carry the parameter list too.
+      if (
+        mentionsTypeParameter(binding.type, this.typeParameters) ||
+        mentionsTypeParameter(binding.type, this.classTypeParameters)
+      ) {
+        if (inAsyncBody(binding.scope)) {
+          this.refuse(identifier.range,
+            "a captured local typed by a type parameter in an async body (closures lowering)");
+        }
+      }
     }
     if (writeTarget && binding.isConst) {
       this.refuse(identifier.range,
@@ -2030,6 +2125,20 @@ class OwnerAnalysis {
     return out;
   }
 
+  /** The type arguments every reference to this owner's env classes carries. */
+  private envTypeArgs(range: Range): TypeNode[] | null {
+    let names = this.envTypeParameters;
+    let k = names.length;
+    if (k == 0) return null;
+    let out = new Array<TypeNode>(k);
+    for (let i = 0; i < k; ++i) {
+      out[i] = Node.createNamedType(
+        Node.createSimpleTypeName(names[i], range), null, false, range
+      );
+    }
+    return out;
+  }
+
   private makeEnvClass(scope: Scope): ClassDeclaration {
     let fields = new Array<DeclarationStatement>();
     let range = scope.range;
@@ -2057,11 +2166,27 @@ class OwnerAnalysis {
       ));
     }
     for (let i = 0, k = bindings.length; i < k; ++i) {
+      let type = bindings[i].type;
+      // A reference-typed field needs an initializer or the compiler reports
+      // TS2564 (the field is not assigned in the constructor before it is
+      // read) — the same reason `$this` below is written `changetype<C>(0)`.
+      // `changetype<T>(0)` is the null pointer for every reference type, and
+      // the value is overwritten at the declaration point (§5.3), so this is
+      // only the constructor's obligation, never an observable value.
+      let initializer: Expression | null = null;
+      if (type != null && needsNullInitializer(type)) {
+        initializer = Node.createCallExpression(
+          Node.createIdentifierExpression("changetype", range),
+          [ type ],
+          [ Node.createIntegerLiteralExpression(i64_new(0), range) ],
+          range
+        );
+      }
       fields.push(Node.createFieldDeclaration(
         Node.createIdentifierExpression(bindings[i].name, range),
         null, CommonFlags.Instance,
-        bindings[i].type,
-        null,
+        type,
+        initializer,
         range
       ));
     }
@@ -2088,7 +2213,8 @@ class OwnerAnalysis {
         // never null, but the class is shared by every instance of the scope
         // shape and the type must admit the constructor's default.
         Node.createNamedType(
-          Node.createSimpleTypeName(assert(parentScope.className), range), null, true, range
+          Node.createSimpleTypeName(assert(parentScope.className), range),
+          this.envTypeArgs(range), true, range
         ),
         Node.createNullExpression(range),
         range
@@ -2109,7 +2235,8 @@ class OwnerAnalysis {
           ParameterKind.Optional,
           Node.createIdentifierExpression(sourceName, range),
           Node.createNamedType(
-            Node.createSimpleTypeName(selfName, range), null, true, range
+            Node.createSimpleTypeName(selfName, range),
+            this.envTypeArgs(range), true, range
           ),
           Node.createNullExpression(range),
           range
@@ -2120,7 +2247,8 @@ class OwnerAnalysis {
           ParameterKind.Optional,
           Node.createIdentifierExpression(parentName, range),
           Node.createNamedType(
-            Node.createSimpleTypeName(assert(parentScope.className), range), null, true, range
+            Node.createSimpleTypeName(assert(parentScope.className), range),
+            this.envTypeArgs(range), true, range
           ),
           Node.createNullExpression(range),
           range
@@ -2205,10 +2333,24 @@ class OwnerAnalysis {
         range
       ));
     }
+    let envTypeParameters: Array<TypeParameterNode> | null = null;
+    let names = this.envTypeParameters;
+    if (names.length > 0) {
+      envTypeParameters = new Array<TypeParameterNode>(names.length);
+      for (let i = 0, k = names.length; i < k; ++i) {
+        envTypeParameters[i] = Node.createTypeParameter(
+          Node.createIdentifierExpression(names[i], range), null, null, range
+        );
+      }
+    }
     return Node.createClassDeclaration(
       Node.createIdentifierExpression(assert(scope.className), range),
-      null, CommonFlags.None,
       null,
+      // The parser sets `Generic` from the presence of type parameters; a
+      // synthesized class must say so itself, or the resolver refuses every
+      // `X$Env<K,V>` reference as "not generic".
+      envTypeParameters != null ? CommonFlags.Generic : CommonFlags.None,
+      envTypeParameters,
       typeNode("TaskEnv", range),
       null,
       fields,
@@ -2339,8 +2481,14 @@ class OwnerAnalysis {
         Node.createVariableDeclaration(
           Node.createIdentifierExpression(assert(scope.localName), scope.range),
           null, CommonFlags.Let,
-          typeNode(className, scope.range),
-          Node.createNewExpression(Node.createSimpleTypeName(className, scope.range), null, args, scope.range),
+          Node.createNamedType(
+            Node.createSimpleTypeName(className, scope.range),
+            this.envTypeArgs(scope.range), false, scope.range
+          ),
+          Node.createNewExpression(
+            Node.createSimpleTypeName(className, scope.range),
+            this.envTypeArgs(scope.range), args, scope.range
+          ),
           scope.range
         )
       ],
@@ -2653,7 +2801,7 @@ class OwnerAnalysis {
         Node.createIdentifierExpression(localName, scope.range),
         Node.createNewExpression(
           Node.createSimpleTypeName(className, scope.range),
-          null,
+          this.envTypeArgs(scope.range),
           [ Node.createIdentifierExpression(localName, scope.range) ],
           scope.range
         ),
@@ -3064,6 +3212,45 @@ function isAssignmentOperator(token: Token): bool {
     default:
       return false;
   }
+}
+
+/**
+ * Whether an env field of this type needs `changetype<T>(0)` to satisfy the
+ * compiler's definite-assignment check: true for every reference type, false
+ * for the primitives. The transform runs before resolution, so this is decided
+ * from the written name — exact here, because resolving the type is the very
+ * thing this arm exists to avoid.
+ */
+function needsNullInitializer(type: TypeNode): bool {
+  if (type.kind != NodeKind.NamedType) {
+    // A function type, an array type, a union — all references.
+    return true;
+  }
+  let named = <NamedTypeNode>type;
+  let typeArguments = named.typeArguments;
+  if (typeArguments != null && typeArguments.length > 0) return true; // a generic instantiation
+  let name = named.name.identifier.text;
+  return !(
+    name == "i8" || name == "i16" || name == "i32" || name == "i64" ||
+    name == "u8" || name == "u16" || name == "u32" || name == "u64" ||
+    name == "isize" || name == "usize" || name == "bool" ||
+    name == "f32" || name == "f64" || name == "v128"
+  );
+}
+
+/**
+ * Whether any function owning a scope on this chain is `async`. A type
+ * parameter the environment class carries needs the class to be *instantiated*
+ * at every reference, and the async transform's synthesized types do not spell
+ * arguments yet (§4.6's C6b note).
+ */
+function inAsyncBody(scope: Scope): bool {
+  let current: Scope | null = scope;
+  while (current != null) {
+    if (current.ownerFunction.isAsync) return true;
+    current = current.parent;
+  }
+  return false;
 }
 
 /** Whether a type node names one of `names`, recursively (D11's check). */
