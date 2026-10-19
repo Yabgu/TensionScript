@@ -212,7 +212,8 @@ interface stays three integers.
   task id is a program error; the runtime MUST refuse it deterministically
   (§4.9), not overwrite the first.
 - **A key outside the class's declared key space is refused** with the class's
-  error (§5). It MUST NOT wait for a completion that cannot arrive.
+  error, and a full task table with `-ENOSPC` — the two refusals §5.1 names,
+  kept distinct. Neither may wait for a completion that cannot arrive.
 
 ### 2.2 Host → guest: `wake`
 
@@ -400,7 +401,37 @@ versioned change, never an implicit one.
 
 A park on a key outside the declared key space, or a park on a class whose
 capacity is exhausted, is refused with the class's error — never silently
-shared or queued unboundedly.
+shared or queued unboundedly. That is the **class's** refusal; §5.1 names the
+other one, which is the scheduler's and has a different status.
+
+### 5.1 The two refusals
+
+A park can be refused for two unrelated reasons. They are named apart because
+they mean different things to the caller, and a guest that cannot tell them
+apart cannot tell a bug from a busy moment.
+
+- **The class refuses.** The key is outside the class's declared key space (its
+  `capacity`, above), or a bound the class declares (a stream's coalescing
+  policy) refuses it. The status is **the class's error**, from its declaration.
+  Recovery is the caller's: the key is malformed, and retrying it unchanged
+  fails again.
+- **The scheduler refuses.** The runtime's task table is full — the park would
+  need a task id the executor cannot allocate. The status is **`-ENOSPC`**
+  (-28), a scheduler status, never a class error. Recovery is back-pressure:
+  wait for a task to complete, then park again.
+
+Both are `status < 0` and both are observable by the guest through the task's
+result (§1.4). A refused park MUST settle its task with that status rather than
+leave it parked — a refusal is a completion, not a silence (§4.1, §4.7).
+
+**Why `-ENOSPC` is named here and not left to a class.** §1.4 sends the status
+vocabulary to the class's declaration, because a class knows what its own
+failures mean. A full task table is not a class's failure: it belongs to the
+executor, which no class declares. Naming it in the contract is what keeps two
+diagnoses from collapsing into one.
+
+The distinction is normative. A runtime that reports a full table as a class
+error, or a bad key as back-pressure, has collapsed them.
 
 ---
 
