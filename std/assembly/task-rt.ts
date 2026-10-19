@@ -77,6 +77,19 @@ export class TaskState {
    * visitor like every other reference in §4.4's chain.
    */
   resume!: (state: TaskState) => void;
+
+  /**
+   * The task-table slot this suspension holds, or `-1` when it holds none
+   * (0.6.0's push path; `-1` for a task that never parked, or one already
+   * resumed).
+   *
+   * A plain `i32` on the state rather than a `Map<TaskState, i32>`: the state
+   * already *is* the key, the value is one word, and a map would pull the whole
+   * `Map` machinery into every guest that reaches `__taskTick` — measured at
+   * +522 bytes of code in a guest that never parks. The field costs four bytes
+   * per state struct instead.
+   */
+  slot: i32 = -1;
 }
 
 // --- the machine's state ----------------------------------------------------
@@ -146,6 +159,151 @@ let bufferedEvictions: i32 = 0;
 const RECORD_PAYLOAD: usize = 8;
 /** §3.2's `f0` offset — `f32` results, and the low half of the 64-bit ones. */
 const RECORD_F0: usize = 16;
+
+// ── the push path (0.6.0, additive) ─────────────────────────────────────────
+//
+// `docs/scheduler-contract.md` §2.1-§2.2 is the specification. This half of it
+// is **additive**: `__taskPark` keeps its `waitingByKey` registration, so the
+// pull path (`__taskDeliver` → `__taskTick`) still delivers everything — which
+// is what lets std 0.6.0 ship before the host that calls `__taskWake` exists.
+// Retiring the pull path is 0.7.0d's decision, made against that host.
+
+/** `scheduler::park(task_id, class, key)` — one call per suspension (§2.1).
+ *  `void`: a refusal comes back as a completion, never as a return value. */
+@external("scheduler", "park")
+declare function hostPark(taskId: i64, class_: i32, key: i32): void;
+
+/**
+ * One entry of the guest's task table.
+ *
+ * **One managed field, and that is load-bearing.** `state` is a class-typed
+ * reference, so the compiler-generated visitor traces it, exactly as it traces
+ * `Task<T>._record` (`task.ts:30-45`). An opaque `usize` would not be traced,
+ * and a parked task's state struct — with its environment and its lifted
+ * locals — could be collected while the task was still parked. The record and
+ * the resume function are read *through* this reference (`state.record`,
+ * `state.resume`), so the slot needs no fields of its own.
+ */
+class TaskSlot {
+  state: TaskState | null = null;
+}
+
+/** The table: `task_id` is a slot index (§2.1). Allocated at bind time. */
+let slots: Array<TaskSlot> | null = null;
+/** Free slot indices, as a stack. Empty means the table is exhausted. */
+let freeSlots: Array<i32> | null = null;
+
+/**
+ * Binds the task table: the guest allocates it once at startup and the host
+ * never allocates on the guest's behalf (§2.1's "the executor maintains a task
+ * table keyed by task_id" — in this implementation the executor's table is the
+ * guest's, because the continuations live in guest memory).
+ *
+ * `capacity` is the number of concurrently parked tasks the guest will allow;
+ * a park past it is the **scheduler refusal**, `-ENOSPC` (§5.1). Idempotent: a
+ * second bind replaces the table, which discards whatever was parked — so the
+ * framework calls it once, at startup.
+ */
+export function __taskBindTable(capacity: i32): void {
+  if (capacity <= 0) return;
+  const table = new Array<TaskSlot>(capacity);
+  const free = new Array<i32>(capacity);
+  for (let i = 0; i < capacity; ++i) {
+    table[i] = new TaskSlot();
+    // Descending, so the free stack hands out index 0 first.
+    free[i] = capacity - 1 - i;
+  }
+  slots = table;
+  freeSlots = free;
+}
+
+/**
+ * The push half of a park: allocate a slot, record the state, tell the host.
+ *
+ * Called from `__taskPark` **after** the pull-path registration, so a guest
+ * that binds no table (or a host with no `scheduler::park`) behaves exactly as
+ * it did before this release — the function returns early and the pull path is
+ * all there is.
+ */
+function parkState(state: TaskState, awaited: TaskRecord): void {
+  const table = slots;
+  const free = freeSlots;
+  if (table == null || free == null) return;   // no table bound: pull path only
+  // A record with no producer stamp has no rendezvous to post: a guest task's
+  // own record is resolved by the handle, not by a key. The pull path keeps it.
+  if (awaited.class_ == 0) return;
+
+  let id: i32 = 0;
+  if (free.length == 0) {
+    // §5.1's scheduler refusal: settle the task rather than park it. The guest
+    // observes it exactly like any other status — `record.status` — and the
+    // pull path's registration above is not undone, so an older host still
+    // delivers. A refusal must never leave the task parked with nothing coming.
+    awaited.status = -28; // -ENOSPC
+    awaited.done = 1;
+    let queue = ready;
+    if (queue == null) {
+      queue = new Array<TaskState>();
+      ready = queue;
+    }
+    queue.push(state);
+    return;
+  }
+
+  id = free.pop();
+  table[id].state = state;
+  state.slot = id;
+  hostPark(<i64>id, awaited.class_, awaited.key);
+}
+
+/** Release a slot: the task it held has resumed, and the id may be reused. */
+function releaseSlot(id: i32): void {
+  const table = slots;
+  const free = freeSlots;
+  if (table == null || free == null) return;
+  if (id < 0 || id >= table.length) return;
+  table[id].state = null;
+  free.push(id);
+}
+
+/** Release whatever slot `state` holds, if it holds one. */
+function releaseSlotOf(state: TaskState): void {
+  const id = state.slot;
+  if (id < 0) return;
+  state.slot = -1;
+  releaseSlot(id);
+}
+
+/**
+ * `__taskWake(idsPtr, count)` — the host names the tasks to resume (§2.2).
+ *
+ * `idsPtr` points at `count` packed little-endian `u64` task ids in guest
+ * memory; the host wrote them before the call. Each id is resolved through the
+ * table and its continuation invoked **exactly once** (§1.2, §4.1), then the
+ * slot is freed so the id can be reused.
+ *
+ * An id whose slot is empty is skipped, not an error: a stale id can only
+ * arrive from a host index that outlived its park (see `scheduler.rs`'s note on
+ * overwrite), and waking nothing is the correct behaviour — resuming twice
+ * never is.
+ */
+export function __taskWake(idsPtr: usize, count: i32): void {
+  const table = slots;
+  if (table == null || count <= 0) return;
+  for (let i = 0; i < count; ++i) {
+    const id = <i32>load<u64>(idsPtr + <usize>i * 8);
+    if (id < 0 || id >= table.length) continue;
+    const slot = table[id];
+    const state = slot.state;
+    if (state == null) continue;            // already resumed: a stale id
+    // Free before resuming, so a task that parks again in its continuation can
+    // reuse the id — the host sees a fresh park for it (§4.9 counts parks, not
+    // tasks).
+    releaseSlot(id);
+    state.slot = -1;
+    state.resume(state);
+  }
+}
 
 /** `(family << 32) | (a & 0xffffffff)`, the correlation key (§3.1). */
 function keyOf(family: i32, a: i32): i64 {
@@ -245,6 +403,9 @@ export function __taskPark(state: TaskState, awaited: TaskRecord): void {
     }
     byKey.set(keyOf(familyOf(awaited.class_), awaited.key), awaited);
   }
+  // The push half (0.6.0). Additive: the registration above is what delivers
+  // until the host calls `__taskWake`.
+  parkState(state, awaited);
 }
 
 /**
@@ -393,6 +554,11 @@ export function __taskTick(): void {
   ready = null;
   for (let i = 0, k = queue.length; i < k; ++i) {
     let state = queue[i];
+    // The pull path resumed this task, so its push-path slot (if any) is done.
+    // Without this a guest on the pull path would leak one slot per await and
+    // hit -ENOSPC after `capacity` suspensions — measured as the reason the
+    // free lives here and not only in `__taskWake`.
+    releaseSlotOf(state);
     state.resume(state);
   }
   // §6.4's dropped-completion rule lands here (4e): compare the drop rollup
