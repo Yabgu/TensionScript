@@ -58,7 +58,7 @@ export class TaskRecord {
 /**
  * A handle to an asynchronous operation's result.
  *
- * `Task<T>` is what a call to an `async function f(): T` yields, and what a
+ * `Task<T>` is what a call to an `async function f(): T` produces, and what a
  * capability's reader returns for work the host completes later
  * (`docs/async-await-plan-v2.md` §1.2 rule 2 and §3.3). One handle type, one
  * name: the design has no `Promise` and no second `Awaitable<T>` (§2.4).

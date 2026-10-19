@@ -469,7 +469,7 @@ export class AsyncLowerTransform {
         return this.refuse(parser, parameter.name.range, "a parameter whose name is reserved by the state struct (async lowering)");
       }
     }
-    // §2.3: `async function f(): T` declares `T` and the call yields `Task<T>`.
+    // §2.3: `async function f(): T` declares `T` and the call produces `Task<T>`.
     // Without an annotation there is no `T` to name — the parser produces an
     // empty `NamedType` for an omitted return type — and `Task<>` is not a type.
     let returnType = signature.returnType;
@@ -962,7 +962,7 @@ export class AsyncLowerTransform {
     declaration.body = Node.createBlockStatement(entryStatements, range);
     declaration.signature.returnType = taskType;
     // The call-site type is now the declared one. `async` on the *element* is
-    // what makes a call yield `Task<T>` (`resolver.ts:2669`); the entry's
+    // what makes a call produce `Task<T>` (`resolver.ts:2669`); the entry's
     // declared return type is already that handle, so keeping the trait would
     // wrap it twice.
     declaration.isAsync = false;
@@ -3326,7 +3326,7 @@ function isVoidTypeNode(type: TypeNode): bool {
     && (<NamedTypeNode>type).name.identifier.text == "void";
 }
 
-/** `Task<T>` — what a call to the lowered entry yields (§1.2 rule 2). */
+/** `Task<T>` — what a call to the lowered entry produces (§1.2 rule 2). */
 function taskTypeNode(typeArgument: TypeNode, range: Range): NamedTypeNode {
   return Node.createNamedType(
     Node.createSimpleTypeName("Task", range),
