@@ -2434,7 +2434,8 @@ export class Parser extends DiagnosticEmitter {
       );
 
       let body: Statement | null = null;
-      if (tn.skip(Token.OpenBrace)) {        if (flags & CommonFlags.Ambient) {
+      if (tn.skip(Token.OpenBrace)) {
+        if (flags & CommonFlags.Ambient) {
           this.error(
             DiagnosticCode.An_implementation_cannot_be_declared_in_ambient_contexts,
             tn.range()

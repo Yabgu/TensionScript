@@ -456,6 +456,23 @@ export class Program extends DiagnosticEmitter {
   resolver!: Resolver;
   /** Array of sources. */
   sources: Source[] = [];
+
+  /**
+   * The sources the compiler's *own* standard library was parsed from.
+   *
+   * `Source.isLibrary` cannot answer this: `SourceKind` is derived from the
+   * path's shape (`parser.ts:171-177`), so it says "flat vs nested under
+   * `~lib/`", never "whose code is this" — std's `rt/`, `shared/`, `util/` and
+   * `bindings/` files are `Library`, exactly like a user package under `~lib/`,
+   * and a one-file user package is `LibraryEntry`, exactly like `~lib/array`.
+   *
+   * The CLI populates this at the two std parse sites, *before* `--lib` merges
+   * user libraries into the same `libraryFiles` map (`cli/index.js:520-534`),
+   * which is the only point where membership still means "std". A transform
+   * that must skip the compiler's own source — the async lowering does, so it
+   * does not walk the standard library — tests this set instead.
+   */
+  stdSources: Set<Source> = new Set();
   /** Diagnostic offset used where successively obtaining the next diagnostic. */
   diagnosticsOffset: i32 = 0;
   /** Special native code file. */

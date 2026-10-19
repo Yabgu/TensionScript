@@ -101,6 +101,7 @@ import { Program } from "../program";
 import { Token } from "../tokenizer";
 import { awaitSites, AwaitSite } from "./ir";
 import { creationEnvOf, envInfoOf, ownerEnvOf, EnvInfo, EnvKind } from "../closure/ir";
+import { inferTypeFromInitializer } from "../inference";
 import {
   validateAsyncConstructs,
   MESSAGE_ASYNC_ARROW,
@@ -256,10 +257,16 @@ export class AsyncLowerTransform {
     let sources = this.program.sources;
     for (let i = 0, k = sources.length; i < k; ++i) {
       let source = sources[i];
-      // Library sources are never lowered: the standard library and the runtime
-      // declare no `async` function, and skipping them keeps the transform out
-      // of the standard library's own compilation path entirely.
-      if (source.isLibrary) continue;
+      // The compiler's *own* standard library is never lowered: it declares no
+      // `async` function, and skipping it keeps the transform out of std's
+      // compilation path entirely.
+      //
+      // The test is `stdSources`, not `Source.isLibrary`: the latter encodes
+      // flat-vs-nested by path shape, so it is true for a user package under
+      // `~lib/` as well (`docs/resource-async-scope.md`, amendment 2). A
+      // package installed through `file:` is user code and must lower — that is
+      // what lets a framework declare an `async` function at all.
+      if (this.program.stdSources.has(source)) continue;
       // Phase 1: lower (or refuse by name) everything this pass reaches.
       this.lowerStatementList(source, source.statements, parser);
       // Phase 2 (commit 7): refuse by name the `async` constructs phase 1 never
@@ -602,6 +609,12 @@ export class AsyncLowerTransform {
     // --- the plan: awaits, structure, and what has to be lifted -------------
 
     let lifting = new Lifting();
+    // Every annotated declaration in the body, so the syntax arm can resolve
+    // `let m = n + 1` against a local that never itself crosses an await
+    // (`docs/closures-plan.md` §4.6's identifier row). It must be collected
+    // before planning: the plan is what calls `liftDeclarator`, which is what
+    // asks for the type.
+    collectDeclaredTypes(block, lifting.declaredTypes);
     let cursor = new PlanCursor();
     let seq = this.planSeq(parser, block.statements, cursor, false, source, hoisted, declared, lifting);
     if (!seq) return null;
@@ -1480,11 +1493,22 @@ export class AsyncLowerTransform {
     }
     let type = declaration.type;
     if (type == null) {
-      // The field needs a type, and the transform runs before resolution:
-      // `let v = 1;` has none it can name. (§4.7.4's limit, in a second place.)
-      this.refuse(parser, declaration.name.range,
-        "a local without a declared type that crosses an await (async lowering)");
-      return false;
+      // The field needs a type, and the transform runs before resolution. The
+      // syntax arm supplies one from the initializer (C6a, §4.6) — this is
+      // Divergence 3, and it is the closure transform's mechanism reused, not a
+      // second inference: the annotation is written onto the declaration, which
+      // is the same field the closure transform writes and the one read here.
+      let inferred = inferTypeFromInitializer(
+        declaration.initializer, lifting.knownTypes(), 0
+      );
+      if (inferred != null) {
+        declaration.type = inferred;
+        type = inferred;
+      } else {
+        this.refuse(parser, declaration.name.range,
+          "a local without a declared type that crosses an await (async lowering)");
+        return false;
+      }
     }
     lifting.liftLocal(name, type, declaration);
     return true;
@@ -2518,6 +2542,48 @@ function collectLocalNames(statement: Statement, into: Set<string>): void {
   }
 }
 
+/**
+ * Collects the annotated type of every declaration in a body, by name. The
+ * syntax arm reads it when an initializer refers to a local that does not itself
+ * cross an await; a later declaration of the same name wins, matching how the
+ * planner walks in source order.
+ */
+function collectDeclaredTypes(statement: Statement, into: Map<string, TypeNode>): void {
+  switch (statement.kind) {
+    case NodeKind.Block: {
+      let statements = (<BlockStatement>statement).statements;
+      for (let i = 0, k = statements.length; i < k; ++i) collectDeclaredTypes(statements[i], into);
+      break;
+    }
+    case NodeKind.If: {
+      let ifs = <IfStatement>statement;
+      collectDeclaredTypes(ifs.ifTrue, into);
+      if (ifs.ifFalse != null) collectDeclaredTypes(assert(ifs.ifFalse), into);
+      break;
+    }
+    case NodeKind.While: {
+      collectDeclaredTypes((<WhileStatement>statement).body, into);
+      break;
+    }
+    case NodeKind.For: {
+      let loop = <ForStatement>statement;
+      if (loop.initializer != null) collectDeclaredTypes(assert(loop.initializer), into);
+      collectDeclaredTypes(loop.body, into);
+      break;
+    }
+    case NodeKind.Variable: {
+      let declarations = (<VariableStatement>statement).declarations;
+      for (let i = 0, k = declarations.length; i < k; ++i) {
+        let declaration = declarations[i];
+        let type = declaration.type;
+        if (type != null) into.set(declaration.name.text, type);
+      }
+      break;
+    }
+    default: break;
+  }
+}
+
 /** The name a declaration statement introduces, if it introduces one. */
 function declarationNameOf(statement: Statement): string | null {
   switch (statement.kind) {
@@ -3217,10 +3283,32 @@ class Lifting {
     return assert(this.parameterRanges.get(name));
   }
 
+  /** Types of the body's annotated declarations, by name. */
+  declaredTypes: Map<string, TypeNode> = new Map();
+
   /** Records a lifted local. */
   liftLocal(name: string, type: TypeNode, declaration: VariableDeclaration): void {
     if (this.hasLocal(name)) return;
     this.locals.push(new LiftedLocal(name, type, declaration));
+  }
+
+  /**
+   * The type of every lifted local so far. The syntax arm's identifier case
+   * reads it, so `let a = 1; let b = a;` lifts both (C6a).
+   */
+  knownTypes(): Map<string, TypeNode> {
+    let out = new Map<string, TypeNode>();
+    let declared = this.declaredTypes;
+    let declaredKeys = Map_keys(declared);
+    for (let i = 0, k = declaredKeys.length; i < k; ++i) {
+      let key = unchecked(declaredKeys[i]);
+      out.set(key, assert(declared.get(key)));
+    }
+    for (let i = 0, k = this.locals.length; i < k; ++i) {
+      let local = this.locals[i];
+      out.set(local.name, local.type);
+    }
+    return out;
   }
 
   /** Whether `name` is a lifted local. */

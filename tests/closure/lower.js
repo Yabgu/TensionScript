@@ -318,18 +318,24 @@ export function main(): i32 {
 // — refusals, each by name ——————————————————————————————————————————————————
 
 {
+  // D10's boundary after C6a: the syntax arm names what an initializer's syntax
+  // can name (`let x = 1` now compiles — case 25), and everything that needs
+  // resolution is still refused by name. A call is the canonical remainder.
   const r = run(`
+function value(): i32 { return 1; }
 function outer(): i32 {
-  let x = 1;
+  let x = value();
   function inner(): i32 { return x; }
   return inner();
 }
 export function main(): i32 { return outer(); }
 `);
-  check("D10: a captured local without a declared type is refused by name",
+  check("D10: a captured local the syntax arm cannot name is refused by name",
     refusals(r), [ "a captured local without a declared type (closures lowering)" ]);
 }
 {
+  // D11 after C6b: the environment class declares the owner's type parameters
+  // and every reference supplies them, so the shape lowers instead of refusing.
   const r = run(`
 function outer<T>(v: T): T {
   let x: T = v;
@@ -338,8 +344,13 @@ function outer<T>(v: T): T {
 }
 export function main(): i32 { return outer<i32>(1); }
 `);
-  check("D11: a captured local typed by a type parameter is refused by name",
-    refusals(r), [ "a captured local typed by a type parameter (closures lowering)" ]);
+  check("D11: a captured local typed by a type parameter is lowered (C6b)", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "outer$Env");
+  check("D11: the env class declares the owner's type parameter",
+    env.typeParameters.map(parameter => parameter.name.text), [ "T" ]);
+  check("D11: the class is flagged generic",
+    (env.flags & asc.CommonFlags.Generic) !== 0, true);
 }
 {
   // C3a replaces the C1 refusal: a for-header binding is captured by cloning the
@@ -1636,6 +1647,188 @@ export function main(): i32 { return 0; }
   const ctor = thisEnv.members.find(member => member.name.text === "constructor");
   check("C5b-21: its constructor takes (source, parent)",
     ctor.signature.parameters.map(parameter => parameter.name.text), [ "source", "parent" ]);
+}
+
+// --- C6a: the syntax arm (D10's syntax cases) and the D11 guard -----------
+//
+// `docs/closures-plan.md` §4.6. A capture the user left unannotated is named
+// from the initializer's own syntax, on demand at the capture site, and the
+// type is written onto the declaration — the same field the environment class
+// takes and the async transform reads.
+{
+  const r = run(`
+export function probe(): i32 {
+  let n = 0;
+  const f: () => i32 = (): i32 => n + 5;
+  return f();
+}
+`);
+  check("C6a: an inferred capture is accepted", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "probe$Env");
+  const field = env.members.find(member => member.name && member.name.text === "n");
+  check("C6a: its field is typed from the literal", field.type.name.identifier.text, "i32");
+}
+
+{
+  const r = run(`
+export function probe(): i32 {
+  let s = "xy";
+  const f: () => i32 = (): i32 => s.length;
+  return f();
+}
+`);
+  check("C6a: a string literal capture is accepted", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "probe$Env");
+  const field = env.members.find(member => member.name && member.name.text === "s");
+  check("C6a: its field is typed string", field.type.name.identifier.text, "string");
+}
+
+{
+  const r = run(`
+class Foo { v: i32 = 3; }
+export function probe(): i32 {
+  let p = new Foo();
+  const f: () => i32 = (): i32 => p.v;
+  return f();
+}
+`);
+  check("C6a: a `new` capture is accepted", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "probe$Env");
+  const field = env.members.find(member => member.name && member.name.text === "p");
+  check("C6a: its field is typed from the NewExpression", field.type.name.identifier.text, "Foo");
+}
+
+{
+  const r = run(`
+export function probe(): i32 {
+  let a: i32 = 2;
+  let b = a + 3;
+  const f: () => i32 = (): i32 => b;
+  return f();
+}
+`);
+  check("C6a: a binary expression over a typed local is accepted", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "probe$Env");
+  const field = env.members.find(member => member.name && member.name.text === "b");
+  check("C6a: its field takes the operands' common type", field.type.name.identifier.text, "i32");
+}
+
+{
+  // A call needs resolution: still refused, and that is C6c's shape.
+  const r = run(`
+function g(): i32 { return 7; }
+export function probe(): i32 {
+  let x = g();
+  const f: () => i32 = (): i32 => x;
+  return f();
+}
+`);
+  check("C6a: a call initializer is still refused, by name",
+    refusals(r), [ "a captured local without a declared type (closures lowering)" ]);
+}
+
+{
+  // C6a made this a named refusal (it used to fail later as TS2304); C6b makes
+  // it work: the env class carries the class's parameter.
+  const r = run(`
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+  m(): i32 { let x: T = this.v; const f: () => T = (): T => x; return 0; }
+}
+export function main(): i32 { return new Box<i32>(1).m(); }
+`);
+  check("C6b: a class type parameter is lowered, not refused", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "m$Env");
+  check("C6b: the env class carries the class's parameter",
+    env.typeParameters.map(parameter => parameter.name.text), [ "T" ]);
+}
+
+{
+  // The bootstrap gate's shape (`src/util/collections.ts:29`, reduced): an
+  // inferred capture whose type mentions the owner's type parameters.
+  const r = run(`
+export function merge<K,V>(map1: Map<K,V>): i32 {
+  let out = new Map<K,V>(map1);
+  const f: () => i32 = (): i32 => out.size;
+  return f();
+}
+export function main(): i32 { return 0; }
+`);
+  check("C6b: the gate's shape is lowered, not refused", refusals(r), []);
+  const env = r.file.statements.find(statement =>
+    statement.name && statement.name.text === "merge$Env");
+  check("C6b: its env class declares both parameters",
+    env.typeParameters.map(parameter => parameter.name.text), [ "K", "V" ]);
+}
+
+{
+  // End to end: the inferred annotation is a real type, not just an AST fact.
+  check("C6a: an inferred literal capture runs",
+    await execute(`
+export function probe(): i32 {
+  let n = 0;
+  const f: () => i32 = (): i32 => n + 5;
+  return f();
+}
+`, "probe"), { value: 5 });
+  check("C6a: an inferred `new` capture runs",
+    await execute(`
+class Foo { v: i32 = 3; }
+export function probe(): i32 {
+  let p = new Foo();
+  const f: () => i32 = (): i32 => p.v;
+  return f();
+}
+`, "probe"), { value: 3 });
+}
+
+// --- C6b: generic env classes ---------------------------------------------
+//
+// The hoisted env class declares its owner's type parameters, and every
+// reference — allocation, clone, `$parent`, the constructor — supplies them.
+{
+  check("C6b: a generic owner's capture runs",
+    await execute(`
+export function merge<K,V>(map1: Map<K,V>): i32 {
+  let out: Map<K,V> = map1;
+  const f: () => i32 = (): i32 => out.size;
+  return f();
+}
+export function probe(): i32 {
+  let m = new Map<i32,i32>();
+  m.set(1, 2);
+  m.set(3, 4);
+  return merge<i32,i32>(m);
+}
+`, "probe"), { value: 2 });
+}
+
+{
+  // The async transform's synthesized types do not spell type arguments yet, so
+  // a type-parameter capture in an async body keeps a named refusal rather
+  // than turning into a bare TS2558. That is the one shape C6b does not take.
+  const r = run(`
+import { Task } from "~lib/task";
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+  async m(h: Task<i32>): i32 {
+    let x: T = this.v;
+    const f: () => T = (): T => x;
+    await h;
+    return 0;
+  }
+}
+export function main(): i32 { return 0; }
+`);
+  check("C6b: a type-parameter capture in an async body is refused by name",
+    refusals(r), [ "a captured local typed by a type parameter in an async body (closures lowering)" ]);
 }
 
 console.log(`\n${failures === 0 ? "[ SUCCESS ]" : "FAILURE"}: ${checks - failures} of ${checks} checks passed`);
