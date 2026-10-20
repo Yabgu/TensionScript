@@ -307,6 +307,51 @@ export function __taskFail(idsPtr: usize, statusesPtr: usize, count: i32): void 
   }
 }
 
+/**
+ * `__taskResume(idsPtr, classesPtr, payloadsPtr, count)` — resume tasks with the
+ * completion that woke them (0.7.0d-pre).
+ *
+ * `__taskWake` names ids and nothing else, which was enough while the guest's
+ * own `__taskDeliver` was still filling records from the ring. Under the push
+ * path the host is the only thing that knows what arrived, so the record has to
+ * come with the wake: `classesPtr` points at `count` packed `i32` class ids and
+ * `payloadsPtr` at `count` packed `i32` payload words, both written by the host.
+ *
+ * Three parallel arrays rather than one packed record, so a chunk costs no more
+ * scratch than the ids already do.
+ *
+ * An id whose slot is empty is skipped: a stale id must never resume a task
+ * twice (§1.2).
+ */
+export function __taskResume(
+  idsPtr: usize,
+  classesPtr: usize,
+  payloadsPtr: usize,
+  count: i32
+): void {
+  const table = slots;
+  if (table == null || count <= 0) return;
+  for (let i = 0; i < count; ++i) {
+    const id = <i32>load<u64>(idsPtr + <usize>i * 8);
+    if (id < 0 || id >= table.length) continue;
+    const slot = table[id];
+    const state = slot.state;
+    if (state == null) continue;            // already resumed: a stale id
+    const record = slot.record;
+    // Free before resuming, so a continuation that parks again reuses the id and
+    // the host sees a fresh park (§4.9 counts parks, not tasks).
+    releaseSlot(id);
+    state.slot = -1;
+    if (record != null) {
+      record.class_ = <i32>load<i32>(classesPtr + <usize>i * 4);
+      record.payload = <i32>load<i32>(payloadsPtr + <usize>i * 4);
+      record.status = 0;
+      record.done = 1;
+    }
+    state.resume(state);
+  }
+}
+
 /** Release a slot: the task it held has resumed, and the id may be reused. */
 function releaseSlot(id: i32): void {
   const table = slots;
@@ -407,7 +452,14 @@ export function __taskPark(state: TaskState, awaited: TaskRecord): void {
   // `if (!__taskSettled) { park; return }` sees a settled record on its *next*
   // check — actually, on the *same* run: `__taskSettled` was checked before
   // this call, which is why the state is queued here rather than left parked.
-  if (awaited.class_ != 0) {
+  // **The guest-side early claim is the pull path's** (0.7.0d-pre). With a task
+  // table bound, the host owns early completions (`RecentCompletions`), and it
+  // delivers them through `__taskResume`. Claiming one here would push the state
+  // onto the `ready` queue — which no host-driven guest drains — and the task
+  // would strand with its completion already consumed. Measured: a guest that
+  // awaited a job, resumed, then awaited a second job whose record had arrived
+  // in the same epoch never parked again.
+  if (awaited.class_ != 0 && slots == null) {
     let buffer = buffered;
     let key = keyOf(familyOf(awaited.class_), awaited.key);
     if (buffer != null && buffer.has(key)) {
@@ -482,7 +534,7 @@ export function __taskDeliver(class_: i32, a: i32, b: i32, f0: i32, f1: i32): vo
     // Nobody is waiting *yet*: buffer it, so a park that happens later finds
     // the completion instead of waiting for one that already arrived (§4b).
     // Only stamped records take part — a task's own record needs no key.
-    if (class_ != 0) bufferCompletion(class_, key, b, f0, f1);
+    if (class_ != 0 && slots == null) bufferCompletion(class_, key, b, f0, f1);
     return;
   }
   let record = byKey.get(key);
@@ -580,6 +632,15 @@ function wake(record: TaskRecord): void {
   let list: Array<TaskState> | null = null;
   if (byRecord.has(record)) list = byRecord.get(record);
   if (list != null && list.length != 0) {
+    // **A push-parked state is not queued** (0.7.0d-pre). Its slot is held, so
+    // the host owns its resume and will call `__taskResume`; queueing it here as
+    // well would resume the same task twice — once from `__taskTick`, once from
+    // the host — and the second resume would re-enter a continuation that has
+    // already advanced.
+    for (let i = list.length - 1; i >= 0; --i) {
+      if (list[i].slot >= 0) list.splice(i, 1);
+    }
+    if (list.length == 0) return;
     let queue = ready;
     if (queue == null) {
       queue = new Array<TaskState>();
