@@ -561,21 +561,17 @@ executor, the same exactly-once result with the class partitioned.
 This section is a reading aid. It is **not** part of the contract, and the
 names here may change without changing any normative sentence above.
 
-| Contract term | Shipped realization (TensionScript 0.5.1 / Tension 0.6.0a, in flight) |
+| Contract term | Shipped realization (TensionScript 0.7.1 / Tension 0.7.0) |
 |---|---|
 | `Task<T>` | `std/assembly/task.ts`'s `Task<T>` and `TaskRecord` |
-| park | `__taskPark(state, awaited)` — `std/assembly/task-rt.ts:193` |
-| wake (pull today) | `__taskTick()` — `std/assembly/task-rt.ts:389`; called by `rt.runReady()` |
-| delivery | `__taskDeliver(class, a, b, f0, f1)` — `std/assembly/task-rt.ts:264` |
-| continuation | `TaskState.resume` — `std/assembly/task-rt.ts:79`, **one instance** of §1.2, not the definition |
-| executor | the guest's `waitingByKey` map plus the host epoch's callback invoke |
+| park | `__taskPark(state, awaited)` — records the rendezvous on the task's slot, then calls `scheduler::park(task_id, class, key)` |
+| wake (push, the only path) | `__taskResume(idsPtr, classesPtr, payloadsPtr, count)` — the record's class and payload travel with the id; `__taskWake(idsPtr, count)` remains for a guest that exports no `__taskResume` (ids only) |
+| failure wake | `__taskFail(idsPtr, statusesPtr, count)` — a lost completion (`-EIO`) or a refused park (`-ENOSPC`) |
+| delivery | the **host**: the epoch matches every published `(class, key)` to a parked task id, or to `scheduler::RecentCompletions` when nobody is parked yet |
+| continuation | `TaskState.resume` — **one instance** of §1.2, not the definition |
+| executor | the host's per-family park tables, the recent-completions table, and `HostState::wake_batch`; the guest's `drainReady` for class-0 records only |
 | class declaration | `arena.rs`'s `CLASSES`, capacities, modes (the frozen layout) |
 | class table version | `RECORDED_LAYOUT_HASH` (`arena.rs`) |
-
-The mismatch this table exposes is the point of the contract: the shipped
-runtime's *wake* is a drain (`__taskTick`), and the guest must call it. The
-contract's `wake(ids)` is push. Closing that gap is Tension 0.7.0's job; the
-language-level guarantees above already say what "closed" means.
 
 **`TaskState.resume` is an instance, not the definition.** It is Backend A's
 continuation — a function reference stored on the state record. A framework
@@ -588,3 +584,42 @@ passes the state record, which is Backend A's continuation-by-argument. The
 contract's `park` names only the task (§2.1); the argument is this
 implementation's way of satisfying "the task table's entry carries the
 continuation", not a requirement the contract makes.
+
+## 10.1 The pull path is retired
+
+Until **TensionScript 0.7.0 / Tension 0.7.0** the shipped implementation carried
+two delivery paths. The contract's `wake(ids)` was push, and that push path
+(`__taskWake`) shipped beside a *pull* path — `__taskDeliver(class, a, b, f0, f1)`
+copying a record into the guest's `waitingByKey` map, and `__taskTick()` draining
+a guest-side ready queue that the game's own frame loop called through
+`rt.runReady()`.
+
+The pull path was implementation, never contract: §2.2's `wake(ids)` is what the
+normative text says, and a guest that must call a drain is doing the executor's
+work in the guest. It was retired in 0.7.0 once both mechanisms the push path
+needed were host-side and both-ways verified:
+
+- **`scheduler::RecentCompletions`** (0.7.0-pre) — a completion that arrives
+  before its park is buffered by the host, one entry per `(family, key)`,
+  replaced by a newer one, bounded by the class's ring capacity. This is what
+  §4.9's "no lost wakes" requires once the guest no longer buffers.
+- **pre-park registration** (0.7.0-pre) — the task's slot is claimed at
+  *creation*, so a refused park has an id the host can fail with `-ENOSPC`
+  instead of stranding (§5.1's second refusal).
+
+What remains guest-side is the one rendezvous the host cannot own: a task
+awaiting another *suspending guest task* parks on that task's own record
+(`class == 0`), which has no producer key. `wake` queues it and `drainReady`
+resumes it at the top of the next host entry (`__taskWake` / `__taskResume` /
+`__taskFail`) — never from inside a completing task's own body, which is the
+property §6.5's "one resume per task per tick" was protecting.
+
+Removed in 0.7.0, with no replacement: `__taskTick`, `__taskDeliver`,
+`__taskReportDrops`, the guest-side completion buffer, and `waitingByKey`. Drop
+attribution moved to the host at the same time (a per-family delta over the
+posting counters, waking the family's parked tasks with `-EIO`), because
+`rt.reportDrops` lived in `rt.runReady` and a host-driven guest never calls it.
+
+**The contract's normative sections did not change for any of this.** §2.1's
+park, §2.2's wake, §4.4's drops, §4.9's no-lost-wakes and §5.1's two refusals
+were written for push and are now simply the only implementation there is.
