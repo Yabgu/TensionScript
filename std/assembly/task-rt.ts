@@ -103,70 +103,29 @@ let recordFactory: (() => TaskRecord) | null = null;
 /** `class_ → family` (§3.1). Unbound classes are their own family. */
 let families: Map<i32, i32> | null = null;
 
-/**
- * `(family, producer id) → the record awaiting it` (§6.5). Written by
- * `__taskPark` when the awaited record carries a producer's stamp, and read by
- * `__taskDeliver` — which is the only way a delivered `(class, a)` can find its
- * task.
- */
-let waitingByKey: Map<i64, TaskRecord> | null = null;
-
-/** `record → the states parked on it`. The general rendezvous: a task handle
- *  (an `async function`'s own record) is awaited through this map alone. */
+/** `record → the states parked on it`. The rendezvous for a task handle: an
+ *  `async function`'s own record is awaited through this map alone, and `wake`
+ *  is what resumes it when that task completes (0.7.0). */
 let waiters: Map<TaskRecord, Array<TaskState>> | null = null;
 
-/** The ready queue: states whose record settled, in delivery order (§6.5). */
+/** States a completion has released, drained at the next host entry
+ *  (`drainReady`). The guest-side half of the wake, for waiters on a guest
+ *  task's own record — the host has no key for those. */
 let ready: Array<TaskState> | null = null;
-
-/**
- * One completion that arrived before any task parked on its key (§4b of the
- * scope, 4e-1). A *managed* class with primitive fields, so the map's own
- * generated visitor traces it — the buffer is the entry's only root.
- *
- * Five words, because `__taskDeliver` receives five: a buffered entry must
- * reproduce the immediate path exactly when a later park claims it.
- */
-class BufferedCompletion {
-  class_: i32 = 0;
-  payload: i32 = 0;
-  f0: f32 = 0;
-  f1: f32 = 0;
-}
-
-/**
- * `(family, key) → a completion nobody has claimed yet`. Delivery order is
- * `Map` insertion order, which is what makes eviction oldest-first.
- *
- * **The boundary, stated:** at most {@link BUFFER_LIMIT} entries. When a new
- * delivery arrives at a full buffer the oldest is evicted silently (counted in
- * `__taskBufferedEvictions`) and the new one is stored (counted in
- * `__taskBufferedOverflows`). A delivery is never refused and never aborts: a
- * guest that has stopped awaiting would otherwise turn a slow job into a hang,
- * which is the failure this buffer exists to remove. 256 is two orders of
- * magnitude above the live-job ceiling every capability in the tree has, so
- * overflow means "the guest is not awaiting", and dropping the oldest is the
- * right guess about which future will never come.
- */
-let buffered: Map<i64, BufferedCompletion> | null = null;
-/** The buffer's ceiling. See `buffered`. */
-const BUFFER_LIMIT: i32 = 256;
-/** Deliveries that found a full buffer (each evicted one old entry). */
-let bufferedOverflows: i32 = 0;
-/** Entries evicted to make room for a newer delivery. */
-let bufferedEvictions: i32 = 0;
 
 /** §3.2's `payload` offset — the record's integer and `bool` result slot. */
 const RECORD_PAYLOAD: usize = 8;
 /** §3.2's `f0` offset — `f32` results, and the low half of the 64-bit ones. */
 const RECORD_F0: usize = 16;
 
-// ── the push path (0.6.0, additive) ─────────────────────────────────────────
+// ── the push path (the only path, 0.7.0) ────────────────────────────────────
 //
-// `docs/scheduler-contract.md` §2.1-§2.2 is the specification. This half of it
-// is **additive**: `__taskPark` keeps its `waitingByKey` registration, so the
-// pull path (`__taskDeliver` → `__taskTick`) still delivers everything — which
-// is what lets std 0.6.0 ship before the host that calls `__taskWake` exists.
-// Retiring the pull path is 0.7.0d's decision, made against that host.
+// `docs/scheduler-contract.md` §2.1-§2.2 is the specification. What stood beside
+// it — `__taskDeliver`, `__taskTick`, `__taskReportDrops`, the early-completion
+// buffer and the `waitingByKey` index they fed — is gone: the host publishes,
+// matches and wakes, and it attributes drops itself (`0.7.0c`). What remains
+// guest-side is the one rendezvous the host cannot own: two guest tasks, one
+// awaiting the other.
 
 /** `scheduler::park(task_id, class, key)` — one call per suspension (§2.1).
  *  `void`: a refusal comes back as a completion, never as a return value. */
@@ -475,48 +434,21 @@ export function __taskSettled(record: TaskRecord): bool {
  * delivery that arrives before the park would still find a valid resume point.
  */
 export function __taskPark(state: TaskState, awaited: TaskRecord): void {
-  // §4b: the completion may already be here — delivered before this park ran.
-  // Claiming it is what keeps the task from waiting forever: fill the record,
-  // mark it settled, and queue the state, so the transform's
-  // `if (!__taskSettled) { park; return }` sees a settled record on its *next*
-  // check — actually, on the *same* run: `__taskSettled` was checked before
-  // this call, which is why the state is queued here rather than left parked.
-  // **The guest-side early claim is the pull path's** (0.7.0d-pre). With a task
-  // table bound, the host owns early completions (`RecentCompletions`), and it
-  // delivers them through `__taskResume`. Claiming one here would push the state
-  // onto the `ready` queue — which no host-driven guest drains — and the task
-  // would strand with its completion already consumed. Measured: a guest that
-  // awaited a job, resumed, then awaited a second job whose record had arrived
-  // in the same epoch never parked again.
-  if (awaited.class_ != 0 && slots == null) {
-    let buffer = buffered;
-    let key = keyOf(familyOf(awaited.class_), awaited.key);
-    if (buffer != null && buffer.has(key)) {
-      let entry = buffer.get(key);
-      awaited.class_ = entry.class_;
-      awaited.payload = entry.payload;
-      awaited.f0 = entry.f0;
-      awaited.f1 = entry.f1;
-      awaited.status = 0;
-      awaited.done = 1;
-      buffer.delete(key);
-      // No `waitingByKey` registration: this task is not waiting any more.
-      let queue = ready;
-      if (queue == null) {
-        queue = new Array<TaskState>();
-        ready = queue;
-      }
-      queue.push(state);
-      return;
-    }
-  }
+  // The push half is the whole park (0.7.0). `parkState` records the state on
+  // the slot the task has held since creation and tells the host, which owns the
+  // rendezvous. A record with no producer stamp (`class_ == 0`) is not the host's
+  // business — its rendezvous is the handle — so `parkState` returns early and
+  // `wake` resumes it when the owning task completes.
+  //
+  // What the retirement removed: the guest-side early-completion buffer and the
+  // `waitingByKey` registration that fed `__taskDeliver`/`__taskTick`. Early
+  // completions are the host's now (`scheduler::RecentCompletions`), delivered
+  // through `__taskResume`; the pull delivery they existed for is gone.
   let byRecord = waiters;
   if (byRecord == null) {
     byRecord = new Map();
     waiters = byRecord;
   }
-  // `Map#get` aborts for a missing key when the value type is non-nullable
-  // (measured: "Key does not exist"), so presence is asked first.
   let list: Array<TaskState> | null = null;
   if (byRecord.has(awaited)) list = byRecord.get(awaited);
   if (list == null) {
@@ -524,136 +456,22 @@ export function __taskPark(state: TaskState, awaited: TaskRecord): void {
     byRecord.set(awaited, list);
   }
   list.push(state);
-  // A record that carries a producer's stamp (a class and a key, set by the
-  // handle that created it — `rt.job(id)` in the framework, 4b) can be found
-  // from a delivered `(class, a)`. A guest task's own record has neither until
-  // it is delivered, and needs no entry: the handle *is* the rendezvous.
-  if (awaited.class_ != 0) {
-    let byKey = waitingByKey;
-    if (byKey == null) {
-      byKey = new Map();
-      waitingByKey = byKey;
-    }
-    byKey.set(keyOf(familyOf(awaited.class_), awaited.key), awaited);
-  }
-  // The push half (0.6.0). Additive: the registration above is what delivers
-  // until the host calls `__taskWake`.
   parkState(state, awaited);
 }
 
 /**
- * Copies one delivered completion record (§3.2) into its task's record, marks
- * the task ready, and wakes the states parked on it.
+ * Move the states parked on `record` to the ready list.
  *
- * Called by the framework's `onBatch`/`onEvent` dispatchers, which decode the
- * 32-byte record out of the arena and pass its words through verbatim (§6.1,
- * §6.2). The runtime never mints an id: `a` is the producer's submit-time id
- * (§3.1).
- *
- * **The copy is immediate, and that is a correctness rule** (§6.5, review 8.3):
- * the sub-ring is transient — compaction slides records down and rebases the
- * guest's tail (`arena.rs:645-655`) — so reading `a`/`b`/`f0`/`f1` at resume
- * time would read a slot that may hold a different event.
- */
-export function __taskDeliver(class_: i32, a: i32, b: i32, f0: i32, f1: i32): void {
-  let family = familyOf(class_);
-  let key = keyOf(family, a);
-  let byKey = waitingByKey;
-  if (byKey == null || !byKey.has(key)) {
-    // Nobody is waiting *yet*: buffer it, so a park that happens later finds
-    // the completion instead of waiting for one that already arrived (§4b).
-    // Only stamped records take part — a task's own record needs no key.
-    if (class_ != 0 && slots == null) bufferCompletion(class_, key, b, f0, f1);
-    return;
-  }
-  let record = byKey.get(key);
-  record.class_ = class_;
-  record.payload = b;
-  record.f0 = reinterpret<f32>(f0);
-  record.f1 = reinterpret<f32>(f1);
-  // §3.4's failure classes and their errno belong to the dispatcher's binding
-  // (4b): std does not know the arena's class ids. Until that binding exists,
-  // `status` stays 0 — and nothing delivers in 4a, so nothing observes it.
-  record.status = 0;
-  record.done = 1;
-  wake(record);
-}
-
-/** Stores one unclaimed completion, evicting the oldest if the buffer is full. */
-function bufferCompletion(class_: i32, key: i64, b: i32, f0: i32, f1: i32): void {
-  let buffer = buffered;
-  if (buffer == null) {
-    buffer = new Map();
-    buffered = buffer;
-  }
-  if (buffer.size >= BUFFER_LIMIT) {
-    // Oldest-first: `Map` iterates in insertion order.
-    let oldest = buffer.keys()[0];
-    buffer.delete(oldest);
-    ++bufferedEvictions;
-    ++bufferedOverflows;
-  }
-  let entry = new BufferedCompletion();
-  entry.class_ = class_;
-  entry.payload = b;
-  entry.f0 = reinterpret<f32>(f0);
-  entry.f1 = reinterpret<f32>(f1);
-  buffer.set(key, entry);
-}
-
-/**
- * §6.4's dropped-completion rule, guest side: the framework measured `count`
- * completions lost for `family` and hands the delta here; this wakes up to
- * `count` tasks parked on that family with `status = -EIO` ("completion
- * lost"), oldest-first.
- *
- * **Who computes what, and why.** The drop counters live in the arena's wire
- * types (`TableHeader.dropped`, per class), which are framework knowledge — std
- * must not learn the arena's layout (§4.7's D9 split). So the framework reads
- * the counters and calls this; std owns the wake policy and the status.
- *
- * **Attribution is per family, not per task** (§6.4's Phase 4 ruling): a drop is
- * counted per class, never per record, so the runtime cannot say *which* job was
- * lost. It wakes the oldest parked tasks in the family, up to the delta, and the
- * guest recovers through the capability's own table — the region is the truth.
- */
-export function __taskReportDrops(family: i32, count: i32): void {
-  if (count <= 0) return;
-  let woken: i32 = 0;
-  // Oldest-first: `waitingByKey` iterates in insertion order, and a park
-  // inserted its entry when it happened.
-  let byKey = waitingByKey;
-  if (byKey == null) return;
-  let keys = byKey.keys();
-  for (let i = 0, k = keys.length; i < k && woken < count; ++i) {
-    let key = keys[i];
-    if (<i32>(key >> 32) != family) continue;
-    let record = byKey.get(key);
-    byKey.delete(key);
-    // §3.4: a lost completion is a status, not an exception. The payload stays
-    // 0 — nothing was delivered — and the guest reads the capability's table
-    // to learn what really happened.
-    record.status = -5; // -EIO
-    record.done = 1;
-    wake(record);
-    ++woken;
-  }
-}
-
-/** Deliveries that arrived at a full buffer (each evicted one older entry). */
-export function __taskBufferedOverflows(): i32 {
-  return bufferedOverflows;
-}
-
-/** Buffered entries evicted to make room for a newer delivery. */
-export function __taskBufferedEvictions(): i32 {
-  return bufferedEvictions;
-}
-
-/**
- * Moves the states parked on `record` to the ready queue, in the order they
- * parked. The list is cleared so a second completion for the same record (a
+ * This is the one rendezvous the host cannot own: `record` is a **guest task's
+ * own record** (class 0), so there is no producer key to match and the host was
+ * never told. The list is cleared so a second completion for the same record (a
  * re-used slot) does not wake the same task twice.
+ *
+ * Since 0.7.0 there is no `slot >= 0` filter here. That guard read "the host
+ * owns this one", which was true when a slot was allocated at park; pre-park
+ * registration gives every task a slot at creation, so the filter dropped every
+ * waiter and a task awaiting a *suspending guest task* was resumed by nobody —
+ * measured as `guest-chain` hanging.
  */
 function wake(record: TaskRecord): void {
   let byRecord = waiters;
@@ -661,19 +479,6 @@ function wake(record: TaskRecord): void {
   let list: Array<TaskState> | null = null;
   if (byRecord.has(record)) list = byRecord.get(record);
   if (list != null && list.length != 0) {
-    // **No slot filter** (0.7.0). The 0.7.0d-pre guard read `slot >= 0` as "the
-    // host owns this one" — true when a slot was allocated at park. Pre-park
-    // registration made every task hold a slot from creation, so the filter
-    // became "drop everything": a task awaiting a *suspending guest task* (a
-    // class-0 record, which never registers with the host) was queued nowhere
-    // and resumed by nobody. Measured as a deadlock: `outer` awaits `inner()`,
-    // `inner` parks on (FRAME, 0), the host resumes `inner`, `inner` completes —
-    // and `outer` never runs.
-    //
-    // The rendezvous is the distinction, not the slot: a state parked on a
-    // producer key is the host's to resume (`__taskResume`), and one parked on a
-    // guest task's own record is this function's. Only the latter ever reaches
-    // `wake`, because `__taskComplete*` settles a task's *own* record.
     let queue = ready;
     if (queue == null) {
       queue = new Array<TaskState>();
@@ -685,46 +490,17 @@ function wake(record: TaskRecord): void {
 }
 
 /**
- * Resumes the ready tasks, in delivery order — one resume per task per tick
- * (§6.5). Called from the guest-owned frame loop (§6.3), after
- * `RuntimeSession.wait(...)` returns and never from inside a callback.
- *
- * Entries present when the tick starts are the ones that run; a task delivered
- * *during* the tick queues for the next one, so a chatty resumed task cannot
- * starve the frame.
- */
-export function __taskTick(): void {
-  let queue = ready;
-  if (queue == null || queue.length == 0) return;
-  // Take the queue: deliveries that happen inside a resume go to a new one.
-  ready = null;
-  for (let i = 0, k = queue.length; i < k; ++i) {
-    let state = queue[i];
-    // The pull path resumed this task, so its push-path slot (if any) is done.
-    // Without this a guest on the pull path would leak one slot per await and
-    // hit -ENOSPC after `capacity` suspensions — measured as the reason the
-    // free lives here and not only in `__taskWake`.
-    releaseSlotOf(state);
-    state.resume(state);
-  }
-  // §6.4's dropped-completion rule lands here (4e): compare the drop rollup
-  // against the last observed value, and wake every task parked on a family
-  // whose counter advanced with `status = -EIO`.
-}
-
-/**
  * Resume the states queued by `wake` — at the executor's entry, never from
- * inside a completing task's own body (0.7.0).
+ * inside a completing task's own body.
  *
- * The guest-side queue has exactly one producer now: `__taskComplete*` waking
- * the tasks parked on a guest task's own record. Under the pull path that queue
- * was drained by `__taskTick` from the guest's frame loop; the host-owned loop
- * never calls a tick, so the drain moved to the host's own entry points —
- * `__taskWake`, `__taskResume` and `__taskFail` all end here. That keeps every
- * resume at the top of a host call, which is the property the queue existed for.
+ * Under the pull path `__taskTick` drained this from the guest's frame loop; a
+ * host-driven guest never ticks, so the drain moved to the host's own entry
+ * points — `__taskWake`, `__taskResume` and `__taskFail` all end here. That keeps
+ * every resume at the top of a host call, which is the property the list existed
+ * for.
  *
  * Loops until empty: resuming one state can complete another task, whose own
- * waiters are then queued. Each entry is resumed once and the queue is emptied
+ * waiters are then queued. Each entry is resumed once and the list is emptied
  * before the first resume, so this terminates.
  */
 function drainReady(): void {
