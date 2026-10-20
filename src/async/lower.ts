@@ -1342,6 +1342,12 @@ export class AsyncLowerTransform {
         plan.all = unionOf(plan.all, refsOfSeq(body));
         return plan;
       }
+      case NodeKind.Break:
+      case NodeKind.Continue: {
+        // EXPERIMENT: neither carries an await, so it plans as a leaf.
+        plan.kind = PlanKind.Plain;
+        return plan;
+      }
       case NodeKind.FunctionDeclaration: {
         let nested = <FunctionDeclaration>statement;
         if (nested.isAsync) {
@@ -1862,9 +1868,6 @@ export class AsyncLowerTransform {
       case PlanKind.For: {
         if (plan.lo == 0) return guardIfNeeded(rewriteReturns(node, ctx), ctx, range);
         let bodyStatements = this.emitSeq(assert(plan.body), ctx);
-        if (plan.incr != null) {
-          bodyStatements.push(Node.createExpressionStatement(assert(plan.incr)));
-        }
         let loopStatements = new Array<Statement>();
         if (plan.init != null) {
           // The initializer runs once, on the normal pass. A lifted loop variable
@@ -1877,13 +1880,24 @@ export class AsyncLowerTransform {
             range
           ));
         }
-        loopStatements.push(Node.createWhileStatement(
+        // A real `for`, with the incrementor in its own slot (0.7.1). It used to
+        // be a `while` with the incrementor appended to the body, which made
+        // `continue` skip it: the iteration counter never advanced and the loop
+        // spun forever. Measured against the first cut of this fix —
+        // `for (;;) { await; if (even) continue; }` hung, while the `while`
+        // forms were correct. The `resumePoint != 0 ||` condition is unchanged:
+        // a resumed pass enters the body without re-evaluating the condition,
+        // its continuation clears the point, and the incrementor then runs
+        // exactly once, as it does on any other iteration.
+        loopStatements.push(Node.createForStatement(
+          null,
           Node.createBinaryExpression(
             Token.Bar_Bar,
             notZero(resumePointRead(ctx.stateName, range), range),
             plan.cond != null ? plan.cond : Node.createTrueExpression(range),
             range
           ),
+          plan.incr != null ? assert(plan.incr) : null,
           Node.createBlockStatement(bodyStatements, range),
           range
         ));
