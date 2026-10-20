@@ -234,33 +234,21 @@ export function __taskBindTable(capacity: i32): void {
  */
 function parkState(state: TaskState, awaited: TaskRecord): void {
   const table = slots;
-  const free = freeSlots;
-  if (table == null || free == null) return;   // no table bound: pull path only
+  if (table == null) return;                   // no table bound: pull path only
   // A record with no producer stamp has no rendezvous to post: a guest task's
-  // own record is resolved by the handle, not by a key. The pull path keeps it.
+  // own record is resolved by the handle, not by a key.
   if (awaited.class_ == 0) return;
 
-  let id: i32 = 0;
-  if (free.length == 0) {
-    // §5.1's scheduler refusal: settle the task rather than park it. The guest
-    // observes it exactly like any other status — `record.status` — and the
-    // pull path's registration above is not undone, so an older host still
-    // delivers. A refusal must never leave the task parked with nothing coming.
-    awaited.status = -28; // -ENOSPC
-    awaited.done = 1;
-    let queue = ready;
-    if (queue == null) {
-      queue = new Array<TaskState>();
-      ready = queue;
-    }
-    queue.push(state);
-    return;
-  }
-
-  id = free.pop();
-  table[id].state = state;
-  table[id].record = awaited;
-  state.slot = id;
+  // **The slot is already this task's** (0.7.0d-pre). `__taskRegister` claimed it
+  // when the task was created and `__taskComplete*` frees it; a park only records
+  // the rendezvous. That is what makes -ENOSPC a creation-time answer: by the
+  // time a task can park, its slot exists, so the refusal has an id to fail and
+  // no task can strand with nowhere to be woken.
+  const id = state.slot;
+  if (id < 0) return;                          // registration refused: not runnable
+  const slot = table[id];
+  slot.state = state;
+  slot.record = awaited;
   hostPark(<i64>id, awaited.class_, awaited.key);
 }
 
@@ -292,10 +280,12 @@ export function __taskFail(idsPtr: usize, statusesPtr: usize, count: i32): void 
     const state = slot.state;
     if (state == null) continue;            // already resumed: a stale id
     const record = slot.record;
-    // Free before resuming, as `__taskWake` does: a continuation that parks
-    // again reuses the id and the host sees a fresh park (§4.9).
-    releaseSlot(id);
-    state.slot = -1;
+    // Clear the park, keep the slot: the task is still live and will free its
+    // slot when its body returns (0.7.0d-pre). Freeing here would let a second
+    // task claim the id while this one is still running, and the host's next
+    // wake for that id would resume the wrong task.
+    slot.state = null;
+    slot.record = null;
     if (record != null) {
       // §3.4: a lost completion is a status, not an exception. The payload
       // stays 0 — nothing was delivered — and the guest reads the capability's
@@ -338,10 +328,9 @@ export function __taskResume(
     const state = slot.state;
     if (state == null) continue;            // already resumed: a stale id
     const record = slot.record;
-    // Free before resuming, so a continuation that parks again reuses the id and
-    // the host sees a fresh park (§4.9 counts parks, not tasks).
-    releaseSlot(id);
-    state.slot = -1;
+    // Clear the park, keep the slot (0.7.0d-pre).
+    slot.state = null;
+    slot.record = null;
     if (record != null) {
       record.class_ = <i32>load<i32>(classesPtr + <usize>i * 4);
       record.payload = <i32>load<i32>(payloadsPtr + <usize>i * 4);
@@ -393,11 +382,10 @@ export function __taskWake(idsPtr: usize, count: i32): void {
     const slot = table[id];
     const state = slot.state;
     if (state == null) continue;            // already resumed: a stale id
-    // Free before resuming, so a task that parks again in its continuation can
-    // reuse the id — the host sees a fresh park for it (§4.9 counts parks, not
-    // tasks).
-    releaseSlot(id);
-    state.slot = -1;
+    // Clear the park, keep the slot (0.7.0d-pre): the task is live until its
+    // body returns, and `__taskComplete*` frees the id then.
+    slot.state = null;
+    slot.record = null;
     state.resume(state);
   }
 }
@@ -421,7 +409,45 @@ export function __taskRegister(state: TaskState): TaskRecord {
   let make = recordFactory;
   let record = make != null ? make() : new TaskRecord();
   state.record = record;
+
+  // **The slot is claimed here, at creation** (0.7.0d-pre): the table's capacity
+  // is a bound on *live* tasks, not on parked ones, and the id is the task's
+  // handle from creation to completion. §5.1's refusal therefore has a moment
+  // where it can be answered: a task that cannot get an id is settled with
+  // -ENOSPC before its body runs, and its caller's `await` falls through on the
+  // settled record instead of suspending forever.
+  const table = slots;
+  const free = freeSlots;
+  if (table == null || free == null) return record;  // no table bound: pull path
+  if (free.length == 0) {
+    record.status = -28; // -ENOSPC
+    record.done = 1;
+    state.slot = -1;
+    return record;
+  }
+  const id = free.pop();
+  table[id].state = state;
+  table[id].record = null;
+  state.slot = id;
   return record;
+}
+
+/** Whether this task got a slot — the entry's guard (0.7.0d-pre). A task whose
+ *  registration was refused must not run its body: its record is already settled
+ *  with the refusal, and the caller's await has already been answered. */
+export function __taskRegistered(state: TaskState): bool {
+  // "May run", not "has a slot" (0.7.0d-pre). A guest that binds no table is on
+  // the pull path: `__taskRegister` is a no-op there and every task runs. Only a
+  // *refused* registration — a table is bound and no slot was free — is false.
+  return state.slot >= 0 || slots == null;
+}
+
+/** Frees a task's slot when its body returns. Idempotent. */
+function finishTask(state: TaskState): void {
+  const id = state.slot;
+  if (id < 0) return;
+  state.slot = -1;
+  releaseSlot(id);
 }
 
 /**
@@ -705,6 +731,7 @@ export function __taskComplete(state: TaskState): void {
   let record = state.record;
   record.status = 0;
   record.done = 1;
+  finishTask(state);
   wake(record);
 }
 

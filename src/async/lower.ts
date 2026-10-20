@@ -190,6 +190,9 @@ const COMPLETE_RESULT_NAME = "__taskCompleteResult";
 const RECORD_FIELD = "_record";
 /** Prefix of the state struct's per-await record fields. */
 const AWAITED_PREFIX = "$awaited";
+/** The registration guard (0.7.0d-pre): a task whose slot could not be claimed
+ *  is settled with -ENOSPC, and its body must not run. */
+const REGISTERED_NAME = "__taskRegistered";
 /** The state struct's resume-point field. */
 const RESUME_POINT_FIELD = "resumePoint";
 /** The state struct's handle field. */
@@ -915,6 +918,28 @@ export class AsyncLowerTransform {
         Node.createCallExpression(Node.createIdentifierExpression(REGISTER_NAME, range), null, [ stateIdent ], range),
         range
       )
+    ));
+    // `if (!__taskRegistered(state)) return;` — the entry's guard (0.7.0d-pre).
+    // `__taskRegister` claims the task's slot; when the table is full it settles
+    // the record with -ENOSPC instead, and the body must not run: the caller's
+    // `await` has already been answered by the settled record, and running the
+    // body would be work for a task the executor refused.
+    entryStatements.push(Node.createIfStatement(
+      Node.createUnaryPrefixExpression(
+        Token.Exclamation,
+        Node.createCallExpression(
+          Node.createIdentifierExpression(REGISTERED_NAME, range), null, [ stateIdent ], range
+        ),
+        range
+      ),
+      // The entry returns the handle it already made: the caller's `await` sees
+      // a settled record and never suspends. A bare `return` would not type —
+      // the lowered signature is `Task<R>`.
+      Node.createBlockStatement(
+        [ Node.createReturnStatement(handleAccess, range) ], range
+      ),
+      null,
+      range
     ));
     // state.resume = changetype<(state: TaskState) => void>(f$resume);
     //   — §4.7.3's carrier. Before the prefix runs, so a suspension inside it
