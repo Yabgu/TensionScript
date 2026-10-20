@@ -186,6 +186,13 @@ declare function hostPark(taskId: i64, class_: i32, key: i32): void;
  */
 class TaskSlot {
   state: TaskState | null = null;
+  /**
+   * The record this task parked on (0.7.0c). `__taskFail` needs it: a refused
+   * park or a lost completion resumes the task with a *status*, and the status
+   * lives on the awaited record — the one the transform's continuation checks
+   * and `rt.classify` reads — not on the task's own result record.
+   */
+  record: TaskRecord | null = null;
 }
 
 /** The table: `task_id` is a slot index (§2.1). Allocated at bind time. */
@@ -252,8 +259,52 @@ function parkState(state: TaskState, awaited: TaskRecord): void {
 
   id = free.pop();
   table[id].state = state;
+  table[id].record = awaited;
   state.slot = id;
   hostPark(<i64>id, awaited.class_, awaited.key);
+}
+
+/**
+ * `__taskFail(idsPtr, statusesPtr, count)` — the host names tasks to resume
+ * with a status and no payload (§4.4's lost completion, §5.1's refused park).
+ *
+ * `idsPtr` points at `count` packed `u64` task ids; `statusesPtr` at `count`
+ * packed `i32` statuses (a negative errno each). The status goes on the record
+ * the task *awaited*: that is the one the transform's settled check reads and
+ * the one `rt.classify` reports, so a lost stream signal returns `-EIO` rather
+ * than the `0` a bare wake would look like.
+ *
+ * This is the mechanism `scheduler::park`'s refusal already described in
+ * `scheduler.rs` — "the next `wake(ids)` carries the id" — split out so the
+ * host has one call for "resume with a status" and another for "resume with a
+ * completion", rather than a wake that sometimes means both.
+ *
+ * An id whose slot is empty is skipped, exactly as `__taskWake` skips one: a
+ * stale id must never resume anything twice.
+ */
+export function __taskFail(idsPtr: usize, statusesPtr: usize, count: i32): void {
+  const table = slots;
+  if (table == null || count <= 0) return;
+  for (let i = 0; i < count; ++i) {
+    const id = <i32>load<u64>(idsPtr + <usize>i * 8);
+    if (id < 0 || id >= table.length) continue;
+    const slot = table[id];
+    const state = slot.state;
+    if (state == null) continue;            // already resumed: a stale id
+    const record = slot.record;
+    // Free before resuming, as `__taskWake` does: a continuation that parks
+    // again reuses the id and the host sees a fresh park (§4.9).
+    releaseSlot(id);
+    state.slot = -1;
+    if (record != null) {
+      // §3.4: a lost completion is a status, not an exception. The payload
+      // stays 0 — nothing was delivered — and the guest reads the capability's
+      // table to learn what really happened.
+      record.status = <i32>load<i32>(statusesPtr + <usize>i * 4);
+      record.done = 1;
+    }
+    state.resume(state);
+  }
 }
 
 /** Release a slot: the task it held has resumed, and the id may be reused. */
@@ -263,6 +314,7 @@ function releaseSlot(id: i32): void {
   if (table == null || free == null) return;
   if (id < 0 || id >= table.length) return;
   table[id].state = null;
+  table[id].record = null;
   free.push(id);
 }
 
