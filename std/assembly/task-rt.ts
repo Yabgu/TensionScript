@@ -295,6 +295,7 @@ export function __taskFail(idsPtr: usize, statusesPtr: usize, count: i32): void 
     }
     state.resume(state);
   }
+  drainReady();
 }
 
 /**
@@ -339,6 +340,7 @@ export function __taskResume(
     }
     state.resume(state);
   }
+  drainReady();
 }
 
 /** Release a slot: the task it held has resumed, and the id may be reused. */
@@ -388,6 +390,7 @@ export function __taskWake(idsPtr: usize, count: i32): void {
     slot.record = null;
     state.resume(state);
   }
+  drainReady();
 }
 
 /** `(family << 32) | (a & 0xffffffff)`, the correlation key (§3.1). */
@@ -658,15 +661,19 @@ function wake(record: TaskRecord): void {
   let list: Array<TaskState> | null = null;
   if (byRecord.has(record)) list = byRecord.get(record);
   if (list != null && list.length != 0) {
-    // **A push-parked state is not queued** (0.7.0d-pre). Its slot is held, so
-    // the host owns its resume and will call `__taskResume`; queueing it here as
-    // well would resume the same task twice — once from `__taskTick`, once from
-    // the host — and the second resume would re-enter a continuation that has
-    // already advanced.
-    for (let i = list.length - 1; i >= 0; --i) {
-      if (list[i].slot >= 0) list.splice(i, 1);
-    }
-    if (list.length == 0) return;
+    // **No slot filter** (0.7.0). The 0.7.0d-pre guard read `slot >= 0` as "the
+    // host owns this one" — true when a slot was allocated at park. Pre-park
+    // registration made every task hold a slot from creation, so the filter
+    // became "drop everything": a task awaiting a *suspending guest task* (a
+    // class-0 record, which never registers with the host) was queued nowhere
+    // and resumed by nobody. Measured as a deadlock: `outer` awaits `inner()`,
+    // `inner` parks on (FRAME, 0), the host resumes `inner`, `inner` completes —
+    // and `outer` never runs.
+    //
+    // The rendezvous is the distinction, not the slot: a state parked on a
+    // producer key is the host's to resume (`__taskResume`), and one parked on a
+    // guest task's own record is this function's. Only the latter ever reaches
+    // `wake`, because `__taskComplete*` settles a task's *own* record.
     let queue = ready;
     if (queue == null) {
       queue = new Array<TaskState>();
@@ -703,6 +710,36 @@ export function __taskTick(): void {
   // §6.4's dropped-completion rule lands here (4e): compare the drop rollup
   // against the last observed value, and wake every task parked on a family
   // whose counter advanced with `status = -EIO`.
+}
+
+/**
+ * Resume the states queued by `wake` — at the executor's entry, never from
+ * inside a completing task's own body (0.7.0).
+ *
+ * The guest-side queue has exactly one producer now: `__taskComplete*` waking
+ * the tasks parked on a guest task's own record. Under the pull path that queue
+ * was drained by `__taskTick` from the guest's frame loop; the host-owned loop
+ * never calls a tick, so the drain moved to the host's own entry points —
+ * `__taskWake`, `__taskResume` and `__taskFail` all end here. That keeps every
+ * resume at the top of a host call, which is the property the queue existed for.
+ *
+ * Loops until empty: resuming one state can complete another task, whose own
+ * waiters are then queued. Each entry is resumed once and the queue is emptied
+ * before the first resume, so this terminates.
+ */
+function drainReady(): void {
+  let guard: i32 = 0;
+  let pending = ready;
+  while (pending != null && pending.length != 0 && guard < 1024) {
+    let queue = pending;
+    ready = null;
+    for (let i = 0, k = queue.length; i < k; ++i) {
+      let state = queue[i];
+      state.resume(state);
+    }
+    pending = ready;
+    guard += 1;
+  }
 }
 
 /**
