@@ -190,6 +190,9 @@ const COMPLETE_RESULT_NAME = "__taskCompleteResult";
 const RECORD_FIELD = "_record";
 /** Prefix of the state struct's per-await record fields. */
 const AWAITED_PREFIX = "$awaited";
+/** The registration guard (0.7.0d-pre): a task whose slot could not be claimed
+ *  is settled with -ENOSPC, and its body must not run. */
+const REGISTERED_NAME = "__taskRegistered";
 /** The state struct's resume-point field. */
 const RESUME_POINT_FIELD = "resumePoint";
 /** The state struct's handle field. */
@@ -469,7 +472,7 @@ export class AsyncLowerTransform {
         return this.refuse(parser, parameter.name.range, "a parameter whose name is reserved by the state struct (async lowering)");
       }
     }
-    // §2.3: `async function f(): T` declares `T` and the call yields `Task<T>`.
+    // §2.3: `async function f(): T` declares `T` and the call produces `Task<T>`.
     // Without an annotation there is no `T` to name — the parser produces an
     // empty `NamedType` for an omitted return type — and `Task<>` is not a type.
     let returnType = signature.returnType;
@@ -916,6 +919,28 @@ export class AsyncLowerTransform {
         range
       )
     ));
+    // `if (!__taskRegistered(state)) return;` — the entry's guard (0.7.0d-pre).
+    // `__taskRegister` claims the task's slot; when the table is full it settles
+    // the record with -ENOSPC instead, and the body must not run: the caller's
+    // `await` has already been answered by the settled record, and running the
+    // body would be work for a task the executor refused.
+    entryStatements.push(Node.createIfStatement(
+      Node.createUnaryPrefixExpression(
+        Token.Exclamation,
+        Node.createCallExpression(
+          Node.createIdentifierExpression(REGISTERED_NAME, range), null, [ stateIdent ], range
+        ),
+        range
+      ),
+      // The entry returns the handle it already made: the caller's `await` sees
+      // a settled record and never suspends. A bare `return` would not type —
+      // the lowered signature is `Task<R>`.
+      Node.createBlockStatement(
+        [ Node.createReturnStatement(handleAccess, range) ], range
+      ),
+      null,
+      range
+    ));
     // state.resume = changetype<(state: TaskState) => void>(f$resume);
     //   — §4.7.3's carrier. Before the prefix runs, so a suspension inside it
     // leaves a state the tick can resume. The cast is a variance bridge, not a
@@ -962,7 +987,7 @@ export class AsyncLowerTransform {
     declaration.body = Node.createBlockStatement(entryStatements, range);
     declaration.signature.returnType = taskType;
     // The call-site type is now the declared one. `async` on the *element* is
-    // what makes a call yield `Task<T>` (`resolver.ts:2669`); the entry's
+    // what makes a call produce `Task<T>` (`resolver.ts:2669`); the entry's
     // declared return type is already that handle, so keeping the trait would
     // wrap it twice.
     declaration.isAsync = false;
@@ -1315,6 +1340,12 @@ export class AsyncLowerTransform {
         plan.lo = body.lo;
         plan.hi = body.hi;
         plan.all = unionOf(plan.all, refsOfSeq(body));
+        return plan;
+      }
+      case NodeKind.Break:
+      case NodeKind.Continue: {
+        // EXPERIMENT: neither carries an await, so it plans as a leaf.
+        plan.kind = PlanKind.Plain;
         return plan;
       }
       case NodeKind.FunctionDeclaration: {
@@ -1837,9 +1868,6 @@ export class AsyncLowerTransform {
       case PlanKind.For: {
         if (plan.lo == 0) return guardIfNeeded(rewriteReturns(node, ctx), ctx, range);
         let bodyStatements = this.emitSeq(assert(plan.body), ctx);
-        if (plan.incr != null) {
-          bodyStatements.push(Node.createExpressionStatement(assert(plan.incr)));
-        }
         let loopStatements = new Array<Statement>();
         if (plan.init != null) {
           // The initializer runs once, on the normal pass. A lifted loop variable
@@ -1852,13 +1880,24 @@ export class AsyncLowerTransform {
             range
           ));
         }
-        loopStatements.push(Node.createWhileStatement(
+        // A real `for`, with the incrementor in its own slot (0.7.1). It used to
+        // be a `while` with the incrementor appended to the body, which made
+        // `continue` skip it: the iteration counter never advanced and the loop
+        // spun forever. Measured against the first cut of this fix —
+        // `for (;;) { await; if (even) continue; }` hung, while the `while`
+        // forms were correct. The `resumePoint != 0 ||` condition is unchanged:
+        // a resumed pass enters the body without re-evaluating the condition,
+        // its continuation clears the point, and the incrementor then runs
+        // exactly once, as it does on any other iteration.
+        loopStatements.push(Node.createForStatement(
+          null,
           Node.createBinaryExpression(
             Token.Bar_Bar,
             notZero(resumePointRead(ctx.stateName, range), range),
             plan.cond != null ? plan.cond : Node.createTrueExpression(range),
             range
           ),
+          plan.incr != null ? assert(plan.incr) : null,
           Node.createBlockStatement(bodyStatements, range),
           range
         ));
@@ -3326,7 +3365,7 @@ function isVoidTypeNode(type: TypeNode): bool {
     && (<NamedTypeNode>type).name.identifier.text == "void";
 }
 
-/** `Task<T>` — what a call to the lowered entry yields (§1.2 rule 2). */
+/** `Task<T>` — what a call to the lowered entry produces (§1.2 rule 2). */
 function taskTypeNode(typeArgument: TypeNode, range: Range): NamedTypeNode {
   return Node.createNamedType(
     Node.createSimpleTypeName("Task", range),

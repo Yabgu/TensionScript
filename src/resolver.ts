@@ -2660,7 +2660,7 @@ export class Resolver extends DiagnosticEmitter {
       }
       case ElementKind.Function: {
         let functionInstance = <Function>target;
-        // A call to an `async` function yields `Task<T>`, not `T`: the
+        // A call to an `async` function produces `Task<T>`, not `T`: the
         // declaration's return type is the *resolved* value type, and the
         // handle is what the call produces (`docs/async-await-plan-v2.md` §1.2
         // rule 2, §2.3). The trait lives on the element and never in the
@@ -2709,12 +2709,12 @@ export class Resolver extends DiagnosticEmitter {
   }
 
   /**
-   * The `Task<T>` a call to an `async function f(): T` yields.
+   * The `Task<T>` a call to an `async function f(): T` produces.
    *
    * `T` is the declaration's return type — the type the body's `return`
    * produces — and the call wraps it in the standard library's handle;
    * `await` unwraps it again (§1.2 rules 1 and 2). `T` may be `void`: an
-   * `async function f(): void` yields `Task<void>`, which instantiates through
+   * `async function f(): void` produces `Task<void>`, which instantiates through
    * the ordinary class machinery like any other type argument.
    *
    * A program without the standard library's `Task` answers `null`, and the
