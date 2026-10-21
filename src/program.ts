@@ -565,7 +565,7 @@ export class Program extends DiagnosticEmitter {
    * Gets the standard `Task` prototype, or `null` when the program does not
    * provide it.
    *
-   * `Task<T>` is the handle type an `async` function's call yields and what
+   * `Task<T>` is the handle type an `async` function's call produces and what
    * `await` unwraps (`docs/async-await-plan-v2.md` §1.2 rule 2, §2.4). Unlike
    * the other standard prototypes this one is *optional*: a program assembled
    * without the standard library (a bare `new Program()` in a unit test, say)
@@ -3819,7 +3819,7 @@ export class FunctionPrototype extends DeclaredElement {
    * refuses those from source, so the flags decide here too: a declaration a
    * transform synthesized cannot smuggle the trait onto a construct the
    * language does not allow it on. A call through a bound async method still
-   * yields `Task<T>`; a constructor never can.
+   * produces `Task<T>`; a constructor never can.
    */
   get isAsync(): bool {
     return (<FunctionDeclaration>this.declaration).isAsync
