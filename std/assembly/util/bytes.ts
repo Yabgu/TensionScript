@@ -105,3 +105,31 @@ export function FILL<T>(
     }
   }
 }
+
+/**
+ * Copies one `T`-layout value: `dst` receives `offsetof<T>()` bytes from `src`.
+ *
+ * **This is the struct copy.** `store<T>(ptr, value)` is not one: `T`'s byte
+ * size is the size of a `T`-*typed value*, which for a class is one reference,
+ * so `store<T>` writes one word. `offsetof<T>()` is the layout size — the sum
+ * of the fields with inter-field alignment, and the same number the compiler
+ * passes to `__alloc` for an `@unmanaged` class — which is what a copy of the
+ * whole record needs.
+ *
+ * Both arguments are addresses. For an `@unmanaged` class `v`, that is
+ * `changetype<usize>(v)`; the copy is a byte move, so the destination must hold
+ * `offsetof<T>()` bytes and the two regions must not require the allocator's
+ * bookkeeping (this neither links nor traces — it is the wire's copy, for
+ * memory the guest addresses directly).
+ *
+ * `T` may be a managed class: its layout is its fields' layout, and
+ * `offsetof<T>()` reports it (measured: 32 for the eight `i32`/`f32` fields of
+ * `TaskRecord`). What the copy cannot do is make the destination a *traced*
+ * reference — so a managed record copied into a raw buffer is the caller's
+ * responsibility, exactly as `memory.copy` always is.
+ */
+// @ts-ignore: decorator
+@inline
+export function COPY_STRUCT<T>(dst: usize, src: usize): void {
+  memory.copy(dst, src, offsetof<T>());
+}
