@@ -113,10 +113,23 @@ let waiters: Map<TaskRecord, Array<TaskState>> | null = null;
  *  task's own record — the host has no key for those. */
 let ready: Array<TaskState> | null = null;
 
-/** §3.2's `payload` offset — the record's integer and `bool` result slot. */
-const RECORD_PAYLOAD: usize = 8;
+/**
+ * §3.2's `payload` offset — the record's integer and `bool` result slot.
+ *
+ * **Derived from the declaration**, not hand-copied: `TaskRecord`
+ * (`./task.ts:41-55`) is the layout, and `offsetof` reports it as a compile-time
+ * constant (measured: 8, and 32 for the record's size). A field that moved
+ * would move this with it; a literal would not.
+ *
+ * A constant rather than `record.payload = …` at the use sites because the
+ * 64-bit path below is generic: `R` is one of `i64`/`u64`/`f64`, which lands
+ * across `f0`/`f1` — two declared `f32` fields — so that store is necessarily a
+ * raw 8-byte write at `f0`'s offset. `payload` keeps the same spelling as its
+ * sibling for symmetry, not because it needs the offset form.
+ */
+const RECORD_PAYLOAD: usize = offsetof<TaskRecord>("payload");
 /** §3.2's `f0` offset — `f32` results, and the low half of the 64-bit ones. */
-const RECORD_F0: usize = 16;
+const RECORD_F0: usize = offsetof<TaskRecord>("f0");
 
 // ── the push path (the only path, 0.7.0) ────────────────────────────────────
 //
