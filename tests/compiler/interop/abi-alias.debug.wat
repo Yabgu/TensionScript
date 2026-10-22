@@ -232,8 +232,8 @@
   i32.const 12
   i32.eq
   drop
-  i32.const 14
-  i32.const 14
+  i32.const 16
+  i32.const 16
   i32.eq
   drop
  )

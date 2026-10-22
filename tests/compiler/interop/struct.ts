@@ -16,7 +16,7 @@
 struct Record_ {
   a: i32;   // 0
   b: f64;   // 8 (8-aligned, so 4 bytes of interior padding after `a`)
-  c: i32;   // 16 -> 20 (no trailing pad: `offsetof` is layout bytes)
+  c: i32;   // 16 -> 20, rounded to the record's alignment (8) -> 24
 }
 
 @unmanaged class RecordExplicit {
@@ -48,8 +48,8 @@ assert(offsetof<RecordBoth>("b") == offsetof<Record_>("b"));
 // --- the layout is the unmanaged one, not a reference ----------------------
 // A managed class would report the pointer width here. The partial cell (a
 // `struct` that parses but does not imply `@unmanaged`) fails these.
-assert(sizeof<Record_>() == 20);        // 4 + pad4 + 8 + 4, no trailing pad
-assert(offsetof<Record_>() == 20);
+assert(sizeof<Record_>() == 24);        // 4 + pad4 + 8 + 4, rounded to 8
+assert(offsetof<Record_>() == 24);
 assert(offsetof<Record_>("a") == 0);
 assert(offsetof<Record_>("b") == 8);
 assert(offsetof<Record_>("c") == 16);

@@ -15,7 +15,7 @@
   f64.store offset=8
  )
  (func $interop/struct/run (result i32)
-  i32.const 28
+  i32.const 32
  )
  (func $interop/struct/readC (param $0 i32) (result i32)
   local.get $0

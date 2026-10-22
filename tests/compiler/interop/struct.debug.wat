@@ -17,40 +17,12 @@
  (export "memory" (memory $0))
  (start $~start)
  (func $start:interop/struct
-  i32.const 20
-  i32.const 20
+  i32.const 24
+  i32.const 24
   i32.eq
   drop
-  i32.const 20
-  i32.const 20
-  i32.eq
-  drop
-  i32.const 0
-  i32.const 0
-  i32.eq
-  drop
-  i32.const 8
-  i32.const 8
-  i32.eq
-  drop
-  i32.const 16
-  i32.const 16
-  i32.eq
-  drop
-  i32.const 20
-  i32.const 20
-  i32.eq
-  drop
-  i32.const 8
-  i32.const 8
-  i32.eq
-  drop
-  i32.const 20
-  i32.const 20
-  i32.eq
-  drop
-  i32.const 20
-  i32.const 20
+  i32.const 24
+  i32.const 24
   i32.eq
   drop
   i32.const 0
@@ -65,7 +37,35 @@
   i32.const 16
   i32.eq
   drop
-  i32.const 20
+  i32.const 24
+  i32.const 24
+  i32.eq
+  drop
+  i32.const 8
+  i32.const 8
+  i32.eq
+  drop
+  i32.const 24
+  i32.const 24
+  i32.eq
+  drop
+  i32.const 24
+  i32.const 24
+  i32.eq
+  drop
+  i32.const 0
+  i32.const 0
+  i32.eq
+  drop
+  i32.const 8
+  i32.const 8
+  i32.eq
+  drop
+  i32.const 16
+  i32.const 16
+  i32.eq
+  drop
+  i32.const 24
   i32.const 4
   i32.ne
   drop
@@ -99,7 +99,7 @@
   return
  )
  (func $interop/struct/run (result i32)
-  i32.const 20
+  i32.const 24
   i32.const 8
   i32.add
   return

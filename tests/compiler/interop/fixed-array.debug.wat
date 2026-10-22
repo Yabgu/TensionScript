@@ -75,16 +75,24 @@
   i32.const 0
   i32.eq
   drop
-  i32.const 37
-  i32.const 37
-  i32.eq
-  drop
   i32.const 4
   i32.const 4
   i32.eq
   drop
   i32.const 36
   i32.const 36
+  i32.eq
+  drop
+  i32.const 40
+  i32.const 40
+  i32.eq
+  drop
+  i32.const 40
+  i32.const 40
+  i32.eq
+  drop
+  i32.const 40
+  i32.const 40
   i32.eq
   drop
   i32.const 16

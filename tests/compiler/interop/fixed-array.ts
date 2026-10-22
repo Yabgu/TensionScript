@@ -35,7 +35,7 @@
 @unmanaged struct Eight {
   head: u8;    // 0
   arr: u32[8]; // 4  (4-aligned, not 32)
-  tail: u8;    // 36
+  tail: u8;    // 36 .. 37, rounded to the record's alignment -> 40
 }
 
 // --- the disambiguation did not collapse to Array<T> -----------------------
@@ -67,9 +67,15 @@ assert(sizeof<Six>() == 24);
 assert(offsetof<Six>("arr") == 0);
 
 // --- and a following field is placed right after the array ----------------
-assert(sizeof<Eight>() == 37);
 assert(offsetof<Eight>("arr") == 4);
 assert(offsetof<Eight>("tail") == 36);
+
+// The record's size is where its last field ends, rounded up to its alignment
+// (4 here): 37 -> 40. That is C's `sizeof(struct)`, and it is what makes this
+// record a legal array stride and a `COPY_STRUCT` length.
+assert(sizeof<Eight>() == 40);
+assert(offsetof<Eight>() == 40);
+assert(sizeof<Eight>() == offsetof<Eight>());
 
 // --- `offsetof` of the array type itself is its whole extent --------------
 // The same number `sizeof` gives: a fixed array has no trailing pad of its own

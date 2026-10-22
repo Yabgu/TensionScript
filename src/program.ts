@@ -4520,8 +4520,10 @@ export class Class extends TypedElement {
   interfaces: Set<Interface> | null = null;
   /** Contextual type arguments for fields and methods. */
   contextualTypeArguments: Map<string,Type> | null = null;
-  /** Current member memory offset. */
+  /** Current member memory offset; for an `@unmanaged` record, rounded up to `alignLog2`. */
   nextMemoryOffset: u32 = 0;
+  /** Alignment of the record's layout as a log2: the strongest of its fields', base included. */
+  alignLog2: i32 = 0;
   /** Constructor instance. */
   constructorInstance: Function | null = null;
   /** Operator overloads. */

@@ -47,7 +47,7 @@ assert(offsetof<Aliased>("plain") == 0);
 assert(offsetof<Aliased>("aliased") == 4);
 assert(offsetof<Aliased>("twice") == 8);
 assert(offsetof<Aliased>("argless") == 12);
-assert(sizeof<Aliased>() == 14);   // 4+4+4+2, no trailing pad
+assert(sizeof<Aliased>() == 16);   // 4+4+4+2, rounded to the u32 alignment (4)
 
 // --- abiNameOf is compile-time: no runtime lookup is emitted ---------------
 // (The .release.wat fixture is the evidence: the bodies are constants.)

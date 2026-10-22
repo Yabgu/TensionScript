@@ -36,7 +36,8 @@ import {
   IndexSignature,
   isTypedElement,
   InterfacePrototype,
-  DeclaredElement
+  DeclaredElement,
+  DecoratorFlags
 } from "./program";
 
 import {
@@ -3629,6 +3630,10 @@ export class Resolver extends DiagnosticEmitter {
 
     // Alias base members
     let memoryOffset: u32 = 0;
+    // The record's alignment: the strongest field alignment, inherited ones
+    // included. A derived record's size must round to the base's alignment as
+    // much as to its own fields'.
+    let classAlignLog2: i32 = 0;
     let base = instance.base;
     if (base) {
       let implicitlyExtendsObject = instance.prototype.implicitlyExtendsObject;
@@ -3653,6 +3658,7 @@ export class Resolver extends DiagnosticEmitter {
         }
       }
       memoryOffset = base.nextMemoryOffset;
+      classAlignLog2 = base.alignLog2;
     }
 
     // Resolve instance members
@@ -3721,6 +3727,7 @@ export class Resolver extends DiagnosticEmitter {
                   // record at 36 instead of 24.
                   let alignLog2 = fieldType.alignLog2;
                   assert(alignLog2 >= 0);
+                  if (alignLog2 > classAlignLog2) classAlignLog2 = alignLog2;
                   let mask = (1 << alignLog2) - 1;
                   if (memoryOffset & mask) memoryOffset = (memoryOffset | mask) + 1;
                   boundInstance.memoryOffset = memoryOffset;
@@ -3765,6 +3772,31 @@ export class Resolver extends DiagnosticEmitter {
       }
 
       // Finalize memory offset
+      //
+      // The size of a C record is where its last field **ends, rounded up to
+      // the record's alignment** -- not the offset where the last field ends.
+      // `{a: u8; arr: u32[8]; b: u8}` ends at 37 and is 40 bytes: its fields
+      // align it to 4. Leaving it at 37 makes the record's size not a multiple
+      // of its own alignment, which is wrong in three ways at once: as an array
+      // stride (`T[N]` misaligns every element after the first), as a
+      // `COPY_STRUCT` length (`memory.copy` leaves the tail of a host buffer
+      // untouched), and against `Marshal.SizeOf` (40, the C#-gold answer).
+      //
+      // `sizeof<T>()` and the no-argument `offsetof<T>()` both read this number
+      // and so move together by construction; a field's offset
+      // (`offsetof<T>("field")`) is unaffected. An empty record stays 0: its
+      // alignment is 0, so the mask is 0.
+      //
+      // Only an `@unmanaged` class is a C record. A managed class is a
+      // reference whose `sizeof` is the pointer width; padding its payload
+      // would change what `__new` is asked for and what the JS bindings report
+      // as `SIZE`, which is a different change to a different path. Its layout
+      // extent stays where its last field ends, as it always was.
+      if (instance.hasDecorator(DecoratorFlags.Unmanaged)) {
+        let classAlignMask = (1 << classAlignLog2) - 1;
+        memoryOffset = (memoryOffset + classAlignMask) & ~classAlignMask;
+      }
+      instance.alignLog2 = classAlignLog2;
       instance.nextMemoryOffset = memoryOffset;
 
       // Link _own_ constructor if present
