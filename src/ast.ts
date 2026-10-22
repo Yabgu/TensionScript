@@ -856,6 +856,21 @@ export abstract class TypeNode extends Node {
   /** Whether this type node is currently in the process of being resolved. */
   currentlyResolving: bool = false;
 
+  /**
+   * Attributes written after the type on the same line, e.g. `x: f32 @abi.alias("f")`.
+   *
+   * They live on the **type**, not on the declaration, because the same type
+   * spelling appears in a field, a parameter, a return type and a local, and an
+   * attribute that changes the type's meaning must travel with it. Declaration
+   * decorators stay on the declaration (`DeclarationStatement.decorators`); the
+   * two lists are never merged.
+   *
+   * A newline before `@` ends the type instead: the attribute then belongs to
+   * the following declaration, which is the behaviour every other line-sensitive
+   * decision in this parser follows (`Tokenizer.peekOnNewLine`).
+   */
+  attributes: DecoratorNode[] | null = null;
+
   /** Tests if this type has a generic component matching one of the given type parameters. */
   hasGenericComponent(typeParameterNodes: TypeParameterNode[]): bool {
     if (this.kind == NodeKind.NamedType) {

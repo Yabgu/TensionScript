@@ -788,6 +788,21 @@ export class Parser extends DiagnosticEmitter {
       if (nullable) break;
     }
 
+    // ... @Attribute: attributes written on the same line as the type belong to
+    // the type. A newline before `@` ends the type, so the attribute attaches to
+    // the following declaration instead -- preserving the pre-existing reading
+    // of `x: f32` / `@foo` / `y: f32`, where `@foo` is `y`'s decorator.
+    while (
+      tn.peek() == Token.At &&
+      !tn.peekOnNewLine()
+    ) {
+      tn.next();
+      let attribute = this.parseDecorator(tn);
+      if (!attribute) break;
+      if (!type.attributes) type.attributes = [ attribute ];
+      else type.attributes.push(attribute);
+    }
+
     return type;
   }
 
