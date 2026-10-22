@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.8.1
+
+Republish. The 0.8.0 tarball shipped an empty `dist/` — the publish ran without
+a build, and `files: ["dist/"]` packed the gitignored-but-absent artifacts — so
+`package.json` exported `./dist/asc.js` and `dist/asc.js` was not in the tarball.
+Every install failed to load:
+
+```
+ERR_MODULE_NOT_FOUND: Cannot find module .../dist/asc.js
+  imported from .../bin/tensionscript.js
+```
+
+0.8.1 republishes with the built `dist/` and adds a `prepublishOnly` guard —
+`npm run build && npm run publish:verify`, where `scripts/verify-dist.js`
+asserts the artifacts exist and clear a sanity floor — that refuses to publish
+if `dist/asc.js` or `dist/assemblyscript.js` is missing or undersized.
+
+**No API changes from 0.8.0.** Any consumer that managed to install 0.8.0 could
+not load it; 0.8.1 is a drop-in replacement.
+
+*Discipline note extension.* Verify the tarball loads, not just that the version
+is on the registry. `npm view <pkg> version` proves the version exists;
+`npm pack` + `tar -tzf` + install + `--version` proves it works. The guard makes
+the second check unnecessary for this failure — the publish now aborts rather
+than shipping an empty `dist/` — but the check is still what tells you whether
+the artifact the registry serves is the one you built.
+
+```
+npm view @acakar/tensionscript version --prefer-online
+npm pack @acakar/tensionscript@0.8.1
+tar -tzf acakar-tensionscript-0.8.1.tgz | grep dist/asc.js
+tar -tzf acakar-tensionscript-0.8.1.tgz | grep dist/assemblyscript.js
+npm install -g acakar-tensionscript-0.8.1.tgz
+tensionscript --version
+```
+
 ## 0.8.0
 
 The interop bundle: the guest describes a C record in the language, and the
