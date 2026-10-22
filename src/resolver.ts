@@ -3792,7 +3792,10 @@ export class Resolver extends DiagnosticEmitter {
       // would change what `__new` is asked for and what the JS bindings report
       // as `SIZE`, which is a different change to a different path. Its layout
       // extent stays where its last field ends, as it always was.
-      if (instance.hasDecorator(DecoratorFlags.Unmanaged)) {
+      if (
+        instance.hasDecorator(DecoratorFlags.Unmanaged) ||
+        instance.hasDecorator(DecoratorFlags.ManagedStruct)
+      ) {
         let classAlignMask = (1 << classAlignLog2) - 1;
         memoryOffset = (memoryOffset + classAlignMask) & ~classAlignMask;
       }

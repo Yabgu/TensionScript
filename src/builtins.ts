@@ -1272,7 +1272,10 @@ function builtin_sizeof(ctx: BuiltinFunctionContext): ExpressionRef {
   let classReference = type.classReference;
   if (
     classReference != null &&
-    classReference.hasDecorator(DecoratorFlags.Unmanaged)
+    (
+      classReference.hasDecorator(DecoratorFlags.Unmanaged) ||
+      classReference.hasDecorator(DecoratorFlags.ManagedStruct)
+    )
   ) {
     return contextualUsize(
       compiler, i64_new(classReference.nextMemoryOffset), ctx.contextualType
