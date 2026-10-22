@@ -4928,6 +4928,21 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (!compound) return expr;
     let resolver = this.resolver;
+    // `foo.arr[i] |= v` and every other compound operator: the same store as a
+    // plain assignment, with the operator's result as the value. Intercepted
+    // before `lookupExpression`, which reports an index signature that an inline
+    // array cannot have -- and this path never reaches `compileAssignment`, so
+    // the intercept there does not cover it.
+    if (left.kind == NodeKind.ElementAccess) {
+      let elementAccess = <ElementAccessExpression>left;
+      let arrayType = resolver.resolveExpression(elementAccess.expression, this.currentFlow);
+      if (arrayType && arrayType.kind == TypeKind.FixedArray) {
+        return this.compileFixedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, null, expr
+        );
+      }
+    }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
     let targetType = resolver.getTypeOfElement(target);
@@ -7382,7 +7397,8 @@ export class Compiler extends DiagnosticEmitter {
     isWrite: boolean,
     contextualType: Type,
     constraints: Constraints,
-    valueExpression: Expression | null = null
+    valueExpression: Expression | null = null,
+    valueRef: ExpressionRef = 0
   ): ExpressionRef {
     let module = this.module;
     let elementType = arrayType.fixedArrayElementType;
@@ -7390,7 +7406,9 @@ export class Compiler extends DiagnosticEmitter {
     let address = this.compileFixedArrayElementAddress(expression, arrayType);
     let isWasm64 = this.options.isWasm64;
     if (isWrite) {
-      let value = this.compileExpression(
+      // `valueRef` is a value already compiled by the caller -- the result of a
+      // compound operator, which must not be recomputed here.
+      let value = valueRef || this.compileExpression(
         assert(valueExpression), elementType, Constraints.ConvImplicit
       );
       if (contextualType == Type.void) {
@@ -10046,6 +10064,25 @@ export class Compiler extends DiagnosticEmitter {
     }
 
     let resolver = this.resolver;
+    // `foo.arr[i]++` / `--`: the same store as a plain assignment, with the
+    // incremented value. Intercepted before `lookupExpression` for the same
+    // reason as the binary compound operators -- an inline array has no index
+    // signature to find, and this path does not go through `compileAssignment`.
+    if (expression.operand.kind == NodeKind.ElementAccess) {
+      let elementAccess = <ElementAccessExpression>expression.operand;
+      let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
+      if (arrayType && arrayType.kind == TypeKind.FixedArray) {
+        let stored = this.compileFixedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, null, expr
+        );
+        if (!tempLocal) return stored;
+        return module.block(null, [
+          stored,
+          module.local_get(tempLocal.index, this.currentType.toRef())
+        ], this.currentType.toRef());
+      }
+    }
     let target = resolver.lookupExpression(expression.operand, flow); // reports
     if (!target) {
       return module.unreachable();
