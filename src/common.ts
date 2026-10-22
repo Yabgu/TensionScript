@@ -167,6 +167,15 @@ export namespace CommonNames {
   export const this_ = "this";
   export const super_ = "super";
   export const constructor = "constructor";
+  /**
+   * `std/assembly/util/bytes.ts`'s `COPY_STRUCT`, by its internal name. It is an
+   * ordinary `@inline` std function, not a builtin, so the resolver is the only
+   * place a call site is visible before the body is inlined away. The name is
+   * the module path the std build gives it; a rename there must change this
+   * constant (and the resolver refuses nothing if it drifts, so the fixture in
+   * `tests/compiler/interop/managed-struct-refusals.ts` is what catches that).
+   */
+  export const COPY_STRUCT = "~lib/util/bytes/COPY_STRUCT";
   // constants
   export const ASC_TARGET = "ASC_TARGET";
   export const ASC_RUNTIME = "ASC_RUNTIME";

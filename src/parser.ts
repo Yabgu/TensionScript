@@ -113,14 +113,15 @@ function hasUnmanagedDecorator(decorators: DecoratorNode[] | null): bool {
   return false;
 }
 
-/** Whether a decorator list already carries `@inline`. */
-function hasInlineDecorator(decorators: DecoratorNode[] | null): bool {
+/** Whether a decorator list already carries `@managed`. */
+function hasManagedDecorator(decorators: DecoratorNode[] | null): bool {
   if (!decorators) return false;
   for (let i = 0, k = decorators.length; i < k; ++i) {
-    if (decorators[i].decoratorKind == DecoratorKind.Inline) return true;
+    if (decorators[i].decoratorKind == DecoratorKind.Managed) return true;
   }
   return false;
 }
+
 
 export class Parser extends DiagnosticEmitter {
 
@@ -385,24 +386,37 @@ export class Parser extends DiagnosticEmitter {
         let structStart = tn.tokenPos;
         let structRange = tn.range(structStart, tn.pos);
         let explicitUnmanaged = hasUnmanagedDecorator(decorators);
+        // `@managed struct` is the GC-owned record: same parse, different
+        // ownership. The decorator list is passed through untouched (no
+        // `@unmanaged` injection), and the declaration is marked so the class
+        // prototype takes `DecoratorFlags.ManagedStruct` + `Final`.
+        let explicitManaged = hasManagedDecorator(decorators);
+        if (explicitManaged && explicitUnmanaged) {
+          // Contradictory ownership. Report on the struct keyword and parse the
+          // declaration anyway, as `@managed`: the two markers select different
+          // runtime kinds, so there is no reading in which both hold, and
+          // stopping here would cascade a parse error through the rest of the
+          // file.
+          this.error(
+            DiagnosticCode.A_struct_cannot_be_both_managed_and_unmanaged,
+            structRange
+          );
+        }
         tn.next();
         let decl = this.parseClassOrInterface(
-          tn, flags, this.withUnmanaged(decorators, structRange), startPos
+          tn, flags,
+          explicitManaged ? decorators : this.withUnmanaged(decorators, structRange),
+          startPos
         );
         if (decl) {
           decl.declaredAsStruct = true;
-          // The 0.9.0 flip: at 0.8.0 a plain `struct` is the borrowed form; at
-          // 0.9.0 the same spelling becomes a managed C-layout reference type.
-          // Warning from day one is what keeps 0.8.0 code from changing meaning
-          // silently one release later. `@unmanaged struct` is already stable
-          // and gets no warning.
-          if (!explicitUnmanaged && !hasInlineDecorator(decorators)) {
-            this.warning(
-              DiagnosticCode
-                .A_plain_struct_currently_means_unmanaged_struct_at_0_9_0_struct_without_unmanaged_becomes_a_managed_C_layout_reference_type_Mark_it_unmanaged_struct_explicitly_if_the_borrowed_form_is_intended,
-              decl.name.range
-            );
-          }
+          decl.declaredAsManagedStruct = explicitManaged;
+          // No deprecation warning. 0.8.x warned (TS6385) that a plain `struct`
+          // would become a managed type at 0.9.0; that change is cancelled.
+          // `struct` means `@unmanaged struct` permanently, so `@unmanaged` is
+          // redundant-but-valid and nothing about a plain declaration's meaning
+          // is pending. `declaredAsStruct` stays: the `@inline` value-type gate
+          // reads it (`src/program.ts`), and so does the AST round-trip.
         }
         statement = decl;
         decorators = null;

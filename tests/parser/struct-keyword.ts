@@ -1,16 +1,25 @@
-// `struct`: the deprecation warning is the 0.9.0 flip made audible.
+// `struct` and `@managed struct`: the two record spellings, and what each means.
 //
-// At 0.8.0 `struct` is the borrowed form. At 0.9.0 the same spelling becomes a
-// managed C-layout reference type, so an unmarked 0.8.0 declaration would change
-// meaning one release later with no diagnostic. The warning fires on the plain
-// form only: `@unmanaged struct` is the spelling that survives the flip, so it
-// must stay silent.
+// The 0.8.x deprecation warning is gone as of 0.9.0: the flip it announced is
+// cancelled, so `struct` is the borrowed form permanently. `@managed struct` is
+// the third type kind — a GC-owned record — and it must NOT take the
+// `@unmanaged` decorator the borrowed form injects.
+//
+// What this pins, as AST round-trip:
+//   struct            -> `@unmanaged class`, unchanged from 0.8.x
+//   @unmanaged struct -> `@unmanaged class`, explicit and now redundant
+//   @managed struct   -> `@managed class` in the dump: no `@unmanaged`
+//   @inline struct    -> `@unmanaged @inline class` (the AS100 reservation)
 
-struct Warns {
+struct Borrowed {
   x: f32;
 }
 
-@unmanaged struct Silent {
+@unmanaged struct Explicit {
+  x: f32;
+}
+
+@managed struct Managed {
   x: f32;
 }
 

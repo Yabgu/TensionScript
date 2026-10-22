@@ -1,0 +1,7 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "AS100: Not implemented: an inline array (T[N]) on an @managed struct (field initialization cannot fill an extent yet; see compiler.ts makeZero)"
+  ]
+}

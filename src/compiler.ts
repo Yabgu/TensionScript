@@ -2015,6 +2015,15 @@ export class Compiler extends DiagnosticEmitter {
     let valueTypeRef = valueType.toRef();
     let thisTypeRef = this.options.sizeTypeRef;
     getterInstance.set(CommonFlags.Compiled);
+    // `this` is the object's reference, and for every reference kind here that
+    // is the first field's address: `__new` returns `object + TOTAL_OVERHEAD`
+    // (`std/assembly/rt/itcms.ts:268`) and the unmanaged allocator returns the
+    // record's own address. So a field read is `local.get; load offset=N` with
+    // no header arithmetic, for a managed class **and** for an `@managed
+    // struct`. Do not add an `OBJECT_OVERHEAD` offset here: the GC header sits
+    // below the reference (scoping §1.2), so adding one would read the bytes
+    // after the record. The checked-in WAT in
+    // `tests/compiler/interop/managed-struct.ts` pins `offset=0` / `offset=8`.
     let body = module.load(valueType.byteSize, valueType.isSignedIntegerValue,
       module.local_get(0, thisTypeRef),
       valueTypeRef, property.memoryOffset
@@ -6245,6 +6254,46 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Compiles a call expression according to the specified context. */
+  /**
+   * Refuses `COPY_STRUCT<T>(dst, src)` when `T` is an `@managed struct`.
+   *
+   * `COPY_STRUCT` is `memory.copy(dst, src, offsetof<T>())`
+   * (`std/assembly/util/bytes.ts:133-135`). For a borrowed record that is the
+   * struct-copy primitive; for a managed reference it is a byte copy that skips
+   * the collector's write barrier, so a destination it writes can hold a
+   * pointer the next collection has no reason to trace. A managed struct also
+   * has no separate "value view" to copy: its reference already is its fields
+   * pointer. The call is an ordinary `@inline` std function, so the check has to
+   * happen here, at the call site, before the body is inlined away.
+   */
+  private checkNoManagedStructCopy(
+    functionInstance: Function,
+    expression: CallExpression
+  ): bool {
+    if (!functionInstance.prototype.internalName.startsWith(CommonNames.COPY_STRUCT)) {
+      return true;
+    }
+    let typeArguments = functionInstance.typeArguments;
+    if (!typeArguments) return true;
+    for (let i = 0, k = typeArguments.length; i < k; ++i) {
+      let classReference = unchecked(typeArguments[i]).classReference;
+      if (
+        classReference != null &&
+        classReference.hasDecorator(DecoratorFlags.ManagedStruct)
+      ) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          expression.typeArguments && expression.typeArguments.length > i
+            ? expression.typeArguments[i].range
+            : expression.range,
+          "COPY_STRUCT on an @managed struct (a raw byte copy bypasses the GC write barrier)"
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
   private compileCallExpression(
     /** Call expression to compile. */
     expression: CallExpression,
@@ -6323,11 +6372,17 @@ export class Compiler extends DiagnosticEmitter {
         }
         let functionInstance = this.resolver.maybeInferCall(expression, functionPrototype, flow);
         if (!functionInstance) return this.module.unreachable();
+        if (!this.checkNoManagedStructCopy(functionInstance, expression)) {
+          return this.module.unreachable();
+        }
         target = functionInstance;
         // fall-through
       }
       case ElementKind.Function: {
         let functionInstance = <Function>target;
+        if (!this.checkNoManagedStructCopy(functionInstance, expression)) {
+          return this.module.unreachable();
+        }
         let thisArg: ExpressionRef = 0;
         if (functionInstance.is(CommonFlags.Instance)) {
           thisArg = this.compileExpression(

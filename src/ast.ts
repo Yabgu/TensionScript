@@ -1083,6 +1083,7 @@ export enum DecoratorKind {
   OperatorPrefix,
   OperatorPostfix,
   Unmanaged,
+  Managed,
   Final,
   Inline,
   External,
@@ -1122,6 +1123,10 @@ export namespace DecoratorKind {
         }
         case CharCode.l: {
           if (nameStr == "lazy") return DecoratorKind.Lazy;
+          break;
+        }
+        case CharCode.m: {
+          if (nameStr == "managed") return DecoratorKind.Managed;
           break;
         }
         case CharCode.o: {
@@ -1955,6 +1960,19 @@ export class ClassDeclaration extends DeclarationStatement {
    * the same declaration.
    */
   declaredAsStruct: bool = false;
+
+  /**
+   * Whether this declaration was written `@managed struct`: a GC-owned record
+   * with a C-compatible layout, whose reference is its fields pointer.
+   *
+   * A separate marker from `declaredAsStruct` because the two select different
+   * runtime kinds: `struct` is borrowed and unmanaged, `@managed struct` is a
+   * managed reference. Both are records with fixed field offsets; only the
+   * ownership differs. `declaredAsStruct` stays true for a managed struct so
+   * the `@inline` value-type gate (`AS100`) and the AST round-trip keep their
+   * meaning.
+   */
+  declaredAsManagedStruct: bool = false;
 
   get isGeneric(): bool {
     let typeParameters = this.typeParameters;
