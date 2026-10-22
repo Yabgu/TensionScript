@@ -60,6 +60,7 @@ import {
   ClassDeclaration,
   ContinueStatement,
   DeclarationStatement,
+  DecoratorKind,
   DecoratorNode,
   DoStatement,
   EnumDeclaration,
@@ -355,6 +356,19 @@ export class Parser extends DiagnosticEmitter {
       case Token.Interface: {
         tn.next();
         statement = this.parseClassOrInterface(tn, flags, decorators, startPos);
+        decorators = null;
+        break;
+      }
+      case Token.Struct: {
+        // `struct Name { … }` is `@unmanaged class Name { … }`, exactly:
+        // the keyword injects the same decorator the explicit spelling
+        // produces, so the resolver and every layout rule see one form.
+        // There is no second code path and no 0.8.0 semantic difference.
+        let structStart = tn.tokenPos;
+        tn.next();
+        statement = this.parseClassOrInterface(
+          tn, flags, this.withUnmanaged(decorators, tn.range(structStart, tn.tokenPos)), startPos
+        );
         decorators = null;
         break;
       }
@@ -1773,6 +1787,38 @@ export class Parser extends DiagnosticEmitter {
       isAsync
     );
     return Node.createFunctionExpression(declaration);
+  }
+
+  /**
+   * Prepends an `@unmanaged` decorator to a declaration's decorators, for the
+   * `struct` keyword form. `struct Foo` and `@unmanaged class Foo` must produce
+   * the same node, so this builds the decorator the author would have written
+   * rather than a parallel flag the resolver would have to learn.
+   *
+   * An explicit `@unmanaged struct Foo` is accepted and produces **one**
+   * decorator: the author already wrote it, and adding a second would trip
+   * `checkDecorators`' duplicate check on a spelling that is simply the
+   * redundant form of the same declaration.
+   */
+  private withUnmanaged(
+    decorators: DecoratorNode[] | null,
+    range: Range
+  ): DecoratorNode[] {
+    if (decorators) {
+      for (let i = 0, k = decorators.length; i < k; ++i) {
+        if (decorators[i].decoratorKind == DecoratorKind.Unmanaged) return decorators;
+      }
+    }
+    let decorator = Node.createDecorator(
+      Node.createIdentifierExpression("unmanaged", range),
+      null,
+      range
+    );
+    if (!decorators) return [ decorator ];
+    let merged = new Array<DecoratorNode>(decorators.length + 1);
+    merged[0] = decorator;
+    for (let i = 0, k = decorators.length; i < k; ++i) merged[i + 1] = decorators[i];
+    return merged;
   }
 
   parseClassOrInterface(

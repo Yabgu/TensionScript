@@ -92,6 +92,7 @@ export const enum Token {
   Return,       // ES2017
   Set,
   Static,       // ES2017 non-lexical
+  Struct,       // TensionScript: an unmanaged C-layout record
   Super,        // ES2017
   Switch,       // ES2017
   This,         // ES2017
@@ -317,6 +318,7 @@ export function tokenFromKeyword(text: string): Token {
       if (len == 6) {
         if (text == "switch") return Token.Switch;
         if (text == "static") return Token.Static;
+        if (text == "struct") return Token.Struct;
         break;
       }
       if (text == "set") return Token.Set;
