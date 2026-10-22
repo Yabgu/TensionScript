@@ -1,19 +1,20 @@
-// `@inline` is reserved, and a plain `struct` warns. 0.8.0.
-//
-// Two different jobs, both about the 0.9.0/1.0 boundary:
+// `@inline` is reserved on a struct. 0.8.0; the warning is gone as of 0.9.0.
 //
 //   @inline struct  -> AS100 "Not implemented: value types (@inline struct)".
 //                      Value types are the 1.0 feature; the reservation must
 //                      refuse by name, never parse-and-ignore (the @fieldOffset
 //                      lesson).
 //
-//   plain struct    -> warning TS6385. At 0.8.0 `struct` means the borrowed
-//                      form; at 0.9.0 the same spelling becomes a managed
-//                      C-layout reference type. Warning from day one is what
-//                      keeps 0.8.0 code from changing meaning silently.
+//   plain struct    -> no diagnostic, as of 0.9.0. 0.8.x warned (TS6385) that
+//                      `struct` would become a managed type at 0.9.0; that
+//                      change is cancelled, so the warning is gone and plain
+//                      `struct` means `@unmanaged struct` permanently. The
+//                      assertions below still pin the borrowed layout, which is
+//                      the part that must not change.
 //
 // The positive cases are the compile-visible ones, so they are here:
-//   @unmanaged struct -> no warning, no error (the stable spelling).
+//   @unmanaged struct -> no diagnostic (the explicit spelling; now redundant,
+//                        still valid).
 //   @inline class     -> AS212, unchanged (a misplaced decorator, not a
 //                        reservation).
 //

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0
+
+### `struct` stays unmanaged, permanently
+
+The 0.9.0 flip announced in 0.8.0 is **cancelled**. `struct` means
+`@unmanaged struct` today and always will. A plain `struct` no longer warns: the
+TS6385 deprecation that 0.8.x emitted is removed. Code that added `@unmanaged`
+to silence it keeps working unchanged, and is now redundant but valid.
+
+### Breaking changes
+
+None from 0.8.x. Every 0.8.x program compiles to the same bytes; `class` and
+`struct` are untouched, and this release only *removes* a warning.
+
 ## 0.8.1
 
 Republish. The 0.8.0 tarball shipped a `dist/` of five files and 488 bytes: the
