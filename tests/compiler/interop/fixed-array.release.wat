@@ -4,6 +4,6 @@
  (export "run" (func $interop/fixed-array/run))
  (export "memory" (memory $0))
  (func $interop/fixed-array/run (result i32)
-  i32.const 16
+  i32.const 44
  )
 )

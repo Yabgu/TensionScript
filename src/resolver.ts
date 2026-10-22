@@ -3711,8 +3711,17 @@ export class Resolver extends DiagnosticEmitter {
                 }
                 if (needsLayout) {
                   let byteSize = fieldType.byteSize;
-                  assert(isPowerOf2(byteSize));
-                  let mask = byteSize - 1;
+                  // Align by the field's **alignment**, not its size. The two
+                  // coincide for every scalar; they do not for an inline array,
+                  // whose size is its element's replicated (24 for `f32[6]`,
+                  // not a power of two) while its alignment is the element's
+                  // (4). Asserting on the size -- which this loop used to do --
+                  // both crashed on 24 and over-aligned a 16-byte array to 16,
+                  // putting `arr` at 16 in `{a:i32; arr:f32[4]; b:i32}` and the
+                  // record at 36 instead of 24.
+                  let alignLog2 = fieldType.alignLog2;
+                  assert(alignLog2 >= 0);
+                  let mask = (1 << alignLog2) - 1;
                   if (memoryOffset & mask) memoryOffset = (memoryOffset | mask) + 1;
                   boundInstance.memoryOffset = memoryOffset;
                   memoryOffset += byteSize;

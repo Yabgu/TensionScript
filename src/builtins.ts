@@ -1293,14 +1293,19 @@ function builtin_alignof(ctx: BuiltinFunctionContext): ExpressionRef {
   ) return module.unreachable();
   let type = ctx.typeArguments![0];
   let byteSize = type.byteSize;
-  if (!isPowerOf2(byteSize)) { // implies == 0
+  // An inline array's size is its element's replicated, which is not a power of
+  // two for the lengths records have (`f32[6]` is 24), while its alignment is
+  // still its element's. So the power-of-two test is on the alignment, not the
+  // size, and the answer comes from `Type#alignLog2` -- which equals
+  // `ctz(byteSize)` for every scalar and the element's value for an array.
+  if (!byteSize || (type.kind != TypeKind.FixedArray && !isPowerOf2(byteSize))) {
     compiler.error(
       DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
       ctx.reportNode.typeArgumentsRange, "alignof", type.toString()
     );
     return module.unreachable();
   }
-  return contextualUsize(compiler, i64_new(ctz<i32>(byteSize)), ctx.contextualType);
+  return contextualUsize(compiler, i64_new(type.alignLog2), ctx.contextualType);
 }
 builtinFunctions.set(BuiltinNames.alignof, builtin_alignof);
 
