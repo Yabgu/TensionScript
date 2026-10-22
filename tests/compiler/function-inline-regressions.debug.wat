@@ -4,7 +4,7 @@
  (type $2 (func (param i32 i32) (result i32)))
  (type $3 (func (result i32)))
  (type $4 (func (param i32 i32 i32) (result i32)))
- (global $function-inline-regressions/struct i32 (i32.const 0))
+ (global $function-inline-regressions/myStruct i32 (i32.const 0))
  (global $~lib/memory/__data_end i32 (i32.const 8))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 32776))
  (global $~lib/memory/__heap_base i32 (i32.const 32776))
@@ -69,13 +69,13 @@
   local.get $y
   i32.add
   call $function-inline-regressions/baz
-  global.get $function-inline-regressions/struct
+  global.get $function-inline-regressions/myStruct
   local.get $v0
   call $function-inline-regressions/Struct#set:v0
-  global.get $function-inline-regressions/struct
+  global.get $function-inline-regressions/myStruct
   local.get $v1
   call $function-inline-regressions/Struct#set:v1
-  global.get $function-inline-regressions/struct
+  global.get $function-inline-regressions/myStruct
   local.get $v2
   call $function-inline-regressions/Struct#set:v2
   local.get $z

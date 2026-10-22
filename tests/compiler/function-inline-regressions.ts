@@ -25,11 +25,11 @@ export function foo(v0: i32, v1: i32, v2: i32): u32 {
 
   baz(z + x + y);
 
-  struct.v0 = v0;
-  struct.v1 = v1;
-  struct.v2 = v2;
+  myStruct.v0 = v0;
+  myStruct.v1 = v1;
+  myStruct.v2 = v2;
 
   return z;
 }
 
-const struct = changetype<Struct>(0);
+const myStruct = changetype<Struct>(0);

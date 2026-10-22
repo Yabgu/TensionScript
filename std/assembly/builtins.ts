@@ -174,6 +174,17 @@ export declare function alignof<T>(): usize; // | u32 / u64
 @builtin
 export declare function offsetof<T>(fieldName?: string): usize; // | u32 / u64
 
+/**
+ * The ABI name of a field: its `@abi.alias("…")` if the declaration has one,
+ * else the field's TypeScript name. Compile-time, like `offsetof`.
+ *
+ * `offsetof<T>("field")` keeps taking the TypeScript name, so an alias never
+ * changes which bytes a field occupies.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function abiNameOf<T>(fieldName: string): string;
+
 // @ts-ignore: decorator
 @builtin
 export declare function idof<T>(): u32;

@@ -44,6 +44,8 @@ import {
   LiteralExpression,
   ArrayLiteralExpression,
   IdentifierExpression,
+  DecoratorNode,
+  PropertyAccessExpression,
   NamedTypeNode
 } from "./ast";
 
@@ -189,6 +191,7 @@ export namespace BuiltinNames {
   export const sizeof = "~lib/builtins/sizeof";
   export const alignof = "~lib/builtins/alignof";
   export const offsetof = "~lib/builtins/offsetof";
+  export const abiNameOf = "~lib/builtins/abiNameOf";
   export const nameof = "~lib/builtins/nameof";
   export const lengthof = "~lib/builtins/lengthof";
   export const select = "~lib/builtins/select";
@@ -1231,6 +1234,24 @@ function builtin_lengthof(ctx: BuiltinFunctionContext): ExpressionRef {
 builtinFunctions.set(BuiltinNames.lengthof, builtin_lengthof);
 
 // sizeof<T!>() -> usize*
+//
+// Two meanings, chosen by the declaration, not by the value:
+//
+// - a managed class is a reference type, so `sizeof` is the reference width
+//   (`type.byteSize`, 4 on wasm32) -- unchanged;
+// - an `@unmanaged` class is a C record, so `sizeof` is its layout size, the
+//   same number `offsetof<T>()` returns (`classReference.nextMemoryOffset`).
+//
+// This is deliberately **not** a change to `Type.byteSize`. `byteSize` is read
+// by `store`'s width and default alignment, `load`'s width and default
+// alignment, `alignof`, and the class-layout loop; changing it would move a
+// reference's size everywhere the compiler asks, including the container
+// loops that step by it (`std/assembly/array.ts`, `staticarray.ts`). Reading
+// the layout here leaves every one of those alone.
+//
+// An empty `@unmanaged` class has a layout size of 0. That is consistent with
+// `offsetof<T>()`, and it is reported as 0 rather than falling back to the
+// pointer width: a record with no fields occupies no bytes.
 function builtin_sizeof(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
@@ -1248,6 +1269,15 @@ function builtin_sizeof(ctx: BuiltinFunctionContext): ExpressionRef {
     );
     return module.unreachable();
   }
+  let classReference = type.classReference;
+  if (
+    classReference != null &&
+    classReference.hasDecorator(DecoratorFlags.Unmanaged)
+  ) {
+    return contextualUsize(
+      compiler, i64_new(classReference.nextMemoryOffset), ctx.contextualType
+    );
+  }
   return contextualUsize(compiler, i64_new(byteSize), ctx.contextualType);
 }
 builtinFunctions.set(BuiltinNames.sizeof, builtin_sizeof);
@@ -1263,14 +1293,19 @@ function builtin_alignof(ctx: BuiltinFunctionContext): ExpressionRef {
   ) return module.unreachable();
   let type = ctx.typeArguments![0];
   let byteSize = type.byteSize;
-  if (!isPowerOf2(byteSize)) { // implies == 0
+  // An inline array's size is its element's replicated, which is not a power of
+  // two for the lengths records have (`f32[6]` is 24), while its alignment is
+  // still its element's. So the power-of-two test is on the alignment, not the
+  // size, and the answer comes from `Type#alignLog2` -- which equals
+  // `ctz(byteSize)` for every scalar and the element's value for an array.
+  if (!byteSize || (type.kind != TypeKind.FixedArray && !isPowerOf2(byteSize))) {
     compiler.error(
       DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
       ctx.reportNode.typeArgumentsRange, "alignof", type.toString()
     );
     return module.unreachable();
   }
-  return contextualUsize(compiler, i64_new(ctz<i32>(byteSize)), ctx.contextualType);
+  return contextualUsize(compiler, i64_new(type.alignLog2), ctx.contextualType);
 }
 builtinFunctions.set(BuiltinNames.alignof, builtin_alignof);
 
@@ -1286,6 +1321,19 @@ function builtin_offsetof(ctx: BuiltinFunctionContext): ExpressionRef {
   let operands = ctx.operands;
   let contextualType = ctx.contextualType;
   let type = ctx.typeArguments![0];
+  // An inline array's "end offset" is its whole extent: `N * sizeof(element)`.
+  // It is the same number `sizeof<T[N]>()` gives, because a fixed array has no
+  // trailing pad of its own -- the record that holds it is what pads.
+  if (type.kind == TypeKind.FixedArray) {
+    if (ctx.operands.length) {
+      compiler.error(
+        DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+        ctx.reportNode.range, "offsetof", type.toString()
+      );
+      return module.unreachable();
+    }
+    return contextualUsize(compiler, i64_new(type.byteSize), ctx.contextualType);
+  }
   let classReference = type.getClassOrWrapper(compiler.program);
   if (!classReference) {
     compiler.error(
@@ -1330,6 +1378,93 @@ function builtin_offsetof(ctx: BuiltinFunctionContext): ExpressionRef {
   return contextualUsize(compiler, i64_new(classReference.nextMemoryOffset), contextualType);
 }
 builtinFunctions.set(BuiltinNames.offsetof, builtin_offsetof);
+
+// abiNameOf<T!>(fieldName: string) -> string
+//
+// The ABI name of a field: its `@abi.alias("…")` if it has one, else its
+// TypeScript name. Compile-time, like `offsetof` and `nameof` — the result is a
+// static string, so a call site costs no more than the constant it selects.
+//
+// `offsetof<T>("field")` keeps taking the **TypeScript** name. The two are
+// separate lookups on purpose: an alias is metadata the other side of the ABI
+// may use, while the layout is addressed by the name the declaration wrote.
+//
+// An attribute is matched by its exact dotted spelling, `abi.alias`. The name
+// namespace is not resolved as a namespace: `@abi.alias` is one attribute whose
+// name happens to be a property access, which is what `DecoratorKind.fromNode`
+// already produces for `@operator.binary`. That keeps the annotation surface
+// open (`@memory.*`, tooling) without the resolver owning a namespace tree.
+function builtin_abiNameOf(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = compiler.program.stringInstance.type;
+  if (
+    checkTypeRequired(ctx) |
+    checkArgsRequired(ctx, 1)
+  ) return module.unreachable();
+  let type = ctx.typeArguments![0];
+  let classReference = type.getClassOrWrapper(compiler.program);
+  if (!classReference) {
+    compiler.error(
+      DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+      ctx.reportNode.typeArgumentsRange, "abiNameOf", type.toString()
+    );
+    return module.unreachable();
+  }
+  let firstOperand = ctx.operands[0];
+  if (!firstOperand.isLiteralKind(LiteralKind.String)) {
+    compiler.error(
+      DiagnosticCode.String_literal_expected,
+      firstOperand.range
+    );
+    return module.unreachable();
+  }
+  let fieldName = (<StringLiteralExpression>firstOperand).value;
+  let fieldMember = classReference.getMember(fieldName);
+  if (!fieldMember || fieldMember.kind != ElementKind.PropertyPrototype) {
+    compiler.error(
+      DiagnosticCode.Type_0_has_no_property_1,
+      firstOperand.range, classReference.internalName, fieldName
+    );
+    return module.unreachable();
+  }
+  let fieldDeclaration = (<PropertyPrototype>fieldMember).fieldDeclaration;
+  let typeNode = fieldDeclaration ? fieldDeclaration.type : null;
+  let attributes = typeNode ? typeNode.attributes : null;
+  if (attributes) {
+    for (let i = 0, k = attributes.length; i < k; ++i) {
+      if (!isAbiAliasAttribute(attributes[i])) continue;
+      let args = attributes[i].args;
+      let alias = args && args.length
+        ? args[0]
+        : null;
+      if (alias && alias.isLiteralKind(LiteralKind.String)) {
+        return reifyConstantType(
+          ctx, compiler.ensureStaticString((<StringLiteralExpression>alias).value)
+        );
+      }
+      // A named attribute with no usable argument falls back to the declared
+      // name: the alternative is a silent empty string at the far side of an
+      // ABI, which is worse than the name the declaration already has.
+      break;
+    }
+  }
+  return reifyConstantType(ctx, compiler.ensureStaticString(fieldName));
+}
+builtinFunctions.set(BuiltinNames.abiNameOf, builtin_abiNameOf);
+
+/** Whether an attribute is `@abi.alias`, matched by its exact dotted spelling. */
+function isAbiAliasAttribute(attribute: DecoratorNode): bool {
+  let name = attribute.name;
+  if (name.kind != NodeKind.PropertyAccess) return false;
+  let propertyAccess = <PropertyAccessExpression>name;
+  let expression = propertyAccess.expression;
+  if (expression.kind != NodeKind.Identifier) return false;
+  return (
+    (<IdentifierExpression>expression).text == "abi" &&
+    propertyAccess.property.text == "alias"
+  );
+}
 
 // nameof<T> -> string
 function builtin_nameof(ctx: BuiltinFunctionContext): ExpressionRef {

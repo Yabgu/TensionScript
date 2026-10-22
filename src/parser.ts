@@ -60,6 +60,7 @@ import {
   ClassDeclaration,
   ContinueStatement,
   DeclarationStatement,
+  DecoratorKind,
   DecoratorNode,
   DoStatement,
   EnumDeclaration,
@@ -103,6 +104,24 @@ class Dependee {
 }
 
 /** Parser interface. */
+/** Whether a decorator list already carries `@unmanaged`. */
+function hasUnmanagedDecorator(decorators: DecoratorNode[] | null): bool {
+  if (!decorators) return false;
+  for (let i = 0, k = decorators.length; i < k; ++i) {
+    if (decorators[i].decoratorKind == DecoratorKind.Unmanaged) return true;
+  }
+  return false;
+}
+
+/** Whether a decorator list already carries `@inline`. */
+function hasInlineDecorator(decorators: DecoratorNode[] | null): bool {
+  if (!decorators) return false;
+  for (let i = 0, k = decorators.length; i < k; ++i) {
+    if (decorators[i].decoratorKind == DecoratorKind.Inline) return true;
+  }
+  return false;
+}
+
 export class Parser extends DiagnosticEmitter {
 
   /** Source file names to be requested next. */
@@ -355,6 +374,37 @@ export class Parser extends DiagnosticEmitter {
       case Token.Interface: {
         tn.next();
         statement = this.parseClassOrInterface(tn, flags, decorators, startPos);
+        decorators = null;
+        break;
+      }
+      case Token.Struct: {
+        // `struct Name { … }` is `@unmanaged class Name { … }`, exactly:
+        // the keyword injects the same decorator the explicit spelling
+        // produces, so the resolver and every layout rule see one form.
+        // There is no second code path and no 0.8.0 semantic difference.
+        let structStart = tn.tokenPos;
+        let structRange = tn.range(structStart, tn.pos);
+        let explicitUnmanaged = hasUnmanagedDecorator(decorators);
+        tn.next();
+        let decl = this.parseClassOrInterface(
+          tn, flags, this.withUnmanaged(decorators, structRange), startPos
+        );
+        if (decl) {
+          decl.declaredAsStruct = true;
+          // The 0.9.0 flip: at 0.8.0 a plain `struct` is the borrowed form; at
+          // 0.9.0 the same spelling becomes a managed C-layout reference type.
+          // Warning from day one is what keeps 0.8.0 code from changing meaning
+          // silently one release later. `@unmanaged struct` is already stable
+          // and gets no warning.
+          if (!explicitUnmanaged && !hasInlineDecorator(decorators)) {
+            this.warning(
+              DiagnosticCode
+                .A_plain_struct_currently_means_unmanaged_struct_at_0_9_0_struct_without_unmanaged_becomes_a_managed_C_layout_reference_type_Mark_it_unmanaged_struct_explicitly_if_the_borrowed_form_is_intended,
+              decl.name.range
+            );
+          }
+        }
+        statement = decl;
         decorators = null;
         break;
       }
@@ -736,9 +786,40 @@ export class Parser extends DiagnosticEmitter {
         type.range.end = nextType.range.end;
       }
     }
-    // ... [][]
+    // ... [] or [N]
+    //
+    // The token after `[` decides, with no lookahead beyond it:
+    //   `]`         -> `Array<T>`, a managed reference (unchanged);
+    //   an integer  -> `T[N]`, N elements inline (a fixed array).
+    // Anything else stays the pre-existing `']' expected`: a non-literal bound
+    // has no runtime length to read, and every bound a record has is a literal.
     while (tn.skip(Token.OpenBracket)) {
       let bracketStart = tn.tokenPos;
+      let length = -1;
+      if (tn.peek() == Token.IntegerLiteral) {
+        tn.next();                    // leaves `pos` at the literal's first digit
+        let literalStart = tn.tokenPos;
+        let value = tn.readInteger();
+        let literalRange = tn.range(literalStart, tn.pos);
+        if (
+          !tn.skip(Token.CloseBracket) ||
+          i64_lt(value, i64_new(1)) ||
+          i64_gt(value, i64_new(i32.MAX_VALUE))
+        ) {
+          if (!suppressErrors) {
+            this.error(
+              DiagnosticCode._0_expected,
+              literalRange, "]"
+            );
+          }
+          return null;
+        }
+        length = <i32>i64_low(value);
+      }
+      if (length >= 0) {
+        type = Node.createFixedArrayType(type, length, tn.range(startPos, tn.pos));
+        continue;
+      }
       if (!tn.skip(Token.CloseBracket)) {
         if (!suppressErrors) {
           this.error(
@@ -772,6 +853,21 @@ export class Parser extends DiagnosticEmitter {
         tn.range(startPos, tn.pos)
       );
       if (nullable) break;
+    }
+
+    // ... @Attribute: attributes written on the same line as the type belong to
+    // the type. A newline before `@` ends the type, so the attribute attaches to
+    // the following declaration instead -- preserving the pre-existing reading
+    // of `x: f32` / `@foo` / `y: f32`, where `@foo` is `y`'s decorator.
+    while (
+      tn.peek() == Token.At &&
+      !tn.peekOnNewLine()
+    ) {
+      tn.next();
+      let attribute = this.parseDecorator(tn);
+      if (!attribute) break;
+      if (!type.attributes) type.attributes = [ attribute ];
+      else type.attributes.push(attribute);
     }
 
     return type;
@@ -1773,6 +1869,34 @@ export class Parser extends DiagnosticEmitter {
       isAsync
     );
     return Node.createFunctionExpression(declaration);
+  }
+
+  /**
+   * Prepends an `@unmanaged` decorator to a declaration's decorators, for the
+   * `struct` keyword form. `struct Foo` and `@unmanaged class Foo` must produce
+   * the same node, so this builds the decorator the author would have written
+   * rather than a parallel flag the resolver would have to learn.
+   *
+   * An explicit `@unmanaged struct Foo` is accepted and produces **one**
+   * decorator: the author already wrote it, and adding a second would trip
+   * `checkDecorators`' duplicate check on a spelling that is simply the
+   * redundant form of the same declaration.
+   */
+  private withUnmanaged(
+    decorators: DecoratorNode[] | null,
+    range: Range
+  ): DecoratorNode[] {
+    if (hasUnmanagedDecorator(decorators)) return <DecoratorNode[]>decorators;
+    let decorator = Node.createDecorator(
+      Node.createIdentifierExpression("unmanaged", range),
+      null,
+      range
+    );
+    if (!decorators) return [ decorator ];
+    let merged = new Array<DecoratorNode>(decorators.length + 1);
+    merged[0] = decorator;
+    for (let i = 0, k = decorators.length; i < k; ++i) merged[i + 1] = decorators[i];
+    return merged;
   }
 
   parseClassOrInterface(
