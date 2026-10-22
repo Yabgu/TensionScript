@@ -2120,10 +2120,21 @@ export class Program extends DiagnosticEmitter {
         DecoratorFlags.Global |
         DecoratorFlags.Final |
         DecoratorFlags.Unmanaged |
-        (declaration.declaredAsStruct ? DecoratorFlags.Inline : DecoratorFlags.None)
+        (declaration.declaredAsStruct
+          ? DecoratorFlags.Inline | DecoratorFlags.ManagedStruct
+          : DecoratorFlags.None)
       )
     );
     if (!parent.add(name, element)) return null;
+
+    // A managed struct is final by definition: its fields sit at fixed offsets
+    // from the reference, so a subclass would put its own fields past an extent
+    // that `sizeof` already reported. Refusing inheritance is Commit 3's job;
+    // marking the prototype here keeps every other path (virtual dispatch,
+    // `instanceof`) from treating it as extensible in the meantime.
+    if (element.hasDecorator(DecoratorFlags.ManagedStruct)) {
+      element.decoratorFlags |= DecoratorFlags.Final;
+    }
 
     // remember classes that implement interfaces
     let implementsTypes = declaration.implementsTypes;
@@ -2147,7 +2158,22 @@ export class Program extends DiagnosticEmitter {
 
     // remember classes that extend another class
     if (declaration.extendsType) {
-      queuedExtends.push(element);
+      // A managed struct's fields sit at fixed offsets from its reference, and
+      // `sizeof` already reported the record's extent at the point the base
+      // would have to be laid out. `@managed struct` is also marked `Final`
+      // above, so this would be refused as `extends a final class` anyway; the
+      // explicit error says *why* rather than sending the author to look up what
+      // `final` meant here. `extends Object` is not special-cased: the record
+      // is a managed reference like any other, so it needs no base to be one.
+      if (element.hasDecorator(DecoratorFlags.ManagedStruct)) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          Range.join(declaration.name.range, declaration.extendsType.range),
+          "inheritance on an @managed struct (its fields must stay at fixed offsets from the reference)"
+        );
+      } else {
+        queuedExtends.push(element);
+      }
     } else if (
       !element.hasDecorator(DecoratorFlags.Unmanaged) &&
       element.internalName != BuiltinNames.Object
@@ -3023,6 +3049,9 @@ export enum DecoratorFlags {
   Final = 1 << 5,
   /** Is always inlined. */
   Inline = 1 << 6,
+  /** Is an `@managed struct`: a GC-owned record with a C-compatible layout, whose
+   *  reference is its fields pointer. Implies `Final`. */
+  ManagedStruct = 1 << 11,
   /** Is using a different external name. */
   External = 1 << 7,
   /** Has external JavaScript code. */
@@ -3046,6 +3075,7 @@ export namespace DecoratorFlags {
       case DecoratorKind.OperatorPrefix: return DecoratorFlags.OperatorPrefix;
       case DecoratorKind.OperatorPostfix: return DecoratorFlags.OperatorPostfix;
       case DecoratorKind.Unmanaged: return DecoratorFlags.Unmanaged;
+      case DecoratorKind.Managed: return DecoratorFlags.ManagedStruct;
       case DecoratorKind.Final: return DecoratorFlags.Final;
       case DecoratorKind.Inline: return DecoratorFlags.Inline;
       case DecoratorKind.External: return DecoratorFlags.External;

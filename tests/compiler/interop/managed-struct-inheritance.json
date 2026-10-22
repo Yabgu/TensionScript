@@ -1,0 +1,7 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "AS100: Not implemented: inheritance on an @managed struct (its fields must stay at fixed offsets from the reference)"
+  ]
+}

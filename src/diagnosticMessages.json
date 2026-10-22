@@ -213,5 +213,5 @@
   "This expression is not callable because it is a 'get' accessor. Did you mean to use it without '()'?": 6234,
   "'super' must be called before accessing 'this' in the constructor of a derived class.": 17009,
   "'super' must be called before accessing a property of 'super' in the constructor of a derived class.": 17011,
-  "A plain 'struct' currently means '@unmanaged struct'; at 0.9.0 'struct' without '@unmanaged' becomes a managed C-layout reference type. Mark it '@unmanaged struct' explicitly if the borrowed form is intended.": 6385
+  "A struct cannot be both '@managed' and '@unmanaged'.": 6390
 }
