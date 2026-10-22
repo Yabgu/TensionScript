@@ -1231,6 +1231,24 @@ function builtin_lengthof(ctx: BuiltinFunctionContext): ExpressionRef {
 builtinFunctions.set(BuiltinNames.lengthof, builtin_lengthof);
 
 // sizeof<T!>() -> usize*
+//
+// Two meanings, chosen by the declaration, not by the value:
+//
+// - a managed class is a reference type, so `sizeof` is the reference width
+//   (`type.byteSize`, 4 on wasm32) -- unchanged;
+// - an `@unmanaged` class is a C record, so `sizeof` is its layout size, the
+//   same number `offsetof<T>()` returns (`classReference.nextMemoryOffset`).
+//
+// This is deliberately **not** a change to `Type.byteSize`. `byteSize` is read
+// by `store`'s width and default alignment, `load`'s width and default
+// alignment, `alignof`, and the class-layout loop; changing it would move a
+// reference's size everywhere the compiler asks, including the container
+// loops that step by it (`std/assembly/array.ts`, `staticarray.ts`). Reading
+// the layout here leaves every one of those alone.
+//
+// An empty `@unmanaged` class has a layout size of 0. That is consistent with
+// `offsetof<T>()`, and it is reported as 0 rather than falling back to the
+// pointer width: a record with no fields occupies no bytes.
 function builtin_sizeof(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
@@ -1247,6 +1265,15 @@ function builtin_sizeof(ctx: BuiltinFunctionContext): ExpressionRef {
       ctx.reportNode.typeArgumentsRange, "sizeof", type.toString()
     );
     return module.unreachable();
+  }
+  let classReference = type.classReference;
+  if (
+    classReference != null &&
+    classReference.hasDecorator(DecoratorFlags.Unmanaged)
+  ) {
+    return contextualUsize(
+      compiler, i64_new(classReference.nextMemoryOffset), ctx.contextualType
+    );
   }
   return contextualUsize(compiler, i64_new(byteSize), ctx.contextualType);
 }
