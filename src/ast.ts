@@ -1912,6 +1912,19 @@ export class ClassDeclaration extends DeclarationStatement {
   /** Index signature, if present. */
   indexSignature: IndexSignatureNode | null = null;
 
+  /**
+   * Whether this declaration was written with the `struct` keyword rather than
+   * `@unmanaged class`. The two produce the same record; the marker exists so
+   * the resolver can refuse `@inline struct` by name (`AS100`, value types are
+   * not built) instead of letting it through as a misplaced decorator, and so
+   * the parser can warn on the plain form ahead of the 0.9.0 meaning change.
+   *
+   * It is deliberately **not** printed by `ASTBuilder`: `struct Foo` and
+   * `@unmanaged class Foo` must round-trip to the same source, because they are
+   * the same declaration.
+   */
+  declaredAsStruct: bool = false;
+
   get isGeneric(): bool {
     let typeParameters = this.typeParameters;
     return typeParameters != null && typeParameters.length > 0;

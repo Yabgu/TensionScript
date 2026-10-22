@@ -104,6 +104,24 @@ class Dependee {
 }
 
 /** Parser interface. */
+/** Whether a decorator list already carries `@unmanaged`. */
+function hasUnmanagedDecorator(decorators: DecoratorNode[] | null): bool {
+  if (!decorators) return false;
+  for (let i = 0, k = decorators.length; i < k; ++i) {
+    if (decorators[i].decoratorKind == DecoratorKind.Unmanaged) return true;
+  }
+  return false;
+}
+
+/** Whether a decorator list already carries `@inline`. */
+function hasInlineDecorator(decorators: DecoratorNode[] | null): bool {
+  if (!decorators) return false;
+  for (let i = 0, k = decorators.length; i < k; ++i) {
+    if (decorators[i].decoratorKind == DecoratorKind.Inline) return true;
+  }
+  return false;
+}
+
 export class Parser extends DiagnosticEmitter {
 
   /** Source file names to be requested next. */
@@ -365,10 +383,28 @@ export class Parser extends DiagnosticEmitter {
         // produces, so the resolver and every layout rule see one form.
         // There is no second code path and no 0.8.0 semantic difference.
         let structStart = tn.tokenPos;
+        let structRange = tn.range(structStart, tn.pos);
+        let explicitUnmanaged = hasUnmanagedDecorator(decorators);
         tn.next();
-        statement = this.parseClassOrInterface(
-          tn, flags, this.withUnmanaged(decorators, tn.range(structStart, tn.tokenPos)), startPos
+        let decl = this.parseClassOrInterface(
+          tn, flags, this.withUnmanaged(decorators, structRange), startPos
         );
+        if (decl) {
+          decl.declaredAsStruct = true;
+          // The 0.9.0 flip: at 0.8.0 a plain `struct` is the borrowed form; at
+          // 0.9.0 the same spelling becomes a managed C-layout reference type.
+          // Warning from day one is what keeps 0.8.0 code from changing meaning
+          // silently one release later. `@unmanaged struct` is already stable
+          // and gets no warning.
+          if (!explicitUnmanaged && !hasInlineDecorator(decorators)) {
+            this.warning(
+              DiagnosticCode
+                .A_plain_struct_currently_means_unmanaged_struct_at_0_9_0_struct_without_unmanaged_becomes_a_managed_C_layout_reference_type_Mark_it_unmanaged_struct_explicitly_if_the_borrowed_form_is_intended,
+              decl.name.range
+            );
+          }
+        }
+        statement = decl;
         decorators = null;
         break;
       }
@@ -1819,11 +1855,7 @@ export class Parser extends DiagnosticEmitter {
     decorators: DecoratorNode[] | null,
     range: Range
   ): DecoratorNode[] {
-    if (decorators) {
-      for (let i = 0, k = decorators.length; i < k; ++i) {
-        if (decorators[i].decoratorKind == DecoratorKind.Unmanaged) return decorators;
-      }
-    }
+    if (hasUnmanagedDecorator(decorators)) return <DecoratorNode[]>decorators;
     let decorator = Node.createDecorator(
       Node.createIdentifierExpression("unmanaged", range),
       null,

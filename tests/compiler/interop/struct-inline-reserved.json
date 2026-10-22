@@ -1,0 +1,8 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "AS100: Not implemented: value types (@inline struct)",
+    "AS212: Decorator '@inline' is not valid here."
+  ]
+}
