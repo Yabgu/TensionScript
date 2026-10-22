@@ -8,7 +8,7 @@
     "tensionscript",
     "wasm"
   ],
-  "version": "0.8.0",
+  "version": "0.8.1",
   "author": "Daniel Wirtz <dcode+assemblyscript@dcode.io>",
   "license": "Apache-2.0",
   "homepage": "https://github.com/Yabgu/Tension",
@@ -99,7 +99,9 @@
     "bootstrap:debug": "node bin/tensionscript.js --config src/asconfig.json --target debug && node bin/tensionscript.js --config src/asconfig.json --target debug-bootstrap --wasm ./build/assemblyscript.debug.js && node bin/tensionscript.js --config src/asconfig.json --target debug-bootstrap --wasm ./build/assemblyscript.debug-bootstrap.js && git --no-pager diff --no-index build/assemblyscript.debug.wast build/assemblyscript.debug-bootstrap.wast",
     "bootstrap:release": "node bin/tensionscript.js --config src/asconfig.json --target release && node bin/tensionscript.js --config src/asconfig.json --target release-bootstrap --wasm ./build/assemblyscript.release.js && node bin/tensionscript.js --config src/asconfig.json --target release-bootstrap --wasm ./build/assemblyscript.release-bootstrap.js && git --no-pager diff --no-index build/assemblyscript.release.wast build/assemblyscript.release-bootstrap.wast",
     "bootstrap:rtraced": "node bin/tensionscript.js --config src/asconfig.json --target rtraced && node bin/tensionscript.js --config src/asconfig.json --target rtraced --wasm ./build/assemblyscript.rtraced.js",
-    "test:closure": "node --enable-source-maps tests/closure/lower.js"
+    "test:closure": "node --enable-source-maps tests/closure/lower.js",
+    "prepublishOnly": "npm run build && npm run publish:verify",
+    "publish:verify": "node scripts/verify-dist.js"
   },
   "files": [
     "bin/",

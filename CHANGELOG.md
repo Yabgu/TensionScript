@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.8.1
+
+Republish. The 0.8.0 tarball shipped a `dist/` of five files and 488 bytes: the
+publish ran without a build, so `dist/` contained only its tracked members;
+`files: ["dist/"]` packs the ignored artifacts when they exist, so running the
+build first is the fix. `package.json` exported `./dist/asc.js`, which was not in
+the tarball. Every install failed to load:
+
+```
+ERR_MODULE_NOT_FOUND: Cannot find module .../dist/asc.js
+  imported from .../bin/tensionscript.js
+```
+
+0.8.1 republishes with the built `dist/` and adds a `prepublishOnly` guard —
+`npm run build && npm run publish:verify`, where `scripts/verify-dist.js`
+asserts the artifacts exist and clear a sanity floor — that refuses to publish
+if `dist/asc.js` or `dist/assemblyscript.js` is missing or undersized.
+
+**No API changes from 0.8.0.** Any consumer that managed to install 0.8.0 could
+not load it; 0.8.1 is a drop-in replacement.
+
+*Diagnosis, corrected by measurement.* The first account of this said
+`.gitignore` excludes `dist/` from the tarball. It does not: `files: ["dist/"]`
+wins, and the ignored artifacts — `asc.js`, `assemblyscript.js`,
+`*.generated.d.ts`, `*.map`, `importmap.json`, `web.js` — are packed whenever
+they exist on disk. Measured with `npm pack --dry-run`, the built tree packs 13
+files under `dist/` and the same tree with those artifact groups removed packs 5.
+The failure was an absent build, not an exclusion rule. So `prepublishOnly`
+running the build is the load-bearing half of the guard, and `publish:verify` is
+the assertion that the build landed; either alone is insufficient, because a
+build that emits nothing looks like one that worked until you look.
+
+*Discipline note extension.* Verify the tarball loads, not just that the version
+is on the registry. `npm view <pkg> version` proves the version exists;
+`npm pack` + `tar -tzf` + install + `--version` proves it works. The guard makes
+the second check unnecessary for this failure — the publish now aborts rather
+than shipping an empty `dist/` — but the check is still what tells you whether
+the artifact the registry serves is the one you built.
+
+```
+npm view @yabgu_gm/tensionscript version --prefer-online
+npm pack @yabgu_gm/tensionscript@0.8.1
+tar -tzf yabgu_gm-tensionscript-0.8.1.tgz | grep dist/asc.js
+tar -tzf yabgu_gm-tensionscript-0.8.1.tgz | grep dist/assemblyscript.js
+npm install -g yabgu_gm-tensionscript-0.8.1.tgz
+tensionscript --version
+```
+
+After publishing 0.8.1, the maintainer should deprecate 0.8.0 so its installers
+are warned:
+
+```
+npm deprecate @yabgu_gm/tensionscript@0.8.0 'Broken tarball (no dist/); install 0.8.1 or later'
+```
+
+0.8.0 cannot be unpublished after 72h; deprecation is the correct response.
+0.8.1 is a drop-in replacement.
+
 ## 0.8.0
 
 The interop bundle: the guest describes a C record in the language, and the
