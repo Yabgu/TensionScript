@@ -87,6 +87,26 @@
   i32.const 36
   i32.eq
   drop
+  i32.const 16
+  i32.const 16
+  i32.eq
+  drop
+  i32.const 24
+  i32.const 24
+  i32.eq
+  drop
+  i32.const 32
+  i32.const 32
+  i32.eq
+  drop
+  i32.const 3
+  i32.const 3
+  i32.eq
+  drop
+  i32.const 16
+  i32.const 16
+  i32.eq
+  drop
  )
  (func $interop/fixed-array/run (result i32)
   i32.const 24

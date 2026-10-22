@@ -1321,6 +1321,19 @@ function builtin_offsetof(ctx: BuiltinFunctionContext): ExpressionRef {
   let operands = ctx.operands;
   let contextualType = ctx.contextualType;
   let type = ctx.typeArguments![0];
+  // An inline array's "end offset" is its whole extent: `N * sizeof(element)`.
+  // It is the same number `sizeof<T[N]>()` gives, because a fixed array has no
+  // trailing pad of its own -- the record that holds it is what pads.
+  if (type.kind == TypeKind.FixedArray) {
+    if (ctx.operands.length) {
+      compiler.error(
+        DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+        ctx.reportNode.range, "offsetof", type.toString()
+      );
+      return module.unreachable();
+    }
+    return contextualUsize(compiler, i64_new(type.byteSize), ctx.contextualType);
+  }
   let classReference = type.getClassOrWrapper(compiler.program);
   if (!classReference) {
     compiler.error(

@@ -71,6 +71,16 @@ assert(sizeof<Eight>() == 37);
 assert(offsetof<Eight>("arr") == 4);
 assert(offsetof<Eight>("tail") == 36);
 
+// --- `offsetof` of the array type itself is its whole extent --------------
+// The same number `sizeof` gives: a fixed array has no trailing pad of its own
+// (the record that holds it is what pads). `offsetof<M>("field")` stays the
+// field's start, which is what the reads and writes address from.
+assert(offsetof<f32[4]>() == 16);
+assert(offsetof<f32[6]>() == 24);
+assert(offsetof<u32[8]>() == 32);
+assert(offsetof<u8[3]>() == 3);
+assert(offsetof<f32[4]>() == sizeof<f32[4]>());
+
 export function run(): i32 {
   return sizeof<Mixed>() + offsetof<Mixed>("b");
 }
