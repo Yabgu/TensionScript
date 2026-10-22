@@ -786,9 +786,40 @@ export class Parser extends DiagnosticEmitter {
         type.range.end = nextType.range.end;
       }
     }
-    // ... [][]
+    // ... [] or [N]
+    //
+    // The token after `[` decides, with no lookahead beyond it:
+    //   `]`         -> `Array<T>`, a managed reference (unchanged);
+    //   an integer  -> `T[N]`, N elements inline (a fixed array).
+    // Anything else stays the pre-existing `']' expected`: a non-literal bound
+    // has no runtime length to read, and every bound a record has is a literal.
     while (tn.skip(Token.OpenBracket)) {
       let bracketStart = tn.tokenPos;
+      let length = -1;
+      if (tn.peek() == Token.IntegerLiteral) {
+        tn.next();                    // leaves `pos` at the literal's first digit
+        let literalStart = tn.tokenPos;
+        let value = tn.readInteger();
+        let literalRange = tn.range(literalStart, tn.pos);
+        if (
+          !tn.skip(Token.CloseBracket) ||
+          i64_lt(value, i64_new(1)) ||
+          i64_gt(value, i64_new(i32.MAX_VALUE))
+        ) {
+          if (!suppressErrors) {
+            this.error(
+              DiagnosticCode._0_expected,
+              literalRange, "]"
+            );
+          }
+          return null;
+        }
+        length = <i32>i64_low(value);
+      }
+      if (length >= 0) {
+        type = Node.createFixedArrayType(type, length, tn.range(startPos, tn.pos));
+        continue;
+      }
       if (!tn.skip(Token.CloseBracket)) {
         if (!suppressErrors) {
           this.error(

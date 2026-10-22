@@ -46,6 +46,7 @@ import {
 import {
   FunctionTypeNode,
   TupleTypeNode,
+  FixedArrayTypeNode,
   ParameterKind,
   TypeNode,
   NodeKind,
@@ -175,6 +176,10 @@ export class Resolver extends DiagnosticEmitter {
       }
       case NodeKind.TupleType: {
         resolved = this.resolveTupleType(<TupleTypeNode>node, flow, ctxElement, ctxTypes, reportMode);
+        break;
+      }
+      case NodeKind.FixedArrayType: {
+        resolved = this.resolveFixedArrayType(<FixedArrayTypeNode>node, flow, ctxElement, ctxTypes, reportMode);
         break;
       }
       default: assert(false);
@@ -459,6 +464,37 @@ export class Resolver extends DiagnosticEmitter {
   }
 
   /** Resolves a {@link TupleTypeNode}. */
+  /**
+   * Resolves a {@link FixedArrayTypeNode} to a {@link TypeKind.FixedArray}.
+   *
+   * The element must be a value type: an inline array of *references* is the
+   * same four-byte-per-element block, but a guest that wants a managed
+   * collection wants `Array<T>`, and letting `T[N]` hold references would make
+   * `@unmanaged` records carry GC edges they cannot describe. Refused by name.
+   */
+  private resolveFixedArrayType(
+    node: FixedArrayTypeNode,
+    flow: Flow | null,
+    ctxElement: Element,
+    ctxTypes: Map<string,Type> | null = null,
+    reportMode: ReportMode = ReportMode.Report
+  ): Type | null {
+    let elementType = this.resolveType(
+      node.elementType, flow, ctxElement, ctxTypes, reportMode
+    );
+    if (!elementType) return null;
+    if (!elementType.isMemory) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+          node.elementType.range, "a fixed-size array of", elementType.toString()
+        );
+      }
+      return null;
+    }
+    return Type.fixedArray(elementType, node.length);
+  }
+
   private resolveTupleType(
     /** The type to resolve. */
     node: TupleTypeNode,

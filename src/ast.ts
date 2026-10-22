@@ -51,6 +51,7 @@ export const enum NodeKind {
   NamedType,
   FunctionType,
   TupleType,
+  FixedArrayType,
   TypeName,
   TypeParameter,
   Parameter,
@@ -170,6 +171,14 @@ export abstract class Node {
     range: Range
   ): TupleTypeNode {
     return new TupleTypeNode(elements, elementNames, isNullable, range);
+  }
+
+  static createFixedArrayType(
+    elementType: TypeNode,
+    length: i32,
+    range: Range
+  ): FixedArrayTypeNode {
+    return new FixedArrayTypeNode(elementType, length, range);
   }
 
   static createOmittedType(
@@ -982,6 +991,28 @@ export class TupleTypeNode extends TypeNode {
     range: Range
   ) {
     super(NodeKind.TupleType, isNullable, range);
+  }
+}
+
+/**
+ * Represents a fixed-size inline array type, `T[N]`.
+ *
+ * Inline storage, not a reference: a field of this type occupies
+ * `N * sizeof(T)` bytes inside its record, aligned to the element. That is the
+ * opposite of `T[]`, which is `Array<T>` and occupies one pointer -- the two
+ * spellings differ by one token and by the whole memory model, which is why the
+ * bracket's contents decide rather than a modifier.
+ */
+export class FixedArrayTypeNode extends TypeNode {
+  constructor(
+    /** Element type. */
+    public elementType: TypeNode,
+    /** Element count. A compile-time literal; there is no runtime length. */
+    public length: i32,
+    /** Source range. */
+    range: Range
+  ) {
+    super(NodeKind.FixedArrayType, false, range);
   }
 }
 
