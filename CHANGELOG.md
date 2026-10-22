@@ -2,6 +2,50 @@
 
 ## 0.9.0
 
+### `@managed struct`
+
+A GC-owned record with a C-compatible layout: heap-allocated, traced, and
+nullable, where `struct` is borrowed and `class` guarantees no layout. The
+reference **is** the fields pointer, so `host.call(foo)` receives the record's
+fields with no conversion, `sizeof<Foo>()` is C's size, and `offsetof<Foo>("b")`
+is the field's offset from that pointer.
+
+```ts
+@managed struct Vec3 { x: f32 = 0; y: f32 = 0; z: f32 = 0; }
+const v = new Vec3();     // GC-owned
+submit(v);                // the host sees the Vec3's fields
+```
+
+Three kinds, and the choice is about ownership and layout, not about syntax:
+
+| | GC | C layout | passed to the host as |
+|---|---|---|---|
+| `class` | yes | no | a reference |
+| `struct` | no | yes | a pointer the author supplies |
+| `@managed struct` | yes | yes | the fields pointer |
+
+A managed struct is **final** — no inheritance, no virtual dispatch — because a
+subclass would put fields past the extent `sizeof` already reported. It refuses
+`T[N]` fields and `COPY_STRUCT` by name (see *Known limitations*).
+
+### Known limitations
+
+- **`T[N]` fields in any constructed type crash the compiler** — pre-existing,
+  and not specific to managed structs: field initialization cannot fill an
+  extent (`makeZero` has no `FixedArray` case), so `new` on any type with an
+  inline array traps the build. `@managed struct` refuses such a field by name
+  rather than promise it; the fix is a separate compiler phase. Borrowed
+  `struct` keeps `T[N]` as 0.8.x had it.
+- **Inline arrays of GC references are untraced** (`isManaged<Other[4]>()` is
+  false), so they are refused on a managed struct.
+- **`COPY_STRUCT` does not accept a managed struct.** It is a raw byte copy; the
+  write barrier it skips is exactly what a managed destination needs. A managed
+  copy needs a method with the barrier in it, not a primitive.
+- **The host must not retain a pointer past the call.** `host.call(foo)` roots
+  the object across the call, so a synchronous host is safe; nothing keeps it
+  alive after the call returns. `@abi.transfer` is not implemented, so this is a
+  contract, not a checked property.
+
 ### `struct` stays unmanaged, permanently
 
 The 0.9.0 flip announced in 0.8.0 is **cancelled**. `struct` means
