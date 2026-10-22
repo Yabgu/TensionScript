@@ -1,0 +1,7 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "AS100: Not implemented: an inline array of GC references on an @managed struct (the collector cannot trace its elements)"
+  ]
+}

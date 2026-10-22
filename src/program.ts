@@ -2158,7 +2158,22 @@ export class Program extends DiagnosticEmitter {
 
     // remember classes that extend another class
     if (declaration.extendsType) {
-      queuedExtends.push(element);
+      // A managed struct's fields sit at fixed offsets from its reference, and
+      // `sizeof` already reported the record's extent at the point the base
+      // would have to be laid out. `@managed struct` is also marked `Final`
+      // above, so this would be refused as `extends a final class` anyway; the
+      // explicit error says *why* rather than sending the author to look up what
+      // `final` meant here. `extends Object` is not special-cased: the record
+      // is a managed reference like any other, so it needs no base to be one.
+      if (element.hasDecorator(DecoratorFlags.ManagedStruct)) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          Range.join(declaration.name.range, declaration.extendsType.range),
+          "inheritance on an @managed struct (its fields must stay at fixed offsets from the reference)"
+        );
+      } else {
+        queuedExtends.push(element);
+      }
     } else if (
       !element.hasDecorator(DecoratorFlags.Unmanaged) &&
       element.internalName != BuiltinNames.Object

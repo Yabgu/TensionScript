@@ -1,0 +1,7 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "AS100: Not implemented: COPY_STRUCT on an @managed struct (a raw byte copy bypasses the GC write barrier)"
+  ]
+}

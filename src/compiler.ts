@@ -6254,6 +6254,46 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Compiles a call expression according to the specified context. */
+  /**
+   * Refuses `COPY_STRUCT<T>(dst, src)` when `T` is an `@managed struct`.
+   *
+   * `COPY_STRUCT` is `memory.copy(dst, src, offsetof<T>())`
+   * (`std/assembly/util/bytes.ts:133-135`). For a borrowed record that is the
+   * struct-copy primitive; for a managed reference it is a byte copy that skips
+   * the collector's write barrier, so a destination it writes can hold a
+   * pointer the next collection has no reason to trace. A managed struct also
+   * has no separate "value view" to copy: its reference already is its fields
+   * pointer. The call is an ordinary `@inline` std function, so the check has to
+   * happen here, at the call site, before the body is inlined away.
+   */
+  private checkNoManagedStructCopy(
+    functionInstance: Function,
+    expression: CallExpression
+  ): bool {
+    if (!functionInstance.prototype.internalName.startsWith(CommonNames.COPY_STRUCT)) {
+      return true;
+    }
+    let typeArguments = functionInstance.typeArguments;
+    if (!typeArguments) return true;
+    for (let i = 0, k = typeArguments.length; i < k; ++i) {
+      let classReference = unchecked(typeArguments[i]).classReference;
+      if (
+        classReference != null &&
+        classReference.hasDecorator(DecoratorFlags.ManagedStruct)
+      ) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          expression.typeArguments && expression.typeArguments.length > i
+            ? expression.typeArguments[i].range
+            : expression.range,
+          "COPY_STRUCT on an @managed struct (a raw byte copy bypasses the GC write barrier)"
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
   private compileCallExpression(
     /** Call expression to compile. */
     expression: CallExpression,
@@ -6332,11 +6372,17 @@ export class Compiler extends DiagnosticEmitter {
         }
         let functionInstance = this.resolver.maybeInferCall(expression, functionPrototype, flow);
         if (!functionInstance) return this.module.unreachable();
+        if (!this.checkNoManagedStructCopy(functionInstance, expression)) {
+          return this.module.unreachable();
+        }
         target = functionInstance;
         // fall-through
       }
       case ElementKind.Function: {
         let functionInstance = <Function>target;
+        if (!this.checkNoManagedStructCopy(functionInstance, expression)) {
+          return this.module.unreachable();
+        }
         let thisArg: ExpressionRef = 0;
         if (functionInstance.is(CommonFlags.Instance)) {
           thisArg = this.compileExpression(

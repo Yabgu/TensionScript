@@ -3717,6 +3717,38 @@ export class Resolver extends DiagnosticEmitter {
                 }
                 if (needsLayout) {
                   let byteSize = fieldType.byteSize;
+                  // A managed struct is a record whose extent `sizeof` reports,
+                  // so a field that cannot be constructed or traced would make
+                  // that number a lie. Both refusals are by name here, at the
+                  // field's own type node, before any codegen can see it:
+                  //
+                  //   - `T[N]` at all: field initialization cannot fill an
+                  //     extent yet -- `makeZero` has no `FixedArray` case
+                  //     (`src/compiler.ts:10688`), so constructing any type
+                  //     with one traps the compiler today, managed or not. The
+                  //     follow-up is a phase that fills extents; until then the
+                  //     field is refused rather than promised.
+                  //   - `T[N]` of a GC reference specifically: even once
+                  //     constructible, the collector could not see the elements
+                  //     (`isManaged<Other[4]>()` is false; `Type.isManaged`
+                  //     consults only `isInternalReference`
+                  //     (`src/types.ts:372-379`) and a fixed array carries
+                  //     `TypeFlags.None` (`:885-889`)), so every referenced
+                  //     object in the array would be collected while live.
+                  if (
+                    instance.hasDecorator(DecoratorFlags.ManagedStruct) &&
+                    fieldType.kind == TypeKind.FixedArray
+                  ) {
+                    let elementType = fieldType.fixedElementType;
+                    this.error(
+                      DiagnosticCode.Not_implemented_0,
+                      assert(boundPrototype.fieldDeclaration).type!.range,
+                      elementType != null && elementType.isManaged
+                        ? "an inline array of GC references on an @managed struct (the collector cannot trace its elements)"
+                        : "an inline array (T[N]) on an @managed struct (field initialization cannot fill an extent yet; see compiler.ts makeZero)"
+                    );
+                    break;
+                  }
                   // Align by the field's **alignment**, not its size. The two
                   // coincide for every scalar; they do not for an inline array,
                   // whose size is its element's replicated (24 for `f32[6]`,
