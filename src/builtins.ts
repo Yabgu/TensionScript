@@ -44,6 +44,8 @@ import {
   LiteralExpression,
   ArrayLiteralExpression,
   IdentifierExpression,
+  DecoratorNode,
+  PropertyAccessExpression,
   NamedTypeNode
 } from "./ast";
 
@@ -189,6 +191,7 @@ export namespace BuiltinNames {
   export const sizeof = "~lib/builtins/sizeof";
   export const alignof = "~lib/builtins/alignof";
   export const offsetof = "~lib/builtins/offsetof";
+  export const abiNameOf = "~lib/builtins/abiNameOf";
   export const nameof = "~lib/builtins/nameof";
   export const lengthof = "~lib/builtins/lengthof";
   export const select = "~lib/builtins/select";
@@ -1357,6 +1360,93 @@ function builtin_offsetof(ctx: BuiltinFunctionContext): ExpressionRef {
   return contextualUsize(compiler, i64_new(classReference.nextMemoryOffset), contextualType);
 }
 builtinFunctions.set(BuiltinNames.offsetof, builtin_offsetof);
+
+// abiNameOf<T!>(fieldName: string) -> string
+//
+// The ABI name of a field: its `@abi.alias("…")` if it has one, else its
+// TypeScript name. Compile-time, like `offsetof` and `nameof` — the result is a
+// static string, so a call site costs no more than the constant it selects.
+//
+// `offsetof<T>("field")` keeps taking the **TypeScript** name. The two are
+// separate lookups on purpose: an alias is metadata the other side of the ABI
+// may use, while the layout is addressed by the name the declaration wrote.
+//
+// An attribute is matched by its exact dotted spelling, `abi.alias`. The name
+// namespace is not resolved as a namespace: `@abi.alias` is one attribute whose
+// name happens to be a property access, which is what `DecoratorKind.fromNode`
+// already produces for `@operator.binary`. That keeps the annotation surface
+// open (`@memory.*`, tooling) without the resolver owning a namespace tree.
+function builtin_abiNameOf(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = compiler.program.stringInstance.type;
+  if (
+    checkTypeRequired(ctx) |
+    checkArgsRequired(ctx, 1)
+  ) return module.unreachable();
+  let type = ctx.typeArguments![0];
+  let classReference = type.getClassOrWrapper(compiler.program);
+  if (!classReference) {
+    compiler.error(
+      DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+      ctx.reportNode.typeArgumentsRange, "abiNameOf", type.toString()
+    );
+    return module.unreachable();
+  }
+  let firstOperand = ctx.operands[0];
+  if (!firstOperand.isLiteralKind(LiteralKind.String)) {
+    compiler.error(
+      DiagnosticCode.String_literal_expected,
+      firstOperand.range
+    );
+    return module.unreachable();
+  }
+  let fieldName = (<StringLiteralExpression>firstOperand).value;
+  let fieldMember = classReference.getMember(fieldName);
+  if (!fieldMember || fieldMember.kind != ElementKind.PropertyPrototype) {
+    compiler.error(
+      DiagnosticCode.Type_0_has_no_property_1,
+      firstOperand.range, classReference.internalName, fieldName
+    );
+    return module.unreachable();
+  }
+  let fieldDeclaration = (<PropertyPrototype>fieldMember).fieldDeclaration;
+  let typeNode = fieldDeclaration ? fieldDeclaration.type : null;
+  let attributes = typeNode ? typeNode.attributes : null;
+  if (attributes) {
+    for (let i = 0, k = attributes.length; i < k; ++i) {
+      if (!isAbiAliasAttribute(attributes[i])) continue;
+      let args = attributes[i].args;
+      let alias = args && args.length
+        ? args[0]
+        : null;
+      if (alias && alias.isLiteralKind(LiteralKind.String)) {
+        return reifyConstantType(
+          ctx, compiler.ensureStaticString((<StringLiteralExpression>alias).value)
+        );
+      }
+      // A named attribute with no usable argument falls back to the declared
+      // name: the alternative is a silent empty string at the far side of an
+      // ABI, which is worse than the name the declaration already has.
+      break;
+    }
+  }
+  return reifyConstantType(ctx, compiler.ensureStaticString(fieldName));
+}
+builtinFunctions.set(BuiltinNames.abiNameOf, builtin_abiNameOf);
+
+/** Whether an attribute is `@abi.alias`, matched by its exact dotted spelling. */
+function isAbiAliasAttribute(attribute: DecoratorNode): bool {
+  let name = attribute.name;
+  if (name.kind != NodeKind.PropertyAccess) return false;
+  let propertyAccess = <PropertyAccessExpression>name;
+  let expression = propertyAccess.expression;
+  if (expression.kind != NodeKind.Identifier) return false;
+  return (
+    (<IdentifierExpression>expression).text == "abi" &&
+    propertyAccess.property.text == "alias"
+  );
+}
 
 // nameof<T> -> string
 function builtin_nameof(ctx: BuiltinFunctionContext): ExpressionRef {
