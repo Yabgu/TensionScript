@@ -5821,6 +5821,23 @@ export class Compiler extends DiagnosticEmitter {
     let program = this.program;
     let resolver = program.resolver;
     let flow = this.currentFlow;
+
+    // `foo.arr[i] = v` on an inline array: the same address arithmetic as the
+    // read, then a store. Intercepted before the index-signature lookup, because
+    // a `T[N]` is inline storage and has no class to hang an operator on -- the
+    // lookup below would report "index signature missing" for a target that is
+    // perfectly writable.
+    if (expression.kind == NodeKind.ElementAccess) {
+      let elementAccess = <ElementAccessExpression>expression;
+      let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
+      if (arrayType && arrayType.kind == TypeKind.FixedArray) {
+        return this.compileFixedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, valueExpression
+        );
+      }
+    }
+
     let target = resolver.lookupExpression(expression, flow); // reports
     if (!target) return this.module.unreachable();
     let thisExpression = resolver.currentThisExpression;
@@ -7376,15 +7393,29 @@ export class Compiler extends DiagnosticEmitter {
       let value = this.compileExpression(
         assert(valueExpression), elementType, Constraints.ConvImplicit
       );
-      this.currentType = Type.void;
-      return module.store(
-        elementSize,
-        address,
-        value,
-        elementType.toRef(),
-        0,
-        elementSize
-      );
+      if (contextualType == Type.void) {
+        this.currentType = Type.void;
+        return module.store(
+          elementSize, address, value, elementType.toRef(), 0, elementSize
+        );
+      }
+      // The assignment is used as a value: the store writes the bytes and the
+      // block yields what was written, so `let y = (foo.arr[0] = 1.5)` reads
+      // back the element rather than the store's void.
+      let temp = this.currentFlow.getTempLocal(elementType);
+      this.currentType = elementType;
+      if (elementType.isManaged) {
+        this.currentFlow.setLocalFlag(temp.index, LocalFlags.Initialized);
+      }
+      return module.block(null, [
+        module.local_set(temp.index, value, elementType.isManaged),
+        module.store(
+          elementSize, address,
+          module.local_get(temp.index, elementType.toRef()),
+          elementType.toRef(), 0, elementSize
+        ),
+        module.local_get(temp.index, elementType.toRef())
+      ], elementType.toRef());
     }
     this.currentType = elementType;
     return module.load(
