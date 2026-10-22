@@ -7348,6 +7348,88 @@ export class Compiler extends DiagnosticEmitter {
     return this.module.flatten(exprs, this.currentType.toRef());
   }
 
+  /**
+   * Compiles `array[index]` for a `T[N]` inline array: read and write.
+   *
+   * The address is `base + (index << alignof(T))` and the width is the
+   * element's, so a constant index folds into the load's immediate offset --
+   * measured on this compiler, `foo.arr[2]` is `local.get $0; f32.load
+   * offset=12`, two instructions, and the `-O3` inliner is not involved.
+   *
+   * `isWrite` selects the store; the arithmetic is shared so a read and a write
+   * cannot disagree about which bytes they address.
+   */
+  private compileFixedArrayElementAccess(
+    expression: ElementAccessExpression,
+    arrayType: Type,
+    isWrite: boolean,
+    contextualType: Type,
+    constraints: Constraints,
+    valueExpression: Expression | null = null
+  ): ExpressionRef {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.byteSize;
+    let address = this.compileFixedArrayElementAddress(expression, arrayType);
+    let isWasm64 = this.options.isWasm64;
+    if (isWrite) {
+      let value = this.compileExpression(
+        assert(valueExpression), elementType, Constraints.ConvImplicit
+      );
+      this.currentType = Type.void;
+      return module.store(
+        elementSize,
+        address,
+        value,
+        elementType.toRef(),
+        0,
+        elementSize
+      );
+    }
+    this.currentType = elementType;
+    return module.load(
+      elementSize,
+      elementType.isSignedIntegerValue,
+      address,
+      elementType.toRef(),
+      0,
+      elementSize
+    );
+  }
+
+  /** Compiles the byte address of `array[index]`. */
+  private compileFixedArrayElementAddress(
+    expression: ElementAccessExpression,
+    arrayType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    // The target's own type, not `usize`: a `T[N]` has no usize representation
+    // of its own, and the field path above already yields the storage's address
+    // for it.
+    let baseType = this.resolver.resolveExpression(expression.expression, this.currentFlow);
+    if (!baseType) return this.module.unreachable();
+    let base = this.compileExpression(
+      expression.expression, baseType, Constraints.ConvImplicit
+    );
+    let index = this.compileExpression(
+      expression.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+    // `index` is i32; extend to the pointer width before the shift so a wasm64
+    // build indexes past 4 GiB correctly, which is what `<usize>index << n`
+    // means in std.
+    let scaledIndex = module.binary(
+      BinaryOp.ShlSize,
+      this.options.isWasm64
+        ? module.unary(UnaryOp.ExtendU32ToU64, index)
+        : index,
+      this.options.isWasm64
+        ? module.i64(elementType.alignLog2)
+        : module.i32(elementType.alignLog2)
+    );
+    return module.binary(BinaryOp.AddSize, base, scaledIndex);
+  }
+
   private compileElementAccessExpression(
     expression: ElementAccessExpression,
     contextualType: Type,
@@ -7367,6 +7449,17 @@ export class Compiler extends DiagnosticEmitter {
 
     let targetType = resolver.resolveExpression(targetExpression, this.currentFlow);
     if (targetType) {
+      // `T[N]` indexed: `base + i * sizeof(T)`, then a load of the element's
+      // width. No bounds check: `N` is a compile-time literal, so a constant
+      // index is checked by the compiler's own range rules and a dynamic index
+      // is the caller's to bound -- the same contract `unchecked` has, and the
+      // reason an inline array is not `StaticArray` (whose `.length` is the
+      // allocator's block size).
+      if (targetType.kind == TypeKind.FixedArray) {
+        return this.compileFixedArrayElementAccess(
+          expression, targetType, false, contextualType, constraints
+        );
+      }
       let classReference = targetType.getClassOrWrapper(this.program);
       if (classReference) {
         let isUnchecked = this.currentFlow.is(FlowFlags.UncheckedContext);
@@ -9573,6 +9666,33 @@ export class Compiler extends DiagnosticEmitter {
               propertyInstance.internalName
             );
           }
+        }
+        // An inline array field is storage, not a value: there is nothing to
+        // read at the field's offset, only bytes to address. So the access
+        // compiles to `base + fieldOffset`, typed as the array, and the
+        // element-access path indexes from there. Without this branch the getter
+        // would be called with a type that has no value representation
+        // (`Type#toRef` has no case for it) and the module would not build.
+        if (propertyInstance.type.kind == TypeKind.FixedArray) {
+          let thisType = this.resolver.resolveExpression(
+            assert(thisExpression), this.currentFlow
+          );
+          if (!thisType) return module.unreachable();
+          let thisArg = this.compileExpression(
+            assert(thisExpression),
+            thisType,
+            Constraints.ConvImplicit | Constraints.IsThis
+          );
+          this.currentType = propertyInstance.type;
+          let offset = propertyInstance.memoryOffset;
+          if (!offset) {
+            return thisArg;
+          }
+          return module.binary(
+            BinaryOp.AddSize,
+            thisArg,
+            this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+          );
         }
         let getterInstance = propertyInstance.getterInstance;
         if (!getterInstance) return module.unreachable(); // failed earlier
