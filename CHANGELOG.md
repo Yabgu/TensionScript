@@ -1,0 +1,94 @@
+# Changelog
+
+## 0.8.0
+
+The interop bundle: the guest describes a C record in the language, and the
+compiler lays it out the way C does.
+
+### `sizeof<@unmanaged T>` is the record's size
+
+`sizeof<T>()` on an `@unmanaged` class now returns the record's layout size:
+the field offsets with inter-field padding, rounded up to the record's
+alignment — C's `sizeof`. It was the pointer width (4) before variant B, and
+then the offset where the last field ends, which under-sized every record whose
+last field is narrower than the record's alignment (`{a: u8; arr: u32[8]; b: u8}`
+is 40 bytes, not 37).
+
+`offsetof<T>()` with no field argument is the same number; both builtins read
+the layout, so they move together. A field's offset
+(`offsetof<T>("field")`) is unchanged, so addressing is unchanged.
+
+**Breaking** only for a consumer that read `sizeof` on an `@unmanaged` record
+and expected the pointer width. There is no such caller in the tree — the only
+in-tree `sizeof<T>()` is `sizeof<usize>()` — which is why this is a minor
+release. A managed class is unaffected: `sizeof<managed T>` is still 4.
+
+### `COPY_STRUCT`
+
+`std/assembly/util/bytes.ts`: `COPY_STRUCT<T>(dst, src)` is
+`memory.copy(dst, src, offsetof<T>())` — the struct-copy primitive, matching C's
+`memcpy(dst, src, sizeof(S))` now that `offsetof<T>()` is the record's size.
+
+`load<T>` / `store<T>` are **reference operations**, not struct copies: they
+read and write one word at a `@unmanaged` reference, which is what the
+allocator's block links want. The originally planned refusals for them were
+dropped (`docs/interop-scope.md` §6.3, `tlsf.ts`'s six sites); `COPY_STRUCT` is
+the struct-copy path.
+
+### `struct`
+
+`struct Foo { … }` is `@unmanaged class Foo { … }` at 0.8.0 — the same keyword
+the same declaration, one decorator, no second code path. A plain `struct`
+emits a deprecation warning (TS6385), because at 0.9.0 the same spelling becomes
+a managed C-layout reference type.
+
+### Post-type `@` attributes
+
+An attribute may follow the type: `m00: f32 @abi.alias("m00")`. On the same
+line it attaches to the type; after a newline it still attaches to the *next*
+member, as before.
+
+### `@abi.alias` and `abiNameOf`
+
+`@abi.alias("name")` names a field for the other side of an ABI without moving
+it; `offsetof<T>("field")` keeps taking the TypeScript name, so an alias can
+never shift a byte. `abiNameOf<T>("field")` returns the alias, or the TypeScript
+name when there is none. Compile-time; no runtime cost. With two aliases on one
+field the first is canonical.
+
+### `@inline` is reserved
+
+`@inline` on a struct declaration is a hard error (AS100, "Not implemented:
+value types"). Value types are a later release; the reservation refuses by name
+rather than parsing and ignoring.
+
+### `T[N]`: inline fixed-size arrays
+
+`f32[4]`, `u32[8]`, `f32[6]` — `N` inline elements, not an `Array<T>`
+reference. Usable as struct fields, with `sizeof`/`offsetof`, indexed reads and
+writes, compound assignment and `++`/`--`. The layout aligns a field by its
+*element's* alignment (4 for `f32[6]`, whose 24-byte size is not a power of
+two), so `{a: i32; arr: f32[4]; b: i32}` is 24 bytes with `arr` at 4 and `b` at
+20. At `-O3` a constant-index access is two instructions (`local.get`,
+`f32.load offset=N`).
+
+`T[N]` is what `tension-input`'s `StateRecord.keysHeld[8]` and
+`PadRecord.axes[6]` were hand-addressed for.
+
+## 0.9.0 preview
+
+Plain `struct` becomes a **managed** C-layout reference type; the borrowed
+(by-value, unmanaged) form is spelled `@unmanaged struct`.
+
+Migration: mark every declaration that intends the borrowed form now.
+
+```ts
+// 0.8.0 -- warns (TS6385), and means @unmanaged
+struct Vec3 { x: f32; y: f32; z: f32; }
+
+// 0.9.0 -- the spelling that keeps meaning the borrowed form
+@unmanaged struct Vec3 { x: f32; y: f32; z: f32; }
+```
+
+The TS6385 warning is the signal. `sizeof<managed T>` stays the reference width
+(4); `sizeof<@unmanaged T>` stays C's `sizeof`.

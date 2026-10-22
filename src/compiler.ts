@@ -4928,6 +4928,21 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (!compound) return expr;
     let resolver = this.resolver;
+    // `foo.arr[i] |= v` and every other compound operator: the same store as a
+    // plain assignment, with the operator's result as the value. Intercepted
+    // before `lookupExpression`, which reports an index signature that an inline
+    // array cannot have -- and this path never reaches `compileAssignment`, so
+    // the intercept there does not cover it.
+    if (left.kind == NodeKind.ElementAccess) {
+      let elementAccess = <ElementAccessExpression>left;
+      let arrayType = resolver.resolveExpression(elementAccess.expression, this.currentFlow);
+      if (arrayType && arrayType.kind == TypeKind.FixedArray) {
+        return this.compileFixedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, null, expr
+        );
+      }
+    }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
     let targetType = resolver.getTypeOfElement(target);
@@ -5821,6 +5836,23 @@ export class Compiler extends DiagnosticEmitter {
     let program = this.program;
     let resolver = program.resolver;
     let flow = this.currentFlow;
+
+    // `foo.arr[i] = v` on an inline array: the same address arithmetic as the
+    // read, then a store. Intercepted before the index-signature lookup, because
+    // a `T[N]` is inline storage and has no class to hang an operator on -- the
+    // lookup below would report "index signature missing" for a target that is
+    // perfectly writable.
+    if (expression.kind == NodeKind.ElementAccess) {
+      let elementAccess = <ElementAccessExpression>expression;
+      let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
+      if (arrayType && arrayType.kind == TypeKind.FixedArray) {
+        return this.compileFixedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, valueExpression
+        );
+      }
+    }
+
     let target = resolver.lookupExpression(expression, flow); // reports
     if (!target) return this.module.unreachable();
     let thisExpression = resolver.currentThisExpression;
@@ -7348,6 +7380,105 @@ export class Compiler extends DiagnosticEmitter {
     return this.module.flatten(exprs, this.currentType.toRef());
   }
 
+  /**
+   * Compiles `array[index]` for a `T[N]` inline array: read and write.
+   *
+   * The address is `base + (index << alignof(T))` and the width is the
+   * element's, so a constant index folds into the load's immediate offset --
+   * measured on this compiler, `foo.arr[2]` is `local.get $0; f32.load
+   * offset=12`, two instructions, and the `-O3` inliner is not involved.
+   *
+   * `isWrite` selects the store; the arithmetic is shared so a read and a write
+   * cannot disagree about which bytes they address.
+   */
+  private compileFixedArrayElementAccess(
+    expression: ElementAccessExpression,
+    arrayType: Type,
+    isWrite: boolean,
+    contextualType: Type,
+    constraints: Constraints,
+    valueExpression: Expression | null = null,
+    valueRef: ExpressionRef = 0
+  ): ExpressionRef {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.byteSize;
+    let address = this.compileFixedArrayElementAddress(expression, arrayType);
+    let isWasm64 = this.options.isWasm64;
+    if (isWrite) {
+      // `valueRef` is a value already compiled by the caller -- the result of a
+      // compound operator, which must not be recomputed here.
+      let value = valueRef || this.compileExpression(
+        assert(valueExpression), elementType, Constraints.ConvImplicit
+      );
+      if (contextualType == Type.void) {
+        this.currentType = Type.void;
+        return module.store(
+          elementSize, address, value, elementType.toRef(), 0, elementSize
+        );
+      }
+      // The assignment is used as a value: the store writes the bytes and the
+      // block yields what was written, so `let y = (foo.arr[0] = 1.5)` reads
+      // back the element rather than the store's void.
+      let temp = this.currentFlow.getTempLocal(elementType);
+      this.currentType = elementType;
+      if (elementType.isManaged) {
+        this.currentFlow.setLocalFlag(temp.index, LocalFlags.Initialized);
+      }
+      return module.block(null, [
+        module.local_set(temp.index, value, elementType.isManaged),
+        module.store(
+          elementSize, address,
+          module.local_get(temp.index, elementType.toRef()),
+          elementType.toRef(), 0, elementSize
+        ),
+        module.local_get(temp.index, elementType.toRef())
+      ], elementType.toRef());
+    }
+    this.currentType = elementType;
+    return module.load(
+      elementSize,
+      elementType.isSignedIntegerValue,
+      address,
+      elementType.toRef(),
+      0,
+      elementSize
+    );
+  }
+
+  /** Compiles the byte address of `array[index]`. */
+  private compileFixedArrayElementAddress(
+    expression: ElementAccessExpression,
+    arrayType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    // The target's own type, not `usize`: a `T[N]` has no usize representation
+    // of its own, and the field path above already yields the storage's address
+    // for it.
+    let baseType = this.resolver.resolveExpression(expression.expression, this.currentFlow);
+    if (!baseType) return this.module.unreachable();
+    let base = this.compileExpression(
+      expression.expression, baseType, Constraints.ConvImplicit
+    );
+    let index = this.compileExpression(
+      expression.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+    // `index` is i32; extend to the pointer width before the shift so a wasm64
+    // build indexes past 4 GiB correctly, which is what `<usize>index << n`
+    // means in std.
+    let scaledIndex = module.binary(
+      BinaryOp.ShlSize,
+      this.options.isWasm64
+        ? module.unary(UnaryOp.ExtendU32ToU64, index)
+        : index,
+      this.options.isWasm64
+        ? module.i64(elementType.alignLog2)
+        : module.i32(elementType.alignLog2)
+    );
+    return module.binary(BinaryOp.AddSize, base, scaledIndex);
+  }
+
   private compileElementAccessExpression(
     expression: ElementAccessExpression,
     contextualType: Type,
@@ -7367,6 +7498,17 @@ export class Compiler extends DiagnosticEmitter {
 
     let targetType = resolver.resolveExpression(targetExpression, this.currentFlow);
     if (targetType) {
+      // `T[N]` indexed: `base + i * sizeof(T)`, then a load of the element's
+      // width. No bounds check: `N` is a compile-time literal, so a constant
+      // index is checked by the compiler's own range rules and a dynamic index
+      // is the caller's to bound -- the same contract `unchecked` has, and the
+      // reason an inline array is not `StaticArray` (whose `.length` is the
+      // allocator's block size).
+      if (targetType.kind == TypeKind.FixedArray) {
+        return this.compileFixedArrayElementAccess(
+          expression, targetType, false, contextualType, constraints
+        );
+      }
       let classReference = targetType.getClassOrWrapper(this.program);
       if (classReference) {
         let isUnchecked = this.currentFlow.is(FlowFlags.UncheckedContext);
@@ -9574,6 +9716,33 @@ export class Compiler extends DiagnosticEmitter {
             );
           }
         }
+        // An inline array field is storage, not a value: there is nothing to
+        // read at the field's offset, only bytes to address. So the access
+        // compiles to `base + fieldOffset`, typed as the array, and the
+        // element-access path indexes from there. Without this branch the getter
+        // would be called with a type that has no value representation
+        // (`Type#toRef` has no case for it) and the module would not build.
+        if (propertyInstance.type.kind == TypeKind.FixedArray) {
+          let thisType = this.resolver.resolveExpression(
+            assert(thisExpression), this.currentFlow
+          );
+          if (!thisType) return module.unreachable();
+          let thisArg = this.compileExpression(
+            assert(thisExpression),
+            thisType,
+            Constraints.ConvImplicit | Constraints.IsThis
+          );
+          this.currentType = propertyInstance.type;
+          let offset = propertyInstance.memoryOffset;
+          if (!offset) {
+            return thisArg;
+          }
+          return module.binary(
+            BinaryOp.AddSize,
+            thisArg,
+            this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+          );
+        }
         let getterInstance = propertyInstance.getterInstance;
         if (!getterInstance) return module.unreachable(); // failed earlier
         let thisArg: ExpressionRef = 0;
@@ -9895,6 +10064,25 @@ export class Compiler extends DiagnosticEmitter {
     }
 
     let resolver = this.resolver;
+    // `foo.arr[i]++` / `--`: the same store as a plain assignment, with the
+    // incremented value. Intercepted before `lookupExpression` for the same
+    // reason as the binary compound operators -- an inline array has no index
+    // signature to find, and this path does not go through `compileAssignment`.
+    if (expression.operand.kind == NodeKind.ElementAccess) {
+      let elementAccess = <ElementAccessExpression>expression.operand;
+      let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
+      if (arrayType && arrayType.kind == TypeKind.FixedArray) {
+        let stored = this.compileFixedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, null, expr
+        );
+        if (!tempLocal) return stored;
+        return module.block(null, [
+          stored,
+          module.local_get(tempLocal.index, this.currentType.toRef())
+        ], this.currentType.toRef());
+      }
+    }
     let target = resolver.lookupExpression(expression.operand, flow); // reports
     if (!target) {
       return module.unreachable();

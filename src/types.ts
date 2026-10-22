@@ -67,6 +67,18 @@ export const enum TypeKind {
   /** A 128-bit vector. */
   V128,
 
+  // inline storage
+
+  /**
+   * A fixed-size inline array, `T[N]`.
+   *
+   * Not a value and not a reference: it has no runtime representation of its
+   * own. Its size and alignment are its element's, replicated, and the only
+   * operations are element reads and writes at `base + i * elementSize`, which
+   * the field-access paths emit directly.
+   */
+  FixedArray,
+
   // references (keep in same order as in Binaryen)
 
   /** External reference. */
@@ -144,6 +156,19 @@ export class Type {
   classReference: Class | null = null;
   /** Underlying signature reference, if a function type. */
   signatureReference: Signature | null = null;
+  /** Element type of a {@link TypeKind.FixedArray}, else `null`. */
+  fixedElementType: Type | null = null;
+  /** Element count of a {@link TypeKind.FixedArray}, else `0`. */
+  fixedLength: i32 = 0;
+  /**
+   * Alignment (log2) of a {@link TypeKind.FixedArray}: its element's.
+   *
+   * `alignLog2` cannot derive this from `byteSize` -- a 24-byte `f32[6]` would
+   * report 16-byte alignment (`31 - clz(24)` = 4), and a 96-byte `f32[24]` would
+   * report 64. An array is aligned as its element is, no matter how long it is,
+   * so the value is carried rather than computed.
+   */
+  private fixedAlignLog2: i32 = 0;
   /** Respective non-nullable type, if nullable. */
   private _nonNullableType: Type | null = null;
   /** Respective nullable type, if non-nullable. */
@@ -197,6 +222,7 @@ export class Type {
 
   /** Gets this type's logarithmic alignment in memory. */
   get alignLog2(): i32 {
+    if (this.kind == TypeKind.FixedArray) return this.fixedAlignLog2;
     return 31 - clz<i32>(this.byteSize);
   }
 
@@ -439,6 +465,15 @@ export class Type {
     if (this.kind != other.kind) {
       return false;
     }
+    if (this.kind == TypeKind.FixedArray) {
+      let elementType = this.fixedElementType;
+      let otherElementType = other.fixedElementType;
+      return (
+        elementType != null && otherElementType != null
+        && this.fixedLength == other.fixedLength
+        && elementType.equals(otherElementType)
+      );
+    }
     if (this.isReference) {
       let selfSignatureReference = this.signatureReference;
       let otherSignatureReference = other.signatureReference;
@@ -626,6 +661,11 @@ export class Type {
       case TypeKind.StringviewWTF8: return CommonNames.ref_stringview_wtf8;
       case TypeKind.StringviewWTF16: return CommonNames.ref_stringview_wtf16;
       case TypeKind.StringviewIter: return CommonNames.ref_stringview_iter;
+      case TypeKind.FixedArray: {
+        let elementType = this.fixedElementType;
+        return (elementType ? elementType.toString() : "?")
+          + "[" + this.fixedLength.toString() + "]";
+      }
       default: assert(false);
       case TypeKind.Void: return CommonNames.void_;
     }
@@ -823,6 +863,42 @@ export class Type {
   );
 
   /** A 64-bit float. */
+  /** Interned fixed-array types, keyed by element type and length. */
+  private static _fixedArrays: Map<string, Type> | null = null;
+
+  /**
+   * Gets the {@link TypeKind.FixedArray} of `elementType` repeated `length` times.
+   *
+   * Interned: the same element and length always yield the same `Type`, so
+   * `offsetof`, `alignof`, `sizeof` and field lookup can compare by identity the
+   * way they do for every other type. Size is the element's byte size times the
+   * length, and the alignment is the element's -- carried in
+   * {@link fixedAlignLog2} rather than derived from the total, because a total
+   * is not a power of two for the lengths records actually have (`f32[6]`).
+   */
+  static fixedArray(elementType: Type, length: i32): Type {
+    let key = elementType.toString() + "[" + length.toString() + "]";
+    let cache = Type._fixedArrays;
+    if (!cache) cache = Type._fixedArrays = new Map();
+    let cached = cache.get(key);
+    if (cached) return cached;
+    let arrayType = new Type(
+      TypeKind.FixedArray,
+      TypeFlags.None,
+      elementType.byteSize * length << 3 // bytes -> bits
+    );
+    arrayType.fixedElementType = elementType;
+    arrayType.fixedLength = length;
+    arrayType.fixedAlignLog2 = elementType.alignLog2;
+    cache.set(key, arrayType);
+    return arrayType;
+  }
+
+  /** Gets the element type of a {@link TypeKind.FixedArray}. */
+  get fixedArrayElementType(): Type {
+    return assert(this.fixedElementType);
+  }
+
   static readonly f64: Type = new Type(TypeKind.F64,
     TypeFlags.Signed   |
     TypeFlags.Long     |

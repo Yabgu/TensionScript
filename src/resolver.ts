@@ -36,7 +36,8 @@ import {
   IndexSignature,
   isTypedElement,
   InterfacePrototype,
-  DeclaredElement
+  DeclaredElement,
+  DecoratorFlags
 } from "./program";
 
 import {
@@ -46,6 +47,7 @@ import {
 import {
   FunctionTypeNode,
   TupleTypeNode,
+  FixedArrayTypeNode,
   ParameterKind,
   TypeNode,
   NodeKind,
@@ -175,6 +177,10 @@ export class Resolver extends DiagnosticEmitter {
       }
       case NodeKind.TupleType: {
         resolved = this.resolveTupleType(<TupleTypeNode>node, flow, ctxElement, ctxTypes, reportMode);
+        break;
+      }
+      case NodeKind.FixedArrayType: {
+        resolved = this.resolveFixedArrayType(<FixedArrayTypeNode>node, flow, ctxElement, ctxTypes, reportMode);
         break;
       }
       default: assert(false);
@@ -459,6 +465,37 @@ export class Resolver extends DiagnosticEmitter {
   }
 
   /** Resolves a {@link TupleTypeNode}. */
+  /**
+   * Resolves a {@link FixedArrayTypeNode} to a {@link TypeKind.FixedArray}.
+   *
+   * The element must be a value type: an inline array of *references* is the
+   * same four-byte-per-element block, but a guest that wants a managed
+   * collection wants `Array<T>`, and letting `T[N]` hold references would make
+   * `@unmanaged` records carry GC edges they cannot describe. Refused by name.
+   */
+  private resolveFixedArrayType(
+    node: FixedArrayTypeNode,
+    flow: Flow | null,
+    ctxElement: Element,
+    ctxTypes: Map<string,Type> | null = null,
+    reportMode: ReportMode = ReportMode.Report
+  ): Type | null {
+    let elementType = this.resolveType(
+      node.elementType, flow, ctxElement, ctxTypes, reportMode
+    );
+    if (!elementType) return null;
+    if (!elementType.isMemory) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+          node.elementType.range, "a fixed-size array of", elementType.toString()
+        );
+      }
+      return null;
+    }
+    return Type.fixedArray(elementType, node.length);
+  }
+
   private resolveTupleType(
     /** The type to resolve. */
     node: TupleTypeNode,
@@ -3593,6 +3630,10 @@ export class Resolver extends DiagnosticEmitter {
 
     // Alias base members
     let memoryOffset: u32 = 0;
+    // The record's alignment: the strongest field alignment, inherited ones
+    // included. A derived record's size must round to the base's alignment as
+    // much as to its own fields'.
+    let classAlignLog2: i32 = 0;
     let base = instance.base;
     if (base) {
       let implicitlyExtendsObject = instance.prototype.implicitlyExtendsObject;
@@ -3617,6 +3658,7 @@ export class Resolver extends DiagnosticEmitter {
         }
       }
       memoryOffset = base.nextMemoryOffset;
+      classAlignLog2 = base.alignLog2;
     }
 
     // Resolve instance members
@@ -3675,8 +3717,18 @@ export class Resolver extends DiagnosticEmitter {
                 }
                 if (needsLayout) {
                   let byteSize = fieldType.byteSize;
-                  assert(isPowerOf2(byteSize));
-                  let mask = byteSize - 1;
+                  // Align by the field's **alignment**, not its size. The two
+                  // coincide for every scalar; they do not for an inline array,
+                  // whose size is its element's replicated (24 for `f32[6]`,
+                  // not a power of two) while its alignment is the element's
+                  // (4). Asserting on the size -- which this loop used to do --
+                  // both crashed on 24 and over-aligned a 16-byte array to 16,
+                  // putting `arr` at 16 in `{a:i32; arr:f32[4]; b:i32}` and the
+                  // record at 36 instead of 24.
+                  let alignLog2 = fieldType.alignLog2;
+                  assert(alignLog2 >= 0);
+                  if (alignLog2 > classAlignLog2) classAlignLog2 = alignLog2;
+                  let mask = (1 << alignLog2) - 1;
                   if (memoryOffset & mask) memoryOffset = (memoryOffset | mask) + 1;
                   boundInstance.memoryOffset = memoryOffset;
                   memoryOffset += byteSize;
@@ -3720,6 +3772,31 @@ export class Resolver extends DiagnosticEmitter {
       }
 
       // Finalize memory offset
+      //
+      // The size of a C record is where its last field **ends, rounded up to
+      // the record's alignment** -- not the offset where the last field ends.
+      // `{a: u8; arr: u32[8]; b: u8}` ends at 37 and is 40 bytes: its fields
+      // align it to 4. Leaving it at 37 makes the record's size not a multiple
+      // of its own alignment, which is wrong in three ways at once: as an array
+      // stride (`T[N]` misaligns every element after the first), as a
+      // `COPY_STRUCT` length (`memory.copy` leaves the tail of a host buffer
+      // untouched), and against `Marshal.SizeOf` (40, the C#-gold answer).
+      //
+      // `sizeof<T>()` and the no-argument `offsetof<T>()` both read this number
+      // and so move together by construction; a field's offset
+      // (`offsetof<T>("field")`) is unaffected. An empty record stays 0: its
+      // alignment is 0, so the mask is 0.
+      //
+      // Only an `@unmanaged` class is a C record. A managed class is a
+      // reference whose `sizeof` is the pointer width; padding its payload
+      // would change what `__new` is asked for and what the JS bindings report
+      // as `SIZE`, which is a different change to a different path. Its layout
+      // extent stays where its last field ends, as it always was.
+      if (instance.hasDecorator(DecoratorFlags.Unmanaged)) {
+        let classAlignMask = (1 << classAlignLog2) - 1;
+        memoryOffset = (memoryOffset + classAlignMask) & ~classAlignMask;
+      }
+      instance.alignLog2 = classAlignLog2;
       instance.nextMemoryOffset = memoryOffset;
 
       // Link _own_ constructor if present

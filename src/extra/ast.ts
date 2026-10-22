@@ -433,6 +433,38 @@ export class ASTBuilder {
       }
       if (node.isNullable) sb.push(" | null");
     }
+    this.visitTypeAttributes(node);
+  }
+
+  /**
+   * Prints a type's post-type attributes inline, e.g. `f32 @abi.alias("f")`.
+   *
+   * They are printed on the same line as the type they belong to, which is what
+   * makes the round trip legible: a reader can tell a type attribute from the
+   * next declaration's decorator by position alone, exactly as the parser does.
+   */
+  private visitTypeAttributes(node: TypeNode): void {
+    let attributes = node.attributes;
+    if (!attributes) return;
+    let sb = this.sb;
+    for (let i = 0, k = attributes.length; i < k; ++i) {
+      let attribute = attributes[i];
+      sb.push(" @");
+      this.visitNode(attribute.name);
+      let args = attribute.args;
+      if (args) {
+        sb.push("(");
+        let numArgs = args.length;
+        if (numArgs) {
+          this.visitNode(args[0]);
+          for (let j = 1; j < numArgs; ++j) {
+            sb.push(", ");
+            this.visitNode(args[j]);
+          }
+        }
+        sb.push(")");
+      }
+    }
   }
 
   visitFunctionTypeNode(node: FunctionTypeNode): void {
@@ -462,6 +494,7 @@ export class ASTBuilder {
       sb.push(") => void");
     }
     if (isNullable) sb.push(") | null");
+    this.visitTypeAttributes(node);
   }
 
   visitTupleTypeNode(node: TupleTypeNode): void {
@@ -489,6 +522,7 @@ export class ASTBuilder {
     }
     sb.push("]");
     if (node.isNullable) sb.push(" | null");
+    this.visitTypeAttributes(node);
   }
 
   visitTypeParameter(node: TypeParameterNode): void {

@@ -2091,14 +2091,36 @@ export class Program extends DiagnosticEmitter {
     queuedImplements: ClassPrototype[]
   ): ClassPrototype | null {
     let name = declaration.name.text;
+    // `@inline` is the value-type opt-in, and value types are not built. Refuse
+    // it by name (`AS100 Not implemented`), not as a misplaced decorator
+    // (`AS212`): a struct author who writes the reserved form needs to be told
+    // the feature is absent, not that the decorator is in the wrong place. This
+    // is the resolver gate, so no codegen path can be reached first — and it is
+    // the counterpart of the `@fieldOffset` lesson: the reservation must not
+    // parse-and-ignore.
+    if (
+      declaration.declaredAsStruct &&
+      hasDecoratorFlag(declaration.decorators, DecoratorFlags.Inline)
+    ) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        declaration.name.range, "value types (@inline struct)"
+      );
+    }
     let element = new ClassPrototype(
       name,
       parent,
       declaration,
       this.checkDecorators(declaration.decorators,
+        // `@inline` is accepted *for a struct* so that the reservation's own
+        // diagnostic (`AS100`, above) is the only one reported: without this the
+        // same declaration also drew `AS212 "Decorator '@inline' is not valid
+        // here"`, which says the decorator is misplaced when the truth is that
+        // the feature is absent.
         DecoratorFlags.Global |
         DecoratorFlags.Final |
-        DecoratorFlags.Unmanaged
+        DecoratorFlags.Unmanaged |
+        (declaration.declaredAsStruct ? DecoratorFlags.Inline : DecoratorFlags.None)
       )
     );
     if (!parent.add(name, element)) return null;
@@ -4349,6 +4371,18 @@ export class IndexSignature extends TypedElement {
 }
 
 /** A yet unresolved class prototype. */
+/** Whether a decorator list contains a decorator of the given flag. */
+function hasDecoratorFlag(
+  decorators: DecoratorNode[] | null,
+  flag: DecoratorFlags
+): bool {
+  if (!decorators) return false;
+  for (let i = 0, k = decorators.length; i < k; ++i) {
+    if (DecoratorFlags.fromKind(decorators[i].decoratorKind) & flag) return true;
+  }
+  return false;
+}
+
 export class ClassPrototype extends DeclaredElement {
 
   /** Instance member prototypes. */
@@ -4486,8 +4520,10 @@ export class Class extends TypedElement {
   interfaces: Set<Interface> | null = null;
   /** Contextual type arguments for fields and methods. */
   contextualTypeArguments: Map<string,Type> | null = null;
-  /** Current member memory offset. */
+  /** Current member memory offset; for an `@unmanaged` record, rounded up to `alignLog2`. */
   nextMemoryOffset: u32 = 0;
+  /** Alignment of the record's layout as a log2: the strongest of its fields', base included. */
+  alignLog2: i32 = 0;
   /** Constructor instance. */
   constructorInstance: Function | null = null;
   /** Operator overloads. */

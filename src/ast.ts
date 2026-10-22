@@ -51,6 +51,7 @@ export const enum NodeKind {
   NamedType,
   FunctionType,
   TupleType,
+  FixedArrayType,
   TypeName,
   TypeParameter,
   Parameter,
@@ -170,6 +171,14 @@ export abstract class Node {
     range: Range
   ): TupleTypeNode {
     return new TupleTypeNode(elements, elementNames, isNullable, range);
+  }
+
+  static createFixedArrayType(
+    elementType: TypeNode,
+    length: i32,
+    range: Range
+  ): FixedArrayTypeNode {
+    return new FixedArrayTypeNode(elementType, length, range);
   }
 
   static createOmittedType(
@@ -856,6 +865,21 @@ export abstract class TypeNode extends Node {
   /** Whether this type node is currently in the process of being resolved. */
   currentlyResolving: bool = false;
 
+  /**
+   * Attributes written after the type on the same line, e.g. `x: f32 @abi.alias("f")`.
+   *
+   * They live on the **type**, not on the declaration, because the same type
+   * spelling appears in a field, a parameter, a return type and a local, and an
+   * attribute that changes the type's meaning must travel with it. Declaration
+   * decorators stay on the declaration (`DeclarationStatement.decorators`); the
+   * two lists are never merged.
+   *
+   * A newline before `@` ends the type instead: the attribute then belongs to
+   * the following declaration, which is the behaviour every other line-sensitive
+   * decision in this parser follows (`Tokenizer.peekOnNewLine`).
+   */
+  attributes: DecoratorNode[] | null = null;
+
   /** Tests if this type has a generic component matching one of the given type parameters. */
   hasGenericComponent(typeParameterNodes: TypeParameterNode[]): bool {
     if (this.kind == NodeKind.NamedType) {
@@ -967,6 +991,28 @@ export class TupleTypeNode extends TypeNode {
     range: Range
   ) {
     super(NodeKind.TupleType, isNullable, range);
+  }
+}
+
+/**
+ * Represents a fixed-size inline array type, `T[N]`.
+ *
+ * Inline storage, not a reference: a field of this type occupies
+ * `N * sizeof(T)` bytes inside its record, aligned to the element. That is the
+ * opposite of `T[]`, which is `Array<T>` and occupies one pointer -- the two
+ * spellings differ by one token and by the whole memory model, which is why the
+ * bracket's contents decide rather than a modifier.
+ */
+export class FixedArrayTypeNode extends TypeNode {
+  constructor(
+    /** Element type. */
+    public elementType: TypeNode,
+    /** Element count. A compile-time literal; there is no runtime length. */
+    public length: i32,
+    /** Source range. */
+    range: Range
+  ) {
+    super(NodeKind.FixedArrayType, false, range);
   }
 }
 
@@ -1896,6 +1942,19 @@ export class ClassDeclaration extends DeclarationStatement {
 
   /** Index signature, if present. */
   indexSignature: IndexSignatureNode | null = null;
+
+  /**
+   * Whether this declaration was written with the `struct` keyword rather than
+   * `@unmanaged class`. The two produce the same record; the marker exists so
+   * the resolver can refuse `@inline struct` by name (`AS100`, value types are
+   * not built) instead of letting it through as a misplaced decorator, and so
+   * the parser can warn on the plain form ahead of the 0.9.0 meaning change.
+   *
+   * It is deliberately **not** printed by `ASTBuilder`: `struct Foo` and
+   * `@unmanaged class Foo` must round-trip to the same source, because they are
+   * the same declaration.
+   */
+  declaredAsStruct: bool = false;
 
   get isGeneric(): bool {
     let typeParameters = this.typeParameters;

@@ -214,6 +214,8 @@ declare function offsetof<T>(): usize;
 declare function offsetof<T>(fieldName: keyof T | string): usize;
 /** Determines the offset of the specified field within the given class type. Returns the class type's end offset if field name has been omitted. Compiles to a constant. */
 declare function offsetof<T>(fieldName?: string): usize;
+/** Determines the ABI name of the specified field: its `@abi.alias` if declared, else the field's TypeScript name. Compiles to a constant. */
+declare function abiNameOf<T>(fieldName: string): string;
 /** Determines the name of a given type. */
 declare function nameof<T>(value?: T): string;
 /** Determines the unique runtime id of a class type. Compiles to a constant. */
