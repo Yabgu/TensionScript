@@ -2015,6 +2015,15 @@ export class Compiler extends DiagnosticEmitter {
     let valueTypeRef = valueType.toRef();
     let thisTypeRef = this.options.sizeTypeRef;
     getterInstance.set(CommonFlags.Compiled);
+    // `this` is the object's reference, and for every reference kind here that
+    // is the first field's address: `__new` returns `object + TOTAL_OVERHEAD`
+    // (`std/assembly/rt/itcms.ts:268`) and the unmanaged allocator returns the
+    // record's own address. So a field read is `local.get; load offset=N` with
+    // no header arithmetic, for a managed class **and** for an `@managed
+    // struct`. Do not add an `OBJECT_OVERHEAD` offset here: the GC header sits
+    // below the reference (scoping §1.2), so adding one would read the bytes
+    // after the record. The checked-in WAT in
+    // `tests/compiler/interop/managed-struct.ts` pins `offset=0` / `offset=8`.
     let body = module.load(valueType.byteSize, valueType.isSignedIntegerValue,
       module.local_get(0, thisTypeRef),
       valueTypeRef, property.memoryOffset
