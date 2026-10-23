@@ -45,18 +45,19 @@ brief does not survive measurement.**
    boundary as a single `i32` (§6); `layout_hash` folds host constants only
    (§13). The one thing that would have made this 2.0-sized — an `@inline struct`
    **returned** by an `@external` call — is scoped OUT with the reason (§9).
-5. **The `alignof` builtin is wrong today; the layout loop is not.** Every
-   multi-alignment record reports the 4-byte `usize` base (`alignof<{u64}>` = 2,
-   not 3), because `builtin_alignof` lacks the record branch that
-   `builtin_sizeof` already has (§7). This scoping first claimed the *layout
-   loop* shared the defect and that nested records were mislaid **today**; that
-   was a pointer-model / C-inline conflation, corrected in §7 against the A/APtr
-   measurement. The loop is correct and must not be changed.
-6. **Two adjacent defects found while measuring**, both reported rather than
-   fixed: `DecoratorFlags.ManagedStruct` and `DecoratorFlags.Unsafe` are the
-   **same bit** (`1 << 11`, `program.ts:3054`/`:3064`), which constrains the flag
-   choice in §3; and the `@inline` reservation already reports correctly, so the
-   syntax needs no new parser work (`program.ts:2101-2107`).
+5. **The `alignof` builtin was wrong; the layout loop is not — FIXED in PR #9.**
+   Every multi-alignment record reported the 4-byte `usize` base
+   (`alignof<{u64}>` = 2, not 3), because `builtin_alignof` lacked the record
+   branch that `builtin_sizeof` already has (§7). This scoping first claimed the
+   *layout loop* shared the defect and that nested records were mislaid
+   **today**; that was a pointer-model / C-inline conflation, corrected in §7
+   against the A/APtr measurement. The loop is correct and must not be changed.
+6. **Two adjacent defects found while measuring.** `DecoratorFlags.ManagedStruct`
+   and `DecoratorFlags.Unsafe` were the **same bit** (`1 << 11`,
+   `program.ts:3054`/`:3064`), which constrained the flag choice in §3 —
+   **FIXED in PR #9** (`Unsafe` → `1 << 13`, `InlineStruct` reserved at
+   `1 << 12`). Separately, the `@inline` reservation already reports correctly,
+   so the syntax needs no new parser work (`program.ts:2101-2107`).
 
 ---
 
@@ -137,6 +138,7 @@ inline-nesting case. §5.3 gives the narrow alternative.
 
 ### 1.4 `alignof` — measured per case
 
+**Fixed in PR #9**; the table is the pre-fix measurement that defined the defect.
 Log2 values, from `sizes.wasm`:
 
 | Type | `alignof` | True alignment (log2) | |
@@ -188,12 +190,15 @@ with `local.get $ref` — the reference itself, no copy. `passUnmanaged` is
 `local.get $0; local.set $1; local.get $1; call` — the pointer, no copy.
 
 **The `@managed struct` inventory in this repository** (relevant to the
-`DecoratorFlags` finding in §3 and §16.2): **7 declarations across 7 files** —
+`DecoratorFlags` finding in §3 and §16.2): **8 declarations across 7 files** —
 `tests/compiler/interop/managed-struct.ts`, `-access.ts`, `-copy.ts`,
 `-array.ts`, `-array-refs.ts`, `-inheritance.ts`, and
-`tests/parser/struct-keyword.ts`. (The brief for the fix PR said "1 fixture"; that
-is Tension PR 32's single consumer-side fixture, in the engine repository — not
-this one.)
+`tests/parser/struct-keyword.ts`. `managed-struct-inheritance.ts` declares two
+(`Base`, `Sub`). (The fix PR's brief said "1 fixture"; that is Tension PR 32's
+single consumer-side fixture, in the engine repository — not this one.)
+**Corrected in PR #9:** an earlier draft of this document said 7 declarations;
+the measured figure is 8 across 7 files (two of an initial grep's hits were
+comment lines).
 
 The host side of that contract (read-only cross-reference, Tension `5fdb63b`):
 guest pointers are `uint32_t` at the boundary (`tension_adapter.h:45`), "An
@@ -256,8 +261,10 @@ happens to touch it. What distinguishes `@inline` is not its `Type` but the
   meanings (always-inline functions, and value-type records) in one bit; the
   `@managed` precedent is a distinct bit.
 - **Bit 11 is occupied twice**: `ManagedStruct = 1 << 11` (`:3054`) and
-  `Unsafe = 1 << 11` (`:3064`). Nine sites consult `Unsafe`
-  (`compiler.ts:5897, 5929, 5958, 6467, 6633, 8173, 9229, 9676, 9704`), so an
+  `Unsafe = 1 << 11` (`:3064`). Nine `checkUnsafe` call sites sit behind
+  decorator tests (`compiler.ts:5897, 5929, 5958, 6467, 6633, 8173, 9676, 9704`
+  consult `Unsafe` directly; `:9229` gates unmanaged allocation on
+  `!isManaged`), so an
   `@managed struct` also answers `hasDecorator(Unsafe)` — but all nine inspect a
   function, variable or index-signature element, never the class element that
   carries the flag, and a method's `Function` copies its *function prototype's*
@@ -449,11 +456,10 @@ performance pessimization, it is the one form with no indirection.
 
 ## 7. Alignment — what is actually wrong
 
-**Answer: the `alignof` builtin is wrong today (live). The layout loop is correct
-for the pointer model and must not be changed.**
+**Answer: the `alignof` builtin was wrong (live, fixed in PR #9). The layout loop
+is correct for the pointer model and must not be changed.**
 
-Measured before this phase's fix (the "refuse" cell of the fixture in the PR that
-fixes it):
+Measured before the fix (the "refuse" cell of `interop/alignof-records`):
 
 | Type | `alignof` | true (log2) | |
 |---|---|---|---|
@@ -514,7 +520,7 @@ By construction it moves nothing today, because no type can express an inline
 field yet. It belongs with the `@inline` implementation, together with the
 fixture that proves existing offsets did not move — not with the `alignof` fix.
 
-### 7.3 What is left to fix: the builtin
+### 7.3 What was left to fix: the builtin (**fixed in PR #9**)
 
 `builtin_alignof` must report `Class.alignLog2` (`program.ts:4556`) for
 `@unmanaged` **and** `@managed` structs, exactly as `builtin_sizeof` reports
@@ -722,9 +728,11 @@ green cell must not be taken as evidence for another.
 
 ---
 
-## 16. Filed follow-ups
+## 16. Follow-ups
 
-1. **`alignof` for records (the builtin).** `builtins.ts:1311` must consult
+### Fixed
+
+1. **`alignof` for records (the builtin). — FIXED in PR #9.** `builtins.ts:1311` must consult
    `Class.alignLog2` (`program.ts:4556`) exactly as `sizeof` consults
    `nextMemoryOffset` (`builtins.ts:1274-1283`) — for `@unmanaged` **and**
    `@managed` structs. Measured symptom: every multi-alignment record reports 2
@@ -732,17 +740,32 @@ green cell must not be taken as evidence for another.
    **Live**, not latent: the number is wrong for every record that is not
    4-byte aligned. Prerequisite for `@inline struct` stack-slot alignment. The
    layout loop is **not** part of this item — see §7.1.
-2. **`DecoratorFlags.ManagedStruct` and `Unsafe` share bit 11**
+   *Fixed in PR #9*: the branch now reads `Class#alignLog2` for both kinds;
+   scalars and non-record classes are unchanged. Fixture
+   `tests/compiler/interop/alignof-records.ts` (three-way: refuse, partial,
+   fixed). One existing assertion that had pinned the wrong value
+   (`interop/sizeof.ts`) was corrected in the same PR.
+2. **`DecoratorFlags.ManagedStruct` and `Unsafe` share bit 11. — FIXED in PR #9.**
    (`program.ts:3054`, `:3064`), so an `@managed struct` also answers
-   `hasDecorator(Unsafe)` at nine sites
-   (`compiler.ts:5897/5929/5958/6467/6633/8173/9229/9676/9704`). **Latent**: all
-   nine inspect a function, variable or index-signature element, and a method's
+   `hasDecorator(Unsafe)` at eight of the nine `checkUnsafe` sites
+   (`compiler.ts:5897/5929/5958/6467/6633/8173/9676/9704`; the ninth, `:9229`,
+   gates unmanaged allocation on `!isManaged`). **Latent**: all nine inspect a
+   function, variable or index-signature (or, at `:9229`, a class that is *not*
+   managed), and a method's
    `Function` copies its function prototype's flags (`program.ts:3980`), so the
    class-level bit does not reach them — measured, a `@managed struct` with
    `new`, a method call, a field read, a field write and a global write compiles
    clean under `--noUnsafe`, while `load<u8>(p)` under the same flag errors.
-   Still a real defect (two meanings on one bit); move `Unsafe` to a free bit
-   before adding `InlineStruct = 1 << 12`.
+   Still a real defect (two meanings on one bit).
+   *Fixed in PR #9*: `Unsafe` moved to `1 << 13`, `ManagedStruct` stayed at
+   `1 << 11`, and `InlineStruct` is reserved at `1 << 12` (declared only; no
+   code path reads it). Fixture
+   `tests/compiler/interop/managed-struct-unsafe-flag.ts` is a regression guard
+   (the collision was latent, so it could not distinguish the old bit); the
+   control that the gate still fires is `tests/compiler/unsafe.ts`.
+
+### Open
+
 3. **`build.rs` warning text (Tension PR 33).** The Zig and gfortran warnings
    still tell the user to "set TENSION_ALLOW_UNPINNED=1", which is inert now that
    both floors warn-and-continue; the variable only silences the warning. Drop
@@ -779,12 +802,11 @@ green cell must not be taken as evidence for another.
 
 **Proceed with the minimum viable form, in this order:**
 
-1. Land the `alignof` fix (§16.1) first — it is small, and it is a live wrong
-   answer today. Do **not** touch the layout loop: it is correct for the pointer
-   model (§7.1); the inline-field branch arrives with the feature that needs it
-   (§7.2).
-2. Resolve the flag bit (§16.2), then add `InlineStruct` and the resolver gate
-   (§3).
+1. ~~Land the `alignof` fix~~ — **done in PR #9**. Do **not** touch the layout
+   loop: it is correct for the pointer model (§7.1); the inline-field branch
+   arrives with the feature that needs it (§7.2).
+2. ~~Resolve the flag bit~~ — **done in PR #9** (`InlineStruct = 1 << 12`
+   reserved). What remains is to add the kind and the resolver gate (§3).
 3. Implement SROA locals + the three copy paths (§4.2, §5) with the three-way
    fixture of §14 — the partial cell is the one to write first, because it is the
    bug the feature exists to remove.
