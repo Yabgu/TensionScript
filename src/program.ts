@@ -3060,8 +3060,13 @@ export enum DecoratorFlags {
   Builtin = 1 << 9,
   /** Is compiled lazily. */
   Lazy = 1 << 10,
+  /** Is an `@inline struct`: a value type with a C-compatible layout, stored
+   *  inline (WASM locals; a temp only at an ABI boundary). Reserved by the 1.0
+   *  `@inline struct` scoping -- declared here so the bit is claimed, **not yet
+   *  wired into any code path**. Implies `Final` when it lands. */
+  InlineStruct = 1 << 12,
   /** Is considered unsafe code. */
-  Unsafe = 1 << 11
+  Unsafe = 1 << 13
 }
 
 export namespace DecoratorFlags {
