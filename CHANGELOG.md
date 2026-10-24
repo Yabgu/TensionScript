@@ -7,6 +7,76 @@ clone without a build fails at `pretest` naming the generated file. Build
 first (`npm run build`) as before — the requirement is unchanged, the error
 is clearer.
 
+## Unreleased — async test cleanup (the 50cceb36 debt)
+
+The scheduler contract (`50cceb36`) changed the async runtime and did not
+update the tests that pinned it. Four layers of the same debt, each reached
+only because the previous one stopped failing first. All four are fixed; the
+suite is green.
+
+### 1. Two stale `.wat` fixtures
+
+`async-closure-value` and `async-closures-case6` had been failing on `main`
+since `50cceb36`. They are stale pre-scheduler snapshots, proven: built at
+`78b24c2e` (the commit immediately before the contract) both pass all six
+steps. The re-emit is broad, not two lines — 2,082 lines reordering-insensitive
+(146 `local.get`, 58 `call`, 25 functions, 14 data segments).
+
+The new emit imports `scheduler::park`, so regenerating the `.wat` files was
+not sufficient: `tests/compiler.js` supplied only `env`, and both fixtures then
+failed at `instantiate` with `Import #1 "scheduler": module is not an object or
+function`. The harness now supplies that module with a no-op body matching the
+real `void` signature — `instantiate` remains a real link check, not a skipped
+step.
+
+### 2. The entry-shape assertion
+
+The lowered entry gained an `If` at index 3 — `if (!<call>) { return … }`, the
+buffered-completion guard — and the async unit test still expected six
+statements, so every later index read the wrong node. The assertion is
+corrected and the guard is now pinned as structure (an `If` whose condition is a
+`UnaryPrefix` over a `Call`, whose then-branch is a `Return`), not merely as a
+shifted index.
+
+### 3. `break`/`continue`: `reasonFor` now matches the planner
+
+The planner has treated both as leaves since `50cceb36`, but `reasonFor` still
+listed them as refusals — the planner's case wins, so the refusal never fired
+and the two disagreed. Adopting the planner's behaviour is what closes the
+`for`-continue hang (compile-green, runtime-stuck): neither statement carries an
+await, so the region is unaffected by it and needs no resume point. Reverting
+would restore the hang. The `EXPERIMENT` marker is gone; the decision stands in
+its place.
+
+### 4. `runtime.js` migrated to park/wake/resume
+
+`__taskTick` and four other symbols (`__taskDeliver`, `__taskReportDrops`,
+`__taskBufferedEvictions`, `__taskAwait`) were removed with the pull delivery;
+`runtime.js` still imported them — 37 references across 5 of its 10 blocks.
+
+- **The entry point is a re-export, not an annotation.** This compiler has no
+  `@export` decorator, and the only other route (`--exportRuntime`'s hardcoded
+  function list at `src/compiler.ts:432-435`) would export the resume entries
+  from every module the flag touches, engine guests included. `export { … } from
+  "~lib/task-rt"` in the test guest scopes the entry to the fixture. **No `src/`
+  or `std/` change.**
+- **The vacuous-pass guard.** `parkState` returns early when no task table is
+  bound (`task-rt.ts:209`) and `__taskResume` returns immediately too — so an
+  unbound guest parks nothing, announces nothing and resumes nothing, silently.
+  A test that asserted a value would pass by asserting nothing (measured: the
+  first probe gave `parked=[]`, `seen=0`, no error). Every host-driven case now
+  calls `__taskBindTable(64)` in setup and asserts the park was observed
+  **before** it resumes, so an omitted bind fails loudly.
+- **Retired-mechanism cases rewritten, not weakened.** `early completions` now
+  asserts the park announcement, that nothing is buffered in the guest, and that
+  `__taskResume` runs the task to its terminal; the early/late/eviction
+  distinction is the host's `scheduler::RecentCompletions` behaviour and is
+  asserted in the engine fixtures. `dropped completions` now asserts `__taskFail`
+  (the status on the awaited record, one resume, a stale id resuming nothing).
+  Tick ordering becomes drain-to-empty.
+
+`npm test` is green end to end.
+
 ## 0.9.0
 
 ### `@managed struct`

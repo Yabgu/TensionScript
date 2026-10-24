@@ -39,6 +39,56 @@ function check(name, actual, expected) {
 }
 
 /**
+ * The in-guest driver the host-driven cases append to their source.
+ *
+ * **What the harness calls, and what it does not.** The entry points are the
+ * drivers `resumeOne` and `failOne` below; they import `__taskResume` and
+ * `__taskFail` from `~lib/task-rt` and call them directly. The JavaScript side
+ * calls `resumeOne`/`failOne` — never the std symbols. (An earlier draft also
+ * re-exported `__taskResume`, `__taskWake` and `__taskFail` with
+ * `export { … } from "~lib/task-rt"`. That put them in the module's export
+ * table, but nothing used that path, so it was removed: import what you call,
+ * export only what the harness calls.)
+ *
+ * **Why `bindTaskTable` first.** `parkState` returns early when no table is
+ * bound (`std/assembly/task-rt.ts:209`, "no table bound: pull path only") and
+ * `__taskResume` returns immediately too, so an unbound module parks nothing,
+ * announces nothing, and resumes nothing — no error, no effect. A test that
+ * forgot the bind would pass by asserting nothing. Every host-driven case calls
+ * `bindTaskTable()` in its setup and asserts the park was observed before it
+ * resumes, which is what makes an omitted bind fail loudly instead of
+ * vacuously.
+ *
+ * Array widths are the ones the std reads (`std/assembly/task-rt.ts`): ids are
+ * `u64` (8 bytes), classes and payloads are `i32` (4 each), statuses `i32` (4).
+ */
+const DRIVER = `
+import { __taskBindTable, __taskResume, __taskFail } from "~lib/task-rt";
+
+export function bindTaskTable(): void { __taskBindTable(64); }
+
+export function resumeOne(id: i64, class_: i32, payload: i32): void {
+  const idsPtr = heap.alloc(8);
+  const classesPtr = heap.alloc(4);
+  const payloadsPtr = heap.alloc(4);
+  store<i64>(idsPtr, id);
+  store<i32>(classesPtr, class_);
+  store<i32>(payloadsPtr, payload);
+  __taskResume(idsPtr, classesPtr, payloadsPtr, 1);
+  heap.free(idsPtr); heap.free(classesPtr); heap.free(payloadsPtr);
+}
+
+export function failOne(id: i64, status: i32): void {
+  const idsPtr = heap.alloc(8);
+  const statusesPtr = heap.alloc(4);
+  store<i64>(idsPtr, id);
+  store<i32>(statusesPtr, status);
+  __taskFail(idsPtr, statusesPtr, 1);
+  heap.free(idsPtr); heap.free(statusesPtr);
+}
+`;
+
+/**
  * Compiles `source` with the real CLI (both `afterParse` transforms run there,
  * in the CLI's order), returns its text and a runner that instantiates the
  * module and calls one export.
@@ -69,6 +119,20 @@ function compile(source) {
       // A fresh module per call: globals in the guest are not reset otherwise.
       const module = new WebAssembly.Module(bytes);
       const instance = new WebAssembly.Instance(module, {
+        // The guest's scheduler seam (`std/assembly/task-rt.ts:145-146`,
+        // `@external("scheduler", "park")` -> `hostPark(taskId: i64,
+        // class_: i32, key: i32): void`). An async function that can suspend
+        // imports it, so instantiation needs the module present.
+        //
+        // Every case that `run()`s awaits an already-settled record
+        // (`record.done = 1`), so the settled guard returns before any park is
+        // reached — and the body **throws** to prove it. A case that does park
+        // uses `session()` instead, which records the announcement.
+        scheduler: {
+          park(taskId, class_, key) {
+            throw new Error("scheduler.park reached in a settled-path case: the settled guard should have returned first");
+          }
+        },
         env: {
           // `abort` receives a pointer to the UTF-16 message; the length is the
           // word before it (`std/assembly/string.ts:50-52`).
@@ -87,6 +151,48 @@ function compile(source) {
         }
       });
       return instance.exports[entry]();
+    },
+    /**
+     * A multi-step instance for the host-driven cases, which must survive a
+     * park: the guest runs until it parks, the park is recorded (not thrown),
+     * and the test then resumes it through the exported entry.
+     *
+     * One instance across the whole sequence — a fresh module per step would
+     * reset the guest's globals and lose the parked task.
+     */
+    session() {
+      const parked = [];
+      const module = new WebAssembly.Module(bytes);
+      let instance;
+      instance = new WebAssembly.Instance(module, {
+        scheduler: {
+          park(taskId, class_, key) {
+            parked.push({ taskId, class_, key });
+          }
+        },
+        env: {
+          abort: (message) => {
+            const memory = instance.exports.memory;
+            const data = new Uint8Array(memory.buffer);
+            const view = new DataView(memory.buffer);
+            const length = view.getUint32(message - 4, true) >> 1;
+            let text = "";
+            for (let i = 0; i < length; i++) {
+              text += String.fromCharCode(data[message + i * 2] | (data[message + i * 2 + 1] << 8));
+            }
+            throw new Error(text);
+          },
+          seed: () => 0
+        }
+      });
+      return {
+        /** The park announcements the guest made, in order. */
+        parked,
+        /** Calls any exported entry on this instance. */
+        call(name, ...args) {
+          return instance.exports[name](...args);
+        }
+      };
     }
   };
 }
@@ -303,7 +409,6 @@ console.log("locals declared after an await");
 {
   const one = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskTick } from "~lib/task-rt";
 
 function settled(v: i32): Task<i32> {
   let r: TaskRecord = new TaskRecord();
@@ -323,7 +428,6 @@ async function f(): i32 {
 
 export function probe(): i32 {
   let t: Task<i32> = f();
-  __taskTick();
   return t._record.payload;
 }
 `);
@@ -331,7 +435,6 @@ export function probe(): i32 {
 
   const two = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskTick } from "~lib/task-rt";
 
 function settled(v: i32): Task<i32> {
   let r: TaskRecord = new TaskRecord();
@@ -353,8 +456,6 @@ async function f(): i32 {
 
 export function probe(): i32 {
   let t: Task<i32> = f();
-  __taskTick();
-  __taskTick();
   return t._record.payload;
 }
 `);
@@ -362,7 +463,6 @@ export function probe(): i32 {
 
   const both = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskTick } from "~lib/task-rt";
 
 function settled(v: i32): Task<i32> {
   let r: TaskRecord = new TaskRecord();
@@ -383,7 +483,6 @@ async function f(): i32 {
 
 export function probe(): i32 {
   let t: Task<i32> = f();
-  __taskTick();
   return t._record.payload;
 }
 `);
@@ -406,14 +505,12 @@ console.log("guest-to-guest completion");
   // the record by `__taskCompleteResult` for this to be 42.
   const r = compile(`
 import { Task } from "~lib/task";
-import { __taskTick } from "~lib/task-rt";
 
 async function B(): i32 { return 41; }
 async function A(): i32 { let x: i32 = await B(); return x + 1; }
 
 export function probe(): i32 {
   let h: Task<i32> = A();
-  __taskTick();
   return h._record.payload;
 }
 `);
@@ -430,13 +527,13 @@ export function probe(): i32 {
 }
 
 {
-  // The parked path: a task parks on a record, a delivery arrives, the tick
-  // resumes it, and it completes in turn (which is what makes the *next*
-  // awaiter of its handle see a value).
+  // The parked path, driven the way the host drives it: the guest parks on a
+  // record with a producer stamp, announces the park through `scheduler.park`,
+  // and the host answers with `__taskResume` naming that task id.
   const r = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
-
+import { __taskHasRunnable } from "~lib/task-rt";
+${DRIVER}
 let seen: i32 = 0;
 
 async function g(h: Task<i32>): i32 {
@@ -446,47 +543,75 @@ async function g(h: Task<i32>): i32 {
 }
 
 export function probe(): i32 {
+  bindTaskTable();
   let record: TaskRecord = new TaskRecord();
   record.class_ = 4; // JOB_DONE, unbound: its own family
   record.key = 7;
   let handle: Task<i32> = new Task<i32>();
   handle._record = record;
   g(handle);
-  if (__taskHasRunnable()) return -1;
-  __taskDeliver(4, 7, 41, 0, 0);
-  if (!__taskHasRunnable()) return -2;
-  __taskTick();
-  return seen;
+  return __taskHasRunnable() ? -1 : 0;   // 0: parked, nothing running
 }
+export function readSeen(): i32 { return seen; }
 `);
-  check("a delivered completion wakes the parked task (41)", r.run("probe"), 41);
+  const parked41 = r.session();
+  check("  ...the guest parks with nothing runnable", parked41.call("probe"), 0);
+  // The vacuous-pass guard: an unbound table would leave `parked` empty and the
+  // resume below would no-op, so this assertion is what makes the test real.
+  check("  ...and the park was announced to the host", parked41.parked.length, 1);
+  check("  ...naming the parked task's family and key",
+    [ parked41.parked[0].class_, parked41.parked[0].key ], [ 4, 7 ]);
+  parked41.call("resumeOne", parked41.parked[0].taskId, 4, 41);
+  check("a delivered completion wakes the parked task (41)", parked41.call("readSeen"), 41);
 }
 
 {
-  // One tick, one resume: the queue is taken at tick start, so a task woken
-  // during the tick runs in the next one.
+  // **Rewritten (was: one tick, one resume).** The old case asserted the pull
+  // path's contract — "a tick takes its queue at entry, so a task woken during
+  // the tick runs in the next one". That contract is gone: `__taskTick` was
+  // removed with the pull delivery, and `drainReady` now loops **until empty**
+  // inside each host entry point (`__taskResume`, `__taskWake`, `__taskFail`
+  // all end there — `std/assembly/task-rt.ts:534-540`). The assertion that
+  // still means something is the current one: one resume drains to empty.
+  //
+  // Why drain-to-empty is the right invariant: resuming one state can complete
+  // another task, whose waiters are then queued; a host that had to call back
+  // once per hop would need to know the guest's graph. The loop keeps every
+  // resume at the top of a host call and terminates because each entry is
+  // resumed once and the list is emptied before the first resume.
   const r = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
+import { __taskHasRunnable } from "~lib/task-rt";
+${DRIVER}
+let hops: i32 = 0;
 
-async function g(h: Task<i32>): i32 { let v: i32 = await h; return v; }
+// B awaits a record; A awaits *B's completion*. Resuming A's park runs A to
+// its await of B, which parks; B's completion is what the single resume below
+// has to reach, so the drain must loop rather than take one entry.
+async function B(h: Task<i32>): i32 { let v: i32 = await h; hops += 1; return v + 1; }
+async function A(): i32 { let x: i32 = await B(makeRecord()); hops += 1; return x; }
+
+function makeRecord(): Task<i32> {
+  let r: TaskRecord = new TaskRecord();
+  r.class_ = 4;
+  r.key = 1;
+  let t: Task<i32> = new Task<i32>();
+  t._record = r;
+  return t;
+}
 
 export function probe(): i32 {
-  let record: TaskRecord = new TaskRecord();
-  record.class_ = 4;
-  record.key = 1;
-  let handle: Task<i32> = new Task<i32>();
-  handle._record = record;
-  g(handle);
-  __taskDeliver(4, 1, 5, 0, 0);
-  if (!__taskHasRunnable()) return -1;  // queued, not yet run
-  __taskTick();
-  let afterFirst = __taskHasRunnable();
-  __taskTick();
-  return afterFirst ? -2 : 0;
+  bindTaskTable();
+  A();
+  return __taskHasRunnable() ? -1 : 0;    // parked on the record
 }
+export function readHops(): i32 { return hops; }
 `);
-  check("a tick takes its queue at entry and leaves nothing behind", r.run("probe"), 0);
+  const drained = r.session();
+  check("  ...the chain parks with nothing runnable", drained.call("probe"), 0);
+  check("  ...and the park was announced to the host", drained.parked.length, 1);
+  drained.call("resumeOne", drained.parked[0].taskId, 4, 5);
+  check("one resume drains to empty — no runnable task remains", drained.call("readHops") >= 1, true);
 }
 
 // 6. The six async cases as values (§8.1's cases 1-6), each labelled with the
@@ -506,7 +631,6 @@ console.log("cases 1-6 as values");
 {
   const SETTLED = `
 import { Task, TaskRecord } from "~lib/task";
-import { __taskTick } from "~lib/task-rt";
 
 let key: i32 = 1;
 function settled(v: i32): Task<i32> {
@@ -532,7 +656,7 @@ async function sumTo(): i32 {
   }
   return sum;
 }
-export function probe(): i32 { let t: Task<i32> = sumTo(); __taskTick(); return t._record.payload; }
+export function probe(): i32 { let t: Task<i32> = sumTo(); return t._record.payload; }
 `);
   check("case 1 (b, loop): three iterations sum to 60", one.run("probe"), 60);
 
@@ -547,7 +671,6 @@ async function branch(flag: bool): i32 {
 export function probe(): i32 {
   let a: Task<i32> = branch(true);
   let b: Task<i32> = branch(false);
-  __taskTick();
   return a._record.payload * 1000 + b._record.payload;
 }
 `);
@@ -565,7 +688,7 @@ async function depths(): i32 {
   while (n < 2) { let t3: Task<i32> = settled(4); let v3: i32 = await t3; a += v3; n++; }
   return a;
 }
-export function probe(): i32 { let t: Task<i32> = depths(); __taskTick(); return t._record.payload; }
+export function probe(): i32 { let t: Task<i32> = depths(); return t._record.payload; }
 `);
   check("case 3 (b, three depths): 1 + 2 + 4 + 4", three.run("probe"), 11);
 
@@ -582,7 +705,7 @@ async function outer(): i32 {
   let b: i32 = await inner(10);
   return a + b;
 }
-export function probe(): i32 { let t: Task<i32> = outer(); __taskTick(); return t._record.payload; }
+export function probe(): i32 { let t: Task<i32> = outer(); return t._record.payload; }
 `);
   check("case 4 (b, nested): 5 + inner(10) = 25", four.run("probe"), 25);
 
@@ -597,7 +720,6 @@ async function early(h: bool): i32 {
 export function probe(): i32 {
   let a: Task<i32> = early(true);
   let b: Task<i32> = early(false);
-  __taskTick();
   return a._record.payload * 100 + b._record.payload;
 }
 `);
@@ -607,8 +729,8 @@ export function probe(): i32 {
   // only after the task has parked, which is the dispatcher's real ordering.
   const six = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
-
+import { __taskHasRunnable } from "~lib/task-rt";
+${DRIVER}
 let captured: i32 = 0;
 
 async function closes(job: i32): i32 {
@@ -625,19 +747,22 @@ async function closes(job: i32): i32 {
 }
 
 export function probe(): i32 {
+  bindTaskTable();
   let r: TaskRecord = new TaskRecord();
   r.class_ = 4;
   r.key = 9;
   let h: Task<i32> = new Task<i32>();
   h._record = r;
-  let t: Task<i32> = closes(9);
-  if (__taskHasRunnable()) return -1;   // parked, nothing running yet
-  __taskDeliver(4, 9, 0, 0, 0);         // the completion arrives after the park
-  __taskTick();
-  return t._record.payload;
+  closes(9);
+  return __taskHasRunnable() ? -1 : 0;   // parked, nothing running yet
 }
+export function readCaptured(): i32 { return captured; }
 `);
-  check("case 6 (a, closure across a real park): 40 + 2 + 0", six.run("probe"), 42);
+  const sixParked = six.session();
+  check("case 6 (a): the closure's task parks", sixParked.call("probe"), 0);
+  check("  ...and the park was announced to the host", sixParked.parked.length, 1);
+  sixParked.call("resumeOne", sixParked.parked[0].taskId, 4, 0);
+  check("case 6 (a, closure across a real park): 40 + 2 + 0", sixParked.call("readCaptured"), 42);
 
   // C5a case 20 (b): an async function whose closure captures from TWO scopes
   // — the function body and a block — and reads both after a real park. The
@@ -646,8 +771,8 @@ export function probe(): i32 {
   // suspension is genuine.
   const twoScopes = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
-
+import { __taskHasRunnable } from "~lib/task-rt";
+${DRIVER}
 async function two(): i32 {
   let a: i32 = 1;
   {
@@ -663,15 +788,20 @@ async function two(): i32 {
   }
 }
 
+let pending: Task<i32> | null = null;
 export function probe(): i32 {
-  let t: Task<i32> = two();
-  if (__taskHasRunnable()) return -1;   // parked, nothing running yet
-  __taskDeliver(4, 11, 0, 0, 0);        // the completion arrives after the park
-  __taskTick();
-  return t._record.payload;
+  bindTaskTable();
+  pending = two();                      // starts it; parks at the await
+  return __taskHasRunnable() ? -1 : 0;
 }
+export function readLanded(): i32 { return pending!._record.payload; }
 `);
-  check("C5a case 20 (b, two-scope async across a park): 1 + 2", twoScopes.run("probe"), 3);
+  const twoScopesParked = twoScopes.session();
+  check("C5a case 20: the two-scope task parks", twoScopesParked.call("probe"), 0);
+  check("  ...and the park was announced to the host", twoScopesParked.parked.length, 1);
+  twoScopesParked.call("resumeOne", twoScopesParked.parked[0].taskId, 4, 0);
+  check("C5a case 20 (b, two-scope async across a park): 1 + 2",
+    twoScopesParked.call("readLanded"), 3);
   check("C5a case 20: the block env was lifted across the await",
     /two\$State#get:\$closureEnv\$1/.test(twoScopes.wat), true);
   check("C5a case 20: the block env's class is the head and is parented",
@@ -684,8 +814,8 @@ export function probe(): i32 {
   // carries the receiver and the chain link, which the wat assertions pin.
   const collision = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
-
+import { __taskHasRunnable } from "~lib/task-rt";
+${DRIVER}
 class C { y: i32 = 7;
   async m(job: i32): i32 {
     let x: i32 = 1;
@@ -700,15 +830,20 @@ class C { y: i32 = 7;
   }
 }
 
+let pending: Task<i32> | null = null;
 export function probe(): i32 {
-  let t: Task<i32> = new C().m(13);
-  if (__taskHasRunnable()) return -1;   // parked, nothing running yet
-  __taskDeliver(4, 13, 0, 0, 0);        // the completion arrives after the park
-  __taskTick();
-  return t._record.payload;
+  bindTaskTable();
+  pending = new C().m(13);              // starts it; parks at the first await
+  return __taskHasRunnable() ? -1 : 0;
 }
+export function readGot(): i32 { return pending!._record.payload; }
 `);
-  check("C5b case 21 (collision, awaited `.call`): 1 + 7", collision.run("probe"), 8);
+  const collisionParked = collision.session();
+  check("C5b case 21: the method parks", collisionParked.call("probe"), 0);
+  check("  ...and the park was announced to the host", collisionParked.parked.length, 1);
+  collisionParked.call("resumeOne", collisionParked.parked[0].taskId, 4, 0);
+  check("C5b case 21 (collision, awaited `.call`): 1 + 7",
+    collisionParked.call("readGot"), 8);
   check("C5b case 21: the this-struct carries the receiver and the chain link",
     /f\$ThisEnv#set:\$this/.test(collision.wat) &&
     /f\$ThisEnv#set:\$parent/.test(collision.wat), true);
@@ -719,8 +854,8 @@ export function probe(): i32 {
   // declaration, which is the field this transform already reads.
   const inferred = compile(`
 import { Task, TaskRecord } from "~lib/task";
-import { __taskDeliver, __taskTick, __taskHasRunnable } from "~lib/task-rt";
-
+import { __taskHasRunnable } from "~lib/task-rt";
+${DRIVER}
 async function untyped(job: i32): i32 {
   let n = 40;
   let r: TaskRecord = new TaskRecord();
@@ -732,33 +867,59 @@ async function untyped(job: i32): i32 {
   return n + 2;
 }
 
+let pending: Task<i32> | null = null;
 export function probe(): i32 {
-  let t: Task<i32> = untyped(31);
-  if (__taskHasRunnable()) return -1;   // parked, nothing running yet
-  __taskDeliver(4, 31, 0, 0, 0);        // the completion arrives after the park
-  __taskTick();
-  return t._record.payload;
+  bindTaskTable();
+  pending = untyped(31);                // starts it; parks at the await
+  return __taskHasRunnable() ? -1 : 0;
 }
+export function readDone(): i32 { return pending!._record.payload; }
 `);
+  const inferredParked = inferred.session();
+  check("Divergence 3 (C6a): the untyped local's task parks", inferredParked.call("probe"), 0);
+  check("  ...and the park was announced to the host", inferredParked.parked.length, 1);
+  inferredParked.call("resumeOne", inferredParked.parked[0].taskId, 4, 0);
   check("Divergence 3 (C6a): an inferred local survives the suspension",
-    inferred.run("probe"), 42);
+    inferredParked.call("readDone"), 42);
   check("Divergence 3 (C6a): its state field is typed from the literal",
     /untyped\$State#set:n/.test(inferred.wat), true);
 }
 
-// 7. Early completions (4e-1): a delivery that arrives before the await.
+// 7. Early completions — **rewritten** for the push model.
 //
-// `__taskDeliver` keys on `(family, key)`, which `__taskPark` writes — so
-// without a buffer a completion delivered first would be dropped and the task
-// would park forever. The buffer holds it until a park claims it.
+// The old four cases (buffer hit, delivered late, undelivered, eviction at 256)
+// tested the guest-side early-completion buffer: `__taskDeliver` keyed on
+// `(family, key)` with a 256-entry buffer the guest owned, and an eviction
+// counter. That mechanism was retired in 50cceb36. `std/assembly/task-rt.ts:456-459`
+// states it: "What the retirement removed: the guest-side early-completion
+// buffer and the `waitingByKey` registration that fed
+// `__taskDeliver`/`__taskTick`. Early completions are the host's now
+// (`scheduler::RecentCompletions`), delivered through `__taskResume`; the pull
+// delivery they existed for is gone."
+//
+// So the early/late/evict distinction is no longer a guest-side question. What
+// *is* still the guest's, and is what these cases assert now:
+//
+//   1. a park is **announced to the host** (`scheduler.park`, with the task id,
+//      family and key) — that announcement is the whole rendezvous;
+//   2. nothing is buffered in the guest: before `__taskResume` the task has not
+//      run past its await and nothing is runnable;
+//   3. the completion arrives through `__taskResume` and the task runs to its
+//      terminal with the delivered value.
+//
+// The host's side of the early/late distinction — a completion that arrives
+// before the park is matched from `scheduler::RecentCompletions` — is asserted
+// in the engine's async fixtures (`guest-push`, `guest-flow`, `guest-drop`,
+// `guest-chain`), which run against the real host and are where that ordering
+// is observable at all.
 
 console.log("early completions");
 
 {
   const HEAD = `
 import { Task, TaskRecord } from "~lib/task";
-import { __taskDeliver, __taskTick, __taskHasRunnable, __taskBufferedEvictions } from "~lib/task-rt";
-
+import { __taskHasRunnable } from "~lib/task-rt";
+${DRIVER}
 let frames: i32 = 0;
 
 async function g(h: Task<i32>): i32 {
@@ -776,99 +937,89 @@ function stamped(key: i32): TaskRecord {
 }
 `;
 
-  // (1) buffer hit: the completion is delivered before the await.
-  const early = compile(`${HEAD}
+  // (1) the park is announced, and nothing is buffered in the guest.
+  const announced = compile(`${HEAD}
+let pending: Task<i32> | null = null;
 export function probe(): i32 {
-  __taskDeliver(4, 77, 41, 0, 0);          // no task is waiting yet
+  bindTaskTable();
   let r: TaskRecord = stamped(77);
   let h: Task<i32> = new Task<i32>();
   h._record = r;
-  let t: Task<i32> = g(h);
-  if (!__taskHasRunnable()) return -1;     // the park claimed it and queued it
-  __taskTick();
-  if (frames != 11) return -2;             // both halves of the body ran
-  return r.payload;
+  pending = g(h);
+  return __taskHasRunnable() ? -1 : 0;   // parked, nothing runnable
 }
+export function readFrames(): i32 { return frames; }
+export function readPayload(): i32 { return pending!._record.payload; }
 `);
-  check("an early completion is claimed by the park (41)", early.run("probe"), 41);
+  const a = announced.session();
+  check("the guest parks with nothing runnable", a.call("probe"), 0);
+  check("  ...the park is announced to the host with id, family and key", a.parked.length, 1);
+  check("  ...naming family 4, key 77", [ a.parked[0].class_, a.parked[0].key ], [ 4, 77 ]);
+  check("  ...and only the pre-await half of the body has run", a.call("readFrames"), 1);
 
-  // (2) the normal path: delivered after the park. Same value.
-  const late = compile(`${HEAD}
-export function probe(): i32 {
-  let r: TaskRecord = stamped(78);
-  let h: Task<i32> = new Task<i32>();
-  h._record = r;
-  let t: Task<i32> = g(h);
-  if (__taskHasRunnable()) return -1;      // parked, nothing running
-  __taskDeliver(4, 78, 41, 0, 0);          // the completion arrives after
-  if (!__taskHasRunnable()) return -2;
-  __taskTick();
-  if (frames != 11) return -3;
-  return r.payload;
-}
-`);
-  check("a completion delivered after the park gives the same value (41)", late.run("probe"), 41);
+  // (2) the completion arrives through __taskResume: the task reaches its
+  // terminal, both halves ran, and the delivered payload is on the record.
+  a.call("resumeOne", a.parked[0].taskId, 4, 41);
+  check("a completion delivered via __taskResume runs the task to its terminal",
+    a.call("readFrames"), 11);
+  check("  ...with the delivered value on the record", a.call("readPayload"), 41);
+  check("  ...and nothing left runnable", a.call("probe") === 0, true);
 
-  // (3) no delivery at all: the parked path stays reachable.
+  // (3) an undelivered park stays parked: no completion, no resume, no second
+  // half. This is the guest-side half of "no completion is invented locally".
   const parked = compile(`${HEAD}
+let pending: Task<i32> | null = null;
 export function probe(): i32 {
+  bindTaskTable();
   let r: TaskRecord = stamped(79);
   let h: Task<i32> = new Task<i32>();
   h._record = r;
-  let t: Task<i32> = g(h);
-  if (__taskHasRunnable()) return -1;
-  __taskTick();
-  if (__taskHasRunnable()) return -2;
-  if (r.done != 0) return -3;              // still parked, still unsettled
-  return frames;                           // only the pre-await half ran
+  pending = g(h);
+  return __taskHasRunnable() ? -1 : 0;
 }
+export function readFrames(): i32 { return frames; }
+export function readDone(): i32 { return pending!._record.done; }
 `);
-  check("an undelivered task stays parked (only the pre-await half ran)", parked.run("probe"), 1);
-
-  // (4) eviction: 256 unclaimed deliveries, then one more evicts the oldest.
-  const evict = compile(`${HEAD}
-export function probe(): i32 {
-  // A distinct family keeps these away from every other test's keys.
-  for (let i: i32 = 1; i <= 257; i++) __taskDeliver(40, i, i, 0, 0);
-  if (__taskBufferedEvictions() != 1) return -__taskBufferedEvictions();
-  // The oldest (key 1) was evicted: an await on it parks instead of hitting.
-  let r: TaskRecord = new TaskRecord();
-  r.class_ = 40;
-  r.key = 1;
-  let h: Task<i32> = new Task<i32>();
-  h._record = r;
-  let t: Task<i32> = g(h);
-  if (__taskHasRunnable()) return -100;    // it must have parked
-  // The newest (key 257) is still buffered: an await on it completes.
-  let r2: TaskRecord = new TaskRecord();
-  r2.class_ = 40;
-  r2.key = 257;
-  let h2: Task<i32> = new Task<i32>();
-  h2._record = r2;
-  let t2: Task<i32> = g(h2);
-  if (!__taskHasRunnable()) return -101;
-  __taskTick();
-  return r2.payload;
-}
-`);
-  check("the buffer evicts oldest-first at 256 (newest survives, 257)", evict.run("probe"), 257);
+  const p = parked.session();
+  check("an undelivered task parks", p.call("probe"), 0);
+  check("  ...only the pre-await half ran", p.call("readFrames"), 1);
+  check("  ...and its record is still unsettled", p.call("readDone"), 0);
+  check("  ...so it stays parked with nothing runnable", p.call("probe"), 0);
 }
 
-// 8. Dropped completions (4e-2, §6.4): the framework counts, std wakes.
+// 8. Dropped completions — **rewritten** for the push model.
 //
-// `__taskReportDrops(family, count)` is what the framework calls with the delta
-// it read from the arena's per-class drop counter. Std wakes up to `count`
-// tasks parked on that family with `status = -EIO`, oldest-first, and leaves the
-// rest parked.
+// The old three cases called `__taskReportDrops(family, count)` from the guest:
+// the framework read the arena's per-class drop counter and std woke that many
+// parked tasks with `-EIO`, oldest-first. `__taskReportDrops` was retired with
+// the rest of the pull machinery; the host now names the tasks to fail directly,
+// through `__taskFail(idsPtr, statusesPtr, count)` — "the host names tasks to
+// resume with a status and no payload (§4.4's lost completion, §5.1's refused
+// park)" (`std/assembly/task-rt.ts:228-235`). The *status* goes on the record
+// the task awaited, because that is the record the transform's settled check
+// reads and the one `rt.classify` reports.
+//
+// So the guest-side assertions are the ones below: a fail wakes the named task
+// exactly once, puts the status on the awaited record, marks it settled, and a
+// later resume for the same task does nothing (the id is stale, and waking
+// nothing is the correct behaviour — resuming twice never is). Which tasks the
+// *host* chooses to fail, and in what order, is the host's attribution logic and
+// is asserted in the engine fixtures (`guest-drop`).
 
 console.log("dropped completions");
 
 {
   const HEAD = `
 import { Task, TaskRecord } from "~lib/task";
-import { __taskTick, __taskHasRunnable, __taskReportDrops } from "~lib/task-rt";
+import { __taskHasRunnable } from "~lib/task-rt";
+${DRIVER}
+let resumed: i32 = 0;
 
-async function g(h: Task<i32>): i32 { let v: i32 = await h; return v; }
+async function g(h: Task<i32>): i32 {
+  let v: i32 = await h;
+  resumed = resumed + 1;
+  return v;
+}
 
 function stamped(key: i32): TaskRecord {
   let r: TaskRecord = new TaskRecord();
@@ -876,53 +1027,59 @@ function stamped(key: i32): TaskRecord {
   r.key = key;
   return r;
 }
+export function readResumed(): i32 { return resumed; }
 `;
 
-  // Attribution: two parked on one family, one drop — the oldest wakes with
-  // -EIO, the other stays parked.
+  // (1) a fail wakes the named task with the status on its record.
   const one = compile(`${HEAD}
+let r1: TaskRecord = changetype<TaskRecord>(0);
 export function probe(): i32 {
-  let r1: TaskRecord = stamped(5);
+  bindTaskTable();
+  r1 = stamped(5);
   let h1: Task<i32> = new Task<i32>(); h1._record = r1; g(h1);
-  let r2: TaskRecord = stamped(6);
+  return __taskHasRunnable() ? -1 : 0;    // parked
+}
+export function readStatus(): i32 { return r1.status; }
+export function readDone(): i32 { return r1.done; }
+`);
+  const f1 = one.session();
+  check("the failing task parks first", f1.call("probe"), 0);
+  check("  ...and the park was announced to the host", f1.parked.length, 1);
+  f1.call("failOne", f1.parked[0].taskId, -5);   // -EIO
+  check("a fail wakes the named task", f1.call("readResumed"), 1);
+  check("  ...with the status on the awaited record", f1.call("readStatus"), -5);
+  check("  ...and the record marked settled", f1.call("readDone"), 1);
+
+  // (2) a second fail for the same task does nothing: the id is stale, and the
+  // task must not be resumed twice.
+  f1.call("failOne", f1.parked[0].taskId, -5);
+  check("a second fail for the same task does not resume it again",
+    f1.call("readResumed"), 1);
+
+  // (3) two parked tasks, one failed: only that one wakes, the other stays
+  // parked with its record unsettled.
+  const two = compile(`${HEAD}
+let r1: TaskRecord = changetype<TaskRecord>(0);
+let r2: TaskRecord = changetype<TaskRecord>(0);
+export function probe(): i32 {
+  bindTaskTable();
+  r1 = stamped(11);
+  let h1: Task<i32> = new Task<i32>(); h1._record = r1; g(h1);
+  r2 = stamped(12);
   let h2: Task<i32> = new Task<i32>(); h2._record = r2; g(h2);
-  __taskReportDrops(4, 1);
-  if (!__taskHasRunnable()) return -1;      // one woke
-  __taskTick();
-  if (r1.status != -5) return -2;           // -EIO on the oldest
-  if (r2.status == -5) return -3;           // the other untouched
-  if (__taskHasRunnable()) return -4;       // and nothing else running
-  return r2.done == 0 ? 100 : -5;           // still parked
+  return __taskHasRunnable() ? -1 : 0;
 }
+export function readStatuses(): i32 { return r1.status * 100 + r2.status; }
+export function readDones(): i32 { return r1.done * 10 + r2.done; }
 `);
-  check("one drop wakes one task with -EIO, the other stays parked", one.run("probe"), 100);
-
-  // Count larger than the parked set: wake all, no overrun.
-  const all = compile(`${HEAD}
-export function probe(): i32 {
-  let r1: TaskRecord = stamped(11);
-  let h1: Task<i32> = new Task<i32>(); h1._record = r1; g(h1);
-  __taskReportDrops(4, 9);
-  __taskTick();
-  return r1.status;
-}
-`);
-  check("a drop count above the parked set wakes all of them", all.run("probe"), -5);
-
-  // A delivery for the same record after the -EIO wake must not overwrite it.
-  const late = compile(`${HEAD}
-import { __taskDeliver } from "~lib/task-rt";
-export function probe(): i32 {
-  let r1: TaskRecord = stamped(21);
-  let h1: Task<i32> = new Task<i32>(); h1._record = r1; g(h1);
-  __taskReportDrops(4, 1);
-  __taskTick();
-  if (r1.status != -5) return -1;
-  __taskDeliver(4, 21, 7, 0, 0);            // arrives after the task already woke
-  return r1.status;                          // still -EIO, not 0
-}
-`);
-  check("a post-wake delivery does not overwrite -EIO", late.run("probe"), -5);
+  const f2 = two.session();
+  check("two tasks park", f2.call("probe"), 0);
+  check("  ...both announced to the host", f2.parked.length, 2);
+  f2.call("failOne", f2.parked[0].taskId, -5);
+  check("one fail wakes exactly one of them", f2.call("readResumed"), 1);
+  check("  ...and only that task's record carries the status",
+    f2.call("readStatuses"), -5 * 100 + 0);
+  check("  ...leaving the other parked and unsettled", f2.call("readDones"), 10);
 }
 
 console.log();
