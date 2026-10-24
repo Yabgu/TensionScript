@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Developer-facing: `npm test` now runs the lint step via `pretest`; a fresh
+clone without a build fails at `pretest` naming the generated file. Build
+first (`npm run build`) as before — the requirement is unchanged, the error
+is clearer.
+
 ## Unreleased — async test cleanup (the 50cceb36 debt)
 
 The scheduler contract (`50cceb36`) changed the async runtime and did not
