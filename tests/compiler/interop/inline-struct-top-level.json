@@ -1,0 +1,10 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: an @inline struct at top level (a global is a pointer slot, so two values would alias; declare it inside a function)",
+    "AS100: Not implemented: an @inline struct at top level (a global is a pointer slot, so two values would alias; declare it inside a function)",
+    "AS100: Not implemented: an @inline struct at top level (a global is a pointer slot, so two values would alias; declare it inside a function)",
+    "AS100: Not implemented: an @inline struct at top level (a global is a pointer slot, so two values would alias; declare it inside a function)",
+    "AS100: Not implemented: an @inline struct at top level (a global is a pointer slot, so two values would alias; declare it inside a function)"
+  ]
+}

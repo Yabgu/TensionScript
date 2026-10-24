@@ -1262,6 +1262,12 @@ export class Compiler extends DiagnosticEmitter {
           return false;
         }
         global.setType(this.currentType);
+        // The inferred-type form must be checked too. The annotated branch
+        // above covers `const G: P = new P()`; without this, `const G = new P()`
+        // — no annotation — compiled as an `i32` pointer global and aliased with
+        // any second top-level value of the same type (measured: `const H = G`
+        // then `H.x = 99` changed `G.x`).
+        this.program.checkInlineStructValue(this.currentType, initializerNode, "a global");
 
       // Error if there's neither a type nor an initializer
       } else {
