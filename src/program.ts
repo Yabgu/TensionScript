@@ -2048,6 +2048,12 @@ export class Program extends DiagnosticEmitter {
         let typeArguments = classReference.typeArguments;
         if (typeArguments) {
           for (let i = 0, k = typeArguments.length; i < k; ++i) {
+            // A type-argument position is a pointer slot (`Array<T>`'s buffer
+            // holds references), so an `@inline struct` there would be stored
+            // by reference — the deferred inline-in-heap case.
+            if (!this.checkInlineStructValue(
+              typeArguments[i], reportNode, "a type argument (Array<T>)"
+            )) return false;
             if (!this.checkTypeSupported(typeArguments[i], reportNode)) {
               return false;
             }
@@ -2079,6 +2085,35 @@ export class Program extends DiagnosticEmitter {
     return true;
   }
 
+  /**
+   * Refuses an `@inline struct` in a position that would need its address.
+   *
+   * The value type exists (commit 1: the kind, the layout, `sizeof`), but every
+   * *storage* position is still refused by name rather than compiled as a
+   * pointer. Compiling one as a pointer is the worst outcome available: it
+   * looks like the feature works, and `let q = p` aliases — the bug the value
+   * type exists to remove (scoping §14's refuse cell).
+   *
+   * `position` names where the type appeared, so the message says which case was
+   * hit rather than only that some case was.
+   */
+  checkInlineStructValue(type: Type, reportNode: Node, position: string): bool {
+    let classReference = type.getClass();
+    if (
+      classReference != null &&
+      classReference.hasDecorator(DecoratorFlags.InlineStruct)
+    ) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        reportNode.range,
+        "an @inline struct value in " + position +
+        " (value types are not implemented here yet; a pointer would alias)"
+      );
+      return false;
+    }
+    return true;
+  }
+
   /** Initializes a class declaration. */
   private initializeClass(
     /** The declaration to initialize. */
@@ -2091,22 +2126,20 @@ export class Program extends DiagnosticEmitter {
     queuedImplements: ClassPrototype[]
   ): ClassPrototype | null {
     let name = declaration.name.text;
-    // `@inline` is the value-type opt-in, and value types are not built. Refuse
-    // it by name (`AS100 Not implemented`), not as a misplaced decorator
-    // (`AS212`): a struct author who writes the reserved form needs to be told
-    // the feature is absent, not that the decorator is in the wrong place. This
-    // is the resolver gate, so no codegen path can be reached first — and it is
-    // the counterpart of the `@fieldOffset` lesson: the reservation must not
-    // parse-and-ignore.
-    if (
-      declaration.declaredAsStruct &&
-      hasDecoratorFlag(declaration.decorators, DecoratorFlags.Inline)
-    ) {
-      this.error(
-        DiagnosticCode.Not_implemented_0,
-        declaration.name.range, "value types (@inline struct)"
-      );
-    }
+    // `@inline struct` is the value type: `@unmanaged struct`'s C layout with
+    // *value* semantics. It takes both flags --
+    //   `InlineStruct` (1 << 12) is the kind marker, and the flag every
+    //      codegen path keys on to decide "this is inline storage, not a
+    //      pointer";
+    //   `Unmanaged` (already injected by the parser for a plain `struct`) is
+    //      what gives it the record layout: the same `resolver.ts` branch, the
+    //      same `sizeof`/`offsetof`/`alignof` answers, the same C-compatible
+    //      extent as every other record.
+    // Keeping the parser's `@unmanaged` injection is deliberate: it means the
+    // layout path is shared rather than duplicated, and `@inline struct` cannot
+    // drift from `@unmanaged struct` in size or alignment.
+    let declaredInlineStruct = declaration.declaredAsStruct &&
+      hasDecoratorFlag(declaration.decorators, DecoratorFlags.Inline);
     let element = new ClassPrototype(
       name,
       parent,
@@ -2127,12 +2160,25 @@ export class Program extends DiagnosticEmitter {
     );
     if (!parent.add(name, element)) return null;
 
+    if (declaredInlineStruct) {
+      // The kind marker. Distinct from `Inline` (1 << 6, "always inline a
+      // function"), which the decorator also set: that one is about call
+      // sites, this one is about storage.
+      element.decoratorFlags |= DecoratorFlags.InlineStruct;
+    }
+
     // A managed struct is final by definition: its fields sit at fixed offsets
     // from the reference, so a subclass would put its own fields past an extent
     // that `sizeof` already reported. Refusing inheritance is Commit 3's job;
     // marking the prototype here keeps every other path (virtual dispatch,
     // `instanceof`) from treating it as extensible in the meantime.
-    if (element.hasDecorator(DecoratorFlags.ManagedStruct)) {
+    if (
+      element.hasDecorator(DecoratorFlags.ManagedStruct) ||
+      element.hasDecorator(DecoratorFlags.InlineStruct)
+    ) {
+      // Both are final by definition: a record's fields sit at fixed offsets
+      // from its extent, and an `@inline struct` is a value with no identity to
+      // inherit through.
       element.decoratorFlags |= DecoratorFlags.Final;
     }
 
@@ -2165,7 +2211,13 @@ export class Program extends DiagnosticEmitter {
       // explicit error says *why* rather than sending the author to look up what
       // `final` meant here. `extends Object` is not special-cased: the record
       // is a managed reference like any other, so it needs no base to be one.
-      if (element.hasDecorator(DecoratorFlags.ManagedStruct)) {
+      if (element.hasDecorator(DecoratorFlags.InlineStruct)) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          Range.join(declaration.name.range, declaration.extendsType.range),
+          "inheritance on an @inline struct (a value type is final: no base class, no virtual methods)"
+        );
+      } else if (element.hasDecorator(DecoratorFlags.ManagedStruct)) {
         this.error(
           DiagnosticCode.Not_implemented_0,
           Range.join(declaration.name.range, declaration.extendsType.range),
