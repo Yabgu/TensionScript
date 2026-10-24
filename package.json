@@ -81,6 +81,7 @@
     "build": "node scripts/build",
     "watch": "node scripts/build --watch",
     "coverage": "npx c8 -- npm test",
+    "pretest": "npm run check",
     "test": "npm run test:parser && npm run test:async && npm run test:closure && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli",
     "test:parser": "node --enable-source-maps tests/parser",
     "test:async": "node --enable-source-maps tests/async/resolver.js && node --enable-source-maps tests/async/lower.js && node --enable-source-maps tests/async/runtime.js",
