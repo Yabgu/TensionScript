@@ -375,7 +375,10 @@ Sret therefore does not need multi-value results — **the model says there is n
 value** — and the change did not touch the expression pipeline at all. It
 relocated the problem from the call to the read path, and that path has exactly
 two shapes: one field load for `f().x`, a per-field copy for `let q: P = f()`.
-Recorded as a correction in `docs/interop-sret-design.md` §8.
+Recorded as a correction in `docs/interop-sret-design.md` §8, which now also
+records the **third** consumer: a bare `f()` statement (the discard shape), which
+allocates, calls and unwinds without reading. Three consumers, and the refusal
+covers everything else.
 
 **The gate, measured.** The five non-consumer uses were compiled as probes
 before the read path existed. Four refuse: `g(f())` (AS100, passing an
@@ -388,29 +391,68 @@ call, restore — no `local.get` of the slot, no address treated as a value. The
 gate therefore did not fire; the four refusals are pinned in
 `inline-struct-sret-refusal-reach.ts`.
 
-**Constructors are not sret.** A constructor's declared return type is its
-class type; for an `@inline struct` that made `hasHiddenDestParam` true and the
-emitted constructor came out as `(param $this i32) (param $sretDest i32)` with
-**no result**, while its body still returned `this` — invalid WASM, and the
-reason an unannotated `let p = new P()` failed validation. `Signature` gains
-`sretDisabled`, part of the memoization key and set only for inline-struct
-constructors; ordinary constructors keep their old key and type-id sequence.
-The inferred `let p = new P()` and `let q = f()` forms then enter SROA; the
-fixture's call counter proves `let q = f()` emits one runtime call.
+### The three gate-probe findings
 
-**A refused field must not reach codegen.** A class field of `@inline struct`
-is refused at declaration (inline nesting), but the generated constructor still
-called `makeZero(fieldType)` and the field's setter was still compiled. Both
-crashed Binaryen: `Assertion failed: index < getNumLocals()` in `setLocalName`,
-from a local-index mismatch in the generated function. Constructor field
-initialization now skips the refused field, and the field getter/setter paths
-return `unreachable` with the declaration diagnostic as the report.
+Each was found while measuring the refusal's reach, each is fixed, and each has a
+fixture that fails if the fix is reverted. The reverts were run, not reasoned
+about.
+
+**1. Constructors are not sret** — `fd6c7772`. A constructor's declared return
+type is its class type; for an `@inline struct` that made `hasHiddenDestParam`
+true, and the emitted constructor came out as
+`(param $this i32) (param $sretDest i32)` with **no result**, while its body
+still returned `this`. `Signature` gains `sretDisabled`, part of the memoization
+key and set only for inline-struct constructors; ordinary constructors keep their
+old key and type-id sequence, because the flag had to be in the key *and* had to
+stay off every other signature (an unconditional flag shifted type ids and broke
+`builtins`, `async-closures-case6` and `async-closure-value`).
+*Revert measured:* removing the `sretDisabled` check from `hasHiddenDestParam`
+makes `inline-struct-sret` fail at validation with
+`wasm-validator error in function interop/inline-struct-sret/P#constructor`.
+*Fixture:* `inline-struct-sret.ts` (`inferredNew`, `zero`).
+
+**2. Inferred locals enter SROA** — `fd6c7772`. `let p = new P()` and
+`let q = f()` reach the post-inference SROA branch once constructors are valid;
+`let q = p`, with **both** types inferred, had no annotated type to trigger the
+SROA branch, so it compiled `p` as a bare identifier — the whole-value refusal.
+A local lookup in `compileVariableStatement` before the initializer is compiled
+fixes it, and deliberately resolves nothing (a `resolveExpression` there can
+force a class before the compiler's builtin constants exist, which crashed on
+`new Box()` during the first attempt).
+*Revert measured:* removing the identifier pre-check makes `inline-struct-sret`
+fail with `AS100: reading an @inline struct value as a whole`.
+*Fixture:* `inline-struct-sret.ts` (`inferredFromLocal`, `inferredNew`,
+`inferredCopy`), including a call counter proving `let q = f()` emits **one**
+runtime call (`countedOnce() == 1067`).
+
+**3. A refused field must not reach codegen** — `fd6c7772`. A class field of
+`@inline struct` is refused at its declaration (inline nesting), but the
+generated constructor still called `makeZero(fieldType)` for it and the field's
+setter was still compiled. Both crashed Binaryen with
+`Assertion failed: index < getNumLocals()` in `setLocalName`, from a local-index
+mismatch in the generated function — a compiler crash on top of a diagnostic that
+had already been reported.
+*Revert measured:* removing the skip makes `inline-struct-sret-refusal-reach`
+abort in `setLocalName` instead of reporting AS100.
+*Fixture:* `inline-struct-sret-refusal-reach.ts` (`class Holder { field: P = new P(); }`).
 
 **A pass-level constraint worth remembering.** Binaryen's passes assume one
 parent per expression node. Sharing one address node between two field loads
 compiles at -O0 and aborts `LocalCSE` in release
 (`Assertion failed: !(requests && original)`). Every load builds its own
 address node now, and the -O3 fixtures are what catch a regression.
+
+**Instance-method sret: the shift.** An instance method's hidden destination is
+WASM local 1 (`this` is local 0), so `compileSretReturnStatement`'s
+`destIndex = signature.thisType ? 1 : 0` is a correctness hinge rather than a
+formality: with 0, the method writes the returned fields over `this` and the
+caller reads a wrong value out of a live object — no compile error, no crash.
+`inline-struct-sret-instance.ts` is the guard, and it was measured: setting
+`destIndex` to 0 for instance methods changes the emitted stores from
+`local.get $sretDest` to `local.get $this`, fails the WAT comparison, and traps
+the fixture's runtime assert at instantiation. The fixture also carries the
+combined shape — `Calc#scale(this, dest, p.a, p.b, k)` — so the shift and the
+parameter flattening are exercised together, which is where they would disagree.
 
 **Third finding (latent, not fixed).** The operand walk's `paramType.isManaged`
 check uses the *source* parameter's type, not the individual field's. Correct
