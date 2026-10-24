@@ -7459,7 +7459,6 @@ export class Compiler extends DiagnosticEmitter {
     let elementType = arrayType.fixedArrayElementType;
     let elementSize = elementType.byteSize;
     let address = this.compileFixedArrayElementAddress(expression, arrayType);
-    let isWasm64 = this.options.isWasm64;
     if (isWrite) {
       // `valueRef` is a value already compiled by the caller -- the result of a
       // compound operator, which must not be recomputed here.
