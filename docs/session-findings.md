@@ -330,3 +330,63 @@ each can drift silently. Listed so the gap is visible rather than assumed away.
   (circular), a test for the prose correction (one-time event).
 - **Does not fix:** Correction 1 (PR #10's branch), the `dist/` local gap (a CI
   concern, unchanged), the bootstrap failures (the Bootstrap-ordering phase).
+
+## PR #16: sret — the layout correction, the eighth site, and the read-back finding
+
+**The layout correction.** The design note said the call-temp stack lives
+"below `__data_end`", which reads like the shadow stack. Measured in an emitted
+module: `__data_end` 520, `__stack_pointer` = `__heap_base` 33288. The region
+`[16, __data_end)` is the **data segment**, and `visitStack` walks
+`[__stack_pointer, __heap_base)` — so a slot in the data region is never scanned
+as a GC root, which is exactly the property the mechanism needs. The base is a
+compile-time constant (the segment's `.offset`), so a call site emits
+`i32.const base + mark` and no address computation.
+
+**The bump pointer's safety.** `compileVisitGlobals` (`builtins.ts:11058-11062`)
+visits only class-typed globals. A plain `i32` global contributes no GC edge and
+no interrupt threshold, so the bump pointer cannot be mistaken for a root or trip
+a collection. Initial value = the segment offset; mutated only by alloc/restore.
+
+**The eighth site.** `operandsTostack` mapped WASM operands to source parameters
+through `sourceIndexOf` and treated `-1` as "past the end". With a hidden
+destination at operand 0, that `break` fired on the first operand and abandoned
+every managed operand after it — the managed argument reached the call as a bare
+`local.get`, unspilled. Fixed by checking `wasmParamCount()` first (which makes
+`-1` unambiguously the hidden slot) and advancing **both** indices past it.
+Measured load-bearing: reverting the loop makes `inline-struct-sret-eighth-site`
+fail on exactly the missing spill block.
+
+**The stub fix is defensive.** `finalizeOverrideStub`'s temp local is
+`1 + wasmParamCount()`, but a virtual method returning an `@inline struct` is
+refused at `compileFunction` before the stub is finalized, so no test exercises
+it. Verified by inspection and by no regression in the suite.
+
+**Region size is policy.** 4 KB = 256 slots at the 16-byte fixture record size.
+The precedent is the shadow stack (`compiler.ts:290`, 32 KB, abort on overflow).
+Overflow aborts with a message naming the limit; a silent overwrite of the next
+slot would be a corruption bug that reads as a wrong value. `--sretStackSize` is
+a follow-up, structurally identical to `stackSize`.
+
+**The read-back finding — the design note's §8 was wrong.** §8 framed
+"multi-value results" as set aside. Measured before writing the read path: every
+non-consumer use of an `@inline struct` call result is refused (the gate: `g(f())`
+and the four other shapes), and no path treats the slot's address as a value.
+Sret therefore does not need multi-value results — **the model says there is no
+value** — and the change did not touch the expression pipeline at all. It
+relocated the problem from the call to the read path, and that path has exactly
+two shapes: one field load for `f().x`, a per-field copy for `let q: P = f()`.
+Recorded as a correction in `docs/interop-sret-design.md` §8.
+
+**A pass-level constraint worth remembering.** Binaryen's passes assume one
+parent per expression node. Sharing one address node between two field loads
+compiles at -O0 and aborts `LocalCSE` in release
+(`Assertion failed: !(requests && original)`). Every load builds its own
+address node now, and the -O3 fixtures are what catch a regression.
+
+**Third finding (latent, not fixed).** The operand walk's `paramType.isManaged`
+check uses the *source* parameter's type, not the individual field's. Correct
+today because an `@inline struct`'s fields are scalar or struct-pointer, so
+`isManaged` is false either way. It becomes wrong when GC-reference fields
+exist: the walk's `-1` sentinel and its `isManaged` check both depend on the
+flattening being field-safe, which it is only for unmanaged fields. Gated by the
+GC-ref-fields phase.
