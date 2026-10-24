@@ -772,7 +772,9 @@ green cell must not be taken as evidence for another.
    the clause in the next `build.rs` touch. (Carried from PR 33's report.)
 4. **Fixture-gated test harness (Tension PR 33).** 17 tests fail strictly on
    missing OGRE/async fixtures, 22 skip messages across 13 suites. Test-harness
-   debt; not touched here.
+   debt; not touched here. This is Tension-side cargo test debt (the
+   `tension-core/tests/*.rs` fixture-gated tests); not TensionScript. The
+   TensionScript async suite is fixed separately.
 5. **`Type#toRef()` has no `FixedArray` case** (`types.ts:746-749`), so any
    fixed-array *local* crashes the compiler with an assertion rather than a
    diagnostic. Adjacent to this phase (SROA will make aggregate locals common)
