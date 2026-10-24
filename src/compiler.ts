@@ -11244,7 +11244,6 @@ export class Compiler extends DiagnosticEmitter {
     let base = this.ensureSretStack();
     let global = assert(this.sretStackGlobal);
     let size = this.sretSizeOf(returnType);
-    let limit = this.sretStackLimit;
     let flow = this.currentFlow;
     let markLocal = flow.getTempLocal(Type.u32);
     let stmts = new Array<ExpressionRef>();
