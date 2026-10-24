@@ -50,6 +50,8 @@ dependency.
 | o | `@inline struct` at top level is refused (a global is a pointer slot and aliases) | `tests/compiler/interop/inline-struct-top-level.ts` (+ `.json`, 5 pinned diagnostics for annotated const, inferred const, a second value, inferred `let`, annotated static) | PR #13 | behavioural, three-way — refuse cell measured |
 | p | `Class.members` holds `PropertyPrototype`, not `Property`; the bound `Property` is at `prototype.instance` | `inline-struct-sroa.ts` — nothing is emitted without it (SROA's field list came back empty, so field access refused); the fixture fails outright | PR #13 | structural |
 | q | SROA must intercept **before** the initializer is compiled | `inline-struct-sroa.ts` — `copyOnDeclaration()` needs the initializer's *shape*; compiling it first asserts on the bare value | PR #13 | structural |
+| r | `@inline struct` parameters pass **by value** (flattened signatures) | `tests/compiler/interop/inline-struct-params.ts` — `passByValue() == 599` (9999 = aliased), `multiParamOrder() == 12534` (`(p.x,p.y,q,r.x,r.y) == (1,2,5,3,4)`) | PR #14 | behavioural, three-way |
+| s | A closure inside a function with an `@inline` parameter reads both correctly | same fixture — `closureEnvSlot() == 26`. Fails if `getNonParameterLocalTypes` counts source arity instead of WASM arity | PR #14 | behavioural (the silent-drift guard) |
 
 ### (h) The chain, measured
 
@@ -194,12 +196,86 @@ repo*, and *does the rule count comment mentions*.
 
 | Follow-up | Why it is not in scope |
 |---|---|
-| **SROA parameters** (field-list signatures) | Fits `Signature#paramRefs` — it is already a tuple (`createType(typesToRefs(parameterTypes))`), so N refs are expressible — but it introduces a source-parameter-index vs WASM-parameter-index mapping that many sites assume is the identity (`module.local_get(0)`, `getNonParameterLocalTypes`, the callee's body-local start index). Its own turn. |
-| **SROA return (sret)** | `Signature#resultRefs` is a single `toRef()`, so a struct return needs either a hidden destination parameter (changing the WASM arity, which inherits the parameter work above) or a multi-value result shape `module.ts` does not currently build. |
+| ~~**SROA parameters** (field-list signatures)~~ | **Landed in PR #14** (`f55fe7d0`): `wasmParamCountOf` / `wasmParamStartOf` / `wasmParamCount` / `sourceIndexOf` are the only translation site; the callee gets one local per field; the call site expands arguments in field order. |
+| **SROA return (sret)** | `Signature#resultRefs` is a single `toRef()`, so a struct return needs a hidden destination parameter. Its site list is **not empty**: `compiler.ts:7070` (the interface-stub temp index) is already known, and by the pattern below there will be more. Design note: `docs/interop-sret-design.md`. |
 | **SROA for top-level statics** | Per-field WASM *globals*, or a shadow slot. Refused until then, with the alternative named. |
 | **SROA for GC-reference fields** | The mixed representation above — a design phase. |
 | **`T[N]` fields in `@inline struct`** | Deep SROA: N locals per array field, plus a `makeZero` arm for `FixedArray` (it asserts today, `compiler.ts` `makeZero`). |
 | **Closure capture, `@external` temp, inline nesting** | Later commits of the 1.0 phase (scoping §9, §10). |
+
+---
+
+## PR #14: SROA parameters — two corrections and a pattern
+
+PR #14 (flattened signatures, the source-to-WASM parameter mapping) shipped
+green, but two of its *sites* were wrong in the plan and right in the code. Both
+are recorded here because the next contributor will read the plan.
+
+### Correction 1 — `operandsTostack` was missing from the site list
+
+The pre-work enumerated 13–15 sites that assume source parameter index == WASM
+parameter index. The actual change touched **16**. The missed one,
+`operandsTostack` (then `compiler.ts:7231`), held
+
+```ts
+assert(parameterTypes.length >= operands.length - operandIndex);
+while (operandIndex < operands.length) {
+  let paramType = parameterTypes[parameterIndex];   // walks parameter types by operand index
+```
+
+— both an assumption flattening breaks and an index walk that only works under
+it.
+
+**Its failure mode is a compiler crash, not aliasing.** The first call with a
+flattened argument asserted out of `operandsTostack` before emitting anything
+(caught by running `take(a, 7)` on a two-field value, not by reading the list).
+That distinction matters for triage: an aliasing bug ships silently, a crash
+does not.
+
+Caught after the fix by `tests/compiler/interop/inline-struct-params.ts` —
+`passByValue()` and `multiParamOrder()` both fail to *compile* without it.
+
+### Correction 2 — sites 6/7 are source arity, and must stay that way
+
+The plan said "`maximum` becomes `wasmParamCount()`". That is **wrong**, and the
+code deliberately does not do it:
+
+```ts
+compiler.ts:6630   let maximum = signature.parameterTypes.length;
+compiler.ts:6748   assert(numArguments <= parameterTypes.length);
+```
+
+`numArguments` is how many arguments the **user wrote**. Both checks run *before*
+the operand array is built, so both are source arity. Making them
+`wasmParamCount()` would accept `f(x, y)` for a one-parameter function returning
+`@inline struct` — a new bug wearing the costume of a fix.
+
+The general rule the params work established: **checks are source arity,
+emission is WASM arity.** Flattening happens when operands are emitted, after
+every check has passed.
+
+### The pattern: the site list is a first enumeration
+
+Both corrections have the same shape. A pre-work site list, read off the source,
+catches the **mechanical** sites — the ones that visibly compute an index. It
+does not catch **arity-shape** sites: code that encodes "N parameters means N
+operands" in a way no `grep` for `paramRefs` finds. Those surface only when the
+compiler compiles something.
+
+> **The pre-work site list is a first enumeration; running the compiler's own
+> fixtures is the second, and the list is not complete until the fixtures are
+> green.**
+
+Budget accordingly: a pre-work that ends with a site list has not finished
+measuring. The first fixture run is part of the measurement, not the
+verification.
+
+**Consequence for sret.** Its site list is **not empty** and **not final**.
+`compiler.ts:7070` — `let tempIndex = 1 + parameterTypes.length;` (the comment
+says `// incl. this`) — is the seventh site and the first predicted one: source-arity arithmetic for a
+temp *local index*, which collides with a hidden destination parameter's slot.
+That site is the sret analogue of `operandsTostack`, and by the pattern above it
+should be assumed to be one of several. See `docs/interop-sret-design.md`.
 
 ---
 
