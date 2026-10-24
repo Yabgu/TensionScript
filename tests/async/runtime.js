@@ -41,16 +41,14 @@ function check(name, actual, expected) {
 /**
  * The in-guest driver the host-driven cases append to their source.
  *
- * **Why a re-export.** `__taskResume`, `__taskWake` and `__taskFail` are
- * `export`ed functions in `std/assembly/task-rt.ts`, but the module drops them
- * from its export table because nothing *in the guest* calls them — the host
- * does. This compiler has no `@export` annotation (the decorator table at
- * `src/ast.ts:1105-1172` knows ten decorators, none of them `export`), and the
- * only other route is the hardcoded `--exportRuntime` list
- * (`src/compiler.ts:432-435`), which would export these from *every* module the
- * flag touches, engine guests included. A re-export here scopes the entry to
- * this fixture: `export { … } from "~lib/task-rt"` puts them in the export
- * table, and `src/` and `std/` are untouched.
+ * **What the harness calls, and what it does not.** The entry points are the
+ * drivers `resumeOne` and `failOne` below; they import `__taskResume` and
+ * `__taskFail` from `~lib/task-rt` and call them directly. The JavaScript side
+ * calls `resumeOne`/`failOne` — never the std symbols. (An earlier draft also
+ * re-exported `__taskResume`, `__taskWake` and `__taskFail` with
+ * `export { … } from "~lib/task-rt"`. That put them in the module's export
+ * table, but nothing used that path, so it was removed: import what you call,
+ * export only what the harness calls.)
  *
  * **Why `bindTaskTable` first.** `parkState` returns early when no table is
  * bound (`std/assembly/task-rt.ts:209`, "no table bound: pull path only") and
@@ -65,7 +63,6 @@ function check(name, actual, expected) {
  * `u64` (8 bytes), classes and payloads are `i32` (4 each), statuses `i32` (4).
  */
 const DRIVER = `
-export { __taskResume, __taskWake, __taskFail } from "~lib/task-rt";
 import { __taskBindTable, __taskResume, __taskFail } from "~lib/task-rt";
 
 export function bindTaskTable(): void { __taskBindTable(64); }
