@@ -232,7 +232,7 @@ Out, with the reason:
 | By-value ABI beyond a temp for `@external` | The host ABI has no struct-by-value form (WASM has none either); a temp pointer is the whole story. |
 | `@inline struct` in `Array<T>` | Shape question in §10.4; no answer scoped. |
 | `@inline struct` as a class field | A class field is a pointer slot; inline-in-heap is the nesting case. |
-| `@inline struct` returned by `@external` | Would need an ABI change; see §9. |
+| `@inline struct` returned by `@external` | Would need an ABI change; see §9. Internal returns are implemented (sret). |
 
 ---
 
@@ -565,8 +565,10 @@ small.
 - **Internal return** (`function make(): Foo` inside the guest): a hidden
   destination pointer (sret). The caller allocates the destination — a temp slot
   by (D) or (C) — and passes its address as an implicit first operand; the callee
-  stores its result there and returns nothing (or returns the pointer). This is a
-  guest-internal convention; no external surface moves. **In.**
+  stores its result there and returns nothing. This is a guest-internal
+  convention; no external surface moves. **In — implemented.**
+  `--sretStackSize` (the region size, structurally identical to `stackSize`) is
+  a follow-up; until it exists the region is a fixed 4 KB and overflow aborts.
 - **`@external` return** (`declare function host_make(): Foo`): the host would
   have to write `sizeof<Foo>` bytes into guest memory and return an address of
   them. It cannot — the only memory it may touch is what it is handed, and a
@@ -591,7 +593,7 @@ out is what keeps this a 1.0 feature.
 | Guest-internal parameter | **in** | Per-field operands (§5.2). |
 | `@external` parameter | **in** | Temp pointer; import stays `(param i32)` (§8). |
 | Capture in a closure | **in** | Field-wise capture into the env class (§5.3) — with the capture-by-value rule ratified. |
-| Internal return | **in** — sret; not yet implemented (its own phase: the hidden destination parameter changes call arity and has no precedent here) | sret (§9). |
+| Internal return | **in — implemented** (sret: hidden first parameter, 4 KB static call-temp stack in the data segment, per-call-frame bump) | sret (§9). |
 | `@external` return | **out** | Needs an ABI change (§9). |
 | Nested `@inline struct` field | **out** | Needs inline-in-record layout, and inherits the §7 defect. Rule in §10.1. |
 | `@inline struct` field inside `@unmanaged struct` | **out** | C inline nesting; same layout dependency, plus a C-layout record whose field is a value — the `offsetof`/`sizeof` loop would have to place an extent, not a pointer. |

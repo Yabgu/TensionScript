@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### `@inline struct` returns (sret)
+
+A function can now return an `@inline struct`. The value is **memory-only**:
+it has no WASM representation, so the call has no result. The caller allocates a
+slot and passes its address as the hidden **first** WASM parameter (after
+`this`); the callee writes the fields into it and returns nothing.
+
+`Signature` gains `hasHiddenDestParam`. `wasmParamCount()` counts the hidden
+slot, `wasmParamStartOf()` starts after it, `paramRefs` emits `i32` first, and
+`resultRefs` is `None`. `sourceIndexOf(0)` is `-1`; its doc comment states both
+meanings of `-1` (hidden slot / past-the-end), because the second is only
+unambiguous when the caller checks `wasmParamCount()` first.
+
+- **Callee:** `$sretDest` is WASM local 0 (1 for an instance method). `return p`
+  writes one `memory.store` per SROA field at `(dest + memoryOffset)`;
+  `return new P()` writes zeros to the slot. Returning anything but a local is
+  refused by name.
+- **Caller:** mark, allocate, guard, call, read, restore. The mark lives in a
+  **WASM local**, so slots are per-call-**frame**: recursion and nested calls
+  each get their own, and the slot stack is LIFO. Reads happen before the
+  restore.
+- **Two consumers, no third:** `f().x` loads one field; `let q: P = f()` copies
+  every field into `q`'s locals; a discarded call allocates and unwinds.
+
+The slot comes from a **4 KB static call-temp stack inside the data segment**
+(`[16, __data_end)`), which `visitStack` does not scan — it walks
+`[__stack_pointer, __heap_base)` — so a slot is never a GC root and the base is
+a compile-time constant. The bump pointer is a plain `i32` global; `compileVisitGlobals`
+visits only class-typed globals, so it adds no GC edge and no interrupt
+threshold. Overflow **aborts** with a message naming the limit; `--sretStackSize`
+(structurally identical to `stackSize`) is a follow-up.
+
+Two sites the shape needs:
+
+- **`operandsTostack`**: the hidden slot is operand 0 and belongs to no source
+  parameter. Treating `sourceIndexOf(-1)` as "past the end" stopped the walk
+  before the first managed argument and never spilled it. Fixed by checking
+  `wasmParamCount()` first and advancing both indices past the hidden slot;
+  measured load-bearing by reverting it (the fixture's WAT diff is the missing
+  spill).
+- **The override stub's temp local** is `1 + wasmParamCount()`. Defensive: a
+  virtual method returning an `@inline struct` is refused before the stub runs.
+
+Refused, unchanged by name: an export and an `@external` import (an ABI
+version), a function value, a virtual method, and returning anything but a
+local. Sret **does not** need multi-value results — the design note's §8
+described a problem this model does not have, because the value never enters the
+pipeline.
+
 ### `@inline struct` pass-by-value (SROA parameters)
 
 A function parameter of `@inline struct` type now passes by value. The source
@@ -26,9 +75,8 @@ Two sites that are easy to get wrong, both now covered by fixtures:
 Arity *checks* stay source-arity (`maximum` is how many arguments the user
 wrote); only operand emission is flattened.
 
-Refused, unchanged: `@inline struct` as a return (sret — its own phase, since the
-hidden destination parameter changes call arity and has no precedent in the
-compiler), as a top-level value, and as a field.
+Refused, unchanged: `@inline struct` as a top-level value and as a field.
+(`@inline struct` as a **return** is implemented — see the sret section above.)
 
 
 Developer-facing: `npm test` now runs the lint step via `pretest`; a fresh
