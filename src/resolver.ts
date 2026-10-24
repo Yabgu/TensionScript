@@ -97,8 +97,7 @@ import {
 } from "./common";
 
 import {
-  cloneMap,
-  isPowerOf2
+  cloneMap
 } from "./util";
 
 import {
