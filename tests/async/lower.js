@@ -227,25 +227,54 @@ function make(): Task<i32> { return changetype<Task<i32>>(0); }
     "Task"
   );
   check(
-    "the entry allocates the state, builds the handle, registers, assigns the resume carrier, resumes, and returns",
+    "the entry allocates the state, builds the handle, registers, guards the buffered completion, assigns the resume carrier, resumes, and returns",
     entry.body.statements.map(statement => statement.kind),
-    [ asc.NodeKind.Variable, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Expression, asc.NodeKind.Return ]
+    [
+      asc.NodeKind.Variable,   // state
+      asc.NodeKind.Expression, // handle = new …$State(…)
+      asc.NodeKind.Expression, // handle._record = __taskRegister(…)
+      asc.NodeKind.If,         // the buffered-completion guard (§4.4)
+      asc.NodeKind.Expression, // state.resume = changetype<…>(f$resume)
+      asc.NodeKind.Expression, // f$resume(state)
+      asc.NodeKind.Return      // return handle
+    ]
   );
   const registerStatement = entry.body.statements[2].expression;
   check("the register call assigns the handle's record", registerStatement.left.property.text, "_record");
   check("  ...from __taskRegister", registerStatement.right.expression.text, "__taskRegister");
+
+  // The buffered-completion guard: a completion that arrived before the park
+  // must not park — it returns through the handle instead. It sits **between**
+  // registration and the carrier, so the carrier is assigned only on the path
+  // that will actually suspend (`std/assembly/task-rt.ts`'s buffered
+  // completion; §4.4's "no lost wakes"). Pinned as a structural fact, not as an
+  // index shift: the guard is real emit and a build that dropped it would still
+  // count seven statements.
+  const guard = entry.body.statements[3];
+  check("the guard is an if", guard.kind, asc.NodeKind.If);
+  check(
+    "  ...testing a negated call (the buffered-completion predicate)",
+    [ guard.condition.kind, guard.condition.operand.kind ],
+    [ asc.NodeKind.UnaryPrefix, asc.NodeKind.Call ]
+  );
+  check(
+    "  ...and returning early through the handle",
+    guard.ifTrue.statements.map(statement => statement.kind),
+    [ asc.NodeKind.Return ]
+  );
+
   // §4.7.3's carrier: `state.resume = changetype<(state: TaskState) => void>(f$resume)`,
-  // between registration and the prefix call, so a suspension inside the prefix
-  // leaves a state the tick can resume.
-  const resumeAssignment = entry.body.statements[3].expression;
+  // after registration and after the guard, before the prefix call, so a
+  // suspension inside the prefix leaves a state the tick can resume.
+  const resumeAssignment = entry.body.statements[4].expression;
   check("the entry assigns the resume carrier", resumeAssignment.left.property.text, "resume");
   check("  ...from f$resume, through the variance cast",
     resumeAssignment.right.args[0].text, "f$resume");
   check("  ...immediately before the synchronous prefix runs",
-    entry.body.statements[4].expression.expression.text, "f$resume");
+    entry.body.statements[5].expression.expression.text, "f$resume");
   check(
     "  ...and the entry returns the handle",
-    entry.body.statements[5].value.property.text,
+    entry.body.statements[6].value.property.text,
     "handle"
   );
 
