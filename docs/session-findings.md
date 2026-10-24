@@ -377,6 +377,35 @@ relocated the problem from the call to the read path, and that path has exactly
 two shapes: one field load for `f().x`, a per-field copy for `let q: P = f()`.
 Recorded as a correction in `docs/interop-sret-design.md` §8.
 
+**The gate, measured.** The five non-consumer uses were compiled as probes
+before the read path existed. Four refuse: `g(f())` (AS100, passing an
+expression as a value argument), `f() + 1` (TS2365), `return f()` in an `i32`
+function (TS2322), `a[i] = f()` (AS100: `Array<P>` is a refused type argument,
+and the store reads the value as a whole), and `obj.field = f()` (AS100:
+inline nesting at the field declaration). A bare `f()` compiles, and its WAT is
+the safe shape: mark, bump, guard, pass `base + mark` as the hidden destination,
+call, restore — no `local.get` of the slot, no address treated as a value. The
+gate therefore did not fire; the four refusals are pinned in
+`inline-struct-sret-refusal-reach.ts`.
+
+**Constructors are not sret.** A constructor's declared return type is its
+class type; for an `@inline struct` that made `hasHiddenDestParam` true and the
+emitted constructor came out as `(param $this i32) (param $sretDest i32)` with
+**no result**, while its body still returned `this` — invalid WASM, and the
+reason an unannotated `let p = new P()` failed validation. `Signature` gains
+`sretDisabled`, part of the memoization key and set only for inline-struct
+constructors; ordinary constructors keep their old key and type-id sequence.
+The inferred `let p = new P()` and `let q = f()` forms then enter SROA; the
+fixture's call counter proves `let q = f()` emits one runtime call.
+
+**A refused field must not reach codegen.** A class field of `@inline struct`
+is refused at declaration (inline nesting), but the generated constructor still
+called `makeZero(fieldType)` and the field's setter was still compiled. Both
+crashed Binaryen: `Assertion failed: index < getNumLocals()` in `setLocalName`,
+from a local-index mismatch in the generated function. Constructor field
+initialization now skips the refused field, and the field getter/setter paths
+return `unreachable` with the declaration diagnostic as the report.
+
 **A pass-level constraint worth remembering.** Binaryen's passes assume one
 parent per expression node. Sharing one address node between two field loads
 compiles at -O0 and aborts `LocalCSE` in release

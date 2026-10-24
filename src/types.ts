@@ -1024,6 +1024,12 @@ export class Signature {
     requiredParameters: i32 = parameterTypes ? parameterTypes.length : 0,
     /** Whether the last parameter is a rest parameter. */
     hasRest: bool = false,
+    /** Whether this signature must never use a hidden sret destination
+     *  parameter even if its return type is an `@inline struct`. Constructors
+     *  are the only such signature: they return the allocated `this` pointer,
+     *  not a value. Part of the memoization key, because a method with the same
+     *  parameter and return types must still get the hidden parameter. */
+    sretDisabled: bool = false,
   ): Signature {
     // get the usize type, and the type of the signature
     let usizeType = program.options.usizeType;
@@ -1038,8 +1044,10 @@ export class Signature {
     let nextId = program.nextSignatureId;
     
     // construct the signature and calculate it's unique key
-    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, nextId, type);
-    let uniqueKey = signature.toString();
+    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, sretDisabled, nextId, type);
+    // Constructors and ordinary functions can share parameter and return types
+    // but not the hidden destination parameter, so the flag is part of the key.
+    let uniqueKey = (sretDisabled ? "!sret-disabled:" : "") + signature.toString();
 
     // check if it exists, and return it
     if (signatureTypes.has(uniqueKey)) {
@@ -1069,6 +1077,8 @@ export class Signature {
     public readonly requiredParameters: i32,
     /** Whether the last parameter is a rest parameter. */
     public readonly hasRest: bool,
+    /** Whether a hidden sret destination parameter is forbidden (constructors). */
+    public readonly sretDisabled: bool,
     /** Unique id representing this signature. */
     public readonly id: u32,
     /** Respective function type. */
@@ -1123,6 +1133,7 @@ export class Signature {
    * only when the shifted types happen to differ.
    */
   get hasHiddenDestParam(): bool {
+    if (this.sretDisabled) return false;
     let classReference = this.returnType.classReference;
     return classReference != null && classReference.hasDecorator(DecoratorFlags.InlineStruct);
   }
@@ -1238,6 +1249,9 @@ export class Signature {
 
     // check rest parameter
     if (this.hasRest != other.hasRest) return false;
+
+    // constructors and ordinary functions never share a hidden dest slot
+    if (this.sretDisabled != other.sretDisabled) return false;
 
     // check return type
     if (!this.returnType.equals(other.returnType)) return false;
@@ -1399,7 +1413,8 @@ export class Signature {
       this.returnType,
       this.thisType,
       requiredParameters,
-      hasRest
+      hasRest,
+      this.sretDisabled
     );
   }
 }

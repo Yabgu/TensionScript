@@ -3286,6 +3286,20 @@ export class Compiler extends DiagnosticEmitter {
 
       // Otherwise infer type from initializer
       } else if (initializerNode) {
+        // `let q = p` where p is an @inline struct local: copy its fields
+        // before compiling `p`, which would be a whole-value read (the
+        // refusal). A local lookup is enough — no expression resolution, so the
+        // compiler's type-id sequence is unaffected.
+        if (initializerNode.kind == NodeKind.Identifier) {
+          let source = flow.lookupLocal((<IdentifierExpression>initializerNode).text);
+          if (source != null && source.fieldLocals != null) {
+            let sourceFields = assert(this.inlineStructFieldsOf(source.type));
+            this.compileSroaLocal(
+              declaration, source.type, sourceFields, initializerNode, flow, initializers
+            );
+            continue;
+          }
+        }
         let pendingElements = this.pendingElements;
         let temp = flow.addScopedDummyLocal(name, Type.auto, statement); // pending dummy
         pendingElements.add(temp);
@@ -6164,6 +6178,14 @@ export class Compiler extends DiagnosticEmitter {
             this.currentType = tee ? fieldLocal.type : Type.void;
             return stored;
           }
+        }
+        // Inline nesting is refused at the field's declaration. Do not compile
+        // the setter here: its parameter would be a value type with no address,
+        // and the generated setter cannot bind it. The declaration diagnostic is
+        // the report; this keeps codegen from crashing on top of it.
+        if (propertyInstance.isField && this.isInlineStructType(propertyInstance.type)) {
+          this.currentType = tee ? propertyInstance.type : Type.void;
+          return module.unreachable();
         }
         if (propertyInstance.isField) {
           // Cannot assign to readonly fields except in constructors if there's no initializer
@@ -9738,7 +9760,10 @@ export class Compiler extends DiagnosticEmitter {
             classInstance.type,
             classInstance.type,
             baseCtor.signature.requiredParameters,
-            baseCtor.signature.hasRest
+            baseCtor.signature.hasRest,
+            // Only an @inline struct constructor needs sret suppressed;
+            // ordinary constructors keep their existing signature identity.
+            classInstance.hasDecorator(DecoratorFlags.InlineStruct)
           ),
           contextualTypeArguments
         );
@@ -9755,7 +9780,13 @@ export class Compiler extends DiagnosticEmitter {
             )
           ),
           null,
-          Signature.create(this.program, [], classInstance.type, classInstance.type),
+          Signature.create(
+            this.program, [], classInstance.type, classInstance.type,
+            0, false,
+            // Only an @inline struct constructor needs sret suppressed;
+            // ordinary constructors keep their existing signature identity.
+            classInstance.hasDecorator(DecoratorFlags.InlineStruct)
+          ),
           contextualTypeArguments
         );
       }
@@ -10042,6 +10073,13 @@ export class Compiler extends DiagnosticEmitter {
               null
             );
           }
+        }
+        // Inline nesting: an `@inline struct` field of an ordinary (heap)
+        // record is refused at declaration. Do not call the getter — its return
+        // type has no value representation. The declaration diagnostic stands.
+        if (propertyInstance.isField && this.isInlineStructType(propertyInstance.type)) {
+          this.currentType = propertyInstance.type;
+          return module.unreachable();
         }
         // An inline array field is storage, not a value: there is nothing to
         // read at the field's offset, only bytes to address. So the access
@@ -11925,6 +11963,12 @@ export class Compiler extends DiagnosticEmitter {
       // only interested in fields (resolved during class finalization)
       let property = (<PropertyPrototype>member).instance;
       if (!property || !property.isField || property.getBoundClassOrInterface() != classInstance) continue;
+      // An `@inline struct` field is inline nesting and was refused at
+      // declaration. Do not materialise it: `makeZero`/the setter would need
+      // the value's address, which is exactly what the type does not have.
+      // Skipping codegen lets the recorded diagnostic surface instead of
+      // crashing in the generated constructor.
+      if (this.isInlineStructType(property.type)) continue;
       assert(!property.isAny(CommonFlags.Const));
       let fieldPrototype = property.prototype;
       let parameterIndex = fieldPrototype.parameterIndex;
