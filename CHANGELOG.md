@@ -45,11 +45,43 @@ Two sites the shape needs:
 - **The override stub's temp local** is `1 + wasmParamCount()`. Defensive: a
   virtual method returning an `@inline struct` is refused before the stub runs.
 
+**The refusal's reach, measured.** Every non-consumer use was compiled as a
+probe before the read path was written: `g(f())` (AS100, passing an expression
+as a value argument), `f() + 1` (TS2365), `return f()` in an `i32` function
+(TS2322), `a[i] = f()` (AS100: `Array<P>` is a refused type argument, and the
+store reads the value as a whole), and `obj.field = f()` (AS100: inline nesting
+at the field declaration). A bare `f()` is the one use that compiles, and it is
+safe: it allocates the slot, passes its address as the hidden destination,
+calls, and unwinds — it never reads the slot as a value. Pinned in
+`inline-struct-sret-refusal-reach.ts`.
+
+**Constructors are not sret.** A constructor returns `this`, not a value, so it
+must not acquire the hidden destination parameter even when its class is an
+`@inline struct` (its declared return type is the class type). `Signature` gains
+`sretDisabled`, set only for an inline-struct constructor and part of the
+memoization key so a method with the same parameter and return types still gets
+the hidden parameter. Without it, `new P()` emitted a constructor with an unused
+destination parameter and no result — invalid WebAssembly. Ordinary
+constructors keep their existing signature identity.
+
+This also makes the **inferred local forms** value-correct: `let p = new P()`
+and `let q = f()` enter SROA (per-field locals, not a heap pointer), and
+`let q = p` is intercepted by the local lookup before the whole-value refusal.
+The fixture counts calls to prove `let q = f()` emits one runtime call.
+
+**A refused field must not reach codegen.** A class field of `@inline struct`
+is inline nesting and is refused at its declaration, but the generated
+constructor still called `makeZero` for it and the field's getter/setter were
+still compiled — crashing Binaryen's debug-info writer on a local-index
+mismatch. Constructor field initialization now skips the refused field, and the
+field getter/setter paths return `unreachable` with the declaration diagnostic
+as the report.
+
 Refused, unchanged by name: an export and an `@external` import (an ABI
-version), a function value, a virtual method, and returning anything but a
-local. Sret **does not** need multi-value results — the design note's §8
-described a problem this model does not have, because the value never enters the
-pipeline.
+version), a function value, a virtual method, returning anything but a local,
+and an `@inline struct` field of another record (inline nesting). Sret **does
+not** need multi-value results — the design note's §8 described a problem this
+model does not have, because the value never enters the pipeline.
 
 ### `@inline struct` pass-by-value (SROA parameters)
 

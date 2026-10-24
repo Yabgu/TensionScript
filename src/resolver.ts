@@ -3171,7 +3171,23 @@ export class Resolver extends DiagnosticEmitter {
       returnType = type;
     }
 
-    let signature = Signature.create(this.program, parameterTypes, returnType, thisType, requiredParameters, hasRest);
+    // A constructor returns the allocated `this` pointer, not a value, so it
+    // must not acquire the hidden destination parameter an `@inline struct`
+    // return would otherwise add (its return type is the class type). Only an
+    // inline-struct constructor needs the flag; leaving ordinary constructors
+    // unchanged keeps their signature key (and the type-id sequence) stable.
+    let sretDisabled = prototype.is(CommonFlags.Constructor) &&
+      returnType.classReference != null &&
+      returnType.classReference.hasDecorator(DecoratorFlags.InlineStruct);
+    let signature = Signature.create(
+      this.program,
+      parameterTypes,
+      returnType,
+      thisType,
+      requiredParameters,
+      hasRest,
+      sretDisabled
+    );
 
     let nameInclTypeParameters = prototype.name;
     if (instanceKey.length) nameInclTypeParameters += `<${instanceKey}>`;

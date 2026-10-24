@@ -38,6 +38,10 @@
   y: i32;
 }
 
+// Counts calls to `counted`, to prove the inferred `let q = f()` form compiles
+// the call's *shape* without emitting it twice: one runtime call, one slot.
+let callCount: i32 = 0;
+
 function make(n: i32): P {
   let p: P = new P();
   p.x = n;
@@ -69,12 +73,54 @@ function zero(): P {
   return new P();
 }
 
+// The **inferred** local forms. `compileVariableStatement` enters SROA after it
+// resolves the initializer's type; the value never becomes a heap pointer. The
+// first form is why a constructor must not take the hidden destination
+// parameter: a constructor returns `this`, not a value, even when its class is
+// an `@inline struct`.
+function inferredNew(n: i32): i32 {
+  let p = new P();
+  p.x = n;
+  p.y = n + 2;
+  return p.x * 10 + p.y;
+}
+
+function inferredCopy(n: i32): i32 {
+  let q = make(n);
+  return q.x * 10 + q.y;
+}
+
+// `let q = p` with both locals inferred: the copy is field-wise, not a pointer.
+function inferredFromLocal(n: i32): i32 {
+  let p: P = new P();
+  p.x = n;
+  p.y = n + 3;
+  let q = p;
+  return q.x * 10 + q.y;
+}
+
+function counted(n: i32): P {
+  callCount += 1;
+  let p: P = new P();
+  p.x = n;
+  p.y = n + 1;
+  return p;
+}
+
+function countedOnce(): i32 {
+  callCount = 0;
+  let q = counted(6);
+  return callCount * 1000 + q.x * 10 + q.y;
+}
+
 export function run(): i32 {
   let total = 0;
   total += readField(41); // 41
   total += copyOut(7); // 708
   total += discard(10); // 11
   total += zero().x + zero().y; // 0
+  total += inferredNew(3); // 35
+  total += inferredCopy(4); // 45
   return <i32>total;
 }
 
@@ -88,6 +134,12 @@ assert(discard(10) == 11);
 assert(discard(10) == 11);
 assert(zero().x == 0);
 assert(zero().y == 0);
+// inferred locals: `let p = new P()` is SROA (no heap pointer), and
+// `let q = f()` copies the slot's fields into q's locals
+assert(inferredNew(3) == 35);
+assert(inferredCopy(4) == 45);
+assert(countedOnce() == 1067); // one call (count 1) and x=6, y=7
+assert(inferredFromLocal(4) == 47);
 
 // Two consumers of two calls in one expression: each call takes its own slot,
 // and the inner call's slot is still live while the outer result is read.
