@@ -15,7 +15,7 @@
 // compiles until its codegen exists.
 //
 // Refused here, each with its own diagnostic:
-//   - a local (declared and inferred), a global
+//   - a global (locals are implemented — see `inline-struct-sroa.ts`)
 //   - a parameter, a return type
 //   - a field of another record (inline nesting)
 //   - `T[N]` of an `@inline struct`
@@ -35,17 +35,6 @@
 @inline struct Q { y: u32 = 0; }
 
 class Base { b: u32 = 0; }
-
-// a local, declared
-function localDeclared(): void {
-  let p: P = new P();
-}
-
-// a local, inferred from the initializer (the form that would slip past a check
-// written only on the type annotation)
-function localInferred(): void {
-  let p = new P();
-}
 
 // a global
 let globalValue: P = new P();
@@ -82,8 +71,6 @@ function view(p: usize): void {
 @inline struct Sub extends Base { w: u32 = 0; }
 
 export function run(): void {
-  localDeclared();
-  localInferred();
   takes(new P());
   makes();
   arrayOf();
