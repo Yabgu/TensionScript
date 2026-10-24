@@ -134,6 +134,7 @@ import {
   ClassDeclaration,
   ContinueStatement,
   DeclarationStatement,
+  VariableLikeDeclarationStatement,
   DoStatement,
   EmptyStatement,
   EnumDeclaration,
@@ -3223,6 +3224,19 @@ export class Compiler extends DiagnosticEmitter {
         if (!type) continue;
         this.program.checkTypeSupported(type, typeNode);
 
+        // SROA, annotated case: handle the declaration **before** the
+        // initializer is compiled. This ordering is load-bearing — compiling
+        // the initializer of `let q: P = p` would compile the bare `p`, and a
+        // value has no representation to compile (`compileIdentifierExpression`
+        // asserts). The SROA path reads the initializer's *shape* instead.
+        let sroaFieldsAnnotated = this.inlineStructFieldsOf(type);
+        if (sroaFieldsAnnotated != null) {
+          this.compileSroaLocal(
+            declaration, type, sroaFieldsAnnotated, initializerNode, flow, initializers
+          );
+          continue;
+        }
+
         if (initializerNode) {
           let pendingElements = this.pendingElements;
           let dummy = flow.addScopedDummyLocal(name, type, statement); // pending dummy
@@ -3334,11 +3348,13 @@ export class Compiler extends DiagnosticEmitter {
 
       // Otherwise compile as mutable
       if (!isStatic) {
-        // An `@inline struct` local is refused by name: compiled as a local it
-        // would be a 4-byte *pointer* (`@unmanaged struct`'s representation),
-        // so `let q = p` would alias. Checked here rather than at the type
-        // annotation so the inferred form (`let p = new P()`) is covered too.
-        if (!this.program.checkInlineStructValue(type, declaration.name, "a local")) {
+        // An `@inline struct` value lives in one WASM local per field, never in
+        // a local of its own: see `compileSroaLocal`. Checked here rather than at
+        // the type annotation so the inferred form (`let p = new P()`) is
+        // covered too.
+        let sroaFields = this.inlineStructFieldsOf(type);
+        if (sroaFields != null) {
+          this.compileSroaLocal(declaration, type, sroaFields, initializerNode, flow, initializers);
           continue;
         }
         let local: Local;
@@ -5870,6 +5886,45 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
+    // `p = q` where both are `@inline struct` values: a field-wise copy, for
+    // the same reason the inline-array case above is intercepted here — there is
+    // no single thing to assign. The value must not be compiled first either: a
+    // value has no representation to compile (`compileIdentifierExpression`
+    // asserts on one), and if it *did* compile it would be a pointer, so the
+    // assignment would alias. Both halves matter; this is the copy that makes
+    // value semantics real.
+    if (
+      expression.kind == NodeKind.Identifier &&
+      valueExpression.kind == NodeKind.Identifier
+    ) {
+      let targetLocal = flow.lookupLocal((<IdentifierExpression>expression).text);
+      let sourceLocal = flow.lookupLocal((<IdentifierExpression>valueExpression).text);
+      if (targetLocal != null && targetLocal.fieldLocals != null && sourceLocal != null) {
+        let targetFields = assert(targetLocal.fieldLocals);
+        let sourceFields = sourceLocal.fieldLocals;
+        if (sourceFields == null) {
+          this.error(
+            DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+            valueExpression.range,
+            "a non-@inline-struct value", assert(targetLocal.type).toString()
+          );
+          return this.module.unreachable();
+        }
+        let copies = new Array<ExpressionRef>();
+        for (let _keys = Map_keys(targetFields), i = 0, k = _keys.length; i < k; ++i) {
+          let fieldName = unchecked(_keys[i]);
+          if (!sourceFields.has(fieldName)) continue;
+          let to = assert(targetFields.get(fieldName));
+          let from = assert(sourceFields.get(fieldName));
+          copies.push(
+            this.module.local_set(to.index, this.module.local_get(from.index, from.type.toRef()), false)
+          );
+        }
+        this.currentType = Type.void;
+        return this.module.flatten(copies);
+      }
+    }
+
     let target = resolver.lookupExpression(expression, flow); // reports
     if (!target) return this.module.unreachable();
     let thisExpression = resolver.currentThisExpression;
@@ -6054,6 +6109,27 @@ export class Compiler extends DiagnosticEmitter {
       }
       case ElementKind.Property: {
         let propertyInstance = <Property>target;
+        // SROA: write the field's own local. `local.set` is the whole store —
+        // there is no address, no offset, and (for the non-GC field types this
+        // phase accepts) no write barrier to run.
+        if (thisExpression != null) {
+          let sroaReceiver = this.resolveSroaReceiver(thisExpression);
+          if (sroaReceiver != null) {
+            let fieldLocals = assert(sroaReceiver.fieldLocals);
+            if (!fieldLocals.has(propertyInstance.name)) {
+              this.error(
+                DiagnosticCode.Not_implemented_0,
+                valueExpression.range,
+                "assigning to a refused field of an @inline struct (the field was refused at declaration)"
+              );
+              return module.unreachable();
+            }
+            let fieldLocal = assert(fieldLocals.get(propertyInstance.name));
+            let stored = module.local_set(fieldLocal.index, valueExpr, false);
+            this.currentType = tee ? fieldLocal.type : Type.void;
+            return stored;
+          }
+        }
         if (propertyInstance.isField) {
           // Cannot assign to readonly fields except in constructors if there's no initializer
           let isConstructor = flow.sourceFunction.is(CommonFlags.Constructor);
@@ -8054,6 +8130,19 @@ export class Compiler extends DiagnosticEmitter {
             expression.range, local.name
           );
         }
+        // An `@inline struct` value has no WASM local of its own and no
+        // address, so there is nothing to `local.get`. Refused by name, not
+        // asserted: this is the *point* of the representation — no address, no
+        // alias — and a compiler crash is the wrong way to say so.
+        if (local.fieldLocals != null || localIndex < 0) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            expression.range,
+            "reading an @inline struct value as a whole (a value has no address; read a field, or copy it with `let q: P = p`)"
+          );
+          this.currentType = localType;
+          return module.unreachable();
+        }
         assert(localIndex >= 0);
         let isNonNull = flow.isLocalFlag(localIndex, LocalFlags.NonNull, false);
         if (localType.isNullableReference && isNonNull && (!localType.isExternalReference || this.options.hasFeature(Feature.GC))) {
@@ -9779,6 +9868,32 @@ export class Compiler extends DiagnosticEmitter {
             );
           }
         }
+        // SROA: the receiver is an `@inline struct` local, so there is no `this`
+        // pointer to call the getter with — the field is its own WASM local, and
+        // the read is `local.get`. This is the sibling of the inline-array branch
+        // immediately below: both handle a field whose type has no value
+        // representation the ordinary getter/call shape can carry. Here the
+        // resolution is the opposite one — the array keeps an *address*, a value
+        // gets *none*, and that absence is what makes copies real.
+        // `thisExpression` is null for a static (global) property access, which
+        // can never be an SROA receiver: there is no instance expression.
+        let sroaReceiver = thisExpression != null
+          ? this.resolveSroaReceiver(thisExpression)
+          : null;
+        if (sroaReceiver != null) {
+          let fieldLocals = assert(sroaReceiver.fieldLocals);
+          if (!propertyInstance.isField || !fieldLocals.has(propertyInstance.name)) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              expression.range,
+              "reading this member of an @inline struct (only supported fields are readable; a refused or computed member has no local)"
+            );
+            return module.unreachable();
+          }
+          let fieldLocal = assert(fieldLocals.get(propertyInstance.name));
+          this.currentType = propertyInstance.type;
+          return module.local_get(fieldLocal.index, fieldLocal.type.toRef());
+        }
         // An inline array field is storage, not a value: there is nothing to
         // read at the field's offset, only bytes to address. So the access
         // compiles to `base + fieldOffset`, typed as the array, and the
@@ -10751,6 +10866,199 @@ export class Compiler extends DiagnosticEmitter {
   // === Specialized code generation ==============================================================
 
   /** Makes a constant zero of the specified type. */
+  /**
+   * The SROA local an expression names, or `null`.
+   *
+   * Only a bare identifier can be one: `p.x.y` where `x` is itself an inline
+   * struct cannot happen this phase (a nested field is refused at declaration),
+   * so the receiver of a field access is either an SROA local or an ordinary
+   * expression that has an address.
+   */
+  private resolveSroaReceiver(expression: Expression): Local | null {
+    if (expression.kind != NodeKind.Identifier) return null;
+    let local = this.currentFlow.lookupLocal((<IdentifierExpression>expression).text);
+    return local != null && local.fieldLocals != null ? local : null;
+  }
+
+  /**
+   * Compiles an `@inline struct` local as SROA: one WASM local per field, no
+   * local for the value, no store for the zero case.
+   *
+   * **Why this shape.** `compilePropertyAccessExpression` already compiles an
+   * inline-array *field* as `base + fieldOffset` rather than through its getter,
+   * because the type "has no value representation" (`compiler.ts`'s
+   * `TypeKind.FixedArray` branch, just above the getter call). An `@inline
+   * struct` value is the same situation with a different resolution: no value
+   * representation, so no getter, no address — the fields are separate locals and
+   * the access is `local.get`/`local.set` on the field's own local. The precedent
+   * is exact, and it is why this fits asc's codegen instead of fighting it.
+   *
+   * **Zero-init is free.** A WASM local starts at zero, and `compileLocal`
+   * already relies on that for scalars (the `// no need to assign zero` branch).
+   * `new P()` therefore emits nothing: the per-field locals are already zero.
+   *
+   * Returns true when the declaration was handled here (the caller must not fall
+   * through to the ordinary local path).
+   */
+  private compileSroaLocal(
+    declaration: VariableLikeDeclarationStatement,
+    type: Type,
+    fields: Property[],
+    initializerNode: Expression | null,
+    flow: Flow,
+    initializers: ExpressionRef[]
+  ): bool {
+    let module = this.module;
+    let name = declaration.name.text;
+    let fieldLocals = new Map<string, Local>();
+    let refused = false;
+
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      if (!this.isSroaFieldType(field.type)) {
+        let fieldDeclaration = assert(field.prototype.fieldDeclaration);
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          fieldDeclaration.type
+            ? fieldDeclaration.type.range
+            : fieldDeclaration.name.range,
+          field.type.kind == TypeKind.FixedArray
+            ? "a T[N] field in an @inline struct (SROA keeps one WASM local per field; array fields are the deep-SROA phase)"
+            : "a GC-reference field in an @inline struct (a bare local.set skips the write barrier; deferred)"
+        );
+        refused = true;
+        continue;
+      }
+      // A synthetic name keeps the per-field locals out of user scope: `p.x` is
+      // not a legal name, so nothing can look one up by accident.
+      let fieldLocal = flow.targetFunction.addLocal(
+        field.type, name + "$" + field.name, declaration
+      );
+      fieldLocals.set(field.name, fieldLocal);
+    }
+    if (refused) return true;
+
+    let local = new Local(name, -1, type, flow.targetFunction, declaration);
+    local.fieldLocals = fieldLocals;
+
+    // Register under the declaration's name so every lookup path (`p.x`, bare
+    // `p`) finds it, and bind the constant flag the ordinary path would set.
+    let scopedLocals = flow.scopedLocals;
+    if (!scopedLocals) flow.scopedLocals = scopedLocals = new Map();
+    if (scopedLocals.has(name)) {
+      this.error(
+        DiagnosticCode.Duplicate_identifier_0, declaration.name.range, name
+      );
+      return true;
+    }
+    scopedLocals.set(name, local);
+    if (declaration.is(CommonFlags.Const)) {
+      flow.setLocalFlag(local.index, LocalFlags.Constant);
+    }
+
+    if (!initializerNode) return true;             // zeros, free
+
+    // `new P(…)`: one store per provided field, in field order.
+    if (initializerNode.kind == NodeKind.New) {
+      let args = (<NewExpression>initializerNode).args;
+      if (args.length > fields.length) {
+        this.error(
+          DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+          initializerNode.range, "too many arguments", type.toString()
+        );
+        return true;
+      }
+      for (let i = 0, k = args.length; i < k; ++i) {
+        let field = unchecked(fields[i]);
+        let fieldLocal = assert(fieldLocals.get(field.name));
+        let value = this.compileExpression(args[i], field.type, Constraints.ConvImplicit);
+        initializers.push(module.local_set(fieldLocal.index, value, false));
+      }
+      return true;
+    }
+
+    // `let q: P = p`: a field-wise copy. Not a single `local.set` — there is no
+    // single local — and not a pointer copy, which is the aliasing this whole
+    // phase exists to remove.
+    if (initializerNode.kind == NodeKind.Identifier) {
+      let source = flow.lookupLocal((<IdentifierExpression>initializerNode).text);
+      if (source && source.fieldLocals) {
+        for (let i = 0, k = fields.length; i < k; ++i) {
+          let fieldName = unchecked(fields[i]).name;
+          let from = assert(source.fieldLocals.get(fieldName));
+          let to = assert(fieldLocals.get(fieldName));
+          initializers.push(
+            module.local_set(to.index, module.local_get(from.index, from.type.toRef()), false)
+          );
+        }
+        return true;
+      }
+    }
+
+    this.error(
+      DiagnosticCode.Not_implemented_0,
+      initializerNode.range,
+      "initialising an @inline struct local from this expression (only `new P(…)`, another @inline struct value, or no initialiser)"
+    );
+    return true;
+  }
+
+  /**
+   * The instance fields of an `@inline struct`, in declaration order, or `null`
+   * when `type` is not one.
+   *
+   * Declaration order is the map's insertion order, which is the same order the
+   * resolver assigned `memoryOffset` in — so "field order" means the same thing
+   * to SROA's local list as it does to `offsetof`.
+   *
+   * Returns an **empty** array for an inline struct all of whose fields were
+   * refused (a `T[N]` field): the caller distinguishes "not an inline struct"
+   * (`null`) from "an inline struct with nothing usable" (empty).
+   */
+  inlineStructFieldsOf(type: Type): Property[] | null {
+    let classReference = type.classReference;
+    if (
+      classReference == null ||
+      !classReference.hasDecorator(DecoratorFlags.InlineStruct)
+    ) return null;
+    let fields = new Array<Property>();
+    let members = classReference.members;
+    if (members) {
+      // `Map_values` preserves insertion order, which is declaration order.
+      for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+        let member = unchecked(_values[i]);
+        // A resolved `Class`'s members are **prototypes**; the bound `Property`
+        // (which carries `type`, `isField` and `memoryOffset`) hangs off
+        // `prototype.instance`, the same indirection `Class#offsetof` uses.
+        if (member.kind != ElementKind.PropertyPrototype) continue;
+        let property = (<PropertyPrototype>member).instance;
+        if (!property || !property.isField) continue;
+        fields.push(property);
+      }
+    }
+    return fields;
+  }
+
+  /**
+   * Whether a field's type can live in a single WASM local.
+   *
+   * Scalars (i8..f64, bool) and references (a `struct` pointer, a `@managed
+   * struct` reference, a class reference) each occupy one local. A `T[N]` field
+   * does not — it is an extent, not a value — and is refused by name rather than
+   * decomposed, because decomposing it is the deep-SROA phase (a `T[N]` of
+   * scalars would become N locals, which needs a `makeZero` case this phase does
+   * not add; `compiler.ts` `makeZero` still has no `FixedArray` arm).
+   */
+  isSroaFieldType(type: Type): bool {
+    if (type.kind == TypeKind.FixedArray) return false;
+    // A field that holds a *GC reference* would need the write barrier
+    // (`link`) on every assignment, which a bare `local.set` skips — so a
+    // collected object could be written into a local the collector has no
+    // reason to trace. Refused by name for this phase; the barrier is a
+    // follow-up, not a silent omission.
+    return !type.isManaged;
+  }
+
   makeZero(type: Type): ExpressionRef {
     let module = this.module;
     switch (type.kind) {

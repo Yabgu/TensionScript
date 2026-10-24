@@ -3816,6 +3816,21 @@ export class Local extends VariableLikeElement {
   /** Original name of the (temporary) local. */
   private originalName: string;
 
+  /**
+   * Per-field WASM locals for an `@inline struct` value (SROA).
+   *
+   * An `@inline struct` local has **no** WASM local of its own: its value lives
+   * in one local per field, and this map is the only handle on them. `null` for
+   * every other local, so the ordinary case allocates nothing — 271 fixtures
+   * compile through `compileLocal` and pay no cost for the feature they do not
+   * use.
+   *
+   * This is what makes "no address" true rather than aspirational: there is no
+   * `index` for the value as a whole, so a bare `p` cannot be compiled, and
+   * therefore cannot alias.
+   */
+  fieldLocals: Map<string, Local> | null = null;
+
   /** Constructs a new local variable. */
   constructor(
     /** Simple name. */
