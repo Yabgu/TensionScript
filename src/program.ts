@@ -4078,6 +4078,16 @@ export class Function extends TypedElement {
         this.localsByIndex[local.index] = local;
         flow.setLocalFlag(local.index, LocalFlags.Initialized);
       }
+      if (signature.hasHiddenDestParam) {
+        // Sret: the hidden destination pointer, at the first slot after `this`.
+        // It has no source name — nothing in the body can refer to it — so it
+        // is not installed in `scopedLocals`; only `localsByIndex` and the
+        // initialized flag know about it. `getNonParameterLocalTypes` starts
+        // the body locals after `wasmParamCount()`, which counts this slot.
+        let local = new Local("$sretDest", localIndex++, Type.u32, this);
+        this.localsByIndex[local.index] = local;
+        flow.setLocalFlag(local.index, LocalFlags.Initialized);
+      }
       let parameterTypes = signature.parameterTypes;
       for (let i = 0, k = parameterTypes.length; i < k; ++i) {
         let parameterType = parameterTypes[i];
