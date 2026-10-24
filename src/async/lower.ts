@@ -1344,7 +1344,12 @@ export class AsyncLowerTransform {
       }
       case NodeKind.Break:
       case NodeKind.Continue: {
-        // EXPERIMENT: neither carries an await, so it plans as a leaf.
+        // Adopted: break/continue plan as leaves. Neither carries an await, so
+        // the region they belong to is unaffected by them and they need no
+        // resume point of their own. This is what closes the for-continue hang
+        // (compile-green, runtime-stuck): refusing them left the loop's own
+        // plan without an exit, and reverting would restore it.
+        // `reasonFor` deliberately has no arm for either -- see below.
         plan.kind = PlanKind.Plain;
         return plan;
       }
@@ -2893,8 +2898,10 @@ function reasonFor(node: Node): string {
     case NodeKind.While: return "while in an async function body (async lowering)";
     case NodeKind.Do: return "do in an async function body (async lowering)";
     case NodeKind.Block: return "a nested block in an async function body (async lowering)";
-    case NodeKind.Break: return "break in an async function body (async lowering)";
-    case NodeKind.Continue: return "continue in an async function body (async lowering)";
+    // `Break` and `Continue` are deliberately absent: the planner handles both
+    // as leaves (see its `case` above), so neither reaches this function. An
+    // arm here would claim a refusal the lowering no longer performs, which is
+    // exactly the disagreement this list used to have with the planner.
     default: return "this async body (async lowering)";
   }
 }

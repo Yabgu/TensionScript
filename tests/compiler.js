@@ -500,7 +500,19 @@ async function testInstantiate(binaryBuffer, glue, stderr) {
         },
         ...toEnv("Date", Date),
         ...toEnv("Math", Math)
-      })
+      }),
+      // The guest's scheduler seam: `scheduler::park(task_id, class, key)`
+      // (`std/assembly/task-rt.ts:145-146`, `@external("scheduler", "park")`
+      // -> `hostPark(taskId: i64, class_: i32, key: i32): void`). An async
+      // function that can suspend imports it, so instantiation needs the module
+      // present. `void`, and these fixtures link rather than schedule: the entry
+      // traps at `__taskRegister` before any park is reached (the fixture
+      // sources say so), so the body is never called.
+      scheduler: {
+        park(taskId, class_, key) {
+          // no-op: linkability, not scheduling
+        }
+      }
     });
 
     if (glue.preInstantiate) {
