@@ -47,11 +47,18 @@ assert(sizeof<Empty>() == offsetof<Empty>());
 assert(sizeof<Managed>() == sizeof<usize>());
 assert(sizeof<Managed>() != offsetof<Managed>());
 
-// --- `byteSize` is untouched, so alignof does not move ---------------------
-// alignof is ctz(byteSize). For a class byteSize is the reference width, so a
-// record still reports 2 -- the property variant B preserves, and the reason
-// the fix is not at `Type.byteSize`.
-assert(alignof<Two>() == alignof<usize>());
+// --- `byteSize` is untouched, but `alignof` now reads the record's layout ---
+// `byteSize` is still the reference width -- that is the property variant B
+// preserves, and the reason the `sizeof` fix is not at `Type.byteSize`.
+// `alignof`, however, must describe the *value's* alignment, not the reference's:
+// `Two` holds an `f64`, so it is aligned 8 (log2 3). Until the fix after the
+// `@inline struct` scoping, `alignof<T>()` returned `Type#alignLog2` -- the
+// 4-byte reference's log2 2 -- for every record, and this assertion pinned that
+// wrong value. It now reads `Class#alignLog2`, the alignment the resolver
+// computed while laying the fields out.
+assert(alignof<Two>() == 3);
+assert(alignof<Two>() == alignof<f64>());
+assert(alignof<Two>() != alignof<usize>());
 
 // --- primitives are unchanged ----------------------------------------------
 assert(sizeof<u8>() == 1);

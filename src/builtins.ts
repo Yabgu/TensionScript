@@ -1308,6 +1308,31 @@ function builtin_alignof(ctx: BuiltinFunctionContext): ExpressionRef {
     );
     return module.unreachable();
   }
+  // A record's alignment is the strongest of its fields', base included --
+  // `Class#alignLog2`, accumulated while the resolver lays the record out
+  // (`program.ts`). The `Type` cannot answer for itself: a record's Type is
+  // class-like, so `Type#alignLog2` reads its 4-byte reference size and would
+  // report 2 for every record, including `{u64}` (which is aligned 8) and
+  // `{u16}` (which is aligned 2).
+  //
+  // The same two kinds `builtin_sizeof` special-cases above (`Unmanaged` |
+  // `ManagedStruct`), and for the same reason: both are C-layout records whose
+  // extent and alignment are properties of the fields, not of a reference to
+  // them. A class with no record decorator keeps `Type#alignLog2`: its object
+  // has a header, but `alignof<C>()` describes the *reference*, which is 4 bytes
+  // at alignment 4 -- consistent with `sizeof<C>() == 4`.
+  let classReference = type.classReference;
+  if (
+    classReference != null &&
+    (
+      classReference.hasDecorator(DecoratorFlags.Unmanaged) ||
+      classReference.hasDecorator(DecoratorFlags.ManagedStruct)
+    )
+  ) {
+    return contextualUsize(
+      compiler, i64_new(classReference.alignLog2), ctx.contextualType
+    );
+  }
   return contextualUsize(compiler, i64_new(type.alignLog2), ctx.contextualType);
 }
 builtinFunctions.set(BuiltinNames.alignof, builtin_alignof);
