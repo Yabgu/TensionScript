@@ -980,8 +980,6 @@ const REFUSALS = [
     "do in an async function body (async lowering)" ],
   [ "for-of", `async function f(a: i32[]): i32 { for (let v of a) return v; return 0; }`,
     "for-of in an async function body (async lowering)" ],
-  [ "break", `async function f(a: i32): i32 { while (a > 0) { break; } return a; }`,
-    "break in an async function body (async lowering)" ],
   [ "a generic async function", `async function f<T>(a: T): void {}`,
     "async generic functions (async lowering)" ],
   [ "an optional parameter", `async function f(a: i32 = 1): i32 { return a; }`,
@@ -1010,6 +1008,33 @@ for (const [ label, source, expected ] of REFUSALS) {
     r.names().some(name => name.includes("$")),
     false
   );
+}
+
+// 9a. `break` and `continue` are **accepted**, not refused.
+//
+// They were refused before the scheduler contract (50cceb36) added the
+// planner's leaf case, and this table kept the old expectation — the same
+// staleness the .wat fixtures had. Neither carries an await, so the region it
+// belongs to is unaffected by it and it needs no resume point; the planner
+// treats both as leaves. Refusing them is what left a `for` loop's plan without
+// an exit and produced the for-continue hang (compile-green, runtime-stuck), so
+// the acceptance is what closes that bug, not an optimization.
+//
+// The engine's own async fixture is the runtime evidence: guest-flow.ts asserts
+// while+break 3, while+continue 9, for+continue 9, for+break 406 and prints
+// FLOW PASS (Tension `tension-framework/tests/guest-flow.ts:100-107`).
+{
+  const accepting = [
+    [ "break in a while", `async function f(a: i32): i32 { while (a > 0) { break; } return a; }` ],
+    [ "continue in a while", `async function f(a: i32): i32 { while (a > 0) { continue; } return a; }` ],
+    [ "break in a for", `async function f(a: i32): i32 { for (let i: i32 = 0; i < a; i++) { break; } return a; }` ],
+    [ "continue in a for", `async function f(a: i32): i32 { for (let i: i32 = 0; i < a; i++) { continue; } return a; }` ]
+  ];
+  for (const [ label, source ] of accepting) {
+    const r = run(source);
+    check(`${label} lowers with no refusal`, refusals(r), []);
+    check(`  ...and emits its artifacts`, r.names()[0], "f$State");
+  }
 }
 
 // 10. A `this` body is refused by name.
