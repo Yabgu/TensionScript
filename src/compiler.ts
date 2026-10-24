@@ -6760,19 +6760,28 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
-    // Otherwise compile to just a call
-    let numArgumentsInclThis = thisArg ? numArguments + 1 : numArguments;
+    // Otherwise compile to just a call.
+    //
+    // The operand array is the **WASM** arity, not the source arity: an
+    // `@inline struct` argument expands to one operand per field. The count is
+    // summed over the arguments actually passed, so an omitted optional
+    // parameter contributes nothing.
+    let parameterTypes = signature.parameterTypes;
+    let wasmOperands = 0;
+    for (let i = 0; i < numArguments; ++i) {
+      wasmOperands += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
+    }
+    let numArgumentsInclThis = thisArg ? wasmOperands + 1 : wasmOperands;
     let operands = new Array<ExpressionRef>(numArgumentsInclThis);
     let index = 0;
     if (thisArg) {
       operands[0] = thisArg;
       index = 1;
     }
-    let parameterTypes = signature.parameterTypes;
-    for (let i = 0; i < numArguments; ++i, ++index) {
-      let paramType = parameterTypes[i];
-      let paramExpr = this.compileExpression(argumentExpressions[i], paramType, Constraints.ConvImplicit);
-      operands[index] = paramExpr;
+    for (let i = 0; i < numArguments; ++i) {
+      index += this.expandSroaArgument(
+        unchecked(argumentExpressions[i]), unchecked(parameterTypes[i]), operands, index
+      );
     }
     assert(index == numArgumentsInclThis);
     return this.makeCallDirect(instance, operands, reportNode, (constraints & Constraints.WillDrop) != 0);
@@ -7217,11 +7226,16 @@ export class Compiler extends DiagnosticEmitter {
       }
       ++operandIndex;
     }
-    let parameterIndex = 0;
+    // Walk WASM operands and map each to the **source** parameter that owns it:
+    // an `@inline struct` parameter occupies one operand per field, so the
+    // operand index is no longer the parameter index. `sourceIndexOf` is the
+    // inverse the mapping helper provides.
     let parameterTypes = signature.parameterTypes;
-    assert(parameterTypes.length >= operands.length - operandIndex);
+    let wasmIndex = 0;
     while (operandIndex < operands.length) {
-      let paramType = parameterTypes[parameterIndex];
+      let sourceIndex = signature.sourceIndexOf(wasmIndex);
+      if (sourceIndex < 0) break;
+      let paramType = unchecked(parameterTypes[sourceIndex]);
       if (paramType.isManaged) {
         let operand = operands[operandIndex];
         if (this.needToStack(operand)) {
@@ -7229,7 +7243,7 @@ export class Compiler extends DiagnosticEmitter {
         }
       }
       ++operandIndex;
-      ++parameterIndex;
+      ++wasmIndex;
     }
   }
 
@@ -10835,9 +10849,6 @@ export class Compiler extends DiagnosticEmitter {
       let parameterReportNode: Node;
       if (parameterNodes.length > i) parameterReportNode = parameterNodes[i];
       else parameterReportNode = reportNode;
-      if (!this.program.checkInlineStructValue(parameterTypes[i], parameterReportNode, "a parameter")) {
-        return false;
-      }
       if (!this.program.checkTypeSupported(parameterTypes[i], parameterReportNode)) {
         supported = false;
       }
@@ -10871,6 +10882,61 @@ export class Compiler extends DiagnosticEmitter {
   // === Specialized code generation ==============================================================
 
   /** Makes a constant zero of the specified type. */
+  /**
+   * Compiles one **source** argument into the WASM operands it occupies, writing
+   * them into `operands` starting at `at`. Returns how many were written
+   * (`Signature.wasmParamCountOf(paramType)`).
+   *
+   * For every type but an `@inline struct` this is one expression, exactly as
+   * before. For an `@inline struct` it is **one operand per field, in
+   * declaration order** — the same order `paramRefs` emits the parameter types
+   * in and `program.ts` lays the callee's field locals out in, which is what
+   * makes caller argument `i+k` land in callee field local `i+k`.
+   *
+   * The argument must be an SROA local: a value has no other representation, and
+   * there is no address to pass. Anything else refuses by name rather than
+   * compiling a pointer.
+   */
+  private expandSroaArgument(
+    argumentExpression: Expression,
+    paramType: Type,
+    operands: ExpressionRef[],
+    at: i32
+  ): i32 {
+    let count = Signature.wasmParamCountOf(paramType);
+    if (count == 1) {
+      unchecked(operands[at] = this.compileExpression(argumentExpression, paramType, Constraints.ConvImplicit));
+      return 1;
+    }
+    let local = argumentExpression.kind == NodeKind.Identifier
+      ? this.currentFlow.lookupLocal((<IdentifierExpression>argumentExpression).text)
+      : null;
+    if (local == null || local.fieldLocals == null) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        argumentExpression.range,
+        "passing this expression as an @inline struct argument (only a local value can be passed: a value has no address, so there is nothing to hand over)"
+      );
+      for (let k = 0; k < count; ++k) unchecked(operands[at + k] = this.module.unreachable());
+      return count;
+    }
+    let fieldLocals = local.fieldLocals;
+    let classReference = assert(paramType.classReference);
+    let members = assert(classReference.members);
+    let pushed = 0;
+    for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
+      let member = unchecked(_values[j]);
+      if (member.kind != ElementKind.PropertyPrototype) continue;
+      let property = (<PropertyPrototype>member).instance;
+      if (property == null || !property.isField) continue;
+      let fieldLocal = fieldLocals.get(property.name);
+      if (fieldLocal == null) continue;
+      unchecked(operands[at + pushed] = this.module.local_get(fieldLocal.index, fieldLocal.type.toRef()));
+      ++pushed;
+    }
+    return pushed;
+  }
+
   /**
    * The SROA local an expression names, or `null`.
    *

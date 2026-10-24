@@ -4082,6 +4082,39 @@ export class Function extends TypedElement {
       for (let i = 0, k = parameterTypes.length; i < k; ++i) {
         let parameterType = parameterTypes[i];
         let parameterName = this.getParameterName(i);
+        // An `@inline struct` parameter occupies **one WASM local per field**, the
+        // same SROA shape `compileSroaLocal` gives a local: `localIndex` advances
+        // by N, and the parent binding is a fieldLocals map with no index of its
+        // own (`-1`, which is also what makes a bare read of it refuse).
+        let fieldCount = Signature.wasmParamCountOf(parameterType);
+        if (fieldCount > 1) {
+          let scopedLocals = this.flow.scopedLocals;
+          if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
+          let fieldLocals = new Map<string, Local>();
+          let classReference = assert(parameterType.classReference);
+          let members = assert(classReference.members);
+          for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
+            let member = unchecked(_values[j]);
+            if (member.kind != ElementKind.PropertyPrototype) continue;
+            let property = (<PropertyPrototype>member).instance;
+            if (property == null || !property.isField) continue;
+            // Name the field locals after the parameter and field, matching
+            // `compileSroaLocal`, so a debug read of the WAT says which is which.
+            let fieldLocal = new Local(
+              parameterName + "$" + property.name,
+              localIndex++,
+              property.type,
+              this
+            );
+            fieldLocals.set(property.name, fieldLocal);
+            this.localsByIndex[fieldLocal.index] = fieldLocal;
+            flow.setLocalFlag(fieldLocal.index, LocalFlags.Initialized);
+          }
+          let parent = new Local(parameterName, -1, parameterType, this);
+          parent.fieldLocals = fieldLocals;
+          scopedLocals.set(parameterName, parent);
+          continue;
+        }
         let local = new Local(
           parameterName,
           localIndex++,
@@ -4111,7 +4144,14 @@ export class Function extends TypedElement {
     let localsByIndex = this.localsByIndex;
     let signature = this.signature;
     let numTotal = localsByIndex.length;
-    let numFixed = signature.parameterTypes.length;
+    // **WASM** parameter count, not the source count. An `@inline struct`
+    // parameter occupies one local per field, so the body-local boundary sits
+    // after `wasmParamCount()` slots. Using `parameterTypes.length` here would
+    // leave the parameter's trailing field locals in the "additional locals"
+    // list — one extra WASM local declared, and every body local after it (the
+    // closure environment included, `CLOSURE_ENV_IN_LOCAL` in `compiler.ts`)
+    // shifted by one slot, silently.
+    let numFixed = signature.wasmParamCount();
     if (signature.thisType) ++numFixed;
     let numAdditional = numTotal - numFixed;
     let types = new Array<Type>(numAdditional);

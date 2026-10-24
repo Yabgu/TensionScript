@@ -215,7 +215,9 @@ so a temp must be built — the mechanism is §8.
 
 In: `@inline struct` declarations with scalar fields; locals; field read/write;
 assignment; passing to guest functions; passing to `@external` calls via a temp;
-capture by value; internal return values.
+capture by value; internal return values. **Implemented so far:** the type
+kind and layout, SROA locals and copy-on-assignment, and pass-by-value (field-list
+signatures with the source-to-WASM parameter mapping).
 
 Out, with the reason:
 
@@ -589,7 +591,7 @@ out is what keeps this a 1.0 feature.
 | Guest-internal parameter | **in** | Per-field operands (§5.2). |
 | `@external` parameter | **in** | Temp pointer; import stays `(param i32)` (§8). |
 | Capture in a closure | **in** | Field-wise capture into the env class (§5.3) — with the capture-by-value rule ratified. |
-| Internal return | **in** | sret (§9). |
+| Internal return | **in** — sret; not yet implemented (its own phase: the hidden destination parameter changes call arity and has no precedent here) | sret (§9). |
 | `@external` return | **out** | Needs an ABI change (§9). |
 | Nested `@inline struct` field | **out** | Needs inline-in-record layout, and inherits the §7 defect. Rule in §10.1. |
 | `@inline struct` field inside `@unmanaged struct` | **out** | C inline nesting; same layout dependency, plus a C-layout record whose field is a value — the `offsetof`/`sizeof` loop would have to place an extent, not a pointer. |

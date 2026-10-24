@@ -4,7 +4,6 @@
     "AS100: Not implemented: inheritance on an @inline struct (a value type is final: no base class, no virtual methods)",
     "AS100: Not implemented: inheritance on an @inline struct (a value type is final: no base class, no virtual methods)",
     "AS100: Not implemented: an @inline struct at top level (a global is a pointer slot, so two values would alias; declare it inside a function)",
-    "AS100: Not implemented: an @inline struct value in a parameter (value types are not implemented here yet; a pointer would alias)",
     "AS100: Not implemented: an @inline struct value in a return type (value types are not implemented here yet; a pointer would alias)",
     "AS100: Not implemented: an @inline struct value in a type argument (Array<T>) (value types are not implemented here yet; a pointer would alias)",
     "AS100: Not implemented: changetype to an @inline struct (a value has no pointer representation; use @unmanaged struct for a view over bytes)",
