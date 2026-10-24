@@ -16,7 +16,7 @@
 //
 // Refused here, each with its own diagnostic:
 //   - a global (locals are implemented — see `inline-struct-sroa.ts`)
-//   - a parameter, a return type
+//   - a return type (parameters are implemented — see `inline-struct-params.ts`)
 //   - a field of another record (inline nesting)
 //   - `T[N]` of an `@inline struct`
 //   - `Array<T>` (a type argument is a pointer slot)
@@ -39,8 +39,8 @@ class Base { b: u32 = 0; }
 // a global
 let globalValue: P = new P();
 
-// a parameter, and a return type
-function takes(p: P): void {}
+// a return type (`@inline struct` **parameters** are implemented — see
+// `inline-struct-params.ts`; the return is sret's phase)
 function makes(): P { return new P(); }
 
 // a field of another record: inline nesting
@@ -71,7 +71,6 @@ function view(p: usize): void {
 @inline struct Sub extends Base { w: u32 = 0; }
 
 export function run(): void {
-  takes(new P());
   makes();
   arrayOf();
   view(0);

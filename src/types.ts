@@ -9,8 +9,10 @@ import {
 
 import {
   Class,
+  PropertyPrototype,
   Program,
   DecoratorFlags,
+  ElementKind,
   OperatorKind,
   Function
 } from "./program";
@@ -1073,6 +1075,73 @@ export class Signature {
     public readonly type: Type,
   ) {}
 
+  /**
+   * How many WASM parameters one source parameter occupies.
+   *
+   * One for every type except an `@inline struct`, which occupies **one per
+   * field**: a value has no representation the WASM value stack can carry, so it
+   * crosses a call as its fields.
+   *
+   * This and its siblings below are the **only** place a source parameter index
+   * is translated into WASM parameter indices. A site that computes the range
+   * itself is a bug waiting for the next contributor, who will not know the
+   * identity broke — so every emitter calls these, and `grep wasmParam` finds
+   * all of them.
+   */
+  static wasmParamCountOf(type: Type): i32 {
+    let classReference = type.classReference;
+    if (
+      classReference == null ||
+      !classReference.hasDecorator(DecoratorFlags.InlineStruct)
+    ) return 1;
+    let members = classReference.members;
+    if (!members) return 1;
+    let count = 0;
+    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+      let member = unchecked(_values[i]);
+      // A resolved `Class`'s members are prototypes; the bound `Property` that
+      // carries `isField` hangs off `prototype.instance`.
+      if (member.kind != ElementKind.PropertyPrototype) continue;
+      let property = (<PropertyPrototype>member).instance;
+      if (property != null && property.isField) ++count;
+    }
+    return count > 0 ? count : 1;
+  }
+
+  /** The WASM parameter index where source parameter `sourceIndex` starts,
+   *  counting from 0 and **excluding** `this`. */
+  wasmParamStartOf(sourceIndex: i32): i32 {
+    let parameterTypes = this.parameterTypes;
+    let start = 0;
+    for (let i = 0; i < sourceIndex && i < parameterTypes.length; ++i) {
+      start += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
+    }
+    return start;
+  }
+
+  /** The total number of WASM parameters, **excluding** `this`. */
+  wasmParamCount(): i32 {
+    let parameterTypes = this.parameterTypes;
+    let count = 0;
+    for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+      count += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
+    }
+    return count;
+  }
+
+  /** The inverse: which source parameter owns WASM parameter `wasmIndex`
+   *  (excluding `this`). Answers -1 if the index is past the last parameter. */
+  sourceIndexOf(wasmIndex: i32): i32 {
+    let parameterTypes = this.parameterTypes;
+    let start = 0;
+    for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+      let count = Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
+      if (wasmIndex < start + count) return i;
+      start += count;
+    }
+    return -1;
+  }
+
   get paramRefs(): TypeRef {
     let thisType = this.thisType;
     let parameterTypes = this.parameterTypes;
@@ -1080,15 +1149,33 @@ export class Signature {
     if (!numParameterTypes) {
       return thisType ? thisType.toRef() : TypeRef.None;
     }
-    if (thisType) {
-      let typeRefs = new Array<TypeRef>(1 + numParameterTypes);
-      unchecked(typeRefs[0] = thisType.toRef());
-      for (let i = 0; i < numParameterTypes; ++i) {
-        unchecked(typeRefs[i + 1] = parameterTypes[i].toRef());
+    // The flattened WASM arity: `this` (if any) plus every parameter's fields.
+    let wasmCount = this.wasmParamCount();
+    let typeRefs = new Array<TypeRef>(thisType ? 1 + wasmCount : wasmCount);
+    let at = 0;
+    if (thisType) unchecked(typeRefs[at++] = thisType.toRef());
+    for (let i = 0; i < numParameterTypes; ++i) {
+      let parameterType = unchecked(parameterTypes[i]);
+      let count = Signature.wasmParamCountOf(parameterType);
+      if (count == 1) {
+        // Scalar or reference: one ref, exactly as before.
+        unchecked(typeRefs[at++] = parameterType.toRef());
+      } else {
+        // `@inline struct`: one ref per field, in declaration order — the same
+        // order `compileSroaLocal` lays the locals out in, so the callee's
+        // local index i+k matches the caller's argument i+k.
+        let classReference = assert(parameterType.classReference);
+        let members = assert(classReference.members);
+        for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
+          let member = unchecked(_values[j]);
+          if (member.kind != ElementKind.PropertyPrototype) continue;
+          let property = (<PropertyPrototype>member).instance;
+          if (property == null || !property.isField) continue;
+          unchecked(typeRefs[at++] = property.type.toRef());
+        }
       }
-      return createType(typeRefs);
     }
-    return createType(typesToRefs(parameterTypes));
+    return createType(typeRefs);
   }
 
   get resultRefs(): TypeRef {

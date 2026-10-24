@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### `@inline struct` pass-by-value (SROA parameters)
+
+A function parameter of `@inline struct` type now passes by value. The source
+parameter becomes one WASM local per field in the callee; the call site expands
+the argument into one operand per field, in declaration order.
+
+Source parameter `i` is no longer WASM parameter `i`: for
+`(p: P{2}, q: i32, r: P{2})` the WASM operands are `(p.x, p.y, q, r.x, r.y)`.
+`Signature` gains `wasmParamCountOf` / `wasmParamStartOf` / `wasmParamCount` /
+`sourceIndexOf`, and they are the only place that translation happens.
+
+Two sites that are easy to get wrong, both now covered by fixtures:
+
+- **`getNonParameterLocalTypes`** must use the *WASM* parameter count for
+  `numFixed`. With the source count, a parameter's trailing field locals land in
+  the "additional locals" list, one extra local is declared, and every body local
+  after it — the closure environment included — shifts one slot, silently.
+- **`operandsTostack`** asserted the source-arity relationship that flattening
+  breaks, and walked parameter types by operand index. It now maps through
+  `sourceIndexOf`.
+
+Arity *checks* stay source-arity (`maximum` is how many arguments the user
+wrote); only operand emission is flattened.
+
+Refused, unchanged: `@inline struct` as a return (sret — its own phase, since the
+hidden destination parameter changes call arity and has no precedent in the
+compiler), as a top-level value, and as a field.
+
+
 Developer-facing: `npm test` now runs the lint step via `pretest`; a fresh
 clone without a build fails at `pretest` naming the generated file. Build
 first (`npm run build`) as before — the requirement is unchanged, the error
