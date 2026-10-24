@@ -9,7 +9,8 @@ pretends otherwise is worse than no table. Each row below names the test that
 would fail on re-introduction, or says why no such test should exist. A future
 reader can check coverage without re-deriving it.
 
-**Citations are current as of `main@f4c01b41`.** PR #9 (`04986ac4`) and PR #10
+**Citations are current as of `main@e2656f4a`** (PRs #9, #10, #11 and #12
+merged; PR #13 — SROA — is this branch). PR #9 (`04986ac4`) and PR #10
 (`f4c01b41`, squash-merged from head `49952a56`) are both on main, so every
 test cited below exists in this branch's tree and runs in `npm test`. The
 "Lands on" column records which PR introduced each one; it is history, not a
@@ -43,6 +44,12 @@ dependency.
 | i | Two unused symbols removed; lint is clean | **the lint gate** — `npm run check`, now in `npm test` via `pretest` (this PR) | this PR | dead-code |
 | j | The test-guest re-export is the entry point the harness needs | **nothing** — measured redundant, see *Correction 1* | — | claim measured false |
 | k | §16 item 4 in the scoping doc is Tension-side, not TensionScript | none — one-time prose correction | PR #9 | prose |
+| l | `@inline struct` locals are copied, not aliased (SROA) | `tests/compiler/interop/inline-struct-sroa.ts` — `assert(copyOnDeclaration() == 599)` (aliased gives 9999, unset 99), `copyOnAssignment() == 642`, `lopsided` `u8`+`u64` field widths, `pointerFieldCopy() == 72` | PR #13 | behavioural, three-way |
+| m | A `T[N]` field and a GC-reference field in an `@inline struct` are refused, not emitted wrongly | `tests/compiler/interop/inline-struct-sroa-refusals.ts` (+ `.json`, 3 pinned diagnostics) | PR #13 | behavioural |
+| n | A whole `@inline struct` value cannot be read or assigned as a whole (no address) | same fixture, third pinned diagnostic (`reading an @inline struct value as a whole`) | PR #13 | behavioural |
+| o | `@inline struct` at top level is refused (a global is a pointer slot and aliases) | `tests/compiler/interop/inline-struct-top-level.ts` (+ `.json`, 5 pinned diagnostics for annotated const, inferred const, a second value, inferred `let`, annotated static) | PR #13 | behavioural, three-way — refuse cell measured |
+| p | `Class.members` holds `PropertyPrototype`, not `Property`; the bound `Property` is at `prototype.instance` | `inline-struct-sroa.ts` — nothing is emitted without it (SROA's field list came back empty, so field access refused); the fixture fails outright | PR #13 | structural |
+| q | SROA must intercept **before** the initializer is compiled | `inline-struct-sroa.ts` — `copyOnDeclaration()` needs the initializer's *shape*; compiling it first asserts on the bare value | PR #13 | structural |
 
 ### (h) The chain, measured
 
@@ -119,6 +126,80 @@ ESLint found too many warnings (maximum: 0).
 ```
 
 exit 1, before any suite runs.
+
+---
+
+## Ratified decisions (not follow-ups)
+
+### The GC-reference field refusal is the phase's final state, not a deferred commit
+
+An `@inline struct` field that holds a **GC reference** (`@managed struct`, or a
+class reference) is **refused**, and that is a decision rather than a staging
+step. The reason is structural, not budgetary:
+
+> An SROA'd field lives in a **WASM local**, not in memory. The write barrier's
+> `__link` takes an **address** — the address of the slot the reference was
+> stored into — and an SROA'd field has none. So "add the barrier" is not
+> available: the implementable options are (a) a mixed representation, scalar
+> fields in locals and GC fields in a shadow slot, or (b) refuse.
+
+(b) is this phase. (a) is a **design phase** — it changes what a value *is*
+(part-local, part-memory), and every downstream consumer of SROA inherits that
+split: parameters, returns, captures, and the `@external` temp. Filed as its own
+phase, not as a follow-up commit here.
+
+Fixture: `tests/compiler/interop/inline-struct-sroa-refusals.ts`, the second
+pinned diagnostic.
+
+### `@inline struct` at top level: refused, with the alternative named
+
+A global is one `i32` slot; a value needs one per field. The refusal says so and
+names the fix — declare it inside a function, where SROA applies. The refuse cell
+is measured in the fixture's header: `const H = G` then `H.x = 99` returned
+`G.x == 99` before the fix.
+
+---
+
+## Count reconciliation (why the declaration numbers disagreed)
+
+Three different numbers appeared across this session's reports, and all three
+were "right" under a different rule. The canonical figure, and the rule:
+
+| Rule | TensionScript `tests/` | Tension (engine) |
+|---|---|---|
+| `grep -o '@unmanaged[[:space:]]+(struct\|class)'` — **counts comment mentions** | 58 | 46 |
+| Declarations at line start, decorator inline or on its own line, comments excluded | **46** | 46 |
+| …plus plain `struct X {` (the parser injects `@unmanaged`) | **52** | 46 |
+| `@managed struct` declarations, same rule | **14** | 0 |
+| `@inline struct` declarations, same rule | **16** | 0 |
+
+So:
+
+- The **35** quoted in earlier phases counted `@unmanaged struct` *declarations*
+  in the engine's framework at that time; the engine has since grown, and the
+  count is repo- and scope-dependent. It was never a TensionScript number.
+- The **55 / 27** in PR #13's report came from the `grep -o` rule while four new
+  `@inline struct` fixtures were excluded — i.e. it counted comment mentions
+  (`@inline struct` is an `@unmanaged class`…") and inflated each side by about six.
+- **Canonical for this audit: 46 `@unmanaged` + 6 plain `struct` = 52 unmanaged
+  records, 14 `@managed struct`, 16 `@inline struct` in TensionScript `tests/`**,
+  counted as declarations with comments excluded, at PR #13's head.
+
+A future reader reconciling a number should ask two questions first: *which
+repo*, and *does the rule count comment mentions*.
+
+---
+
+## Follow-ups filed this phase
+
+| Follow-up | Why it is not in scope |
+|---|---|
+| **SROA parameters** (field-list signatures) | Fits `Signature#paramRefs` — it is already a tuple (`createType(typesToRefs(parameterTypes))`), so N refs are expressible — but it introduces a source-parameter-index vs WASM-parameter-index mapping that many sites assume is the identity (`module.local_get(0)`, `getNonParameterLocalTypes`, the callee's body-local start index). Its own turn. |
+| **SROA return (sret)** | `Signature#resultRefs` is a single `toRef()`, so a struct return needs either a hidden destination parameter (changing the WASM arity, which inherits the parameter work above) or a multi-value result shape `module.ts` does not currently build. |
+| **SROA for top-level statics** | Per-field WASM *globals*, or a shadow slot. Refused until then, with the alternative named. |
+| **SROA for GC-reference fields** | The mixed representation above — a design phase. |
+| **`T[N]` fields in `@inline struct`** | Deep SROA: N locals per array field, plus a `makeZero` arm for `FixedArray` (it asserts today, `compiler.ts` `makeZero`). |
+| **Closure capture, `@external` temp, inline nesting** | Later commits of the 1.0 phase (scoping §9, §10). |
 
 ---
 

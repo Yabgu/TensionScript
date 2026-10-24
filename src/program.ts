@@ -2103,11 +2103,17 @@ export class Program extends DiagnosticEmitter {
       classReference != null &&
       classReference.hasDecorator(DecoratorFlags.InlineStruct)
     ) {
+      // `a global` is the one position with a *better* alternative, now that
+      // SROA implements locals: declare it inside a function. A global is an
+      // `i32` slot, i.e. a pointer, so two globals holding the "same" value
+      // alias — measured: `const H = G` then `H.x = 99` changes `G.x`.
       this.error(
         DiagnosticCode.Not_implemented_0,
         reportNode.range,
-        "an @inline struct value in " + position +
-        " (value types are not implemented here yet; a pointer would alias)"
+        position == "a global"
+          ? "an @inline struct at top level (a global is a pointer slot, so two values would alias; declare it inside a function)"
+          : "an @inline struct value in " + position +
+            " (value types are not implemented here yet; a pointer would alias)"
       );
       return false;
     }
@@ -3815,6 +3821,21 @@ export class Local extends VariableLikeElement {
 
   /** Original name of the (temporary) local. */
   private originalName: string;
+
+  /**
+   * Per-field WASM locals for an `@inline struct` value (SROA).
+   *
+   * An `@inline struct` local has **no** WASM local of its own: its value lives
+   * in one local per field, and this map is the only handle on them. `null` for
+   * every other local, so the ordinary case allocates nothing — 271 fixtures
+   * compile through `compileLocal` and pay no cost for the feature they do not
+   * use.
+   *
+   * This is what makes "no address" true rather than aspirational: there is no
+   * `index` for the value as a whole, so a bare `p` cannot be compiled, and
+   * therefore cannot alias.
+   */
+  fieldLocals: Map<string, Local> | null = null;
 
   /** Constructs a new local variable. */
   constructor(

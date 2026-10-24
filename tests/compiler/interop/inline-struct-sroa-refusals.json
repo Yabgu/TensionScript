@@ -1,0 +1,8 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: a T[N] field in an @inline struct (SROA keeps one WASM local per field; array fields are the deep-SROA phase)",
+    "AS100: Not implemented: a GC-reference field in an @inline struct (a bare local.set skips the write barrier; deferred)",
+    "AS100: Not implemented: reading an @inline struct value as a whole (a value has no address; read a field, or copy it with `let q: P = p`)"
+  ]
+}
