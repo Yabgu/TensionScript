@@ -45,6 +45,15 @@ Two sites the shape needs:
 - **The override stub's temp local** is `1 + wasmParamCount()`. Defensive: a
   virtual method returning an `@inline struct` is refused before the stub runs.
 
+**Instance methods.** `$sretDest` sits at WASM local **1** for an instance
+method (`this` is local 0), and the return path selects it from
+`signature.thisType`. Covered by `inline-struct-sret-instance.ts`: a method
+returning the two-field value, and a method that takes an `@inline struct` **and**
+returns one — WASM `(this, dest, p.a, p.b, k)` — so the shift and the parameter
+flattening are exercised together. Measured load-bearing: with the instance
+destination read from local 0, the stores land on `this`, the WAT comparison
+fails, and the fixture's runtime assert traps at instantiation.
+
 **The refusal's reach, measured.** Every non-consumer use was compiled as a
 probe before the read path was written: `g(f())` (AS100, passing an expression
 as a value argument), `f() + 1` (TS2365), `return f()` in an `i32` function
@@ -52,8 +61,9 @@ as a value argument), `f() + 1` (TS2365), `return f()` in an `i32` function
 store reads the value as a whole), and `obj.field = f()` (AS100: inline nesting
 at the field declaration). A bare `f()` is the one use that compiles, and it is
 safe: it allocates the slot, passes its address as the hidden destination,
-calls, and unwinds — it never reads the slot as a value. Pinned in
-`inline-struct-sret-refusal-reach.ts`.
+calls, and unwinds — it never reads the slot as a value. It is therefore the
+**third consumer** of the memory-only model, alongside `f().x` and
+`let q: P = f()`. Pinned in `inline-struct-sret-refusal-reach.ts`.
 
 **Constructors are not sret.** A constructor returns `this`, not a value, so it
 must not acquire the hidden destination parameter even when its class is an
