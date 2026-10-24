@@ -484,6 +484,19 @@ export class Resolver extends DiagnosticEmitter {
       node.elementType, flow, ctxElement, ctxTypes, reportMode
     );
     if (!elementType) return null;
+    if (
+      elementType.classReference != null &&
+      elementType.classReference.hasDecorator(DecoratorFlags.InlineStruct)
+    ) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          node.elementType.range,
+          "an inline array (T[N]) of an @inline struct (elements by value are a later phase)"
+        );
+      }
+      return null;
+    }
     if (!elementType.isMemory) {
       if (reportMode == ReportMode.Report) {
         this.error(
@@ -3770,7 +3783,17 @@ export class Resolver extends DiagnosticEmitter {
                 // field materializes here, so check for supported type early
                 // (other checks are performed once an element is compiled)
                 let typeNode = assert(boundPrototype.fieldDeclaration).type;
-                if (typeNode) this.program.checkTypeSupported(fieldType, typeNode);
+                if (typeNode) {
+                  // An `@inline struct` field is inline *nesting*: the outer
+                  // record would need the inner value's bytes inline, which is
+                  // the layout-loop branch this phase does not add (§7.2 of the
+                  // scoping). Also covers a `@managed`/`@unmanaged` struct field
+                  // of an `@inline struct` type, and `T[N]` handled below.
+                  this.program.checkInlineStructValue(
+                    fieldType, typeNode, "a field (inline nesting is a later phase)"
+                  );
+                  this.program.checkTypeSupported(fieldType, typeNode);
+                }
               }
             } else {
               instance.add(boundPrototype.name, boundPrototype); // reports

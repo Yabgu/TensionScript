@@ -1239,6 +1239,7 @@ export class Compiler extends DiagnosticEmitter {
         }
         global.setType(resolvedType);
         this.program.checkTypeSupported(resolvedType, typeNode);
+        this.program.checkInlineStructValue(resolvedType, typeNode, "a global");
 
       // Otherwise infer type from initializer
       } else if (initializerNode) {
@@ -3333,6 +3334,13 @@ export class Compiler extends DiagnosticEmitter {
 
       // Otherwise compile as mutable
       if (!isStatic) {
+        // An `@inline struct` local is refused by name: compiled as a local it
+        // would be a 4-byte *pointer* (`@unmanaged struct`'s representation),
+        // so `let q = p` would alias. Checked here rather than at the type
+        // annotation so the inferred form (`let p = new P()`) is covered too.
+        if (!this.program.checkInlineStructValue(type, declaration.name, "a local")) {
+          continue;
+        }
         let local: Local;
         if (
           declaration.isAny(CommonFlags.Let | CommonFlags.Const) ||
@@ -10707,9 +10715,15 @@ export class Compiler extends DiagnosticEmitter {
       let parameterReportNode: Node;
       if (parameterNodes.length > i) parameterReportNode = parameterNodes[i];
       else parameterReportNode = reportNode;
+      if (!this.program.checkInlineStructValue(parameterTypes[i], parameterReportNode, "a parameter")) {
+        return false;
+      }
       if (!this.program.checkTypeSupported(parameterTypes[i], parameterReportNode)) {
         supported = false;
       }
+    }
+    if (!this.program.checkInlineStructValue(signature.returnType, reportNode.returnType, "a return type")) {
+      return false;
     }
     if (!this.program.checkTypeSupported(signature.returnType, reportNode.returnType)) {
       supported = false;
