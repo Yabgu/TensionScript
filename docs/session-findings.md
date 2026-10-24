@@ -9,11 +9,11 @@ pretends otherwise is worse than no table. Each row below names the test that
 would fail on re-introduction, or says why no such test should exist. A future
 reader can check coverage without re-deriving it.
 
-**A caveat that matters for reading the citations.** Most of the tests cited
-here are **not in this branch's tree**. They land with PR #9 (`alignof`,
-`DecoratorFlags`) and PR #10 (the async suite). The "Lands on" column says
-which; a reader checking `chore/dead-code-lint` alone will find those files
-absent. The citations become true in the order the PRs merge.
+**Citations are current as of `main@f4c01b41`.** PR #9 (`04986ac4`) and PR #10
+(`f4c01b41`, squash-merged from head `49952a56`) are both on main, so every
+test cited below exists in this branch's tree and runs in `npm test`. The
+"Lands on" column records which PR introduced each one; it is history, not a
+dependency.
 
 ---
 
@@ -34,7 +34,7 @@ absent. The citations become true in the order the PRs merge.
 |---|---|---|---|---|
 | a | `sizeof` returns the C size, trailing padding included (variant B, 0.8.0) | `tests/compiler/interop/sizeof-trailing-padding.ts:44` (`assert(sizeof<Tail>() == 40)`), `:51` (`!= 37`) | main | behavioural |
 | b | `alignof` for records returns the record's own alignment, both `@unmanaged` and `@managed` | `tests/compiler/interop/alignof-records.ts:50-51` (`alignof<OneU16>() == 1`, `alignof<U32ThenU64>() == 3`), plus the base-alignment and class cases in the same file | PR #9 | behavioural, three-way |
-| c | `DecoratorFlags` has no two names on one bit (`ManagedStruct` 1<<11, `Unsafe` 1<<13, `InlineStruct` 1<<12) | **none anywhere** — see *Gap 1* | — | **gap** |
+| c | `DecoratorFlags` has no two names on one bit (`ManagedStruct` 1<<11, `Unsafe` 1<<13, `InlineStruct` 1<<12) | `tests/flags.js:84` (`no two entries share a value`), `:94` (`every non-zero entry is a single bit`), `:102` (`ManagedStruct and Unsafe are distinct`), the pinned values at `:99-101`, and the gate pair at `:151` / `:161` | this PR | behavioural |
 | d | The two async `.wat` fixtures match the emitter | the `compare fixture` step against `tests/compiler/async-closure-value.{debug,release}.wat` and `…-closures-case6.{debug,release}.wat` | PR #10 | structural (the fixture *is* the test) |
 | e | The lowered entry carries the buffered-completion `If` guard at index 3 | `tests/async/lower.js:230` (the kind array) and `:254` (`check("the guard is an if", guard.kind, NodeKind.If)`) | PR #10 | behavioural |
 | f | `break`/`continue` are accepted by the async planner, not refused | `tests/async/lower.js:1013` (the `9a.` block) → `:1028-1035`: four shapes, `check(… lowers with no refusal, refusals(r), [])` | PR #10 | behavioural |
@@ -85,9 +85,26 @@ src/program.ts:3054  ManagedStruct = 1 << 11
 src/program.ts:3064  Unsafe = 1 << 11
 ```
 
-An assertion of distinctness — or of any exact value — fails here and passes
-only once PR #9 merges. So it belongs on PR #9, with the fix that makes it true.
-Filed there rather than written here as a test that is known to fail.
+An assertion of distinctness — or of any exact value — fails while the
+collision is present, so it could not be written before #9 merged.
+
+**Closed by this PR.** `tests/flags.js`, wired into `npm test` as `test:flags`,
+asserts distinctness, single-bit-ness, the three pinned values, that a
+`@managed struct` reports no unsafe operation under `--noUnsafe`, and — as the
+control — that a bare `load<u8>(p)` still is refused. Shape is a standalone node
+script, not a guest fixture and not a `build.sh` grep: `DecoratorFlags` is
+reachable from `dist/assemblyscript.js`, so the enum is enumerated directly
+rather than re-parsed.
+
+Verified it catches the bug rather than merely passing: reintroducing
+`Unsafe = 1 << 11` in a scratch build fails three checks —
+
+```
+  FAIL no two entries share a value
+  FAIL Unsafe is 1 << 13
+  FAIL ManagedStruct and Unsafe are distinct
+ERROR: 3 of 10 flag checks failed
+```
 
 ### Gap 2 — the lint gate was outside the local loop
 
@@ -150,8 +167,9 @@ each can drift silently. Listed so the gap is visible rather than assumed away.
 ## What this PR adds and does not add
 
 - **Adds:** `pretest` (Gap 2), and this record.
-- **Does not add:** a `DecoratorFlags` test (Gap 1 — belongs on PR #9, and would
-  fail here), a test for the dead-code removal beyond the lint gate (circular),
-  a test for the prose correction (one-time event).
+- **Adds (later commit):** `tests/flags.js` — Gap 1 closed once #9's fix reached
+  main.
+- **Does not add:** a test for the dead-code removal beyond the lint gate
+  (circular), a test for the prose correction (one-time event).
 - **Does not fix:** Correction 1 (PR #10's branch), the `dist/` local gap (a CI
   concern, unchanged), the bootstrap failures (the Bootstrap-ordering phase).
