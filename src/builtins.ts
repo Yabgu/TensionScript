@@ -3734,6 +3734,21 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   let operands = ctx.operands;
   let typeArguments = ctx.typeArguments!;
   let toType = typeArguments[0];
+  // `changetype` is a pointer reinterpretation. A value type has no pointer
+  // representation -- SROA keeps it in locals, so there is no address to
+  // reinterpret -- and treating one as "a view over these bytes" is exactly
+  // `@unmanaged struct`'s job.
+  if (
+    toType.classReference != null &&
+    toType.classReference.hasDecorator(DecoratorFlags.InlineStruct)
+  ) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.range,
+      "changetype to an @inline struct (a value has no pointer representation; use @unmanaged struct for a view over bytes)"
+    );
+    return module.unreachable();
+  }
   let arg0 = compiler.compileExpression(operands[0], Type.auto);
   let fromType = compiler.currentType;
   compiler.currentType = toType;
