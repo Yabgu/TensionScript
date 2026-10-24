@@ -1,0 +1,12 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: passing this expression as an @inline struct argument (only a local value can be passed: a value has no address, so there is nothing to hand over)",
+    "TS2365: Operator '+' cannot be applied to types",
+    "TS2322: Type",
+    "AS100: Not implemented: an @inline struct value in a type argument (Array<T>)",
+    "AS100: Not implemented: an @inline struct value in a type argument (Array<T>)",
+    "AS100: Not implemented: reading an @inline struct value as a whole",
+    "AS100: Not implemented: an @inline struct value in a field (inline nesting is a later phase)"
+  ]
+}

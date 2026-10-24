@@ -1024,6 +1024,12 @@ export class Signature {
     requiredParameters: i32 = parameterTypes ? parameterTypes.length : 0,
     /** Whether the last parameter is a rest parameter. */
     hasRest: bool = false,
+    /** Whether this signature must never use a hidden sret destination
+     *  parameter even if its return type is an `@inline struct`. Constructors
+     *  are the only such signature: they return the allocated `this` pointer,
+     *  not a value. Part of the memoization key, because a method with the same
+     *  parameter and return types must still get the hidden parameter. */
+    sretDisabled: bool = false,
   ): Signature {
     // get the usize type, and the type of the signature
     let usizeType = program.options.usizeType;
@@ -1038,8 +1044,10 @@ export class Signature {
     let nextId = program.nextSignatureId;
     
     // construct the signature and calculate it's unique key
-    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, nextId, type);
-    let uniqueKey = signature.toString();
+    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, sretDisabled, nextId, type);
+    // Constructors and ordinary functions can share parameter and return types
+    // but not the hidden destination parameter, so the flag is part of the key.
+    let uniqueKey = (sretDisabled ? "!sret-disabled:" : "") + signature.toString();
 
     // check if it exists, and return it
     if (signatureTypes.has(uniqueKey)) {
@@ -1069,6 +1077,8 @@ export class Signature {
     public readonly requiredParameters: i32,
     /** Whether the last parameter is a rest parameter. */
     public readonly hasRest: bool,
+    /** Whether a hidden sret destination parameter is forbidden (constructors). */
+    public readonly sretDisabled: bool,
     /** Unique id representing this signature. */
     public readonly id: u32,
     /** Respective function type. */
@@ -1108,32 +1118,69 @@ export class Signature {
     return count > 0 ? count : 1;
   }
 
+  /**
+   * Whether a call to this signature passes a hidden destination pointer.
+   *
+   * An `@inline struct` return is **memory-only**: the value has no WASM
+   * representation, so the call has no result. The caller allocates a slot and
+   * passes its address as the first WASM parameter (after `this`, if any); the
+   * callee writes the value's fields there and returns nothing. Sret.
+   *
+   * Every emitter asks this method rather than inspecting `returnType` itself,
+   * so "is there a hidden slot" and "how many WASM parameters are there" can
+   * never disagree — the failure mode of that disagreement is a call whose
+   * operands are shifted by one, which typechecks as an ordinary arity error
+   * only when the shifted types happen to differ.
+   */
+  get hasHiddenDestParam(): bool {
+    if (this.sretDisabled) return false;
+    let classReference = this.returnType.classReference;
+    return classReference != null && classReference.hasDecorator(DecoratorFlags.InlineStruct);
+  }
+
   /** The WASM parameter index where source parameter `sourceIndex` starts,
-   *  counting from 0 and **excluding** `this`. */
+   *  counting from 0 and **excluding** `this`. The hidden destination pointer,
+   *  if any, occupies slot 0, so a source parameter's slot is its field sum
+   *  plus one. */
   wasmParamStartOf(sourceIndex: i32): i32 {
     let parameterTypes = this.parameterTypes;
-    let start = 0;
+    let start = this.hasHiddenDestParam ? 1 : 0;
     for (let i = 0; i < sourceIndex && i < parameterTypes.length; ++i) {
       start += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
     }
     return start;
   }
 
-  /** The total number of WASM parameters, **excluding** `this`. */
+  /** The total number of WASM parameters, **excluding** `this`, and
+   *  **including** the hidden destination pointer if there is one. */
   wasmParamCount(): i32 {
     let parameterTypes = this.parameterTypes;
-    let count = 0;
+    let count = this.hasHiddenDestParam ? 1 : 0;
     for (let i = 0, k = parameterTypes.length; i < k; ++i) {
       count += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
     }
     return count;
   }
 
-  /** The inverse: which source parameter owns WASM parameter `wasmIndex`
-   *  (excluding `this`). Answers -1 if the index is past the last parameter. */
+  /**
+   * The inverse: which source parameter owns WASM parameter `wasmIndex`
+   * (excluding `this`).
+   *
+   * **`-1` has two meanings**, and both are in use:
+   *
+   * - **The hidden destination slot.** Position 0 when `hasHiddenDestParam`:
+   *   there is no source parameter behind it, so there is no name to report.
+   * - **Past the end.** `wasmIndex >= wasmParamCount()`. A consumer that walks
+   *   a source parameter list should check `wasmParamCount()` *before* calling
+   *   this, which makes a `-1` unambiguous: only the hidden slot can produce
+   *   it. A consumer that does not check cannot tell the two apart, and the
+   *   difference matters — the hidden slot has an operand,
+   *   `operands[operandIndex]`, while a past-the-end index has none.
+   */
   sourceIndexOf(wasmIndex: i32): i32 {
     let parameterTypes = this.parameterTypes;
-    let start = 0;
+    let start = this.hasHiddenDestParam ? 1 : 0;
+    if (wasmIndex < start) return -1;
     for (let i = 0, k = parameterTypes.length; i < k; ++i) {
       let count = Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
       if (wasmIndex < start + count) return i;
@@ -1146,14 +1193,17 @@ export class Signature {
     let thisType = this.thisType;
     let parameterTypes = this.parameterTypes;
     let numParameterTypes = parameterTypes.length;
-    if (!numParameterTypes) {
+    let hasHiddenDest = this.hasHiddenDestParam;
+    if (!numParameterTypes && !hasHiddenDest) {
       return thisType ? thisType.toRef() : TypeRef.None;
     }
-    // The flattened WASM arity: `this` (if any) plus every parameter's fields.
+    // The flattened WASM arity: `this` (if any), the hidden destination
+    // pointer (if any), then every parameter's fields.
     let wasmCount = this.wasmParamCount();
     let typeRefs = new Array<TypeRef>(thisType ? 1 + wasmCount : wasmCount);
     let at = 0;
     if (thisType) unchecked(typeRefs[at++] = thisType.toRef());
+    if (hasHiddenDest) unchecked(typeRefs[at++] = TypeRef.I32);
     for (let i = 0; i < numParameterTypes; ++i) {
       let parameterType = unchecked(parameterTypes[i]);
       let count = Signature.wasmParamCountOf(parameterType);
@@ -1178,8 +1228,11 @@ export class Signature {
     return createType(typeRefs);
   }
 
+  /** The WASM result type. `None` for an `@inline struct` return: the value is
+   *  written to the caller's slot, so nothing flows back through the value
+   *  stack. */
   get resultRefs(): TypeRef {
-    return this.returnType.toRef();
+    return this.hasHiddenDestParam ? TypeRef.None : this.returnType.toRef();
   }
 
   /** Tests if this signature equals the specified. */
@@ -1196,6 +1249,9 @@ export class Signature {
 
     // check rest parameter
     if (this.hasRest != other.hasRest) return false;
+
+    // constructors and ordinary functions never share a hidden dest slot
+    if (this.sretDisabled != other.sretDisabled) return false;
 
     // check return type
     if (!this.returnType.equals(other.returnType)) return false;
@@ -1357,7 +1413,8 @@ export class Signature {
       this.returnType,
       this.thisType,
       requiredParameters,
-      hasRest
+      hasRest,
+      this.sretDisabled
     );
   }
 }

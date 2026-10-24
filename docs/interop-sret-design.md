@@ -349,6 +349,29 @@ sret keeps the result a single `void` and moves the multi-value problem into
 memory. That is why it is the smaller change **for this compiler's shape** — and
 why §7 keeps the multi-value option open rather than closed.
 
+**Correction, measured during implementation.** This section's framing —
+"multi-value results set aside" — mischaracterised the problem. Sret does not
+need multi-value results **because the model says there is no value**: the value
+is memory end-to-end, and the pipeline never carries it. So the change did not
+touch the expression pipeline at all — it relocated the problem from the call to
+the read path. Recorded in `session-findings.md` as the read-back finding.
+
+**The memory-only model has three legitimate consumers**, not two:
+
+| Consumer | Shape | Emitted |
+|---|---|---|
+| `f().x` | one field read | a load from `(base + mark + offsetof x)`, then restore |
+| `let q: P = f()` | per-field copy | one load and one `local.set` per field, then restore |
+| `f()` (bare statement) | **discard** | mark, bump, guard, call, restore — **no read** |
+
+The third was measured, not assumed: a bare `f()` compiles, and its WAT contains
+no `local.get` of the slot and no address used as a value. It is a *consumer*
+because it must still allocate a destination — the callee always writes one — and
+because its unwind is the behaviour a leaked bump pointer would break (the
+sret fixture asserts that a call after a discarded call starts at the same
+slot). Everything outside these three is refused by name; the measurement is
+pinned in `inline-struct-sret-refusal-reach.ts`.
+
 ---
 
 ## 9. Recommendation

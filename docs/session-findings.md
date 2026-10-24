@@ -330,3 +330,134 @@ each can drift silently. Listed so the gap is visible rather than assumed away.
   (circular), a test for the prose correction (one-time event).
 - **Does not fix:** Correction 1 (PR #10's branch), the `dist/` local gap (a CI
   concern, unchanged), the bootstrap failures (the Bootstrap-ordering phase).
+
+## PR #16: sret — the layout correction, the eighth site, and the read-back finding
+
+**The layout correction.** The design note said the call-temp stack lives
+"below `__data_end`", which reads like the shadow stack. Measured in an emitted
+module: `__data_end` 520, `__stack_pointer` = `__heap_base` 33288. The region
+`[16, __data_end)` is the **data segment**, and `visitStack` walks
+`[__stack_pointer, __heap_base)` — so a slot in the data region is never scanned
+as a GC root, which is exactly the property the mechanism needs. The base is a
+compile-time constant (the segment's `.offset`), so a call site emits
+`i32.const base + mark` and no address computation.
+
+**The bump pointer's safety.** `compileVisitGlobals` (`builtins.ts:11058-11062`)
+visits only class-typed globals. A plain `i32` global contributes no GC edge and
+no interrupt threshold, so the bump pointer cannot be mistaken for a root or trip
+a collection. Initial value = the segment offset; mutated only by alloc/restore.
+
+**The eighth site.** `operandsTostack` mapped WASM operands to source parameters
+through `sourceIndexOf` and treated `-1` as "past the end". With a hidden
+destination at operand 0, that `break` fired on the first operand and abandoned
+every managed operand after it — the managed argument reached the call as a bare
+`local.get`, unspilled. Fixed by checking `wasmParamCount()` first (which makes
+`-1` unambiguously the hidden slot) and advancing **both** indices past it.
+Measured load-bearing: reverting the loop makes `inline-struct-sret-eighth-site`
+fail on exactly the missing spill block.
+
+**The stub fix is defensive.** `finalizeOverrideStub`'s temp local is
+`1 + wasmParamCount()`, but a virtual method returning an `@inline struct` is
+refused at `compileFunction` before the stub is finalized, so no test exercises
+it. Verified by inspection and by no regression in the suite.
+
+**Region size is policy.** 4 KB = 256 slots at the 16-byte fixture record size.
+The precedent is the shadow stack (`compiler.ts:290`, 32 KB, abort on overflow).
+Overflow aborts with a message naming the limit; a silent overwrite of the next
+slot would be a corruption bug that reads as a wrong value. `--sretStackSize` is
+a follow-up, structurally identical to `stackSize`.
+
+**The read-back finding — the design note's §8 was wrong.** §8 framed
+"multi-value results" as set aside. Measured before writing the read path: every
+non-consumer use of an `@inline struct` call result is refused (the gate: `g(f())`
+and the four other shapes), and no path treats the slot's address as a value.
+Sret therefore does not need multi-value results — **the model says there is no
+value** — and the change did not touch the expression pipeline at all. It
+relocated the problem from the call to the read path, and that path has exactly
+two shapes: one field load for `f().x`, a per-field copy for `let q: P = f()`.
+Recorded as a correction in `docs/interop-sret-design.md` §8, which now also
+records the **third** consumer: a bare `f()` statement (the discard shape), which
+allocates, calls and unwinds without reading. Three consumers, and the refusal
+covers everything else.
+
+**The gate, measured.** The five non-consumer uses were compiled as probes
+before the read path existed. Four refuse: `g(f())` (AS100, passing an
+expression as a value argument), `f() + 1` (TS2365), `return f()` in an `i32`
+function (TS2322), `a[i] = f()` (AS100: `Array<P>` is a refused type argument,
+and the store reads the value as a whole), and `obj.field = f()` (AS100:
+inline nesting at the field declaration). A bare `f()` compiles, and its WAT is
+the safe shape: mark, bump, guard, pass `base + mark` as the hidden destination,
+call, restore — no `local.get` of the slot, no address treated as a value. The
+gate therefore did not fire; the four refusals are pinned in
+`inline-struct-sret-refusal-reach.ts`.
+
+### The three gate-probe findings
+
+Each was found while measuring the refusal's reach, each is fixed, and each has a
+fixture that fails if the fix is reverted. The reverts were run, not reasoned
+about.
+
+**1. Constructors are not sret** — `fd6c7772`. A constructor's declared return
+type is its class type; for an `@inline struct` that made `hasHiddenDestParam`
+true, and the emitted constructor came out as
+`(param $this i32) (param $sretDest i32)` with **no result**, while its body
+still returned `this`. `Signature` gains `sretDisabled`, part of the memoization
+key and set only for inline-struct constructors; ordinary constructors keep their
+old key and type-id sequence, because the flag had to be in the key *and* had to
+stay off every other signature (an unconditional flag shifted type ids and broke
+`builtins`, `async-closures-case6` and `async-closure-value`).
+*Revert measured:* removing the `sretDisabled` check from `hasHiddenDestParam`
+makes `inline-struct-sret` fail at validation with
+`wasm-validator error in function interop/inline-struct-sret/P#constructor`.
+*Fixture:* `inline-struct-sret.ts` (`inferredNew`, `zero`).
+
+**2. Inferred locals enter SROA** — `fd6c7772`. `let p = new P()` and
+`let q = f()` reach the post-inference SROA branch once constructors are valid;
+`let q = p`, with **both** types inferred, had no annotated type to trigger the
+SROA branch, so it compiled `p` as a bare identifier — the whole-value refusal.
+A local lookup in `compileVariableStatement` before the initializer is compiled
+fixes it, and deliberately resolves nothing (a `resolveExpression` there can
+force a class before the compiler's builtin constants exist, which crashed on
+`new Box()` during the first attempt).
+*Revert measured:* removing the identifier pre-check makes `inline-struct-sret`
+fail with `AS100: reading an @inline struct value as a whole`.
+*Fixture:* `inline-struct-sret.ts` (`inferredFromLocal`, `inferredNew`,
+`inferredCopy`), including a call counter proving `let q = f()` emits **one**
+runtime call (`countedOnce() == 1067`).
+
+**3. A refused field must not reach codegen** — `fd6c7772`. A class field of
+`@inline struct` is refused at its declaration (inline nesting), but the
+generated constructor still called `makeZero(fieldType)` for it and the field's
+setter was still compiled. Both crashed Binaryen with
+`Assertion failed: index < getNumLocals()` in `setLocalName`, from a local-index
+mismatch in the generated function — a compiler crash on top of a diagnostic that
+had already been reported.
+*Revert measured:* removing the skip makes `inline-struct-sret-refusal-reach`
+abort in `setLocalName` instead of reporting AS100.
+*Fixture:* `inline-struct-sret-refusal-reach.ts` (`class Holder { field: P = new P(); }`).
+
+**A pass-level constraint worth remembering.** Binaryen's passes assume one
+parent per expression node. Sharing one address node between two field loads
+compiles at -O0 and aborts `LocalCSE` in release
+(`Assertion failed: !(requests && original)`). Every load builds its own
+address node now, and the -O3 fixtures are what catch a regression.
+
+**Instance-method sret: the shift.** An instance method's hidden destination is
+WASM local 1 (`this` is local 0), so `compileSretReturnStatement`'s
+`destIndex = signature.thisType ? 1 : 0` is a correctness hinge rather than a
+formality: with 0, the method writes the returned fields over `this` and the
+caller reads a wrong value out of a live object — no compile error, no crash.
+`inline-struct-sret-instance.ts` is the guard, and it was measured: setting
+`destIndex` to 0 for instance methods changes the emitted stores from
+`local.get $sretDest` to `local.get $this`, fails the WAT comparison, and traps
+the fixture's runtime assert at instantiation. The fixture also carries the
+combined shape — `Calc#scale(this, dest, p.a, p.b, k)` — so the shift and the
+parameter flattening are exercised together, which is where they would disagree.
+
+**Third finding (latent, not fixed).** The operand walk's `paramType.isManaged`
+check uses the *source* parameter's type, not the individual field's. Correct
+today because an `@inline struct`'s fields are scalar or struct-pointer, so
+`isManaged` is false either way. It becomes wrong when GC-reference fields
+exist: the walk's `-1` sentinel and its `isManaged` check both depend on the
+flattening being field-safe, which it is only for unmanaged fields. Gated by the
+GC-ref-fields phase.

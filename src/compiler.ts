@@ -1676,6 +1676,28 @@ export class Compiler extends DiagnosticEmitter {
     let declarationNode = instance.declaration;
     assert(declarationNode.kind == NodeKind.FunctionDeclaration || declarationNode.kind == NodeKind.MethodDeclaration);
     this.checkSignatureSupported(instance.signature, (<FunctionDeclaration>declarationNode).signature);
+    // A virtual method returning an `@inline struct` is refused: the override
+    // stub forwards `this` and the source parameters to the concrete override,
+    // and it has no destination pointer to forward — its own signature would
+    // need one that the dispatch path does not produce.
+    if (signature.hasHiddenDestParam && instance.is(CommonFlags.Overridden)) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        declarationNode.name.range,
+        "an @inline struct return on a virtual method (the override stub has no destination parameter; deferred)"
+      );
+    }
+    // Refused at the boundary: `@inline struct` returns are sret inside the
+    // module, and the host ABI has no destination pointer to pass. An export or
+    // an `@external` implementation would need an ABI version.
+    if (signature.hasHiddenDestParam && (instance.is(CommonFlags.ModuleExport) || instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs)))
+    {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        declarationNode.name.range,
+        "an @inline struct return across the module boundary (the host would have to pass the destination pointer; that is an ABI version, not this phase)"
+      );
+    }
 
     let funcRef: FunctionRef = 0;
 
@@ -1726,7 +1748,7 @@ export class Compiler extends DiagnosticEmitter {
         signature.paramRefs,
         signature.resultRefs,
         typesToRefs(instance.getNonParameterLocalTypes()),
-        module.flatten(stmts, instance.signature.returnType.toRef())
+        module.flatten(stmts, signature.resultRefs)
       );
 
     // imported function
@@ -2995,6 +3017,13 @@ export class Compiler extends DiagnosticEmitter {
 
     let valueExpression = statement.value;
     if (valueExpression) {
+      // Sret: an `@inline struct` return has no value representation, so the
+      // value is written into the caller's slot instead of being returned. It
+      // has to happen before `compileExpression`, which refuses a whole-value
+      // read by design.
+      if (this.isInlineStructType(returnType)) {
+        return this.compileSretReturnStatement(statement, returnType);
+      }
       let constraints = Constraints.ConvImplicit;
       if (flow.sourceFunction.is(CommonFlags.ModuleExport)) constraints |= Constraints.MustWrap;
 
@@ -3257,6 +3286,20 @@ export class Compiler extends DiagnosticEmitter {
 
       // Otherwise infer type from initializer
       } else if (initializerNode) {
+        // `let q = p` where p is an @inline struct local: copy its fields
+        // before compiling `p`, which would be a whole-value read (the
+        // refusal). A local lookup is enough — no expression resolution, so the
+        // compiler's type-id sequence is unaffected.
+        if (initializerNode.kind == NodeKind.Identifier) {
+          let source = flow.lookupLocal((<IdentifierExpression>initializerNode).text);
+          if (source != null && source.fieldLocals != null) {
+            let sourceFields = assert(this.inlineStructFieldsOf(source.type));
+            this.compileSroaLocal(
+              declaration, source.type, sourceFields, initializerNode, flow, initializers
+            );
+            continue;
+          }
+        }
         let pendingElements = this.pendingElements;
         let temp = flow.addScopedDummyLocal(name, Type.auto, statement); // pending dummy
         pendingElements.add(temp);
@@ -6136,6 +6179,14 @@ export class Compiler extends DiagnosticEmitter {
             return stored;
           }
         }
+        // Inline nesting is refused at the field's declaration. Do not compile
+        // the setter here: its parameter would be a value type with no address,
+        // and the generated setter cannot bind it. The declaration diagnostic is
+        // the report; this keeps codegen from crashing on top of it.
+        if (propertyInstance.isField && this.isInlineStructType(propertyInstance.type)) {
+          this.currentType = tee ? propertyInstance.type : Type.void;
+          return module.unreachable();
+        }
         if (propertyInstance.isField) {
           // Cannot assign to readonly fields except in constructors if there's no initializer
           let isConstructor = flow.sourceFunction.is(CommonFlags.Constructor);
@@ -6722,6 +6773,15 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (instance.hasDecorator(DecoratorFlags.Unsafe)) this.checkUnsafe(reportNode);
 
+    // Sret: take the destination address **now**, before any argument is
+    // compiled. An argument that is itself an sret call allocates its own slot
+    // and sets `sretDestSlot` for *its* call; consuming early is what keeps the
+    // two from being confused for one another.
+    let sretDest: ExpressionRef = 0;
+    if (signature.hasHiddenDestParam) {
+      sretDest = this.sretDestSlot;
+      this.sretDestSlot = 0;
+    }
     argumentExpressions = this.adjustArgumentsForRestParams(argumentExpressions, signature, reportNode);
     numArguments = argumentExpressions.length;
 
@@ -6733,9 +6793,11 @@ export class Compiler extends DiagnosticEmitter {
       this.checkFieldInitialization(<Class>parent, reportNode);
     }
 
-    // Inline if explicitly requested
+    // Inline if explicitly requested. An `@inline struct` return is not inlined
+    // this phase: the inline path binds parameters to locals directly and has no
+    // slot to write the hidden destination into.
     let inlineRequested = instance.hasDecorator(DecoratorFlags.Inline) || this.currentFlow.is(FlowFlags.InlineContext);
-    if (inlineRequested && (!instance.is(CommonFlags.Overridden) || reportNode.isAccessOnSuper)) {
+    if (!signature.hasHiddenDestParam && inlineRequested && (!instance.is(CommonFlags.Overridden) || reportNode.isAccessOnSuper)) {
       assert(!instance.is(CommonFlags.Stub)); // doesn't make sense
       let inlineStack = this.inlineStack;
       if (inlineStack.includes(instance)) {
@@ -6772,18 +6834,41 @@ export class Compiler extends DiagnosticEmitter {
       wasmOperands += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
     }
     let numArgumentsInclThis = thisArg ? wasmOperands + 1 : wasmOperands;
-    let operands = new Array<ExpressionRef>(numArgumentsInclThis);
+    let hasHiddenDest = signature.hasHiddenDestParam;
+    // A call whose result is discarded (`f();`, or any consumer that does not
+    // read the slot) still needs a slot to write into: allocate one here and
+    // unwind after the call. Every other consumer supplies the address through
+    // `sretDestSlot`, so that the read can happen while the slot is live.
+    this.sretDiscardMark = null;
+    if (hasHiddenDest && sretDest == 0) {
+      let base = this.ensureSretStack();
+      let sretMarkLocal = this.currentFlow.getTempLocal(Type.u32);
+      this.sretDiscardMark = sretMarkLocal;
+      sretDest = this.module.binary(
+        BinaryOp.AddI32,
+        this.module.i32(base),
+        this.module.local_get(sretMarkLocal.index, TypeRef.I32)
+      );
+    }
+    let numOperands = numArgumentsInclThis + (hasHiddenDest ? 1 : 0);
+    let operands = new Array<ExpressionRef>(numOperands);
     let index = 0;
     if (thisArg) {
       operands[0] = thisArg;
       index = 1;
+    }
+    if (hasHiddenDest) {
+      // The hidden destination is the **first** parameter after `this` — the
+      // same slot `paramRefs` puts `i32` in and the callee's binder makes
+      // `$sretDest`.
+      operands[index++] = sretDest;
     }
     for (let i = 0; i < numArguments; ++i) {
       index += this.expandSroaArgument(
         unchecked(argumentExpressions[i]), unchecked(parameterTypes[i]), operands, index
       );
     }
-    assert(index == numArgumentsInclThis);
+    assert(index == numOperands);
     return this.makeCallDirect(instance, operands, reportNode, (constraints & Constraints.WillDrop) != 0);
   }
 
@@ -6867,7 +6952,7 @@ export class Compiler extends DiagnosticEmitter {
 
     // Create an outer block that we can break to when returning a value out of order
     this.currentType = returnType;
-    return module.block(flow.inlineReturnLabel, body, returnType.toRef());
+    return module.block(flow.inlineReturnLabel, body, this.resultRefOf(returnType));
   }
 
   /** Makes sure that the arguments length helper global is present. */
@@ -7067,7 +7152,7 @@ export class Compiler extends DiagnosticEmitter {
     let parameterTypes = instance.signature.parameterTypes;
     let returnType = instance.signature.returnType;
     let numParameters = parameterTypes.length;
-    let tempIndex = 1 + parameterTypes.length; // incl. `this`
+    let tempIndex = 1 + assert(instance.signature).wasmParamCount(); // incl. `this` and the hidden dest
 
     // Switch over this's rtId and map it to the respective overload
     let builder = new SwitchBuilder(this.module,
@@ -7231,10 +7316,24 @@ export class Compiler extends DiagnosticEmitter {
     // operand index is no longer the parameter index. `sourceIndexOf` is the
     // inverse the mapping helper provides.
     let parameterTypes = signature.parameterTypes;
+    let wasmParamCount = signature.wasmParamCount();
     let wasmIndex = 0;
     while (operandIndex < operands.length) {
+      // Past the end of the WASM parameter list. Checking this **before**
+      // `sourceIndexOf` is what makes its `-1` unambiguous: only the hidden
+      // slot can produce one from here.
+      if (wasmIndex >= wasmParamCount) break;
       let sourceIndex = signature.sourceIndexOf(wasmIndex);
-      if (sourceIndex < 0) break;
+      if (sourceIndex < 0) {
+        // The hidden sret destination. It **is** `operands[operandIndex]` — a
+        // plain address, never managed — and it has no source parameter, so
+        // both indices advance past it and nothing is stacked. `break` here
+        // would abandon every managed operand after it, which is exactly the
+        // desync the operand-stream fixture catches.
+        ++operandIndex;
+        ++wasmIndex;
+        continue;
+      }
       let paramType = unchecked(parameterTypes[sourceIndex]);
       if (paramType.isManaged) {
         let operand = operands[operandIndex];
@@ -7254,6 +7353,10 @@ export class Compiler extends DiagnosticEmitter {
     reportNode: Node,
     immediatelyDropped: bool = false
   ): ExpressionRef {
+    // A discarded-result sret call allocates its slot in `compileCallDirect`
+    // (which builds the operands) and is wrapped here, where the call node is.
+    let sretMarkLocal = this.sretDiscardMark;
+    this.sretDiscardMark = null;
     if (instance.hasDecorator(DecoratorFlags.Inline)) {
       if (!instance.is(CommonFlags.Overridden)) {
         assert(!instance.is(CommonFlags.Stub)); // doesn't make sense
@@ -7340,7 +7443,7 @@ export class Compiler extends DiagnosticEmitter {
         instance = this.ensureVarargsStub(instance);
         if (!this.compileFunction(instance)) return module.unreachable();
         instance.flow.flags = original.flow.flags;
-        let returnTypeRef = returnType.toRef();
+        let returnTypeRef = instance.signature.resultRefs;
         // We know the last operand is optional and omitted, so inject setting
         // ~argumentsLength into that operand, which is always safe.
         let lastOperand = operands[maxOperands - 1];
@@ -7352,11 +7455,18 @@ export class Compiler extends DiagnosticEmitter {
         ], lastOperandType.toRef());
         this.operandsTostack(instance.signature, operands);
         let expr = module.call(instance.internalName, operands, returnTypeRef);
-        if (returnType != Type.void && immediatelyDropped) {
+        if (returnTypeRef != TypeRef.None && immediatelyDropped) {
           expr = module.drop(expr);
           this.currentType = Type.void;
         } else {
           this.currentType = returnType;
+        }
+        if (sretMarkLocal != null) {
+          expr = this.wrapSretCall(assert(sretMarkLocal), expr, returnType, reportNode);
+          // A discarded call produced no value. A consumer that expected one
+          // has no slot (and has already reported why), so the type stays the
+          // declared return type rather than cascading into a second error.
+          this.currentType = immediatelyDropped ? Type.void : returnType;
         }
         return expr;
       }
@@ -7368,8 +7478,16 @@ export class Compiler extends DiagnosticEmitter {
     }
 
     if (operands) this.operandsTostack(instance.signature, operands);
-    let expr = module.call(instance.internalName, operands, returnType.toRef());
+    // `resultRefs`, not `returnType.toRef()`: an `@inline struct` return has no
+    // WASM result (the value goes to the caller's slot), and calling the
+    // signature's own accessor is what keeps the call node's type and the
+    // callee's declared type from disagreeing.
+    let expr = module.call(instance.internalName, operands, instance.signature.resultRefs);
     this.currentType = returnType;
+    if (sretMarkLocal != null) {
+      expr = this.wrapSretCall(assert(sretMarkLocal), expr, returnType, reportNode);
+      this.currentType = immediatelyDropped ? Type.void : returnType;
+    }
     return expr;
   }
 
@@ -7383,6 +7501,20 @@ export class Compiler extends DiagnosticEmitter {
     immediatelyDropped: bool = false
   ): ExpressionRef {
     let numArguments = argumentExpressions.length;
+
+    // Refused: an `@inline struct` return through a function value. The hidden
+    // destination pointer is a *parameter*, so a callee reached through a
+    // signature the caller does not see cannot receive one — that is the
+    // function-value phase, after inline nesting.
+    if (signature.hasHiddenDestParam) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        reportNode.range,
+        "calling an @inline struct-returning function through a function value (the hidden destination parameter needs a direct call)"
+      );
+      this.currentType = signature.returnType;
+      return this.module.unreachable();
+    }
 
     if (!this.checkCallSignature( // reports
       signature,
@@ -9628,7 +9760,10 @@ export class Compiler extends DiagnosticEmitter {
             classInstance.type,
             classInstance.type,
             baseCtor.signature.requiredParameters,
-            baseCtor.signature.hasRest
+            baseCtor.signature.hasRest,
+            // Only an @inline struct constructor needs sret suppressed;
+            // ordinary constructors keep their existing signature identity.
+            classInstance.hasDecorator(DecoratorFlags.InlineStruct)
           ),
           contextualTypeArguments
         );
@@ -9645,7 +9780,13 @@ export class Compiler extends DiagnosticEmitter {
             )
           ),
           null,
-          Signature.create(this.program, [], classInstance.type, classInstance.type),
+          Signature.create(
+            this.program, [], classInstance.type, classInstance.type,
+            0, false,
+            // Only an @inline struct constructor needs sret suppressed;
+            // ordinary constructors keep their existing signature identity.
+            classInstance.hasDecorator(DecoratorFlags.InlineStruct)
+          ),
           contextualTypeArguments
         );
       }
@@ -9912,6 +10053,33 @@ export class Compiler extends DiagnosticEmitter {
           let fieldLocal = assert(fieldLocals.get(propertyInstance.name));
           this.currentType = propertyInstance.type;
           return module.local_get(fieldLocal.index, fieldLocal.type.toRef());
+        }
+        // Sret: `f().x` where `f` returns an `@inline struct`. There is no value
+        // to read a field from — the call wrote the fields into a slot the
+        // caller allocated — so the read is a load from that slot, done while
+        // the slot is still live (the mark is restored after it).
+        if (
+          thisExpression != null &&
+          thisExpression.kind == NodeKind.Call &&
+          propertyInstance.isField
+        ) {
+          let receiverType = this.resolver.resolveExpression(thisExpression, this.currentFlow);
+          if (receiverType != null && this.isInlineStructType(receiverType)) {
+            return this.makeSretCallBlock(
+              <CallExpression>thisExpression,
+              receiverType,
+              propertyInstance.type,
+              propertyInstance,
+              null
+            );
+          }
+        }
+        // Inline nesting: an `@inline struct` field of an ordinary (heap)
+        // record is refused at declaration. Do not call the getter — its return
+        // type has no value representation. The declaration diagnostic stands.
+        if (propertyInstance.isField && this.isInlineStructType(propertyInstance.type)) {
+          this.currentType = propertyInstance.type;
+          return module.unreachable();
         }
         // An inline array field is storage, not a value: there is nothing to
         // read at the field's offset, only bytes to address. So the access
@@ -10853,13 +11021,25 @@ export class Compiler extends DiagnosticEmitter {
         supported = false;
       }
     }
-    if (!this.program.checkInlineStructValue(signature.returnType, reportNode.returnType, "a return type")) {
-      return false;
-    }
     if (!this.program.checkTypeSupported(signature.returnType, reportNode.returnType)) {
       supported = false;
     }
     return supported;
+  }
+
+  /** Is `type` an `@inline struct`: a value carried as its fields, never as a
+   *  pointer? */
+  private isInlineStructType(type: Type): bool {
+    let classReference = type.classReference;
+    return classReference != null && classReference.hasDecorator(DecoratorFlags.InlineStruct);
+  }
+
+  /** The WASM result type of a value of `type`: `None` for an `@inline struct`,
+   *  whose value is written to the caller's slot instead of returned. Calling
+   *  `type.toRef()` on an inline struct is what this replaces — it has no
+   *  value representation, and `toRef` asserts on one. */
+  private resultRefOf(type: Type): TypeRef {
+    return this.isInlineStructType(type) ? TypeRef.None : type.toRef();
   }
 
   /** Evaluates a boolean condition, determining whether it is TRUE, FALSE or UNKNOWN. */
@@ -10949,6 +11129,300 @@ export class Compiler extends DiagnosticEmitter {
     if (expression.kind != NodeKind.Identifier) return null;
     let local = this.currentFlow.lookupLocal((<IdentifierExpression>expression).text);
     return local != null && local.fieldLocals != null ? local : null;
+  }
+
+  // === Sret: `@inline struct` returns ===========================================================
+
+  /** Size of the static call-temp region, in bytes. 4 KB is 256 slots at the
+   *  16-byte fixture record size. Overflow aborts (see `makeSretCallBlock`);
+   *  failing loudly beats corrupting a neighbouring slot. A `--sretStackSize`
+   *  option is a follow-up, structurally identical to `stackSize`. */
+  private static readonly SRET_STACK_SIZE: i32 = 4096;
+
+  /** Base address of the static call-temp region, once reserved. */
+  private sretStackBase: i32 = 0;
+  /** One past the region's last byte. */
+  private sretStackLimit: i32 = 0;
+  /** Name of the bump global, or `null` before the first reservation. */
+  private sretStackGlobal: string | null = null;
+  /** The destination address a call about to be compiled must pass. Consumed
+   *  (and cleared) by `compileCallDirect`, so a nested call in an argument
+   *  cannot mistake it for its own. */
+  private sretDestSlot: ExpressionRef = 0;
+  /** The mark local of a discarded-result sret call, handed from
+   *  `compileCallDirect` (which builds the operands) to `makeCallDirect`
+   *  (which builds the call node and can wrap it). */
+  private sretDiscardMark: Local | null = null;
+
+  /**
+   * Reserves the static call-temp region, once per module, and returns its base.
+   *
+   * The region lives **inside the data segment** (`[16, __data_end)`), below
+   * `__data_end`. That placement is the whole point: `visitStack` walks
+   * `[__stack_pointer, __heap_base)`, so a slot written here is never scanned as
+   * a GC root, and `compileVisitGlobals` visits only class-typed globals, so the
+   * `i32` bump pointer contributes no interrupt threshold. Both were measured,
+   * not assumed.
+   *
+   * The base is a compile-time constant, so a call site emits `i32.const base`
+   * plus the frame's mark — no run-time address computation.
+   */
+  ensureSretStack(): i32 {
+    if (this.sretStackGlobal != null) return this.sretStackBase;
+    let module = this.module;
+    let segment = this.addAlignedMemorySegment(
+      new Uint8Array(Compiler.SRET_STACK_SIZE), 16
+    );
+    let base = i64_low(segment.offset);
+    this.sretStackBase = base;
+    this.sretStackLimit = base + Compiler.SRET_STACK_SIZE;
+    let name = "~sretStackPointer";
+    this.sretStackGlobal = name;
+    module.addGlobal(name, TypeRef.I32, true, module.i32(base));
+    return base;
+  }
+
+  /** The bytes one call-temp slot needs for `type`, rounded up to the region's
+   *  16-byte alignment so every slot stays aligned for any field. */
+  private sretSizeOf(type: Type): i32 {
+    let classReference = assert(type.classReference);
+    return (classReference.nextMemoryOffset + 15) & ~15;
+  }
+
+  /** `base + mark`, freshly built. Callers must not share the node: Binaryen
+   *  passes assume a single parent per expression. */
+  private makeSretAddress(base: i32, markLocal: Local): ExpressionRef {
+    return this.module.binary(
+      BinaryOp.AddI32,
+      this.module.i32(base),
+      this.module.local_get(markLocal.index, TypeRef.I32)
+    );
+  }
+
+  /** A load of one field of an `@inline struct` at a slot address. */
+  private makeSretFieldLoad(destAddress: ExpressionRef, field: Property): ExpressionRef {
+    return this.module.load(
+      field.type.byteSize,
+      false,
+      destAddress,
+      field.type.toRef(),
+      field.memoryOffset
+    );
+  }
+
+  /** The overflow check for one allocation: `if (mark + size > limit) abort`.
+   *  The limit is the reserved region's end, a compile-time constant. */
+  private makeSretGuard(markLocal: Local, size: i32, reportNode: Node): ExpressionRef {
+    let module = this.module;
+    let end = module.binary(
+      BinaryOp.AddI32,
+      module.local_get(markLocal.index, TypeRef.I32),
+      module.i32(size)
+    );
+    return module.if(
+      module.binary(BinaryOp.GtI32, end, module.i32(this.sretStackLimit)),
+      this.makeStaticAbort(
+        this.ensureStaticString(
+          "sret stack overflow: the static call-temp region is 4 KB; see --sretStackSize"
+        ),
+        reportNode
+      )
+    );
+  }
+
+  /** Mark, allocate, and restore around a call whose result is discarded. */
+  private wrapSretCall(
+    markLocal: Local,
+    callExpr: ExpressionRef,
+    returnType: Type,
+    reportNode: Node
+  ): ExpressionRef {
+    let module = this.module;
+    let global = assert(this.sretStackGlobal);
+    let size = this.sretSizeOf(returnType);
+    return module.block(null, [
+      module.local_set(markLocal.index, module.global_get(global, TypeRef.I32), false),
+      module.global_set(global, module.binary(
+        BinaryOp.AddI32,
+        module.local_get(markLocal.index, TypeRef.I32),
+        module.i32(size)
+      )),
+      this.makeSretGuard(markLocal, size, reportNode),
+      callExpr,
+      module.global_set(global, module.local_get(markLocal.index, TypeRef.I32))
+    ]);
+  }
+
+  /**
+   * Compiles a call whose result is an `@inline struct`: allocates a slot on the
+   * static call-temp stack, passes its address as the hidden first operand,
+   * reads the result out of it, and unwinds the bump pointer.
+   *
+   * **Lifetime is per-call-frame, not per-call-site.** The bump global is saved
+   * into a *WASM local* before the allocation and restored from it afterwards;
+   * a WASM local is inherently per-frame, so recursion and `f(f())` each get
+   * their own mark and the LIFO order is the value stack's own order. A
+   * per-call-site slot would be overwritten by the nested call — the failure the
+   * recursion fixture exists to catch.
+   *
+   * `readField` reads one field (for `f().x`); `readTarget` copies every field
+   * into an SROA local's field locals (for `let q: P = f()`); exactly one is
+   * non-null, or neither for a discarded result. The read happens **before** the
+   * bump is restored: the slot is dead the moment the mark is restored, so a read
+   * afterwards would be from freed space.
+   */
+  private makeSretCallBlock(
+    callExpression: CallExpression,
+    returnType: Type,
+    resultType: Type,
+    readField: Property | null,
+    readTarget: Map<string, Local> | null
+  ): ExpressionRef {
+    let module = this.module;
+    let base = this.ensureSretStack();
+    let global = assert(this.sretStackGlobal);
+    let size = this.sretSizeOf(returnType);
+    let flow = this.currentFlow;
+    let markLocal = flow.getTempLocal(Type.u32);
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(markLocal.index, module.global_get(global, TypeRef.I32), false));
+    stmts.push(module.global_set(global,
+      module.binary(BinaryOp.AddI32, module.local_get(markLocal.index, TypeRef.I32), module.i32(size))
+    ));
+    stmts.push(this.makeSretGuard(markLocal, size, callExpression));
+    this.sretDestSlot = module.binary(
+      BinaryOp.AddI32,
+      module.i32(base),
+      module.local_get(markLocal.index, TypeRef.I32)
+    );
+    let callExpr = this.compileCallExpression(callExpression, Type.auto, Constraints.None);
+    if (this.sretDestSlot != 0) {
+      // The call did not consume its destination: it was refused before
+      // reaching `compileCallDirect` (a function value, a virtual call). The
+      // refusal is already reported; there is no slot use to emit. The
+      // consumer's type is still set, so the refusal does not cascade into a
+      // type error in the enclosing expression.
+      this.sretDestSlot = 0;
+      this.currentType = resultType;
+      return module.unreachable();
+    }
+    stmts.push(callExpr);
+    let resultLocal: Local | null = resultType != Type.void
+      ? flow.getTempLocal(resultType)
+      : null;
+    // A fresh address node per load: Binaryen's passes assume one parent per
+    // node, so an address shared between two loads breaks them (LocalCSE
+    // asserts on it in release builds).
+    if (readField != null) {
+      stmts.push(module.local_set(
+        assert(resultLocal).index,
+        this.makeSretFieldLoad(this.makeSretAddress(base, markLocal), readField),
+        false
+      ));
+    } else if (readTarget != null) {
+      let fields = assert(this.inlineStructFieldsOf(returnType));
+      for (let i = 0, k = fields.length; i < k; ++i) {
+        let field = unchecked(fields[i]);
+        let to = readTarget.get(field.name);
+        if (!to) continue;
+        stmts.push(module.local_set(
+          to.index,
+          this.makeSretFieldLoad(this.makeSretAddress(base, markLocal), field),
+          false
+        ));
+      }
+    }
+    stmts.push(module.global_set(global, module.local_get(markLocal.index, TypeRef.I32)));
+    if (resultLocal != null) {
+      stmts.push(module.local_get(resultLocal.index, resultLocal.type.toRef()));
+      this.currentType = resultType;
+      return module.block(null, stmts, resultType.toRef());
+    }
+    this.currentType = Type.void;
+    return module.block(null, stmts);
+  }
+
+  /**
+   * Sret: `return p` in a function returning an `@inline struct`.
+   *
+   * The value is written field by field into the hidden destination slot (the
+   * first WASM parameter after `this`) and nothing is returned through the value
+   * stack. Only a local is accepted: an arbitrary expression would have to be
+   * materialised somewhere before the fields can be written, and the only place
+   * to materialise it is a slot nobody allocated.
+   */
+  private compileSretReturnStatement(
+    statement: ReturnStatement,
+    returnType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let valueExpression = assert(statement.value);
+    let fields = assert(this.inlineStructFieldsOf(returnType));
+    // `return new P()` with no arguments: every field is zero, which is what a
+    // fresh record holds — the stores still go to the slot, because the slot is
+    // the value's home, not a local that happens to start at zero.
+    let isZeroNew = valueExpression.kind == NodeKind.New &&
+      (<NewExpression>valueExpression).args.length == 0;
+    if (isZeroNew) {
+      let module2 = this.module;
+      let destIndex = flow.sourceFunction.signature.thisType ? 1 : 0;
+      let zeroStmts = new Array<ExpressionRef>();
+      for (let i = 0, k = fields.length; i < k; ++i) {
+        let field = unchecked(fields[i]);
+        if (!this.isSroaFieldType(field.type)) continue;
+        zeroStmts.push(module2.store(
+          field.type.byteSize,
+          module2.local_get(destIndex, TypeRef.I32),
+          this.makeZero(field.type),
+          field.type.toRef(),
+          field.memoryOffset
+        ));
+      }
+      zeroStmts.push(module2.return());
+      flow.set(FlowFlags.Returns | FlowFlags.Terminates);
+      this.currentType = returnType;
+      return module2.block(null, zeroStmts);
+    }
+    let local = valueExpression.kind == NodeKind.Identifier
+      ? flow.lookupLocal((<IdentifierExpression>valueExpression).text)
+      : null;
+    if (local == null || local.fieldLocals == null) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        valueExpression.range,
+        "returning this expression from an @inline struct function (only a local value can be returned: a value has no address, so there is nowhere to write it)"
+      );
+      flow.set(FlowFlags.Returns | FlowFlags.Terminates);
+      this.currentType = returnType;
+      return module.unreachable();
+    }
+    let signature = flow.sourceFunction.signature;
+    assert(signature.hasHiddenDestParam);
+    let destIndex = signature.thisType ? 1 : 0;
+    let fieldLocals = assert(local.fieldLocals);
+    let stmts = new Array<ExpressionRef>();
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let fieldLocal = fieldLocals.get(field.name);
+      // A field refused at declaration (a T[N] field, a GC reference) has no
+      // local: it was never part of the value, and a store here would need the
+      // representation the refusal withheld.
+      if (!fieldLocal) continue;
+      stmts.push(module.store(
+        field.type.byteSize,
+        // A fresh node per store: Binaryen's passes assume each child has one
+        // parent, so the address expression must not be shared between stores.
+        module.local_get(destIndex, TypeRef.I32),
+        module.local_get(fieldLocal.index, fieldLocal.type.toRef()),
+        field.type.toRef(),
+        field.memoryOffset
+      ));
+    }
+    stmts.push(module.return());
+    flow.set(FlowFlags.Returns | FlowFlags.Terminates);
+    this.currentType = returnType;
+    return module.block(null, stmts);
   }
 
   /**
@@ -11046,6 +11520,24 @@ export class Compiler extends DiagnosticEmitter {
         initializers.push(module.local_set(fieldLocal.index, value, false));
       }
       return true;
+    }
+
+    // `let q: P = f()`: the callee fills a caller-allocated slot, and each field
+    // is copied out of it into q's own locals while the slot is live — the same
+    // field-wise copy the local-to-local case makes, with the source being a
+    // slot instead of another local's locals.
+    if (initializerNode != null && initializerNode.kind == NodeKind.Call) {
+      let initializedType = this.resolver.resolveExpression(initializerNode, this.currentFlow);
+      if (initializedType != null && this.isInlineStructType(initializedType)) {
+        initializers.push(this.makeSretCallBlock(
+          <CallExpression>initializerNode,
+          initializedType,
+          Type.void,
+          null,
+          fieldLocals
+        ));
+        return true;
+      }
     }
 
     // `let q: P = p`: a field-wise copy. Not a single `local.set` — there is no
@@ -11471,6 +11963,12 @@ export class Compiler extends DiagnosticEmitter {
       // only interested in fields (resolved during class finalization)
       let property = (<PropertyPrototype>member).instance;
       if (!property || !property.isField || property.getBoundClassOrInterface() != classInstance) continue;
+      // An `@inline struct` field is inline nesting and was refused at
+      // declaration. Do not materialise it: `makeZero`/the setter would need
+      // the value's address, which is exactly what the type does not have.
+      // Skipping codegen lets the recorded diagnostic surface instead of
+      // crashing in the generated constructor.
+      if (this.isInlineStructType(property.type)) continue;
       assert(!property.isAny(CommonFlags.Const));
       let fieldPrototype = property.prototype;
       let parameterIndex = fieldPrototype.parameterIndex;

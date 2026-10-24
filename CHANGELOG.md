@@ -2,6 +2,97 @@
 
 ## Unreleased
 
+### `@inline struct` returns (sret)
+
+A function can now return an `@inline struct`. The value is **memory-only**:
+it has no WASM representation, so the call has no result. The caller allocates a
+slot and passes its address as the hidden **first** WASM parameter (after
+`this`); the callee writes the fields into it and returns nothing.
+
+`Signature` gains `hasHiddenDestParam`. `wasmParamCount()` counts the hidden
+slot, `wasmParamStartOf()` starts after it, `paramRefs` emits `i32` first, and
+`resultRefs` is `None`. `sourceIndexOf(0)` is `-1`; its doc comment states both
+meanings of `-1` (hidden slot / past-the-end), because the second is only
+unambiguous when the caller checks `wasmParamCount()` first.
+
+- **Callee:** `$sretDest` is WASM local 0 (1 for an instance method). `return p`
+  writes one `memory.store` per SROA field at `(dest + memoryOffset)`;
+  `return new P()` writes zeros to the slot. Returning anything but a local is
+  refused by name.
+- **Caller:** mark, allocate, guard, call, read, restore. The mark lives in a
+  **WASM local**, so slots are per-call-**frame**: recursion and nested calls
+  each get their own, and the slot stack is LIFO. Reads happen before the
+  restore.
+- **Two consumers, no third:** `f().x` loads one field; `let q: P = f()` copies
+  every field into `q`'s locals; a discarded call allocates and unwinds.
+
+The slot comes from a **4 KB static call-temp stack inside the data segment**
+(`[16, __data_end)`), which `visitStack` does not scan — it walks
+`[__stack_pointer, __heap_base)` — so a slot is never a GC root and the base is
+a compile-time constant. The bump pointer is a plain `i32` global; `compileVisitGlobals`
+visits only class-typed globals, so it adds no GC edge and no interrupt
+threshold. Overflow **aborts** with a message naming the limit; `--sretStackSize`
+(structurally identical to `stackSize`) is a follow-up.
+
+Two sites the shape needs:
+
+- **`operandsTostack`**: the hidden slot is operand 0 and belongs to no source
+  parameter. Treating `sourceIndexOf(-1)` as "past the end" stopped the walk
+  before the first managed argument and never spilled it. Fixed by checking
+  `wasmParamCount()` first and advancing both indices past the hidden slot;
+  measured load-bearing by reverting it (the fixture's WAT diff is the missing
+  spill).
+- **The override stub's temp local** is `1 + wasmParamCount()`. Defensive: a
+  virtual method returning an `@inline struct` is refused before the stub runs.
+
+**Instance methods.** `$sretDest` sits at WASM local **1** for an instance
+method (`this` is local 0), and the return path selects it from
+`signature.thisType`. Covered by `inline-struct-sret-instance.ts`: a method
+returning the two-field value, and a method that takes an `@inline struct` **and**
+returns one — WASM `(this, dest, p.a, p.b, k)` — so the shift and the parameter
+flattening are exercised together. Measured load-bearing: with the instance
+destination read from local 0, the stores land on `this`, the WAT comparison
+fails, and the fixture's runtime assert traps at instantiation.
+
+**The refusal's reach, measured.** Every non-consumer use was compiled as a
+probe before the read path was written: `g(f())` (AS100, passing an expression
+as a value argument), `f() + 1` (TS2365), `return f()` in an `i32` function
+(TS2322), `a[i] = f()` (AS100: `Array<P>` is a refused type argument, and the
+store reads the value as a whole), and `obj.field = f()` (AS100: inline nesting
+at the field declaration). A bare `f()` is the one use that compiles, and it is
+safe: it allocates the slot, passes its address as the hidden destination,
+calls, and unwinds — it never reads the slot as a value. It is therefore the
+**third consumer** of the memory-only model, alongside `f().x` and
+`let q: P = f()`. Pinned in `inline-struct-sret-refusal-reach.ts`.
+
+**Constructors are not sret.** A constructor returns `this`, not a value, so it
+must not acquire the hidden destination parameter even when its class is an
+`@inline struct` (its declared return type is the class type). `Signature` gains
+`sretDisabled`, set only for an inline-struct constructor and part of the
+memoization key so a method with the same parameter and return types still gets
+the hidden parameter. Without it, `new P()` emitted a constructor with an unused
+destination parameter and no result — invalid WebAssembly. Ordinary
+constructors keep their existing signature identity.
+
+This also makes the **inferred local forms** value-correct: `let p = new P()`
+and `let q = f()` enter SROA (per-field locals, not a heap pointer), and
+`let q = p` is intercepted by the local lookup before the whole-value refusal.
+The fixture counts calls to prove `let q = f()` emits one runtime call.
+
+**A refused field must not reach codegen.** A class field of `@inline struct`
+is inline nesting and is refused at its declaration, but the generated
+constructor still called `makeZero` for it and the field's getter/setter were
+still compiled — crashing Binaryen's debug-info writer on a local-index
+mismatch. Constructor field initialization now skips the refused field, and the
+field getter/setter paths return `unreachable` with the declaration diagnostic
+as the report.
+
+Refused, unchanged by name: an export and an `@external` import (an ABI
+version), a function value, a virtual method, returning anything but a local,
+and an `@inline struct` field of another record (inline nesting). Sret **does
+not** need multi-value results — the design note's §8 described a problem this
+model does not have, because the value never enters the pipeline.
+
 ### `@inline struct` pass-by-value (SROA parameters)
 
 A function parameter of `@inline struct` type now passes by value. The source
@@ -26,9 +117,8 @@ Two sites that are easy to get wrong, both now covered by fixtures:
 Arity *checks* stay source-arity (`maximum` is how many arguments the user
 wrote); only operand emission is flattened.
 
-Refused, unchanged: `@inline struct` as a return (sret — its own phase, since the
-hidden destination parameter changes call arity and has no precedent in the
-compiler), as a top-level value, and as a field.
+Refused, unchanged: `@inline struct` as a top-level value and as a field.
+(`@inline struct` as a **return** is implemented — see the sret section above.)
 
 
 Developer-facing: `npm test` now runs the lint step via `pretest`; a fresh
