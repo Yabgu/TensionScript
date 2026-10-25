@@ -1730,6 +1730,37 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
+    // Refused at the boundary, the mirror direction: an `@inline struct`
+    // parameter of an **export**. An export's signature is built from the same
+    // `signature.paramRefs` a guest function uses (`module.addFunction` below),
+    // so the host sees `(param f32 f32)` for a two-field record — the record's
+    // field list became the host ABI, exactly as it did on the import side
+    // before that was refused. `layout_hash` does not move (it folds arena
+    // geometry) and the host cannot tell, because it never sees the record.
+    //
+    // The intended shape is the one the tool convention and the `@unmanaged` /
+    // `@managed` kinds already use: a single byval pointer. That needs the
+    // export's prologue to copy the pointer's fields into the SROA locals —
+    // the mirror of sret's callee write — and lands next. Until then, nothing
+    // compiles here rather than something compiling on an undesigned ABI.
+    if (
+      instance.is(CommonFlags.ModuleExport) &&
+      !instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs)
+    ) {
+      let parameterTypes = signature.parameterTypes;
+      for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+        if (this.isInlineStructType(unchecked(parameterTypes[i]))) {
+          let parameterNode = instance.prototype.functionTypeNode.parameters[i];
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            parameterNode.type.range,
+            "an @inline struct as an export parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; the export's by-value pointer parameter is the mirror of the @external temp and lands next)"
+          );
+          break; // one diagnostic per declaration
+        }
+      }
+    }
+
     let funcRef: FunctionRef = 0;
 
     // concrete function
