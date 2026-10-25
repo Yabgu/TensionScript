@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+### `@inline struct` phase complete (scalar and struct-ref fields)
+
+The minimum viable value type is finished. What is in:
+
+- **Type kind + per-use refusals.** `@inline struct` declares, lays out as a C
+  record (`sizeof`/`offsetof`/`alignof`), and every use the phase does not
+  support refuses **by name with a reason** rather than compiling as a pointer.
+  The refuse cell is the point: a silent pointer would alias, and that is the bug
+  the value type exists to remove.
+- **SROA locals.** One WASM local per field, `local.get`/`local.set` for access,
+  copy on assignment and on declaration. No address, no aliasing, no collector
+  interaction.
+- **SROA parameters.** Field-list signatures; `wasmParamCountOf` /
+  `wasmParamStartOf` / `wasmParamCount` / `sourceIndexOf` are the only
+  source-to-WASM index translation; the callee binds one local per field and the
+  caller expands the argument in declaration order.
+- **Sret returns**, free functions and instance methods. The hidden destination
+  is the **first** WASM parameter (after `this`), so it is local 0 for a free
+  function and local 1 for an instance method. Slots come from a static
+  call-temp stack inside `[16, __data_end)` with align 16 — outside the region
+  `visitStack` scans, so a slot is never a GC root — with a per-call-frame bump
+  pointer and mark/restore, and a 4 KB limit whose overflow **aborts**.
+- **`@external` parameters.** The caller materialises a temp on that stack and
+  passes `(param i32)`; the host borrows it for the call (adapter rule 6). One
+  mark and one bump cover all of a call's temps.
+- **Export parameters.** The mirror: `(param i32)` is a byval pointer the **host**
+  supplies, and the callee copies each field into its SROA locals at entry. sret
+  writes to `(dest + offset)` at exit; an export reads from `(ptr + offset)` at
+  entry. Between them a value crosses the boundary as memory in both directions.
+- **Single-field structs.** Usable inside the module (the field-count question is
+  now answered by `Signature.fieldCountOf`, not by a WASM slot count). Refused at
+  both host boundaries, where the C/WASM tool convention passes a one-scalar
+  struct **as the scalar** while this compiler passes records as pointers — both
+  `(param i32)`, so the mismatch would be silent. The `@unmanaged` case has the
+  same divergence and is **kept**, because the engine's adapter reads records
+  through `guest_read(ptr, len)` and already depends on it; filed as
+  `unmanaged-single-field-tool-convention`.
+- **Refused, with the reason named:** `@external` return of an `@inline struct`
+  (an ABI version: the host would have to write into a slot it never allocated),
+  a function value, a virtual method, an export, a global, a field, `Array<T>`,
+  `T[N]`, `changetype`, inheritance, and returning anything but a local.
+- **Multi-value results: superseded.** The memory-only model means there is no
+  whole value in the pipeline, so there is nothing for multi-value to carry. The
+  design note's §8 framed this as "set aside"; it was a mischaracterisation, and
+  the correction is recorded in the note and in the commit record.
+
+Deferred, each filed with a reason:
+
+- **Closure capture** — needs inline nesting (the environment is a class, and a
+  value-typed field in one is nesting).
+- **`T[N]` fields** — deep SROA plus a `makeZero` arm for `FixedArray`.
+- **GC-reference fields** — the mixed representation needs write barriers in SROA.
+- **Inline nesting** — a nested value type needs one local per leaf, and inherits
+  the layout question for record-typed fields.
+- **Top-level statics** — a global is a pointer slot, so two values would alias.
+- **`@external` return** — an ABI version change; the last refused case.
+- **`--sretStackSize`** — the 4 KB limit is shared by sret and the `@external`
+  temp, so this is one limit for both; structurally identical to `stackSize`.
+- **`unmanaged-single-field-tool-convention`** — see above.
+- **`--create=false` in the test harness** — the boolean parser treats it as
+  `true`, so there is no "compare only" spelling; it regenerates fixtures from
+  whatever build is present.
+
 ### `@inline struct` returns (sret)
 
 A function can now return an `@inline struct`. The value is **memory-only**:
