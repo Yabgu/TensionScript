@@ -31,17 +31,53 @@ syntax error (`TS1206`, plus an unsuppressible eslint parse error); on a class
 member it parses and lints but fails `npm run build` with `ReferenceError: lazy
 is not defined`. The scoping ratified a mechanism the toolchain rejects.
 
-**Not yet verified end to end.** `bootstrap:debug` exits 1 at stage 2, on a
-failure unrelated to ordering: the CLI marks std sources through
-`program.sources` / `program.stdSources`, which exist on the JS compiler and are
-`undefined` when the compiler runs as WASM. That path had never been reached
-before, because stage 1 always failed first. Until it is fixed the self-host
-fixpoint — the final `.wast` diff — cannot run.
+**The CLI/WASM harness is complete, and the self-host fixpoint runs.** Stage 2
+of the self-host used to stop in the harness at three gaps; all three are
+closed:
 
-Neutrality for *user* programs is measured: `npm test` passes all 1339 fixtures
-against their checked-in `.wat` byte for byte, and `npm run check` is green.
-Programs that previously failed to compile now compile — additive and
-backward-compatible.
+- **The in-tree transforms run inside the compiler.** `ClosureLowerTransform`
+  and `AsyncLowerTransform` used to be classes the CLI constructed and handed a
+  program. That is impossible when the compiler is WebAssembly — compiler
+  classes cross the boundary as opaque handles — so the pipeline moved to
+  `src/transforms.ts` and both hosts call it through one flat export,
+  `applyInTreeTransforms(program)`. No transform class and no AST is exposed;
+  the ordering (closures before async) is written once. Programs declare no
+  transform and never did: the passes are always on, which is why gating them
+  on `asconfig` was not the answer.
+- **The shadow stack is sized for the compiler's own source.** Stage 1 aborted
+  with `~stack_check`'s `stack overflow`: the compiler's own build needs
+  ≈34.2 KB of shadow stack (measured: 34,048 fails, 34,304 passes) and the
+  default is 32,768. All five `src/asconfig.json` targets now request 65,536.
+  The abort is a capacity limit, not a runaway recursion — the JS compiler
+  compiles the same source with exit 0.
+- **The transform sources are portable between hosts.** They had never been
+  compiled by this compiler. Making them so was 55 nullability sites, one
+  spread, one `Set#forEach`, `null`-as-a-type (and `null`-as-a-`usize` in two
+  ternaries), and 25 `Map#get` sites where AS aborts on a missing key and JS
+  answers `undefined` (`getMapEntry` in `src/util/collections.ts` names the
+  guarded read once). Mechanical throughout; all output-neutral.
+
+**Aggregate neutrality, now proven.** `npm run bootstrap` (debug and release)
+runs to completion and its final step — `git diff --no-index` of the two
+`.wast` files — is **empty**: the JS compiler's output and stage 2's output are
+byte-identical (debug `20154872…`, release `5b4b9a22…`). The ordering
+relaxation does not change codegen; this is not a release boundary.
+
+The fixpoint compiles one input — the compiler's own source. CI's Bootstrap job
+compiles **every fixture** with the self-hosted compiler, and that had never
+run either. Enabled, it exposed ten more sites of the same host difference:
+`Map#get` throws on a missing key under the wasm standard library and answers
+`undefined` under JS, and ten reads in the compiler core treat a miss as a
+legitimate answer (`Type.fixedArray`'s cache among them — upstream code, not
+this fork's). They now go through `getMapEntry`, and the fixture suite is green
+through the debug and the release bootstrap compiler, and through the
+cross-compile step.
+
+Neutrality for *user* programs is unchanged: `npm test` passes all 1339
+fixtures against their checked-in `.wat` byte for byte, and `npm run check` is
+green. Programs that previously failed to compile now compile — additive and
+backward-compatible. The compiler's own module grows with both passes: debug
++326 KB, release +132 KB.
 
 Version: **minor** by the additive reading; the exact release (0.9.1, 0.10.0, or
 bundled with the `@inline struct` batch) is the user's decision.

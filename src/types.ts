@@ -25,6 +25,7 @@ import {
 } from "./module";
 
 import * as binaryen from "./glue/binaryen";
+import { getMapEntry } from "./util/collections";
 
 /** Indicates the kind of a type. */
 export const enum TypeKind {
@@ -886,7 +887,7 @@ export class Type {
       Type._fixedArrays = fresh;
       cache = fresh;
     }
-    let cached = cache.get(key);
+    let cached = getMapEntry(cache, key);
     if (cached) return cached;
     let arrayType = new Type(
       TypeKind.FixedArray,

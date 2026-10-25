@@ -3,6 +3,23 @@
  * @license Apache-2.0
  */
 
+/**
+ * Gets a map entry, or `null` when the key is absent.
+ *
+ * `Map#get` throws on a missing key — the opposite of the JS `Map` the same
+ * source runs against when the compiler is JS. A pass that is compiled by both
+ * (`src/transforms.ts`) needs one answer for a miss, so this is the
+ * `has`-guarded read, named once. Written as an `if` rather than a ternary
+ * because `null` is a `usize` literal here: a ternary branching between it and
+ * a class value does not type.
+ */
+export function getMapEntry<K,V>(map: Map<K,V>, key: K): V | null {
+  // The cast is the host seam: the wasm standard library types `get` as `V`,
+  // the portable (TS) one as `V | undefined`. `has` has just answered.
+  if (map.has(key)) return <V>map.get(key);
+  return null;
+}
+
 /** Clone map. Typically used to track contextual type arguments. */
 export function cloneMap<K,V>(map: Map<K,V> | null): Map<K,V> {
   if (!ASC_TARGET) { // JS

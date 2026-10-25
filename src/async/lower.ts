@@ -10,7 +10,8 @@
  * `Signature` there, and no supported entry point to synthesize a *managed*
  * class — the state struct has to be an ordinary class with ordinary layout,
  * typeinfo and a `__visit` the collector can follow. This hook instead runs
- * before the program is instantiated (`cli/index.js:697-701`), and
+ * before the program is instantiated (the `afterParse` hook in
+ * `cli/index.js`, applied through `src/transforms.ts`), and
  * `program.initialize()` walks every source's `statements` in array order
  * (`program.ts:1102-1113`), so what is synthesized here becomes an ordinary
  * element of the program. A consequence that is easy to get wrong: **the state
@@ -98,6 +99,7 @@ import { CommonFlags } from "../common";
 import { DiagnosticCode, Range } from "../diagnostics";
 import { Parser } from "../parser";
 import { Program } from "../program";
+import { getMapEntry } from "../util/collections";
 import { Token } from "../tokenizer";
 import { awaitSites, AwaitSite } from "./ir";
 import { creationEnvOf, envInfoOf, ownerEnvOf, EnvInfo, EnvKind } from "../closure/ir";
@@ -230,8 +232,12 @@ const COND_TEMP_PREFIX = "$cond";
 /** The in-tree `afterParse` `Transform`. */
 export class AsyncLowerTransform {
 
-  /** The program being compiled. Assigned by the CLI onto the prototype. */
-  readonly program!: Program;
+  /**
+   * The program being compiled. Assigned by `applyInTreeTransforms`
+   * (`src/transforms.ts`), which is the pipeline the CLI runs; assigned on the
+   * prototype by the transform tests, which drive the class directly.
+   */
+  program!: Program;
 
   /**
    * Construct start positions already refused, per source.
@@ -275,7 +281,7 @@ export class AsyncLowerTransform {
       // Phase 2 (commit 7): refuse by name the `async` constructs phase 1 never
       // reached. A pure traversal — see `./validate.ts`.
       let refusals = this.refusals;
-      let refused = refusals != null ? refusals.get(source) : null;
+      let refused = refusals != null ? getMapEntry(refusals, source) : null;
       validateAsyncConstructs(source, parser, refused != null ? refused : null);
     }
   }
@@ -421,10 +427,12 @@ export class AsyncLowerTransform {
     // reader of the diagnostic knows what is missing rather than that "async"
     // is missing.
     if (declaration.arrowKind != ArrowKind.None) {
-      return this.refuse(parser, declaration.range, MESSAGE_ASYNC_ARROW);
+      this.refuse(parser, declaration.range, MESSAGE_ASYNC_ARROW);
+      return null;
     }
     if (declaration.typeParameters != null) {
-      return this.refuse(parser, declaration.range, "async generic functions (async lowering)");
+      this.refuse(parser, declaration.range, "async generic functions (async lowering)");
+      return null;
     }
     // An explicit `this:` parameter is the free-function spelling of a
     // receiver: `this` is `param 0`, exactly as it is for a method, so the same
@@ -438,7 +446,8 @@ export class AsyncLowerTransform {
     // expression node -- `docs/closures-plan.md` §3.3), and the carrier is
     // `state.$env`: the entry copies the received local in, the resume function
     // re-declares it from the state.
-    let foundEnv = expression != null ? envInfoOf().get(expression) : null;
+    let foundEnv: EnvInfo | null = null;
+    if (expression != null) foundEnv = getMapEntry<FunctionExpression, EnvInfo>(envInfoOf(), expression);
     let closureEnv: EnvInfo | null = foundEnv != null ? foundEnv : null;
     let closureEnvClass = closureEnv != null && closureEnv.kind == EnvKind.Struct
       ? closureEnv.envClass
@@ -450,10 +459,10 @@ export class AsyncLowerTransform {
     // `envInfoOf` with. When it exists it is the function-scope env — it
     // carries `$this` when the scope has a receiver — and `$env` holds it, so
     // one scope instance has one object.
-    let foundOwnerEnv = ownerEnvOf.get(declaration);
+    let foundOwnerEnv = getMapEntry(ownerEnvOf, declaration);
     let ownerEnv: EnvInfo | null = foundOwnerEnv != null ? foundOwnerEnv : null;
     let bodyEnvClass = ownerEnv != null && ownerEnv.ownEnv ? ownerEnv.envClass : null;
-    let bodyEnvHasThis = bodyEnvClass != null && ownerEnv != null && ownerEnv.hasThis;
+    let bodyEnvHasThis = bodyEnvClass != null && ownerEnv != null && assert(ownerEnv).hasThis;
     let bodyEnvParent = ownerEnv != null ? ownerEnv.parentClass : null;
     // The body env is the head only when it also carries the receiver: that is
     // the object the resume would otherwise have no way to see. An env-only
@@ -466,10 +475,12 @@ export class AsyncLowerTransform {
     for (let i = 0, k = parameters.length; i < k; ++i) {
       let parameter = parameters[i];
       if (parameter.parameterKind != ParameterKind.Default) {
-        return this.refuse(parser, parameter.range, "optional or rest parameters in an async function (async lowering)");
+        this.refuse(parser, parameter.range, "optional or rest parameters in an async function (async lowering)");
+        return null;
       }
       if (isReservedStateField(parameter.name.text)) {
-        return this.refuse(parser, parameter.name.range, "a parameter whose name is reserved by the state struct (async lowering)");
+        this.refuse(parser, parameter.name.range, "a parameter whose name is reserved by the state struct (async lowering)");
+        return null;
       }
     }
     // §2.3: `async function f(): T` declares `T` and the call produces `Task<T>`.
@@ -477,11 +488,13 @@ export class AsyncLowerTransform {
     // empty `NamedType` for an omitted return type — and `Task<>` is not a type.
     let returnType = signature.returnType;
     if (returnType == null || isOmittedTypeNode(returnType)) {
-      return this.refuse(parser, declaration.name.range, "an async function without a declared return type (async lowering)");
+      this.refuse(parser, declaration.name.range, "an async function without a declared return type (async lowering)");
+      return null;
     }
     let body = declaration.body;
     if (!body || body.kind != NodeKind.Block) {
-      return this.refuse(parser, declaration.range, "an async function without a block body (async lowering)");
+      this.refuse(parser, declaration.range, "an async function without a block body (async lowering)");
+      return null;
     }
     let block = <BlockStatement>body;
 
@@ -585,13 +598,14 @@ export class AsyncLowerTransform {
         Node.createBlockStatement(ctorStatements, range),
         range
       );
+      fields.push(thisEnvCtor);
       thisEnvClass = Node.createClassDeclaration(
         Node.createIdentifierExpression(thisEnvName, range),
         null, CommonFlags.None,
         null,
         typeNode(TASK_ENV_NAME, range),
         null,
-        [ ...fields, thisEnvCtor ],
+        fields,
         range
       );
     }
@@ -652,7 +666,8 @@ export class AsyncLowerTransform {
     for (let i = 0, k = declared.length; i < k; ++i) {
       let taken = declared[i];
       if (taken == stateName || taken == resumeName) {
-        return this.refuse(parser, declaration.name.range, "an async function whose synthesized name is taken (async lowering)");
+        this.refuse(parser, declaration.name.range, "an async function whose synthesized name is taken (async lowering)");
+        return null;
       }
     }
 
@@ -1322,15 +1337,18 @@ export class AsyncLowerTransform {
           );
           if (!initPlan) return null;
           if (initPlan.info != null) {
-            return this.refuse(parser, init.range, "await in a for initializer (async lowering)");
+            this.refuse(parser, init.range, "await in a for initializer (async lowering)");
+            return null;
           }
           if (initPlan.lo != 0) return null; // already refused by the planner
         }
-        if (loop.condition != null) {
-          if (!this.walkExpression(parser, loop.condition, plan.all, null, false)) return null;
+        let loopCondition = loop.condition;
+        if (loopCondition != null) {
+          if (!this.walkExpression(parser, loopCondition, plan.all, null, false)) return null;
         }
-        if (loop.incrementor != null) {
-          if (!this.walkExpression(parser, loop.incrementor, plan.all, null, false)) return null;
+        let loopIncrementor = loop.incrementor;
+        if (loopIncrementor != null) {
+          if (!this.walkExpression(parser, loopIncrementor, plan.all, null, false)) return null;
         }
         plan.kind = PlanKind.For;
         plan.init = init;
@@ -1373,7 +1391,8 @@ export class AsyncLowerTransform {
         return plan;
       }
       default: {
-        return this.refuse(parser, statement.range, reasonFor(statement));
+        this.refuse(parser, statement.range, reasonFor(statement));
+        return null;
       }
     }
   }
@@ -1475,7 +1494,8 @@ export class AsyncLowerTransform {
       let where = awaits.length > 1
         ? "more than one await in one statement (async lowering)"
         : "await in an unsupported position (async lowering)";
-      return this.refuse(parser, awaits[0].range, where);
+      this.refuse(parser, awaits[0].range, where);
+      return null;
     }
     return plan;
   }
@@ -1693,7 +1713,7 @@ export class AsyncLowerTransform {
           return out;
         }
         if (plan.info != null) {
-          let info = plan.info;
+          let info = assert(plan.info);
           // The prefix: evaluate the operand where the `await` is written, set
           // the resume point, and suspend unless the task is already settled.
           let prefix = new Array<Statement>();
@@ -1850,10 +1870,11 @@ export class AsyncLowerTransform {
         // `resumePoint != 0 || cond`: a resumed pass enters the body without
         // re-evaluating the condition, then its continuation clears the point, so
         // the next iteration evaluates it normally.
+        let planCond = plan.cond;
         let condition = Node.createBinaryExpression(
           Token.Bar_Bar,
           notZero(resumePointRead(ctx.stateName, range), range),
-          plan.cond != null ? plan.cond : Node.createTrueExpression(range),
+          planCond != null ? planCond : Node.createTrueExpression(range),
           range
         );
         out.push(Node.createIfStatement(
@@ -1894,12 +1915,13 @@ export class AsyncLowerTransform {
         // a resumed pass enters the body without re-evaluating the condition,
         // its continuation clears the point, and the incrementor then runs
         // exactly once, as it does on any other iteration.
+        let planCond = plan.cond;
         loopStatements.push(Node.createForStatement(
           null,
           Node.createBinaryExpression(
             Token.Bar_Bar,
             notZero(resumePointRead(ctx.stateName, range), range),
-            plan.cond != null ? plan.cond : Node.createTrueExpression(range),
+            planCond != null ? planCond : Node.createTrueExpression(range),
             range
           ),
           plan.incr != null ? assert(plan.incr) : null,
@@ -2165,12 +2187,11 @@ export class AsyncLowerTransform {
    * should look, and a walk keyed on the diagnostic range would miss them and
    * report the same construct twice.
    */
-  private refuse(parser: Parser, range: Range, what: string, construct: Node | null = null): null {
+  private refuse(parser: Parser, range: Range, what: string, construct: Node | null = null): void {
     let node = construct != null ? construct : this.currentConstruct;
     if (node != null) this.recordRefusalStart(node.range.source, node.range.start);
     else this.recordRefusalStart(range.source, range.start);
     parser.error(DiagnosticCode.Not_implemented_0, range, what);
-    return null;
   }
 
   /** Records one construct start as already reported (see `refusals`). */
@@ -2185,7 +2206,7 @@ export class AsyncLowerTransform {
       refusals = new Map();
       this.refusals = refusals;
     }
-    let starts = refusals.get(source);
+    let starts = getMapEntry(refusals, source);
     if (starts == null) {
       starts = new Set();
       refusals.set(source, starts);
@@ -2348,7 +2369,9 @@ class EmitContext {
 
 /** Adds every member of `source` to `target`. */
 function addAll(target: Set<string>, source: Set<string>): void {
-  source.forEach((value: string): void => { target.add(value); });
+  for (let _values = Set_values(source), i = 0, k = _values.length; i < k; ++i) {
+    target.add(unchecked(_values[i]));
+  }
 }
 
 /** The union of two name sets, as a new set. */
@@ -2473,7 +2496,7 @@ function collectCreationEnvNames(statements: Statement[], into: Set<string>): vo
       case NodeKind.Expression: {
         let expression = (<ExpressionStatement>statement).expression;
         if (expression.kind == NodeKind.Function) {
-          let env = creationEnvOf().get(<FunctionExpression>expression);
+          let env = getMapEntry(creationEnvOf(), <FunctionExpression>expression);
           if (env != null) into.add(env);
         }
         break;
@@ -2483,7 +2506,7 @@ function collectCreationEnvNames(statements: Statement[], into: Set<string>): vo
         for (let j = 0, l = declarations.length; j < l; ++j) {
           let initializer = declarations[j].initializer;
           if (initializer != null && initializer.kind == NodeKind.Function) {
-            let env = creationEnvOf().get(<FunctionExpression>initializer);
+            let env = getMapEntry(creationEnvOf(), <FunctionExpression>initializer);
             if (env != null) into.add(env);
           }
         }
@@ -2496,7 +2519,7 @@ function collectCreationEnvNames(statements: Statement[], into: Set<string>): vo
       case NodeKind.If: {
         let ifs = <IfStatement>statement;
         collectCreationEnvNames([ ifs.ifTrue ], into);
-        if (ifs.ifFalse != null) collectCreationEnvNames([ ifs.ifFalse ], into);
+        if (ifs.ifFalse != null) collectCreationEnvNames([ assert(ifs.ifFalse) ], into);
         break;
       }
       case NodeKind.While: {
@@ -2509,7 +2532,7 @@ function collectCreationEnvNames(statements: Statement[], into: Set<string>): vo
       }
       case NodeKind.For: {
         let loop = <ForStatement>statement;
-        if (loop.initializer != null) collectCreationEnvNames([ loop.initializer ], into);
+        if (loop.initializer != null) collectCreationEnvNames([ assert(loop.initializer) ], into);
         collectCreationEnvNames([ loop.body ], into);
         break;
       }
@@ -2546,7 +2569,7 @@ function liftDeclarationsNamed(
       case NodeKind.If: {
         let ifs = <IfStatement>statement;
         liftDeclarationsNamed([ ifs.ifTrue ], names, lifting);
-        if (ifs.ifFalse != null) liftDeclarationsNamed([ ifs.ifFalse ], names, lifting);
+        if (ifs.ifFalse != null) liftDeclarationsNamed([ assert(ifs.ifFalse) ], names, lifting);
         break;
       }
       default: break;
@@ -2728,7 +2751,7 @@ function rewriteStatement(statement: Statement, ctx: EmitContext): Array<Stateme
     let moved: bool = false;
     for (let i = 0, k = declarations.length; i < k; ++i) {
       let name = declarations[i].name.text;
-      if (ctx.lifting.hasLocal(name) || (ctx.hoisted != null && ctx.hoisted.has(name))) {
+      if (ctx.lifting.hasLocal(name) || (ctx.hoisted != null && assert(ctx.hoisted).has(name))) {
         moved = true;
         break;
       }
@@ -2742,7 +2765,7 @@ function rewriteStatement(statement: Statement, ctx: EmitContext): Array<Stateme
     for (let i = 0, k = declarations.length; i < k; ++i) {
       let declaration = declarations[i];
       let name = declaration.name.text;
-      if (!ctx.lifting.hasLocal(name) && (ctx.hoisted == null || !ctx.hoisted.has(name))) {
+      if (!ctx.lifting.hasLocal(name) && (ctx.hoisted == null || !assert(ctx.hoisted).has(name))) {
         out.push(Node.createVariableStatement(null, [ declaration ], declaration.range));
         continue;
       }
@@ -3018,7 +3041,7 @@ function replaceThisInStatement(
       let ifs = <IfStatement>statement;
       ifs.condition = replaceThisInExpression(ifs.condition, envName, stateName);
       replaceThisInStatement(ifs.ifTrue, envName, stateName);
-      if (ifs.ifFalse != null) replaceThisInStatement(ifs.ifFalse, envName, stateName);
+      if (ifs.ifFalse != null) replaceThisInStatement(assert(ifs.ifFalse), envName, stateName);
       break;
     }
     case NodeKind.While: {
@@ -3035,9 +3058,12 @@ function replaceThisInStatement(
     }
     case NodeKind.For: {
       let loop = <ForStatement>statement;
-      if (loop.initializer != null) replaceThisInStatement(loop.initializer, envName, stateName);
-      if (loop.condition != null) loop.condition = replaceThisInExpression(loop.condition, envName, stateName);
-      if (loop.incrementor != null) loop.incrementor = replaceThisInExpression(loop.incrementor, envName, stateName);
+      let initializer = loop.initializer;
+      if (initializer != null) replaceThisInStatement(initializer, envName, stateName);
+      let condition = loop.condition;
+      if (condition != null) loop.condition = replaceThisInExpression(condition, envName, stateName);
+      let incrementor = loop.incrementor;
+      if (incrementor != null) loop.incrementor = replaceThisInExpression(incrementor, envName, stateName);
       replaceThisInStatement(loop.body, envName, stateName);
       break;
     }
