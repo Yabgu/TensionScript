@@ -1195,7 +1195,11 @@ export class Compiler extends DiagnosticEmitter {
   /** Tries to compile a global variable lazily. */
   compileGlobalLazy(global: Global, reportNode: Node): bool {
     if (global.is(CommonFlags.Compiled)) return !global.is(CommonFlags.Errored);
-    if (global.hasAnyDecorator(DecoratorFlags.Lazy | DecoratorFlags.Builtin) || global.is(CommonFlags.Ambient)) {
+    if (
+      global.hasAnyDecorator(DecoratorFlags.Lazy | DecoratorFlags.Builtin) ||
+      global.is(CommonFlags.Ambient) ||
+      this.hasConstantInitializer(global)
+    ) {
       return this.compileGlobal(global); // compile now
     }
     // Otherwise the global is used before its initializer executes
@@ -1204,6 +1208,27 @@ export class Compiler extends DiagnosticEmitter {
       reportNode.range, global.identifierNode.range, global.internalName
     );
     return false;
+  }
+
+  /**
+   * Tests whether a global's initializer is a compile-time constant, and so has
+   * no initialization order to violate.
+   *
+   * The diagnostic above models one hazard: compiling a global's initializer
+   * before another global's initializer has run. A literal has no operands, so
+   * it cannot depend on execution order — compiling it here yields exactly the
+   * value the declaration would have produced, whenever the declaration is
+   * reached. This is the case the diagnostic was never about, and it is common
+   * in this source: `TypeRef.I32` and friends are read from function bodies
+   * compiled before `module.ts`'s namespace is first used.
+   *
+   * Deliberately narrow. A non-constant initializer (`new Map()`, a call, an
+   * expression) is still refused: those can depend on order, and a read from a
+   * *global initializer* would observe a value that has not been computed yet.
+   */
+  private hasConstantInitializer(global: Global): bool {
+    let initializer = global.initializerNode;
+    return initializer != null && initializer.compilesToConst;
   }
 
   /** Compiles a global variable. */
