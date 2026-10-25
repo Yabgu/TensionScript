@@ -372,6 +372,31 @@ sret fixture asserts that a call after a discarded call starts at the same
 slot). Everything outside these three is refused by name; the measurement is
 pinned in `inline-struct-sret-refusal-reach.ts`.
 
+**A fourth consumer of the same stack: the `@external` argument temp.** It is not
+a consumer of a *return value* — it is the mirror problem, a value crossing
+outward — but it uses the same region, the same mark/bump/guard/restore, and the
+same per-frame mark, so it belongs in this note's accounting:
+
+| Consumer | Direction | Slot content | Restore follows |
+|---|---|---|---|
+| `f().x`, `let q: P = f()` | inward (return) | the callee's result | the caller's read |
+| `f()` (discard) | inward (return) | nothing is read | the call |
+| `@external` parameter | outward (argument) | the caller's value, copied in | the call — the host reads during it |
+
+**The `@external` contract is "borrowed for the call".** The restore after the
+call is sound only because the host does not retain the pointer:
+`tension_adapter.h` rule 6 (`:57-58`) states that an adapter "never caches a
+pointer into guest memory and never holds a slice across a call", and its only
+way to touch guest bytes is `guest_read(user, uint32_t ptr, void *dst, uint32_t
+len)` (`:184`) — a `(ptr, len)` pair with no ownership. **If a host ever gains
+async capability, that clause is what changes**, and the temp becomes a
+dangling-pointer surface: the mark would have to stay live until the host
+reports completion, which is a different lifetime model, not a tweak. Recorded
+here so the change is a decision rather than a discovery. Re-entry *during* the
+call is already safe — a WASM local is per-frame, so a nested call allocates
+above the outer block and restores to it (measured: with the restore moved before
+the call, the host's second read returns the inner temp's bytes).
+
 ---
 
 ## 9. Recommendation
