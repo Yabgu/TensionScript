@@ -61,8 +61,7 @@ import {
   ContinueStatement,
   DeclarationStatement,
   DecoratorKind,
-  DecoratorNode,
-  DoStatement,
+  DecoratorNode,  DoStatement,
   EnumDeclaration,
   EnumValueDeclaration,
   ExportImportStatement,
@@ -90,6 +89,7 @@ import {
   VoidStatement,
   WhileStatement,
   ModuleDeclaration,
+  MemoryModel,
 
   mangleInternalPath
 } from "./ast";
@@ -120,6 +120,45 @@ function hasManagedDecorator(decorators: DecoratorNode[] | null): bool {
     if (decorators[i].decoratorKind == DecoratorKind.Managed) return true;
   }
   return false;
+}
+
+/** Whether a decorator list carries `@inline` (the value-type marker). */
+function hasInlineDecorator(decorators: DecoratorNode[] | null): bool {
+  if (!decorators) return false;
+  for (let i = 0, k = decorators.length; i < k; ++i) {
+    if (decorators[i].decoratorKind == DecoratorKind.Inline) return true;
+  }
+  return false;
+}
+
+/**
+ * The memory model a decorator name stands for, or {@link MemoryModel.Any} when
+ * it names none.
+ *
+ * Only the three storage models are memory models. Everything else — `@final`,
+ * `@global`, `@abi.alias`, a custom name — is somebody else's decorator and is
+ * left for the existing declaration/attribute paths to judge.
+ */
+function memoryModelOfDecoratorName(name: Expression): MemoryModel {
+  let text: string | null = null;
+  if (name.kind == NodeKind.Identifier) {
+    text = (<IdentifierExpression>name).text;
+  } else if (name.kind == NodeKind.PropertyAccess) {
+    // `@memory.inline`-style spellings are not memory models; only the three
+    // bare names are. Falling through keeps `@abi.alias` a plain attribute.
+    return MemoryModel.Any;
+  }
+  if (text == null) return MemoryModel.Any;
+  if (text == "inline") return MemoryModel.Inline;
+  if (text == "managed") return MemoryModel.Managed;
+  if (text == "unmanaged") return MemoryModel.Unmanaged;
+  return MemoryModel.Any;
+}
+
+/** Whether two models are the `@inline` + `@managed` contradiction. */
+function isInlineManagedPair(a: MemoryModel, b: MemoryModel): bool {
+  return (a == MemoryModel.Inline && b == MemoryModel.Managed) ||
+         (a == MemoryModel.Managed && b == MemoryModel.Inline);
 }
 
 
@@ -402,6 +441,17 @@ export class Parser extends DiagnosticEmitter {
             structRange
           );
         }
+        // `@inline` is a storage model too, so it contradicts `@managed` for the
+        // same reason `@unmanaged` does: a value with no address cannot also be
+        // a GC reference. Reported on the struct keyword, and parsing continues
+        // as `@managed`, exactly like the `@managed`/`@unmanaged` case above —
+        // stopping would cascade a parse error through the rest of the file.
+        if (explicitManaged && hasInlineDecorator(decorators)) {
+          this.error(
+            DiagnosticCode.A_struct_cannot_be_both_inline_and_managed,
+            structRange
+          );
+        }
         tn.next();
         let decl = this.parseClassOrInterface(
           tn, flags,
@@ -604,10 +654,45 @@ export class Parser extends DiagnosticEmitter {
     suppressErrors: bool = false
   ): TypeNode | null {
 
-    // before: Type
+    // before: ('@' Identifier)*? Type
+    //
+    // A pre-type decorator names the memory model this **use** of the type asks
+    // for: `v: @inline V3`. It is distinct from a declaration decorator
+    // (`@inline struct V3`, which sets the record's own model) and from a
+    // post-type attribute (`x: f32 @abi.alias("f")`, which describes the
+    // type). See `TypeNode.memoryModel`.
+    let memoryModel = MemoryModel.Any;
+    let memoryModelDecorator: DecoratorNode | null = null;
 
     // NOTE: this parses our limited subset
     let token = tn.next();
+    while (token == Token.At) {
+      let decorator = this.parseDecorator(tn);
+      if (!decorator) break;
+      let model = memoryModelOfDecoratorName(decorator.name);
+      if (model == MemoryModel.Any) {
+        // A decorator that is not a memory model has no meaning before a type:
+        // the only pre-type decorators are the three storage models.
+        this.error(
+          DiagnosticCode.Decorator_0_is_not_valid_here,
+          decorator.range, decorator.name.range.toString()
+        );
+      } else if (memoryModel != MemoryModel.Any) {
+        // One use, one model. `@inline @managed` gets the dedicated message
+        // (the same contradiction a declaration reports); any other pair is a
+        // second model on one use, which has no reading at all.
+        this.error(
+          isInlineManagedPair(memoryModel, model)
+            ? DiagnosticCode.A_struct_cannot_be_both_inline_and_managed
+            : DiagnosticCode.Only_one_memory_model_decorator_may_apply_to_a_use,
+          Range.join(assert(memoryModelDecorator).range, decorator.range)
+        );
+      } else {
+        memoryModel = model;
+        memoryModelDecorator = decorator;
+      }
+      token = tn.next();
+    }
     let startPos = tn.tokenPos;
 
     let type: TypeNode;
@@ -880,10 +965,22 @@ export class Parser extends DiagnosticEmitter {
       tn.next();
       let attribute = this.parseDecorator(tn);
       if (!attribute) break;
+      // A memory model is a pre-type decorator. Accepted here, it would be
+      // silently ignored — a `V @inline` parameter would compile as a plain
+      // pointer, which is the trap this refusal exists to close. Every other
+      // post-type attribute (`@abi.alias`, `@custom`, …) is unaffected.
+      if (memoryModelOfDecoratorName(attribute.name) != MemoryModel.Any) {
+        this.error(
+          DiagnosticCode.A_memory_model_decorator_must_precede_the_type_it_applies_to_0,
+          attribute.range, attribute.name.range.toString()
+        );
+        continue;
+      }
       if (!type.attributes) type.attributes = [ attribute ];
       else assert(type.attributes).push(attribute);
     }
 
+    if (memoryModel != MemoryModel.Any) type.memoryModel = memoryModel;
     return type;
   }
 
