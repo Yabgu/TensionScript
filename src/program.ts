@@ -134,6 +134,7 @@ import {
   writeI32AsI64,
   writeI64AsI32
 } from "./util";
+import { getMapEntry } from "./util/collections";
 
 import {
   Resolver
@@ -467,7 +468,7 @@ export class Program extends DiagnosticEmitter {
    * and a one-file user package is `LibraryEntry`, exactly like `~lib/array`.
    *
    * The CLI populates this at the two std parse sites, *before* `--lib` merges
-   * user libraries into the same `libraryFiles` map (`cli/index.js:520-534`),
+   * user libraries into the same `libraryFiles` map (`cli/index.js:528-541`),
    * which is the only point where membership still means "std". A transform
    * that must skip the compiler's own source — the async lowering does, so it
    * does not walk the standard library — tests this set instead.
@@ -577,7 +578,7 @@ export class Program extends DiagnosticEmitter {
   get taskPrototype(): ClassPrototype | null {
     let cached = this._taskPrototype;
     if (!cached) {
-      let element = this.elementsByName.get(CommonNames.Task);
+      let element = getMapEntry(this.elementsByName, CommonNames.Task);
       if (!element || element.kind != ElementKind.ClassPrototype) return null;
       this._taskPrototype = cached = <ClassPrototype>element;
     }

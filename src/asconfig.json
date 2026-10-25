@@ -16,32 +16,37 @@
       "outFile": "../build/assemblyscript.debug.wasm",
       "textFile": "../build/assemblyscript.debug.wast",
       "debug": true,
-      "sourceMap": true
+      "sourceMap": true,
+      "stackSize": 65536
     },
     "release": {
       "outFile": "../build/assemblyscript.release.wasm",
       "textFile": "../build/assemblyscript.release.wast",
       "optimizeLevel": 3,
-      "shrinkLevel": 0
+      "shrinkLevel": 0,
+      "stackSize": 65536
     },
     "rtraced": {
       "outFile": "../build/assemblyscript.rtraced.wasm",
       "textFile": "../build/assemblyscript.rtraced.wast",
       "debug": true,
       "use": "ASC_RTRACE=1",
+      "stackSize": 65536,
       "runPasses": []
     },
     "debug-bootstrap": {
       "outFile": "../build/assemblyscript.debug-bootstrap.wasm",
       "textFile": "../build/assemblyscript.debug-bootstrap.wast",
       "debug": true,
-      "sourceMap": true
+      "sourceMap": true,
+      "stackSize": 65536
     },
     "release-bootstrap": {
       "outFile": "../build/assemblyscript.release-bootstrap.wasm",
       "textFile": "../build/assemblyscript.release-bootstrap.wast",
       "optimizeLevel": 3,
-      "shrinkLevel": 0
+      "shrinkLevel": 0,
+      "stackSize": 65536
     }
   }
 }

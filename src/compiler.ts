@@ -209,6 +209,7 @@ import {
   writeF64,
   writeV128,
   cloneMap,
+  getMapEntry,
   isPowerOf2,
   readI32,
   isIdentifier,
@@ -1997,7 +1998,7 @@ export class Compiler extends DiagnosticEmitter {
         let args = new Array<Type>(envTypeParameterNodes.length);
         for (let i = 0, k = envTypeParameterNodes.length; i < k; ++i) {
           let name = envTypeParameterNodes[i].name.text;
-          let arg = contextual != null ? contextual.get(name) : null;
+          let arg = contextual != null ? getMapEntry(contextual, name) : null;
           if (arg == null) {
             this.error(DiagnosticCode.Type_argument_expected, instance.declaration.range);
             return false;
@@ -8016,7 +8017,7 @@ export class Compiler extends DiagnosticEmitter {
     // The closure transform records what this function's `_env` will mean,
     // keyed by the expression node -- the declaration above is a clone, so a
     // declaration-keyed table would not find it (`docs/closures-plan.md` §3.3).
-    let closureInfo = envInfoOf().get(expression);
+    let closureInfo = getMapEntry(envInfoOf(), expression);
     if (closureInfo) {
       prototype.envKind = closureInfo.kind;
       prototype.envClass = closureInfo.envClass;
@@ -8616,7 +8617,7 @@ export class Compiler extends DiagnosticEmitter {
    * capability's own reader at the await site instead.
    */
   private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {
-    let site = awaitSites().get(expression);
+    let site = getMapEntry(awaitSites(), expression);
     if (!site) {
       // No lowering ran, or this await is one the transform did not take. Say so
       // rather than emitting a read of a record that does not exist.
@@ -11281,7 +11282,7 @@ export class Compiler extends DiagnosticEmitter {
       if (member.kind != ElementKind.PropertyPrototype) continue;
       let property = (<PropertyPrototype>member).instance;
       if (property == null || !property.isField) continue;
-      let fieldLocal = fieldLocals.get(property.name);
+      let fieldLocal = getMapEntry(fieldLocals, property.name);
       if (fieldLocal == null) continue;
       unchecked(operands[at + pushed] = this.module.local_get(fieldLocal.index, fieldLocal.type.toRef()));
       ++pushed;
@@ -11438,7 +11439,7 @@ export class Compiler extends DiagnosticEmitter {
       let fields = assert(this.inlineStructFieldsOf(unchecked(parameterTypes[i])));
       for (let j = 0, n = fields.length; j < n; ++j) {
         let field = unchecked(fields[j]);
-        let to = fieldLocals.get(field.name);
+        let to = getMapEntry(fieldLocals, field.name);
         // A field refused at declaration (a `T[N]` or GC-reference field) has
         // no local: it was never part of the value.
         if (!to) continue;
@@ -11512,7 +11513,7 @@ export class Compiler extends DiagnosticEmitter {
     let stmts = new Array<ExpressionRef>();
     for (let i = 0, k = fields.length; i < k; ++i) {
       let field = unchecked(fields[i]);
-      let fieldLocal = fieldLocals.get(field.name);
+      let fieldLocal = getMapEntry(fieldLocals, field.name);
       // A field refused at declaration was never part of the value; there is
       // nothing to store and no representation to store it as.
       if (!fieldLocal) continue;
@@ -11664,7 +11665,7 @@ export class Compiler extends DiagnosticEmitter {
       let fields = assert(this.inlineStructFieldsOf(returnType));
       for (let i = 0, k = fields.length; i < k; ++i) {
         let field = unchecked(fields[i]);
-        let to = readTarget.get(field.name);
+        let to = getMapEntry(readTarget, field.name);
         if (!to) continue;
         stmts.push(module.local_set(
           to.index,
@@ -11745,7 +11746,7 @@ export class Compiler extends DiagnosticEmitter {
     let stmts = new Array<ExpressionRef>();
     for (let i = 0, k = fields.length; i < k; ++i) {
       let field = unchecked(fields[i]);
-      let fieldLocal = fieldLocals.get(field.name);
+      let fieldLocal = getMapEntry(fieldLocals, field.name);
       // A field refused at declaration (a T[N] field, a GC reference) has no
       // local: it was never part of the value, and a store here would need the
       // representation the refusal withheld.

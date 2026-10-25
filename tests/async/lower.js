@@ -57,8 +57,9 @@ const NOT_IMPLEMENTED = 100;
 function run(source) {
   const program = buildProgram([ [ "probe.ts", source ] ]);
   const Transform = asc.AsyncLowerTransform;
-  // The CLI assigns these onto the transform's prototype before instantiating
-  // it (`cli/index.js:455-462`) — this is that assignment, not a re-implementation.
+  // The CLI runs the pipeline inside the compiler (`src/transforms.ts`); this
+  // test drives the class directly, so it supplies the program the pipeline
+  // would, the same way the CLI did before the pipeline moved.
   Object.assign(Transform.prototype, { program });
   new Transform().afterParse(program.parser);
   const file = program.sources.find(source => source.internalPath === "probe");
@@ -80,7 +81,7 @@ function run(source) {
 
 /**
  * Compiles `source` through **both** `afterParse` transforms, in the order the
- * CLI applies them (`cli/index.js:697-701`): closures first, then async. The
+ * pipeline applies them (`src/transforms.ts`): closures first, then async. The
  * §8.3(a) shapes need it — the closure transform is what records that a nested
  * async function is a `Struct` closure (`envInfoOf`), and without that record
  * the async transform has nothing to carry into `state.$env`.

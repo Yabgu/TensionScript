@@ -718,3 +718,210 @@ artifacts leak into the WAT):
 Only the first two are byte-identical, and those are the two the toolchain
 refuses to accept. The generalisation was sound for the property it measured and
 wrong for the property relied on.
+
+## Bootstrap self-compile, continued — the CLI/WASM harness (stacked PR)
+
+PR #17 left the ordering fix in place and the self-host fixpoint unrun: stage 2
+died in the CLI/WASM harness at two gaps. This PR closes both, and the
+fixpoint — stage 0's output against stage 2's, the phase's aggregate neutrality
+proof — **now runs and is empty, debug and release**.
+
+### Gap 2's shape: not a CLI gate, and not a class export either
+
+The CLI pushed the two in-tree transforms unconditionally
+(`cli/index.js:452-464` before this PR), and `src/asconfig.json` configures no
+`transforms` at all. So "gate the push by asconfig" was the wrong diagnosis:
+the transforms are the compiler's own pipeline, always on. Every `async` or
+closure program in `tests/compiler` compiles with no `--transform` flag and
+depends on exactly that push.
+
+Exporting the *classes* is not available at this boundary, which the glue
+settles: the WASM module exports 80 flat functions and no classes. A
+class-typed value crosses as an opaque `__Internref` handle
+(`__liftInternref(exports.newProgram(...))`), which the host may pass back into
+an exported function but cannot construct, extend, or read a field off. That is
+also why gap 1's guard exists: `program.sources` is not a number's property.
+
+The shape is therefore **opaquely passable**, and the smaller end of it: one
+flat export, `applyInTreeTransforms(program)`, which runs the pipeline *inside*
+the instance on the handle the CLI already holds (`src/transforms.ts`). No
+transform class crosses the boundary and no AST surface is exposed. The CLI
+pushes one adapter for both hosts, so stage 0 and stage 1 run the same two
+lines in the same order.
+
+### Gap 2's cost, measured after the shape was chosen
+
+The transforms had never been in the compiler's own build graph — the CLI
+loaded them from the JS build. Importing them from `index-wasm.ts` exposed, in
+one step, everything about those two files that the self-host had never
+compiled:
+
+- **55 `TS2322`** — the same nullability divergence PR #17 handled 16 of: this
+  compiler does not carry a `!= null` narrowing across a repeated property
+  read. Fixed with the phase's established idiom (a local for the repeated
+  read, `assert(...)` where a local would be clumsier).
+- **1 `AS100` spread** (`[ ...fields, thisEnvCtor ]`) — rebuilt in place.
+- **1 `Set#forEach`** — AS's `Set` has no `forEach`; the tree's `Set_values`
+  loop replaces it.
+- **`null` is not a type.** `refuse(...): null` is fine for tsc and a `TS2304`
+  here. `refuse` now returns `void` and each `return this.refuse(...)` is a
+  call followed by `return null`.
+- **`null` is a `usize` literal**, so `let x = cond ? null : someStatement`
+  types the ternary as `usize` and fails. Two sites were rebuilt explicitly.
+- **25 `Map#get` sites where the two hosts disagree.** AS's `Map#get` *aborts*
+  on a missing key; JS's returns `undefined`, and the code reads a miss as
+  `null`. This is not a type error — it is a host-semantics difference that
+  only fires when the pass runs inside the compiler. First observable failure:
+  `Scope#resolve` → "Key does not exist in ~lib/map.ts". Fixed with
+  `getMapEntry` (`src/util/collections.ts`), the `has`-guarded read, named
+  once.
+
+None of these are output changes, and the 1339-fixture suite is what proves it:
+every fixture now compiles through the new pipeline.
+
+**Cost in bytes.** The compiler's own module now contains both passes: debug
+`.wasm` 1,884,318 → 2,209,924 (+326 KB), release 970,930 → 1,103,068 (+132 KB).
+The debug `.wast` grows 29.0 → 34.7 MB.
+
+### Gap 3: a shadow-stack limit, measured, not a recursion cycle
+
+The failure is `~stack_check`'s abort (`src/passes/shadowstack.ts:317-330`):
+`__stack_pointer < __data_end`. That is the **shadow stack** — the region
+`--stackSize` provisions in linear memory for managed locals under
+`runtime: incremental` — not the engine's call stack, and not visible to V8.
+The trace's frames (`Flow#lookup` → `Function#lookup` → `Element#lookup` →
+`File#getMember`) are the deepest *chain*, not a cycle: each `lookup` delegates
+to a parent or a map, and the JS compiler compiles the identical source with
+exit 0.
+
+So the shape is capacity, and it is the *running* compiler's capacity, not the
+compiled program's. Measured by bisection on the compiler's own build:
+
+- 32,768 (the default) — fails;
+- 34,048 — fails;
+- 34,304 — passes.
+
+Peak usage ≈ **34.2 KB**, and the default is short by ~1.5 KB. All five targets
+got `"stackSize": 65536` (2× the default, 1.9× the measured peak), and both
+halves of each fixpoint pair got the same value — the shadow-stack size is a
+global initializer (`__stack_pointer`), so an asymmetric setting would show up
+in the `.wast` diff as a difference this PR introduced.
+
+That this is load-bearing and not cosmetic was caught by the same measurement:
+`release-bootstrap` was missed in the first edit, kept 32,768, and stage 2
+overflowed again. The emitted `__stack_pointer` differed from `release.wast` by
+exactly 32,768.
+
+### Gap 1's residual: the std skip is inert under `--wasm`, and benign
+
+Gap 1's guard makes `markStdSources` a no-op under `--wasm`, so `stdSources` is
+empty and `AsyncLowerTransform#afterParse`'s `stdSources.has(source)` skip never
+fires: the transform walks std along with everything else. Measured directly in
+the JS host, with the two runs differing only in whether the marking happens:
+
+- output: **byte-identical** `.wast` (sha256 equal);
+- `stats.transform`: 76.4/72.7 ms marked, 78.3/77.4 ms unmarked — the walk
+  costs about **2%**.
+
+It is output-neutral because std declares no `async function` (two mentions,
+both in comments), so there is nothing to lower and nothing to refuse. In
+`--wasm` the same walk happens over the same sources and the fixpoint is empty:
+the strongest available form of "benign". What restores the skip in both hosts
+is moving the marking inside `parse` — its own small phase, not this one.
+
+### The fixes
+
+- `src/transforms.ts` — `applyInTreeTransforms(program)`: closures, then async.
+  The one place the pipeline order is written.
+- `src/index-wasm.ts` — exports it. One flat function, no class, no AST.
+- `cli/index.js` — pushes one adapter (`afterParse: () =>
+  assemblyscript.applyInTreeTransforms(program)`) instead of two classes; user
+  transforms still run first; `applyTransform`'s error handling and stats still
+  wrap it.
+- `src/closure/lower.ts`, `src/async/lower.ts` — the portability pass above;
+  `program` is no longer `readonly` (it was never readonly in practice: the CLI
+  assigned it onto the prototype), and the doc comment now names both hosts.
+- `src/util/collections.ts` — `getMapEntry`.
+- `src/asconfig.json` — `stackSize: 65536` on all five targets.
+
+### The fixpoint
+
+`bootstrap:debug` exit 0, `bootstrap:release` exit 0, and the tree's own
+comparison (`git diff --no-index` of the two `.wast` files, the last step of
+each script) empty:
+
+- debug: `20154872…` = `20154872…`;
+- release: `5b4b9a22…` = `5b4b9a22…`.
+
+Stage 0's output (the JS compiler) and stage 2's output (the compiler compiled
+by the compiler compiled by the JS compiler) are the same text. The aggregate
+neutrality proof for the ordering relaxation now exists.
+
+### The Bootstrap job's fixture suite: 10 more host-parity sites, in the compiler core
+
+The `.wast` fixpoint compiles **one** input: the compiler's own source. CI's
+Bootstrap job does more — it runs the whole fixture suite through the
+self-hosted compiler (`npm run test:compiler -- --wasm
+build/assemblyscript.<t>-bootstrap.js`), which had never run in this fork
+because stage 1 always failed first. Enabled, it found the same divergence in
+the core: `Key does not exist in ~lib/map.ts`, first at fixture
+`compiler/typeof`, in `Compiler#compileFunctionExpression`'s
+`envInfoOf().get(expression)`.
+
+Audited rather than chased one abort at a time: 58 `.get(` sites in `src/` have
+no `has` within four lines, of which **10** read a map where a miss is a
+legitimate answer (the rest read keys from a `Map_keys` iteration — present by
+construction — or sit inside `assert(...get(...))`, which fails on both hosts
+either way):
+
+- `compiler.ts`: `contextual.get(name)` (a type argument that may be absent),
+  four `fieldLocals.get(field.name)` / `fieldLocals.get(property.name)` reads
+  whose callers already `continue` on `null` (an `@inline struct` field refused
+  at declaration has no local), and one `readTarget.get(field.name)`;
+- `inference.ts`: an alias chain's `known.get(name)`;
+- `program.ts`: `elementsByName.get(CommonNames.Task)` in `taskPrototype`;
+- `resolver.ts`: `scopedLocals.get(CommonNames.this_)`;
+- `types.ts`: `Type.fixedArray`'s cache — **upstream code**, so the divergence
+  is not only in this fork's additions.
+
+All ten use `getMapEntry`. With them, the fixture suite is green through both
+bootstrap compilers (debug and release), and through the CI cross-step that
+compiles the release target with the debug bootstrap compiler.
+
+The lesson is the same one gap 1 taught, at a wider radius: "the compiler
+compiles itself" and "the compiler runs the same programs as itself" are two
+different properties, and the fixpoint proves only the first.
+
+### Item 5: the `variables.ts` unit test does not exist
+
+Checked `tests/` and every worktree: no `variables.ts`, no fixture or test by
+that name, and `git log --all -- '*variables*'` has no history for one. What
+exists is `tests/compiler/variable-access-in-initializer.ts`, a compiler fixture
+(a checked-in `.wat` pair), which passes — it is the boundary the ordering
+diagnostic was narrowed against (`458c81f4`), unrelated to this phase's three
+gaps. Nothing regressed; the prior report's reference does not resolve.
+
+### Why stacked, not appended to PR #17
+
+PR #17's six commits are the ordering story and they are told; this PR is the
+harness story. Two merge-commits preserve both: PR #17 merges first, this one
+retargets to `main` (GitHub does it automatically when the base branch is
+deleted) and merges second. The tradeoff is explicit: `main` stays without the
+ordering fix until both land. A single merge sequence over two spaced merges —
+the user's call, recorded.
+
+### Meta-finding: the aggregate proof waited on a second system (fifth instance)
+
+The ordering phase could not run its own proof — the `.wast` fixpoint — until
+the CLI/WASM harness worked, so its evidence was per-fixture (`npm test`,
+1339 fixtures) with the aggregate deferred and the reason named. That is the
+same shape as the layout-loop non-fix, the design note's §8, "the site list is
+not final" and the scoping's §1.6(a): a measurement that is sound for the
+property it measured, standing in for the one that was wanted.
+
+This instance has a second layer worth recording: the deferral was **two
+systems deep**. After gap 1, the harness needed gap 2; after gap 2's shape was
+chosen, the transform sources needed to be compilable by the compiler, which
+exposed 55 type sites and 25 host-semantics sites. Each layer was only visible
+from the layer above it. The fixpoint was finally run — and it is empty — but
+the sequence is the finding: "stage 1 is green" was not one step from the proof.

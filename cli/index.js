@@ -444,21 +444,26 @@ export async function main(argv, options) {
     }
   }
 
-  // The in-tree closure lowering (docs/closures-plan.md §3): an `afterParse`
-  // AST transform that analyses captures and rewrites them onto synthesized
-  // environment objects. It is pushed *before* the async transform on purpose:
-  // `applyTransform` runs the array in order, so closures are lowered first and
-  // the async transform sees ordinary code — an environment local and ordinary
-  // field accesses — which its lifting rule already handles (§3.1).
-  // A no-op for a program that captures nothing, which is what keeps programs
-  // without closures byte-identical.
-  transforms.push(assemblyscript.ClosureLowerTransform);
-
-  // The in-tree async lowering (docs/async-await-plan-v2.md §0.2, §4.5, D9): an
-  // `afterParse` AST transform that turns `async function`s into state machines.
-  // It is a no-op for a program that declares no `async` function, which is what
-  // keeps the output of programs that do not use `async` byte-identical.
-  transforms.push(assemblyscript.AsyncLowerTransform);
+  // The in-tree afterParse transforms: closure lowering (docs/closures-plan.md
+  // §3), then async lowering (docs/async-await-plan-v2.md §0.2, §4.5, D9). They
+  // are pushed as one step and *after* the `--transform` / `options.transforms`
+  // entries, so closures are lowered first and the async transform sees ordinary
+  // code — an environment local and ordinary field accesses — which its lifting
+  // rule already handles (§3.1).
+  //
+  // They run *inside* the compiler (`assemblyscript.applyInTreeTransforms`,
+  // `src/transforms.ts`) rather than as classes this CLI constructs. That is what
+  // lets both hosts run the same pipeline: when the compiler is WebAssembly, its
+  // classes cross the boundary as opaque handles the host may pass back into an
+  // exported function but cannot construct, and the program lives inside the
+  // instance. One flat call, given the handle this CLI already holds, is the
+  // whole surface — no transform class and no AST is exposed to the host.
+  //
+  // A no-op for a program that captures nothing and declares no `async` function,
+  // which is what keeps the output of such a program byte-identical.
+  transforms.push({
+    afterParse: () => assemblyscript.applyInTreeTransforms(program)
+  });
 
   // Fix up the prototype of the transforms’ constructors and instantiate them.
   try {
@@ -512,11 +517,16 @@ export async function main(argv, options) {
     const sources = program.sources;
     // The compiled compiler does not expose its source list to JS: under
     // `--wasm`, `newProgram()` returns an object whose `sources` and
-    // `stdSources` are both undefined (measured). The marks then cannot be
-    // made from here at all, so skip rather than crash. `stdSources` is read
-    // only by the async transform (`src/async/lower.ts`), which no bootstrap
-    // target configures — so this path is not left expecting marks that are
-    // absent.
+    // `stdSources` are both undefined (measured). The marks then cannot be made
+    // from here at all, so skip rather than crash.
+    //
+    // What the skip costs: `stdSources` stays empty, so the async transform —
+    // which the bootstrap *does* run, inside the compiler (`src/transforms.ts`)
+    // — does not skip std and walks it with everything else. That is benign
+    // (std declares no `async function`, so there is nothing to lower and
+    // nothing to refuse) and the `.wast` fixpoint proves it for the compiler's
+    // own build byte for byte. Moving the marking inside `parse` is what would
+    // restore the skip in both hosts.
     if (!sources) return;
     for (let i = before, k = sources.length; i < k; ++i) {
       program.stdSources.add(sources[i]);
