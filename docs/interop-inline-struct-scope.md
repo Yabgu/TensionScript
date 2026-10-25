@@ -600,7 +600,8 @@ out is what keeps this a 1.0 feature.
 | `@inline struct` local, field read/write | **in** | SROA; 1 instruction (§6). |
 | Assignment `y = x` | **in** | `N × local.set`; no aliasing (§5.1). |
 | Guest-internal parameter | **in** | Per-field operands (§5.2). |
-| `@external` parameter | **in — implemented** | Temp pointer; import is `(param i32)` (§8). |
+| `@external` parameter | **in — implemented** | Temp pointer; import is `(param i32)` (§8). Multi-field records only; a single-field record is refused (the tool convention passes the scalar). |
+| Export parameter | **in — implemented** | Byval pointer the host supplies; export is `(param i32)`; the callee copies the fields at entry. Multi-field only, same reason. |
 | Capture in a closure | **in** | Field-wise capture into the env class (§5.3) — with the capture-by-value rule ratified. |
 | Internal return | **in — implemented** (sret: hidden first parameter, 4 KB static call-temp stack in the data segment, per-call-frame bump) | sret (§9). |
 | `@external` return | **out** | Needs an ABI change (§9). |
