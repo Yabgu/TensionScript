@@ -1,7 +1,7 @@
 {
   "asc_flags": [],
   "stderr": [
-    "AS100: Not implemented: passing this expression as an @inline struct to an @external function (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)",
-    "AS100: Not implemented: passing this expression as an @inline struct to an @external function (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)"
+    "AS100: Not implemented: passing this expression as an @inline struct to a by-value parameter (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)",
+    "AS100: Not implemented: passing this expression as an @inline struct to a by-value parameter (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)"
   ]
 }

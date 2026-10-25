@@ -1,7 +1,7 @@
 {
   "asc_flags": [],
   "stderr": [
-    "AS100: Not implemented: an @inline struct as an export parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; the export's by-value pointer parameter is the mirror of the @external temp and lands next)",
-    "AS100: Not implemented: an @inline struct as an export parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; the export's by-value pointer parameter is the mirror of the @external temp and lands next)"
+    "AS100: Not implemented: passing this expression as an @inline struct to a by-value parameter (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)",
+    "AS100: Not implemented: passing this expression as an @inline struct to a by-value parameter (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)"
   ]
 }

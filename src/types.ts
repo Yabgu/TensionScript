@@ -1037,6 +1037,12 @@ export class Signature {
      *  signature also exists as an ordinary guest function, whose parameters
      *  really are per-field. */
     externalBoundary: bool = false,
+    /** Whether an `@inline struct` parameter of an **export** crosses as a
+     *  byval pointer the *host* provides: one `i32`, with the callee's prologue
+     *  copying its fields into the SROA locals. The mirror of
+     *  `externalBoundary`, which is the same shape with the guest on the other
+     *  side of the call. Part of the memoization key for the same reason. */
+    exportByValParams: bool = false,
   ): Signature {
     // get the usize type, and the type of the signature
     let usizeType = program.options.usizeType;
@@ -1051,13 +1057,14 @@ export class Signature {
     let nextId = program.nextSignatureId;
     
     // construct the signature and calculate it's unique key
-    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, sretDisabled, externalBoundary, nextId, type);
+    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, sretDisabled, externalBoundary, exportByValParams, nextId, type);
     // Constructors and ordinary functions can share parameter and return types
     // but not the hidden destination parameter, and an `@external` declaration
     // can share them with a guest function but not the pointer shape, so both
     // flags are part of the key.
     let uniqueKey = (sretDisabled ? "!sret-disabled:" : "")
       + (externalBoundary ? "!external-boundary:" : "")
+      + (exportByValParams ? "!export-byval:" : "")
       + signature.toString();
 
     // check if it exists, and return it
@@ -1093,6 +1100,9 @@ export class Signature {
     /** Whether an `@inline struct` parameter crosses a host boundary as a
      *  pointer to a caller-materialised temp. */
     public readonly externalBoundary: bool,
+    /** Whether an `@inline struct` parameter of an export crosses as a byval
+     *  pointer the host provides. */
+    public readonly exportByValParams: bool,
     /** Unique id representing this signature. */
     public readonly id: u32,
     /** Respective function type. */
@@ -1148,7 +1158,7 @@ export class Signature {
    * the same source parameter.
    */
   wasmParamSlotCountOf(sourceIndex: i32): i32 {
-    if (this.isExternalPointerParam(sourceIndex)) return 1;
+    if (this.isByValPointerParam(sourceIndex)) return 1;
     return Signature.wasmParamCountOf(unchecked(this.parameterTypes[sourceIndex]));
   }
 
@@ -1162,9 +1172,52 @@ export class Signature {
    */
   isExternalPointerParam(sourceIndex: i32): bool {
     if (!this.externalBoundary) return false;
-    let classReference = unchecked(this.parameterTypes[sourceIndex]).classReference;
+    return Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]));
+  }
+
+  /** Whether source parameter `sourceIndex` of an **export** crosses as a byval
+   *  pointer: the host materialises the value and passes its address, and the
+   *  callee copies the fields in at entry. */
+  isExportByValParam(sourceIndex: i32): bool {
+    if (!this.exportByValParams) return false;
+    return Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]));
+  }
+
+  /** Whether this signature spends **one `i32` address** on a value-type
+   *  parameter rather than one operand per field — true for either boundary. */
+  isByValPointerParam(sourceIndex: i32): bool {
+    return this.isExternalPointerParam(sourceIndex) || this.isExportByValParam(sourceIndex);
+  }
+
+  /** Whether *any* parameter of this signature is a byval pointer, i.e. whether
+   *  a call to it has to materialise argument temps. */
+  get byValPointerParams(): bool {
+    return this.externalBoundary || this.exportByValParams;
+  }
+
+  /** Whether `type` is an `@inline struct`. */
+  static isInlineStructRef(type: Type): bool {
+    let classReference = type.classReference;
     return classReference != null &&
       classReference.hasDecorator(DecoratorFlags.InlineStruct);
+  }
+
+  /** The number of fields an `@inline struct` has (0 for a record with none).
+   *  Distinct from `wasmParamCountOf`, which cannot express "one field" and
+   *  "one operand" differently. */
+  static fieldCountOf(type: Type): i32 {
+    let classReference = type.classReference;
+    if (classReference == null) return 0;
+    let members = classReference.members;
+    if (!members) return 0;
+    let count = 0;
+    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+      let member = unchecked(_values[i]);
+      if (member.kind != ElementKind.PropertyPrototype) continue;
+      let property = (<PropertyPrototype>member).instance;
+      if (property != null && property.isField) ++count;
+    }
+    return count;
   }
 
   /**
@@ -1256,7 +1309,7 @@ export class Signature {
     for (let i = 0; i < numParameterTypes; ++i) {
       let parameterType = unchecked(parameterTypes[i]);
       let count = this.wasmParamSlotCountOf(i);
-      if (this.isExternalPointerParam(i)) {
+      if (this.isByValPointerParam(i)) {
         // The host boundary: the caller materialises the value and passes its
         // address. Not `toRef()` — an `@inline struct`'s ref is a GC heap type
         // (`ensureType`), which is a different ABI and would need the GC
@@ -1309,8 +1362,10 @@ export class Signature {
     // constructors and ordinary functions never share a hidden dest slot
     if (this.sretDisabled != other.sretDisabled) return false;
 
-    // a host-boundary signature never shares slots with a guest one
+    // a host-boundary signature never shares slots with a guest one, and the
+    // export byval shape is a third arity for the same source parameters
     if (this.externalBoundary != other.externalBoundary) return false;
+    if (this.exportByValParams != other.exportByValParams) return false;
 
     // check return type
     if (!this.returnType.equals(other.returnType)) return false;
@@ -1474,7 +1529,8 @@ export class Signature {
       requiredParameters,
       hasRest,
       this.sretDisabled,
-      this.externalBoundary
+      this.externalBoundary,
+      this.exportByValParams
     );
   }
 }
