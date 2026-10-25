@@ -1030,6 +1030,13 @@ export class Signature {
      *  not a value. Part of the memoization key, because a method with the same
      *  parameter and return types must still get the hidden parameter. */
     sretDisabled: bool = false,
+    /** Whether an `@inline struct` parameter crosses a host boundary and must
+     *  be passed as the **address** of a caller-materialised temp rather than
+     *  as one WASM operand per field. Set for an `@external` declaration with
+     *  such a parameter. Part of the memoization key, because the same source
+     *  signature also exists as an ordinary guest function, whose parameters
+     *  really are per-field. */
+    externalBoundary: bool = false,
   ): Signature {
     // get the usize type, and the type of the signature
     let usizeType = program.options.usizeType;
@@ -1044,10 +1051,14 @@ export class Signature {
     let nextId = program.nextSignatureId;
     
     // construct the signature and calculate it's unique key
-    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, sretDisabled, nextId, type);
+    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, sretDisabled, externalBoundary, nextId, type);
     // Constructors and ordinary functions can share parameter and return types
-    // but not the hidden destination parameter, so the flag is part of the key.
-    let uniqueKey = (sretDisabled ? "!sret-disabled:" : "") + signature.toString();
+    // but not the hidden destination parameter, and an `@external` declaration
+    // can share them with a guest function but not the pointer shape, so both
+    // flags are part of the key.
+    let uniqueKey = (sretDisabled ? "!sret-disabled:" : "")
+      + (externalBoundary ? "!external-boundary:" : "")
+      + signature.toString();
 
     // check if it exists, and return it
     if (signatureTypes.has(uniqueKey)) {
@@ -1079,6 +1090,9 @@ export class Signature {
     public readonly hasRest: bool,
     /** Whether a hidden sret destination parameter is forbidden (constructors). */
     public readonly sretDisabled: bool,
+    /** Whether an `@inline struct` parameter crosses a host boundary as a
+     *  pointer to a caller-materialised temp. */
+    public readonly externalBoundary: bool,
     /** Unique id representing this signature. */
     public readonly id: u32,
     /** Respective function type. */
@@ -1119,6 +1133,41 @@ export class Signature {
   }
 
   /**
+   * How many WASM operands **this signature** spends on source parameter
+   * `sourceIndex`.
+   *
+   * Usually the static `wasmParamCountOf` answer. The exception is a
+   * host-boundary signature (`externalBoundary`, an `@external` declaration):
+   * there an `@inline struct` crosses as the address of a caller-materialised
+   * temp, so it spends **one** `i32` operand instead of one per field.
+   *
+   * This is the only place that difference exists. Every emitter that walks a
+   * parameter list — `paramRefs`, `wasmParamCount`, `wasmParamStartOf`,
+   * `sourceIndexOf`, and the call site's operand count — asks this method, so a
+   * boundary signature and a guest signature cannot disagree about the arity of
+   * the same source parameter.
+   */
+  wasmParamSlotCountOf(sourceIndex: i32): i32 {
+    if (this.isExternalPointerParam(sourceIndex)) return 1;
+    return Signature.wasmParamCountOf(unchecked(this.parameterTypes[sourceIndex]));
+  }
+
+  /**
+   * Whether source parameter `sourceIndex` crosses a host boundary as a single
+   * `i32` address instead of one WASM operand per field.
+   *
+   * Both halves matter: the signature must be a host-boundary signature, and
+   * the parameter must actually be an `@inline struct` (every other type already
+   * spends one operand).
+   */
+  isExternalPointerParam(sourceIndex: i32): bool {
+    if (!this.externalBoundary) return false;
+    let classReference = unchecked(this.parameterTypes[sourceIndex]).classReference;
+    return classReference != null &&
+      classReference.hasDecorator(DecoratorFlags.InlineStruct);
+  }
+
+  /**
    * Whether a call to this signature passes a hidden destination pointer.
    *
    * An `@inline struct` return is **memory-only**: the value has no WASM
@@ -1146,7 +1195,7 @@ export class Signature {
     let parameterTypes = this.parameterTypes;
     let start = this.hasHiddenDestParam ? 1 : 0;
     for (let i = 0; i < sourceIndex && i < parameterTypes.length; ++i) {
-      start += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
+      start += this.wasmParamSlotCountOf(i);
     }
     return start;
   }
@@ -1157,7 +1206,7 @@ export class Signature {
     let parameterTypes = this.parameterTypes;
     let count = this.hasHiddenDestParam ? 1 : 0;
     for (let i = 0, k = parameterTypes.length; i < k; ++i) {
-      count += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
+      count += this.wasmParamSlotCountOf(i);
     }
     return count;
   }
@@ -1182,7 +1231,7 @@ export class Signature {
     let start = this.hasHiddenDestParam ? 1 : 0;
     if (wasmIndex < start) return -1;
     for (let i = 0, k = parameterTypes.length; i < k; ++i) {
-      let count = Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
+      let count = this.wasmParamSlotCountOf(i);
       if (wasmIndex < start + count) return i;
       start += count;
     }
@@ -1206,8 +1255,15 @@ export class Signature {
     if (hasHiddenDest) unchecked(typeRefs[at++] = TypeRef.I32);
     for (let i = 0; i < numParameterTypes; ++i) {
       let parameterType = unchecked(parameterTypes[i]);
-      let count = Signature.wasmParamCountOf(parameterType);
-      if (count == 1) {
+      let count = this.wasmParamSlotCountOf(i);
+      if (this.isExternalPointerParam(i)) {
+        // The host boundary: the caller materialises the value and passes its
+        // address. Not `toRef()` — an `@inline struct`'s ref is a GC heap type
+        // (`ensureType`), which is a different ABI and would need the GC
+        // feature; the slot here is a plain pointer, exactly as `@unmanaged`
+        // and `@managed` cross.
+        unchecked(typeRefs[at++] = TypeRef.I32);
+      } else if (count == 1) {
         // Scalar or reference: one ref, exactly as before.
         unchecked(typeRefs[at++] = parameterType.toRef());
       } else {
@@ -1252,6 +1308,9 @@ export class Signature {
 
     // constructors and ordinary functions never share a hidden dest slot
     if (this.sretDisabled != other.sretDisabled) return false;
+
+    // a host-boundary signature never shares slots with a guest one
+    if (this.externalBoundary != other.externalBoundary) return false;
 
     // check return type
     if (!this.returnType.equals(other.returnType)) return false;
@@ -1414,7 +1473,8 @@ export class Signature {
       this.thisType,
       requiredParameters,
       hasRest,
-      this.sretDisabled
+      this.sretDisabled,
+      this.externalBoundary
     );
   }
 }

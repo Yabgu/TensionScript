@@ -1712,7 +1712,10 @@ export class Compiler extends DiagnosticEmitter {
     // `@managed` both cross as a single borrowed `i32`), and a caller-side
     // temp that materialises the value and passes its address is the phase's
     // next step; until it exists, nothing compiles here.
-    if (instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs)) {
+    if (
+      instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
+      !signature.externalBoundary
+    ) {
       let parameterTypes = signature.parameterTypes;
       for (let i = 0, k = parameterTypes.length; i < k; ++i) {
         if (this.isInlineStructType(unchecked(parameterTypes[i]))) {
@@ -6859,7 +6862,7 @@ export class Compiler extends DiagnosticEmitter {
     let parameterTypes = signature.parameterTypes;
     let wasmOperands = 0;
     for (let i = 0; i < numArguments; ++i) {
-      wasmOperands += Signature.wasmParamCountOf(unchecked(parameterTypes[i]));
+      wasmOperands += signature.wasmParamSlotCountOf(i);
     }
     let numArgumentsInclThis = thisArg ? wasmOperands + 1 : wasmOperands;
     let hasHiddenDest = signature.hasHiddenDestParam;
@@ -6891,10 +6894,41 @@ export class Compiler extends DiagnosticEmitter {
       // `$sretDest`.
       operands[index++] = sretDest;
     }
+    // `@external` boundary: an `@inline struct` argument crosses as the address
+    // of a slot the caller materialises here, not as one operand per field.
+    // One mark covers the whole call — every argument's temp comes out of the
+    // same block, which is what keeps the restore a single operation.
+    this.externalTempMark = null;
+    this.externalTempSize = 0;
+    let externalBase = 0;
+    let externalMark: Local | null = null;
+    let externalOffset = 0;
+    if (signature.externalBoundary) {
+      let total = 0;
+      for (let i = 0; i < numArguments; ++i) {
+        let parameterType = unchecked(parameterTypes[i]);
+        if (this.isInlineStructType(parameterType)) total += this.sretSizeOf(parameterType);
+      }
+      if (total > 0) {
+        externalBase = this.ensureSretStack();
+        externalMark = this.currentFlow.getTempLocal(Type.u32);
+        this.externalTempMark = externalMark;
+        this.externalTempSize = total;
+      }
+    }
     for (let i = 0; i < numArguments; ++i) {
-      index += this.expandSroaArgument(
-        unchecked(argumentExpressions[i]), unchecked(parameterTypes[i]), operands, index
-      );
+      let parameterType = unchecked(parameterTypes[i]);
+      if (externalMark != null && this.isInlineStructType(parameterType)) {
+        operands[index++] = this.makeExternalTempArgument(
+          unchecked(argumentExpressions[i]), parameterType,
+          externalBase, assert(externalMark), externalOffset
+        );
+        externalOffset += this.sretSizeOf(parameterType);
+      } else {
+        index += this.expandSroaArgument(
+          unchecked(argumentExpressions[i]), parameterType, operands, index
+        );
+      }
     }
     assert(index == numOperands);
     return this.makeCallDirect(instance, operands, reportNode, (constraints & Constraints.WillDrop) != 0);
@@ -7385,6 +7419,10 @@ export class Compiler extends DiagnosticEmitter {
     // (which builds the operands) and is wrapped here, where the call node is.
     let sretMarkLocal = this.sretDiscardMark;
     this.sretDiscardMark = null;
+    let externalMark = this.externalTempMark;
+    let externalSize = this.externalTempSize;
+    this.externalTempMark = null;
+    this.externalTempSize = 0;
     if (instance.hasDecorator(DecoratorFlags.Inline)) {
       if (!instance.is(CommonFlags.Overridden)) {
         assert(!instance.is(CommonFlags.Stub)); // doesn't make sense
@@ -7514,6 +7552,16 @@ export class Compiler extends DiagnosticEmitter {
     this.currentType = returnType;
     if (sretMarkLocal != null) {
       expr = this.wrapSretCall(assert(sretMarkLocal), expr, returnType, reportNode);
+      this.currentType = immediatelyDropped ? Type.void : returnType;
+    }
+    if (externalMark != null) {
+      expr = this.wrapExternalTempCall(
+        assert(externalMark), externalSize, expr, returnType, reportNode
+      );
+      // `wrapExternalTempCall` emits the overflow guard, whose message is a
+      // static string — compiling it leaves `currentType` pointing at that
+      // string. Restate the call's type, the same way the sret branch does after
+      // its own guard.
       this.currentType = immediatelyDropped ? Type.void : returnType;
     }
     return expr;
@@ -11181,6 +11229,12 @@ export class Compiler extends DiagnosticEmitter {
    *  `compileCallDirect` (which builds the operands) to `makeCallDirect`
    *  (which builds the call node and can wrap it). */
   private sretDiscardMark: Local | null = null;
+  /** The mark local of an `@external` call's argument temps, and the size of the
+   *  block they occupy. Handed over the same way, for the same reason: the
+   *  allocation is decided where the arguments are compiled, but the mark/bump/
+   *  guard/restore statements have to wrap the call node. */
+  private externalTempMark: Local | null = null;
+  private externalTempSize: i32 = 0;
 
   /**
    * Reserves the static call-temp region, once per module, and returns its base.
@@ -11256,6 +11310,118 @@ export class Compiler extends DiagnosticEmitter {
         reportNode
       )
     );
+  }
+
+  /** `base + mark + extra`, freshly built. Callers must not share the node:
+   *  Binaryen's passes assume a single parent per expression. */
+  private makeSretAddressPlus(base: i32, markLocal: Local, extra: i32): ExpressionRef {
+    let module = this.module;
+    return module.binary(
+      BinaryOp.AddI32,
+      this.makeSretAddress(base, markLocal),
+      module.i32(extra)
+    );
+  }
+
+  /**
+   * Materialises one `@inline struct` argument of an `@external` call on the
+   * static call-temp stack and returns the address to pass.
+   *
+   * The host receives a `(ptr, len)`-shaped pointer and borrows it for the call
+   * (`tension_adapter.h:184`, rule 6 at `:57-58`: "An adapter never caches a
+   * pointer into guest memory and never holds a slice across a call"), so the
+   * temp only has to outlive the call itself. The caller's restore is the outer
+   * block, after the call node.
+   *
+   * The stores and the address are one `block`, so they are evaluated at this
+   * operand's position — after the call's mark/bump (which the wrapper emits
+   * before the call node) and before the call. A nested call inside a later
+   * argument therefore allocates above this whole block, never inside it.
+   */
+  private makeExternalTempArgument(
+    argumentExpression: Expression,
+    type: Type,
+    base: i32,
+    markLocal: Local,
+    offset: i32
+  ): ExpressionRef {
+    let module = this.module;
+    let local = argumentExpression.kind == NodeKind.Identifier
+      ? this.currentFlow.lookupLocal((<IdentifierExpression>argumentExpression).text)
+      : null;
+    if (local == null || local.fieldLocals == null) {
+      // A value has no address, so there is nothing to copy into the temp. This
+      // is the same rule the guest-internal parameter path applies, restated
+      // for the host boundary: only a local can cross.
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        argumentExpression.range,
+        "passing this expression as an @inline struct to an @external function (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)"
+      );
+      return module.unreachable();
+    }
+    let fieldLocals = local.fieldLocals;
+    let fields = assert(this.inlineStructFieldsOf(type));
+    let stmts = new Array<ExpressionRef>();
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let fieldLocal = fieldLocals.get(field.name);
+      // A field refused at declaration was never part of the value; there is
+      // nothing to store and no representation to store it as.
+      if (!fieldLocal) continue;
+      stmts.push(module.store(
+        field.type.byteSize,
+        // A fresh address node per store (one parent per node).
+        this.makeSretAddressPlus(base, markLocal, offset),
+        module.local_get(fieldLocal.index, fieldLocal.type.toRef()),
+        field.type.toRef(),
+        field.memoryOffset
+      ));
+    }
+    stmts.push(this.makeSretAddressPlus(base, markLocal, offset));
+    return module.block(null, stmts, TypeRef.I32);
+  }
+
+  /** Mark, allocate, guard, call, restore — the `@external` argument temp's
+   *  lifetime, which is the call itself. */
+  private wrapExternalTempCall(
+    markLocal: Local,
+    size: i32,
+    callExpr: ExpressionRef,
+    returnType: Type,
+    reportNode: Node
+  ): ExpressionRef {
+    let module = this.module;
+    let global = assert(this.sretStackGlobal);
+    let restore = module.global_set(global, module.local_get(markLocal.index, TypeRef.I32));
+    let head = [
+      module.local_set(markLocal.index, module.global_get(global, TypeRef.I32), false),
+      module.global_set(global, module.binary(
+        BinaryOp.AddI32,
+        module.local_get(markLocal.index, TypeRef.I32),
+        module.i32(size)
+      )),
+      this.makeSretGuard(markLocal, size, reportNode)
+    ];
+    // Unlike sret, the call here has a real WASM result, so it cannot sit in a
+    // block as a non-final value: capture it in a temp, restore, then read it.
+    // The restore still follows the call, which is the whole point — the host
+    // reads from the temp while the call runs.
+    if (returnType == Type.void) {
+      head.push(callExpr);
+      head.push(restore);
+      return module.block(null, head);
+    }
+    let resultLocal = this.currentFlow.getTempLocal(returnType);
+    head.push(module.local_set(resultLocal.index, callExpr, false));
+    head.push(
+      // After the call, not before: the host reads from the temp while the call
+      // runs. For a synchronous host this is the whole lifetime; a host that
+      // retained the pointer would need a different contract (rule 6, `:57-58`).
+      restore
+    );
+    head.push(module.local_get(resultLocal.index, returnType.toRef()));
+    return module.block(null, head, returnType.toRef());
   }
 
   /** Mark, allocate, and restore around a call whose result is discarded. */

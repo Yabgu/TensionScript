@@ -3179,6 +3179,14 @@ export class Resolver extends DiagnosticEmitter {
     let sretDisabled = prototype.is(CommonFlags.Constructor) &&
       returnType.classReference != null &&
       returnType.classReference.hasDecorator(DecoratorFlags.InlineStruct);
+    // An `@external` declaration is a **host** boundary: an `@inline struct`
+    // parameter crosses as the address of a temp the guest materialises, one
+    // `i32`, not as one WASM parameter per field. Without this the import's
+    // field list becomes part of the host ABI (measured: `(param f32 f32)` for
+    // a two-field record, while `@unmanaged` and `@managed` both emitted
+    // `(param i32)`).
+    let externalBoundary = prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
+      signatureHasInlineStructParam(parameterTypes);
     let signature = Signature.create(
       this.program,
       parameterTypes,
@@ -3186,7 +3194,8 @@ export class Resolver extends DiagnosticEmitter {
       thisType,
       requiredParameters,
       hasRest,
-      sretDisabled
+      sretDisabled,
+      externalBoundary
     );
 
     let nameInclTypeParameters = prototype.name;
@@ -4122,4 +4131,19 @@ export class Resolver extends DiagnosticEmitter {
     }
     return typeArgumentNodes[0];
   }
+}
+
+/** Whether any source parameter type is an `@inline struct`. Used to decide
+ *  whether an `@external` signature needs the host-boundary pointer shape; a
+ *  declaration with no value-type parameter keeps its ordinary signature (and
+ *  its memoized identity). */
+function signatureHasInlineStructParam(parameterTypes: Type[]): bool {
+  for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+    let classReference = unchecked(parameterTypes[i]).classReference;
+    if (
+      classReference != null &&
+      classReference.hasDecorator(DecoratorFlags.InlineStruct)
+    ) return true;
+  }
+  return false;
 }
