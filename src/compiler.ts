@@ -1195,7 +1195,11 @@ export class Compiler extends DiagnosticEmitter {
   /** Tries to compile a global variable lazily. */
   compileGlobalLazy(global: Global, reportNode: Node): bool {
     if (global.is(CommonFlags.Compiled)) return !global.is(CommonFlags.Errored);
-    if (global.hasAnyDecorator(DecoratorFlags.Lazy | DecoratorFlags.Builtin) || global.is(CommonFlags.Ambient)) {
+    if (
+      global.hasAnyDecorator(DecoratorFlags.Lazy | DecoratorFlags.Builtin) ||
+      global.is(CommonFlags.Ambient) ||
+      this.hasConstantInitializer(global)
+    ) {
       return this.compileGlobal(global); // compile now
     }
     // Otherwise the global is used before its initializer executes
@@ -1204,6 +1208,27 @@ export class Compiler extends DiagnosticEmitter {
       reportNode.range, global.identifierNode.range, global.internalName
     );
     return false;
+  }
+
+  /**
+   * Tests whether a global's initializer is a compile-time constant, and so has
+   * no initialization order to violate.
+   *
+   * The diagnostic above models one hazard: compiling a global's initializer
+   * before another global's initializer has run. A literal has no operands, so
+   * it cannot depend on execution order — compiling it here yields exactly the
+   * value the declaration would have produced, whenever the declaration is
+   * reached. This is the case the diagnostic was never about, and it is common
+   * in this source: `TypeRef.I32` and friends are read from function bodies
+   * compiled before `module.ts`'s namespace is first used.
+   *
+   * Deliberately narrow. A non-constant initializer (`new Map()`, a call, an
+   * expression) is still refused: those can depend on order, and a read from a
+   * *global initializer* would observe a value that has not been computed yet.
+   */
+  private hasConstantInitializer(global: Global): bool {
+    let initializer = global.initializerNode;
+    return initializer != null && initializer.evaluatesToConst;
   }
 
   /** Compiles a global variable. */
@@ -6518,10 +6543,11 @@ export class Compiler extends DiagnosticEmitter {
         classReference != null &&
         classReference.hasDecorator(DecoratorFlags.ManagedStruct)
       ) {
+        let typeArguments = expression.typeArguments;
         this.error(
           DiagnosticCode.Not_implemented_0,
-          expression.typeArguments && expression.typeArguments.length > i
-            ? expression.typeArguments[i].range
+          typeArguments && typeArguments.length > i
+            ? unchecked(typeArguments[i]).range
             : expression.range,
           "COPY_STRUCT on an @managed struct (a raw byte copy bypasses the GC write barrier)"
         );
@@ -7990,7 +8016,7 @@ export class Compiler extends DiagnosticEmitter {
     // The closure transform records what this function's `_env` will mean,
     // keyed by the expression node -- the declaration above is a clone, so a
     // declaration-keyed table would not find it (`docs/closures-plan.md` §3.3).
-    let closureInfo = envInfoOf.get(expression);
+    let closureInfo = envInfoOf().get(expression);
     if (closureInfo) {
       prototype.envKind = closureInfo.kind;
       prototype.envClass = closureInfo.envClass;
@@ -8117,7 +8143,7 @@ export class Compiler extends DiagnosticEmitter {
     let valueType = this.currentType;
     let expr: ExpressionRef;
     if (instance.prototype.envKind == EnvKind.Struct) {
-      expr = this.makeEnvFunctionValue(instance, assert(creationEnvOf.get(expression)));
+      expr = this.makeEnvFunctionValue(instance, assert(creationEnvOf().get(expression)));
     } else if (instance.prototype.capturesThis) {
       expr = this.makeCapturingFunctionValue(instance);
     } else {
@@ -8590,7 +8616,7 @@ export class Compiler extends DiagnosticEmitter {
    * capability's own reader at the await site instead.
    */
   private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {
-    let site = awaitSites.get(expression);
+    let site = awaitSites().get(expression);
     if (!site) {
       // No lowering ran, or this await is one the transform did not take. Say so
       // rather than emitting a read of a record that does not exist.
@@ -11246,7 +11272,7 @@ export class Compiler extends DiagnosticEmitter {
       for (let k = 0; k < count; ++k) unchecked(operands[at + k] = this.module.unreachable());
       return count;
     }
-    let fieldLocals = local.fieldLocals;
+    let fieldLocals = assert(local.fieldLocals);
     let classReference = assert(paramType.classReference);
     let members = assert(classReference.members);
     let pushed = 0;
@@ -11408,7 +11434,7 @@ export class Compiler extends DiagnosticEmitter {
       let pointerLocal = flow.lookupLocal(parameterName + "$byval");
       let parent = flow.lookupLocal(parameterName);
       if (pointerLocal == null || parent == null || parent.fieldLocals == null) continue;
-      let fieldLocals = parent.fieldLocals;
+      let fieldLocals = assert(parent.fieldLocals);
       let fields = assert(this.inlineStructFieldsOf(unchecked(parameterTypes[i])));
       for (let j = 0, n = fields.length; j < n; ++j) {
         let field = unchecked(fields[j]);
@@ -11481,7 +11507,7 @@ export class Compiler extends DiagnosticEmitter {
       );
       return module.unreachable();
     }
-    let fieldLocals = local.fieldLocals;
+    let fieldLocals = assert(local.fieldLocals);
     let fields = assert(this.inlineStructFieldsOf(type));
     let stmts = new Array<ExpressionRef>();
     for (let i = 0, k = fields.length; i < k; ++i) {
@@ -11777,10 +11803,11 @@ export class Compiler extends DiagnosticEmitter {
       let field = unchecked(fields[i]);
       if (!this.isSroaFieldType(field.type)) {
         let fieldDeclaration = assert(field.prototype.fieldDeclaration);
+        let fieldTypeNode = fieldDeclaration.type;
         this.error(
           DiagnosticCode.Not_implemented_0,
-          fieldDeclaration.type
-            ? fieldDeclaration.type.range
+          fieldTypeNode
+            ? fieldTypeNode.range
             : fieldDeclaration.name.range,
           field.type.kind == TypeKind.FixedArray
             ? "a T[N] field in an @inline struct (SROA keeps one WASM local per field; array fields are the deep-SROA phase)"
@@ -11863,7 +11890,7 @@ export class Compiler extends DiagnosticEmitter {
       if (source && source.fieldLocals) {
         for (let i = 0, k = fields.length; i < k; ++i) {
           let fieldName = unchecked(fields[i]).name;
-          let from = assert(source.fieldLocals.get(fieldName));
+          let from = assert(assert(source.fieldLocals).get(fieldName));
           let to = assert(fieldLocals.get(fieldName));
           initializers.push(
             module.local_set(to.index, module.local_get(from.index, from.type.toRef()), false)

@@ -881,7 +881,11 @@ export class Type {
   static fixedArray(elementType: Type, length: i32): Type {
     let key = elementType.toString() + "[" + length.toString() + "]";
     let cache = Type._fixedArrays;
-    if (!cache) cache = Type._fixedArrays = new Map();
+    if (!cache) {
+      let fresh = new Map<string, Type>();
+      Type._fixedArrays = fresh;
+      cache = fresh;
+    }
     let cached = cache.get(key);
     if (cached) return cached;
     let arrayType = new Type(
