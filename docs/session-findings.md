@@ -197,11 +197,16 @@ repo*, and *does the rule count comment mentions*.
 | Follow-up | Why it is not in scope |
 |---|---|
 | ~~**SROA parameters** (field-list signatures)~~ | **Landed in PR #14** (`f55fe7d0`): `wasmParamCountOf` / `wasmParamStartOf` / `wasmParamCount` / `sourceIndexOf` are the only translation site; the callee gets one local per field; the call site expands arguments in field order. |
-| **SROA return (sret)** | `Signature#resultRefs` is a single `toRef()`, so a struct return needs a hidden destination parameter. Its site list is **not empty**: `compiler.ts:7070` (the interface-stub temp index) is already known, and by the pattern below there will be more. Design note: `docs/interop-sret-design.md`. |
+| ~~**SROA return (sret)**~~ | **Landed in PR #16** (`73fb7a57`): hidden destination parameter, the static call-temp stack, per-call-frame mark/restore. Design note: `docs/interop-sret-design.md`. |
+| ~~**`@external` temp**~~ | **Landed in PR #16** (`516104f9`): the caller's temp, `(param i32)`, borrowed for the call. |
 | **SROA for top-level statics** | Per-field WASM *globals*, or a shadow slot. Refused until then, with the alternative named. |
 | **SROA for GC-reference fields** | The mixed representation above — a design phase. |
 | **`T[N]` fields in `@inline struct`** | Deep SROA: N locals per array field, plus a `makeZero` arm for `FixedArray` (it asserts today, `compiler.ts` `makeZero`). |
-| **Closure capture, `@external` temp, inline nesting** | Later commits of the 1.0 phase (scoping §9, §10). |
+| **Closure capture, inline nesting** | Later commits of the 1.0 phase (scoping §9, §10). Closure capture needs inline nesting first (the environment is a class, and a value-typed field in one is nesting). |
+| **`@external` return of `@inline struct`** | An ABI version: the host would have to write `sizeof<T>` bytes into a slot it never allocated. The last refused case. |
+| **`--sretStackSize`** | The 4 KB limit is shared by sret and the `@external` temp, so this option is one limit for both. Structurally identical to `stackSize`. |
+| **`unmanaged-single-field-tool-convention`** | A one-scalar `@unmanaged struct` passes as a pointer where BasicCABI passes the scalar. Ratified *accept*: the engine's adapter reads records through `guest_read(ptr, len)` (`tension_adapter.h:184`), so aligning it would change a live ABI. Revisit only if a C-authored consumer appears. See Finding 3. |
+| **`--create=false` in the compiler test harness** | `tests/util/options.js`'s boolean parser treats `--create=false` as `true`, so there is no way to say "compare only" on the command line; passing it regenerates the fixtures from whatever build is present. Discovered the hard way (a broken build rewrote three fixtures). Also `--create` is `type: "b"`, so the value is never inspected. |
 
 ---
 
@@ -330,3 +335,306 @@ each can drift silently. Listed so the gap is visible rather than assumed away.
   (circular), a test for the prose correction (one-time event).
 - **Does not fix:** Correction 1 (PR #10's branch), the `dist/` local gap (a CI
   concern, unchanged), the bootstrap failures (the Bootstrap-ordering phase).
+
+## PR #16: sret — the layout correction, the eighth site, and the read-back finding
+
+**The layout correction.** The design note said the call-temp stack lives
+"below `__data_end`", which reads like the shadow stack. Measured in an emitted
+module: `__data_end` 520, `__stack_pointer` = `__heap_base` 33288. The region
+`[16, __data_end)` is the **data segment**, and `visitStack` walks
+`[__stack_pointer, __heap_base)` — so a slot in the data region is never scanned
+as a GC root, which is exactly the property the mechanism needs. The base is a
+compile-time constant (the segment's `.offset`), so a call site emits
+`i32.const base + mark` and no address computation.
+
+**The bump pointer's safety.** `compileVisitGlobals` (`builtins.ts:11058-11062`)
+visits only class-typed globals. A plain `i32` global contributes no GC edge and
+no interrupt threshold, so the bump pointer cannot be mistaken for a root or trip
+a collection. Initial value = the segment offset; mutated only by alloc/restore.
+
+**The eighth site.** `operandsTostack` mapped WASM operands to source parameters
+through `sourceIndexOf` and treated `-1` as "past the end". With a hidden
+destination at operand 0, that `break` fired on the first operand and abandoned
+every managed operand after it — the managed argument reached the call as a bare
+`local.get`, unspilled. Fixed by checking `wasmParamCount()` first (which makes
+`-1` unambiguously the hidden slot) and advancing **both** indices past it.
+Measured load-bearing: reverting the loop makes `inline-struct-sret-eighth-site`
+fail on exactly the missing spill block.
+
+**The stub fix is defensive.** `finalizeOverrideStub`'s temp local is
+`1 + wasmParamCount()`, but a virtual method returning an `@inline struct` is
+refused at `compileFunction` before the stub is finalized, so no test exercises
+it. Verified by inspection and by no regression in the suite.
+
+**Region size is policy.** 4 KB = 256 slots at the 16-byte fixture record size.
+The precedent is the shadow stack (`compiler.ts:290`, 32 KB, abort on overflow).
+Overflow aborts with a message naming the limit; a silent overwrite of the next
+slot would be a corruption bug that reads as a wrong value. `--sretStackSize` is
+a follow-up, structurally identical to `stackSize`.
+
+**The read-back finding — the design note's §8 was wrong.** §8 framed
+"multi-value results" as set aside. Measured before writing the read path: every
+non-consumer use of an `@inline struct` call result is refused (the gate: `g(f())`
+and the four other shapes), and no path treats the slot's address as a value.
+Sret therefore does not need multi-value results — **the model says there is no
+value** — and the change did not touch the expression pipeline at all. It
+relocated the problem from the call to the read path, and that path has exactly
+two shapes: one field load for `f().x`, a per-field copy for `let q: P = f()`.
+Recorded as a correction in `docs/interop-sret-design.md` §8, which now also
+records the **third** consumer: a bare `f()` statement (the discard shape), which
+allocates, calls and unwinds without reading. Three consumers, and the refusal
+covers everything else.
+
+**The gate, measured.** The five non-consumer uses were compiled as probes
+before the read path existed. Four refuse: `g(f())` (AS100, passing an
+expression as a value argument), `f() + 1` (TS2365), `return f()` in an `i32`
+function (TS2322), `a[i] = f()` (AS100: `Array<P>` is a refused type argument,
+and the store reads the value as a whole), and `obj.field = f()` (AS100:
+inline nesting at the field declaration). A bare `f()` compiles, and its WAT is
+the safe shape: mark, bump, guard, pass `base + mark` as the hidden destination,
+call, restore — no `local.get` of the slot, no address treated as a value. The
+gate therefore did not fire; the four refusals are pinned in
+`inline-struct-sret-refusal-reach.ts`.
+
+### The three gate-probe findings
+
+Each was found while measuring the refusal's reach, each is fixed, and each has a
+fixture that fails if the fix is reverted. The reverts were run, not reasoned
+about.
+
+**1. Constructors are not sret** — `fd6c7772`. A constructor's declared return
+type is its class type; for an `@inline struct` that made `hasHiddenDestParam`
+true, and the emitted constructor came out as
+`(param $this i32) (param $sretDest i32)` with **no result**, while its body
+still returned `this`. `Signature` gains `sretDisabled`, part of the memoization
+key and set only for inline-struct constructors; ordinary constructors keep their
+old key and type-id sequence, because the flag had to be in the key *and* had to
+stay off every other signature (an unconditional flag shifted type ids and broke
+`builtins`, `async-closures-case6` and `async-closure-value`).
+*Revert measured:* removing the `sretDisabled` check from `hasHiddenDestParam`
+makes `inline-struct-sret` fail at validation with
+`wasm-validator error in function interop/inline-struct-sret/P#constructor`.
+*Fixture:* `inline-struct-sret.ts` (`inferredNew`, `zero`).
+
+**2. Inferred locals enter SROA** — `fd6c7772`. `let p = new P()` and
+`let q = f()` reach the post-inference SROA branch once constructors are valid;
+`let q = p`, with **both** types inferred, had no annotated type to trigger the
+SROA branch, so it compiled `p` as a bare identifier — the whole-value refusal.
+A local lookup in `compileVariableStatement` before the initializer is compiled
+fixes it, and deliberately resolves nothing (a `resolveExpression` there can
+force a class before the compiler's builtin constants exist, which crashed on
+`new Box()` during the first attempt).
+*Revert measured:* removing the identifier pre-check makes `inline-struct-sret`
+fail with `AS100: reading an @inline struct value as a whole`.
+*Fixture:* `inline-struct-sret.ts` (`inferredFromLocal`, `inferredNew`,
+`inferredCopy`), including a call counter proving `let q = f()` emits **one**
+runtime call (`countedOnce() == 1067`).
+
+**3. A refused field must not reach codegen** — `fd6c7772`. A class field of
+`@inline struct` is refused at its declaration (inline nesting), but the
+generated constructor still called `makeZero(fieldType)` for it and the field's
+setter was still compiled. Both crashed Binaryen with
+`Assertion failed: index < getNumLocals()` in `setLocalName`, from a local-index
+mismatch in the generated function — a compiler crash on top of a diagnostic that
+had already been reported.
+*Revert measured:* removing the skip makes `inline-struct-sret-refusal-reach`
+abort in `setLocalName` instead of reporting AS100.
+*Fixture:* `inline-struct-sret-refusal-reach.ts` (`class Holder { field: P = new P(); }`).
+
+**A pass-level constraint worth remembering.** Binaryen's passes assume one
+parent per expression node. Sharing one address node between two field loads
+compiles at -O0 and aborts `LocalCSE` in release
+(`Assertion failed: !(requests && original)`). Every load builds its own
+address node now, and the -O3 fixtures are what catch a regression.
+
+**Instance-method sret: the shift.** An instance method's hidden destination is
+WASM local 1 (`this` is local 0), so `compileSretReturnStatement`'s
+`destIndex = signature.thisType ? 1 : 0` is a correctness hinge rather than a
+formality: with 0, the method writes the returned fields over `this` and the
+caller reads a wrong value out of a live object — no compile error, no crash.
+`inline-struct-sret-instance.ts` is the guard, and it was measured: setting
+`destIndex` to 0 for instance methods changes the emitted stores from
+`local.get $sretDest` to `local.get $this`, fails the WAT comparison, and traps
+the fixture's runtime assert at instantiation. The fixture also carries the
+combined shape — `Calc#scale(this, dest, p.a, p.b, k)` — so the shift and the
+parameter flattening are exercised together, which is where they would disagree.
+
+## PR #16, continued: the `@external` argument temp
+
+**The silent-flattening finding.** An `@external` declaration with an `@inline
+struct` parameter emitted one WASM parameter per field — `(import "env"
+"host_use" (func (param f32 f32) (result i32)))` for a two-field record. That
+made the record's field list part of the host ABI with nothing recording it:
+`layout_hash` folds arena geometry, and the host never sees the record. Measured
+against the other two kinds: `@unmanaged` and `@managed` both emitted
+`(param i32)`, so the value type was the only one with a different shape at the
+same boundary. Refused first (`af88469e`), then served by the temp
+(`516104f9`); the refusal stays as the fallback for a boundary signature without
+the flag, and *that* is reachable — clearing the flag makes
+`inline-struct-external-param-temp` fail on the diagnostic.
+
+**One shape, one contract.** After the phase, all three record kinds cross as a
+single borrowed pointer:
+
+| Declaration | Import signature | Host receives |
+|---|---|---|
+| `@unmanaged struct` | `(param i32)` | borrowed pointer to the caller's record |
+| `@managed struct` | `(param i32)` | borrowed reference |
+| `@inline struct` | `(param i32)` | borrowed pointer to a caller-materialised temp |
+
+The adapter has no per-field expectation anywhere: its only guest-memory path is
+`guest_read(user, uint32_t ptr, void *dst, uint32_t len)`
+(`tension_adapter.h:184`), and rule 6 (`:57-58`) makes it borrow.
+
+**The temp's re-entrancy, measured.** The restore goes after the call node
+because the host reads the temp during the call. Re-entry *inside* that window is
+safe because the mark is a WASM local: `callback()`'s frame allocates above the
+outer block and restores to the outer's post-bump value.
+*Revert measured:* moving the restore before the call makes the host's second
+read across re-entry return the **inner** temp's bytes — `before=3, after=101`,
+`outer()` 205 instead of 107 — and the fixture's WAT comparison fails.
+*Fixture:* `inline-struct-external-param-reentrancy.ts` (the glue re-enters the
+guest and reads the same pointer twice).
+
+**A per-call mark, not per-argument.** Two value-type arguments in one call take
+one mark, one bump by the sum (32 = two 16-byte slices), one guard and one
+restore; each argument gets a distinct slice, asserted by the host comparing the
+two addresses. Bumping by the total before any operand is evaluated is what lets
+a nested call allocate above the whole block rather than between two slices.
+
+**Two traps the implementation hit, both recorded because they are cheap to
+repeat.** (1) `paramRefs` for the boundary slot must be `TypeRef.I32` explicitly:
+`toRef()` on an `@inline struct` builds a GC heap type via `ensureType`, which
+produced a `~lib/string/String` type error in the first attempt. (2) The overflow
+guard compiles a static message string, which leaves `currentType` pointing at
+that string; the call's type must be restated after wrapping, the same way the
+sret branch already did.
+
+## PR #16, continued: the export mirror and single-field value types
+
+**The export-flattening finding — the import defect, mirrored.** `export function
+take(v: V)` declared `(param f32 f32)` for a two-field record: the field list as
+the host ABI, with `layout_hash` not moving (it folds arena geometry, and this is
+a guest-side declaration the hash never sees). Exactly the defect the `@external`
+side had, in the outgoing direction. Refused first (`ca06c620`), then served by a
+byval pointer (`5069aeba`): the host materialises, the callee loads each field at
+entry. *Revert measured:* omitting the prologue fails
+`inline-struct-export-param-byval` — the fields are never loaded, so the sums are
+wrong — and the WAT comparison fails too.
+
+**Two passes, not one, for byval binding.** Field locals of a byval parameter are
+*additional* locals: the WASM signature spends one slot on the pointer, so the
+fields have to come after every parameter local. Binding them in source order
+gave local `i+1` the type of a WASM parameter that was really the next pointer —
+`local.set` with an `f32` value into an `i32` local, refused by the validator.
+The binding now assigns parameter locals first, then byval field locals, and
+`getNonParameterLocalTypes` starts the additional list at `wasmParamCount()`,
+which is exactly where the second pass begins.
+
+### Finding 1 — the single-field breakage: broken everywhere, not just at the boundary
+
+The pre-work asked a narrow question (does a one-field record pass a pointer or
+the scalar at an `@external` position?) and the answer was: **a pointer**
+(`(param i32)`, call site `base + mark`, 16 bytes reserved, field stored at
+`+0`). The tool convention says the scalar, and both spell `(param i32)`, so the
+mismatch is silent. That is why the shape is now refused at both boundaries.
+
+Measuring it turned up something worse next door. **A one-field value-type
+parameter was unusable everywhere**, including inside the module with no boundary
+involved. Three sites decided "unpack into fields" from
+`wasmParamCountOf(...) > 1`, and a one-field record spends exactly **one** WASM
+slot:
+
+| Site | What it did with `> 1` false |
+|---|---|
+| `program.ts` parameter binding | bound an ordinary local of the record type, with `toRef()`'s GC heap type, instead of an SROA field local |
+| `Signature#paramRefs` | emitted that heap type as the WASM parameter |
+| `Compiler#expandSroaArgument` | compiled the argument as a whole value — the refusal |
+
+So the minimal case failed:
+
+```ts
+@inline struct S { a: i32; }
+function take(s: S): i32 { return s.a; }   // AS100: reading an @inline struct value as a whole
+```
+
+All three now key on the **type** (`Signature.isInlineStructRef`) and use
+`Signature.fieldCountOf` where a field count is what is meant. Commit `3db469cd`
+both refuses the boundary case and fixes the internal one, because refusing alone
+would have told the author to "use a scalar" while the scalar-shaped value was
+silently broken.
+
+*Revert measured:* restoring the `> 1` test in the parameter binding fails
+`tests/compiler/interop/inline-struct-single-field.ts` — the guest function
+`addOne(s: S)` reaching `s.a` is the load-bearing assertion, and it is the same
+function the fixture exports through `run()`.
+
+### Finding 2 — `wasmParamCountOf` answers two questions, and was used for the wrong one
+
+`Signature.wasmParamCountOf(type)` answers **"how many WASM slots does this
+parameter spend?"** It was repeatedly read as **"is this parameter an
+aggregate?"** — a different question with a different answer precisely at one
+field, where an aggregate spends one slot.
+
+Three defects in this phase trace to that conflation:
+
+1. **The single-field breakage above** — three sites, one wrong reading.
+2. **The export flattening, pre-refusal** — the mirror signature was built from
+   the same per-field expansion, so an export declared `(param f32 f32)` for a
+   two-field record. Correct arity by the count's own rule; the count simply does
+   not say "this is a boundary".
+3. **The boundary temp's per-argument vs per-call shape** — deciding whether a
+   parameter needed a temp meant asking a slot-count helper about a *position*;
+   the answer was only well-defined once the signature carried the boundary as a
+   flag, and the flag (not the count) is what the call site consults.
+
+`Signature.fieldCountOf(type)` now separates the concepts, and
+`wasmParamSlotCountOf` / `isInlineStructRef` / `isByValPointerParam` split the
+remaining readings. **The rule for this audit, forward-looking:** *a helper that
+answers two questions will be used wrong for one of them — split it before the
+third defect, not after.* Two independent wrong readings are the signal; three is
+a pattern that has already cost three fixtures.
+
+The same shape of error appeared twice more in this phase in other helpers, which
+is why the rule is stated generally rather than about this function: the
+constructor flag (`sretDisabled`) had to be in the memoization key *and* absent
+for every other signature, and `getNonParameterLocalTypes`'s boundary had to be
+WASM arity rather than source arity.
+
+### Finding 3 — the `@unmanaged` single-field divergence: ratified, not aligned
+
+The same divergence exists for `@unmanaged`: a one-scalar `@unmanaged struct` also
+crosses a boundary as a **pointer**, where BasicCABI would pass the scalar. Nothing
+about `@inline struct` made this true — it was true before the phase, and the
+phase's measurement merely made it visible.
+
+**Ratified: accept, do not align.** The reasons are asymmetric, and the asymmetry
+is the decision:
+
+- The engine's adapter is **pointer-based by design**. Its only guest-memory path
+  is `guest_read(void *user, uint32_t ptr, void *dst, uint32_t len)`
+  (`tension-core/include/tension_adapter.h:184`) — a `(ptr, len)` pair — so every
+  record it touches, `@unmanaged` included, arrives and is read through a pointer.
+  Aligning `@unmanaged` to the scalar would change an ABI the adapter depends on
+  today.
+- BasicCABI is **a convention, not a law.** It describes how a C compiler targeting
+  WASM lowers struct arguments; nothing in WASM enforces it, and a host written
+  against this engine reads pointers.
+- `@inline struct` is **new**, so no caller depends on its pointer shape. Refusing
+  the one-field case there costs nothing and prevents a silent mismatch. Refusing
+  it for `@unmanaged` would break existing callers to fix a theoretical one.
+
+So the honest state is: one kind refuses the divergent shape (no dependants), two
+kinds keep it (the adapter depends on it), and the divergence is **filed** rather
+than hidden. Filed as **`unmanaged-single-field-tool-convention`** — revisit only
+if a C-authored consumer of an `@unmanaged` single-scalar parameter ever appears,
+at which point the choice is between flattening at the boundary and a documented
+"this engine passes record pointers" note in the interop surface.
+
+**Third finding (latent, not fixed).** The operand walk's `paramType.isManaged`
+check uses the *source* parameter's type, not the individual field's. Correct
+today because an `@inline struct`'s fields are scalar or struct-pointer, so
+`isManaged` is false either way. It becomes wrong when GC-reference fields
+exist: the walk's `-1` sentinel and its `isManaged` check both depend on the
+flattening being field-safe, which it is only for unmanaged fields. Gated by the
+GC-ref-fields phase.

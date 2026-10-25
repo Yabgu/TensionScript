@@ -349,6 +349,94 @@ sret keeps the result a single `void` and moves the multi-value problem into
 memory. That is why it is the smaller change **for this compiler's shape** — and
 why §7 keeps the multi-value option open rather than closed.
 
+**Correction, measured during implementation.** This section's framing —
+"multi-value results set aside" — mischaracterised the problem. Sret does not
+need multi-value results **because the model says there is no value**: the value
+is memory end-to-end, and the pipeline never carries it. So the change did not
+touch the expression pipeline at all — it relocated the problem from the call to
+the read path. Recorded in `session-findings.md` as the read-back finding.
+
+**The memory-only model has three legitimate consumers**, not two:
+
+| Consumer | Shape | Emitted |
+|---|---|---|
+| `f().x` | one field read | a load from `(base + mark + offsetof x)`, then restore |
+| `let q: P = f()` | per-field copy | one load and one `local.set` per field, then restore |
+| `f()` (bare statement) | **discard** | mark, bump, guard, call, restore — **no read** |
+
+The third was measured, not assumed: a bare `f()` compiles, and its WAT contains
+no `local.get` of the slot and no address used as a value. It is a *consumer*
+because it must still allocate a destination — the callee always writes one — and
+because its unwind is the behaviour a leaked bump pointer would break (the
+sret fixture asserts that a call after a discarded call starts at the same
+slot). Everything outside these three is refused by name; the measurement is
+pinned in `inline-struct-sret-refusal-reach.ts`.
+
+**A fourth consumer of the same stack: the `@external` argument temp.** It is not
+a consumer of a *return value* — it is the mirror problem, a value crossing
+outward — but it uses the same region, the same mark/bump/guard/restore, and the
+same per-frame mark, so it belongs in this note's accounting:
+
+| Consumer | Direction | Slot content | Restore follows |
+|---|---|---|---|
+| `f().x`, `let q: P = f()` | inward (return) | the callee's result | the caller's read |
+| `f()` (discard) | inward (return) | nothing is read | the call |
+| `@external` parameter | outward (argument) | the caller's value, copied in | the call — the host reads during it |
+
+**The `@external` contract is "borrowed for the call".** The restore after the
+call is sound only because the host does not retain the pointer:
+`tension_adapter.h` rule 6 (`:57-58`) states that an adapter "never caches a
+pointer into guest memory and never holds a slice across a call", and its only
+way to touch guest bytes is `guest_read(user, uint32_t ptr, void *dst, uint32_t
+len)` (`:184`) — a `(ptr, len)` pair with no ownership. **If a host ever gains
+async capability, that clause is what changes**, and the temp becomes a
+dangling-pointer surface: the mark would have to stay live until the host
+reports completion, which is a different lifetime model, not a tweak. Recorded
+here so the change is a decision rather than a discovery. Re-entry *during* the
+call is already safe — a WASM local is per-frame, so a nested call allocates
+above the outer block and restores to it (measured: with the restore moved before
+the call, the host's second read returns the inner temp's bytes).
+
+---
+
+## 8.5 The pass-by-value model, and the export mirror
+
+The `@external` temp and sret are two halves of one model: **a value crosses a
+call as memory, never as a value**. The `@inline struct` phase now covers all four
+positions:
+
+| Position | Multi-field | Single-field |
+|---|---|---|
+| `@external` parameter | `(param i32)` — the caller's temp; host borrows for the call | refused |
+| export parameter | `(param i32)` — the host's byval pointer; callee copies at entry | refused |
+| `@external` return | refused (an ABI version) | refused |
+| sret return (in-module) | `(dest, …)` hidden first parameter | `(dest, …)` |
+
+**Why "by value" is the right name for both directions.** The external temp is
+C#'s "structure by value: passes structures as In parameters" — the guest
+materialises a copy, the host reads it, and mutations do not leak back. The export
+mirror is the same model with the roles swapped: the host materialises the copy,
+and the callee *loads* each field once at entry, so the host's later mutation
+cannot be observed and the callee's writes land in its own locals. Both are the
+same guarantee stated from opposite sides, and both are asserted behaviourally
+rather than by signature.
+
+**Why the shapes agree.** The WASM tool convention (`BasicCABI.md`) passes a
+multi-scalar-field struct indirectly, as a byval pointer — which is exactly what
+`(param i32)` is, and exactly what the engine's adapter reads through
+(`guest_read(ptr, len)`, rule 6). So for multi-field records the tool convention,
+the C# model and this compiler's existing `@unmanaged`/`@managed` convention all
+agree, and one shape serves all three record kinds.
+
+**Why single-field is refused instead.** BasicCABI passes a struct whose only
+member is a scalar **as that scalar**. This compiler passes records as pointers.
+Both spell `(param i32)`, so nothing links-and-fails: one side reads an address as
+a number. That is the one place the conventions cannot be reconciled by
+inspection, so it is refused at the boundaries and left working inside the
+module, where no ABI is involved. The eventual fix is a deliberate flatten
+special case for one-field records at the boundary — not a change to the temp,
+which is correct for every shape the conventions agree on.
+
 ---
 
 ## 9. Recommendation

@@ -1,0 +1,11 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: an @inline struct return across the module boundary (the host would have to pass the destination pointer; that is an ABI version, not this phase)",
+    "AS100: Not implemented: returning this expression from an @inline struct function (only a local value can be returned: a value has no address, so there is nowhere to write it)",
+    "AS100: Not implemented: calling an @inline struct-returning function through a function value (the hidden destination parameter needs a direct call)",
+    "AS100: Not implemented: returning this expression from an @inline struct function (only a local value can be returned: a value has no address, so there is nowhere to write it)",
+    "AS100: Not implemented: an @inline struct return on a virtual method (the override stub has no destination parameter; deferred)",
+    "AS100: Not implemented: returning this expression from an @inline struct function (only a local value can be returned: a value has no address, so there is nowhere to write it)"
+  ]
+}

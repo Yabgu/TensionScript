@@ -16,7 +16,9 @@
 //
 // Refused here, each with its own diagnostic:
 //   - a global (locals are implemented — see `inline-struct-sroa.ts`)
-//   - a return type (parameters are implemented — see `inline-struct-params.ts`)
+//   - ...but **not** a return type any more: an `@inline struct` return is
+//     sret (the caller passes a hidden destination pointer) — see
+//     `inline-struct-sret.ts`.
 //   - a field of another record (inline nesting)
 //   - `T[N]` of an `@inline struct`
 //   - `Array<T>` (a type argument is a pointer slot)
@@ -39,8 +41,8 @@ class Base { b: u32 = 0; }
 // a global
 let globalValue: P = new P();
 
-// a return type (`@inline struct` **parameters** are implemented — see
-// `inline-struct-params.ts`; the return is sret's phase)
+// a return type is **implemented** now (sret — see `inline-struct-sret.ts`);
+// this function is here so `run()` exercises a discarded sret call
 function makes(): P { return new P(); }
 
 // a field of another record: inline nesting

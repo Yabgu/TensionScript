@@ -3171,7 +3171,47 @@ export class Resolver extends DiagnosticEmitter {
       returnType = type;
     }
 
-    let signature = Signature.create(this.program, parameterTypes, returnType, thisType, requiredParameters, hasRest);
+    // A constructor returns the allocated `this` pointer, not a value, so it
+    // must not acquire the hidden destination parameter an `@inline struct`
+    // return would otherwise add (its return type is the class type). Only an
+    // inline-struct constructor needs the flag; leaving ordinary constructors
+    // unchanged keeps their signature key (and the type-id sequence) stable.
+    let sretDisabled = prototype.is(CommonFlags.Constructor) &&
+      returnType.classReference != null &&
+      returnType.classReference.hasDecorator(DecoratorFlags.InlineStruct);
+    // An `@external` declaration is a **host** boundary: an `@inline struct`
+    // parameter crosses as the address of a temp the guest materialises, one
+    // `i32`, not as one WASM parameter per field. Without this the import's
+    // field list becomes part of the host ABI (measured: `(param f32 f32)` for
+    // a two-field record, while `@unmanaged` and `@managed` both emitted
+    // `(param i32)`).
+    // Only a **multi-field** record takes the pointer shape. A one-scalar
+    // record is passed directly by the C/WASM tool convention (BasicCABI: a
+    // struct whose only member is a scalar is passed as that scalar), while
+    // this compiler would pass a pointer — the WAT types are identical
+    // (`i32`), so the mismatch is silent. That case is refused at the
+    // boundaries instead of being promised in one convention and shipped in the
+    // other; see the refusal in `Compiler#compileFunction`.
+    let externalBoundary = prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
+      signatureHasMultiFieldInlineStructParam(parameterTypes);
+    // An **export** is the mirror boundary: a value-type parameter crosses as a
+    // byval pointer the host provides, rather than as one WASM parameter per
+    // field (which is the silent ABI an export used to have). `ModuleExport` is
+    // set on the prototype by `markModuleExports` before any function resolves.
+    let exportByValParams = prototype.is(CommonFlags.ModuleExport) &&
+      !prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
+      signatureHasMultiFieldInlineStructParam(parameterTypes);
+    let signature = Signature.create(
+      this.program,
+      parameterTypes,
+      returnType,
+      thisType,
+      requiredParameters,
+      hasRest,
+      sretDisabled,
+      externalBoundary,
+      exportByValParams
+    );
 
     let nameInclTypeParameters = prototype.name;
     if (instanceKey.length) nameInclTypeParameters += `<${instanceKey}>`;
@@ -4106,4 +4146,21 @@ export class Resolver extends DiagnosticEmitter {
     }
     return typeArgumentNodes[0];
   }
+}
+
+/** Whether any source parameter type is an `@inline struct`. Used to decide
+ *  whether an `@external` signature needs the host-boundary pointer shape; a
+ *  declaration with no value-type parameter keeps its ordinary signature (and
+ *  its memoized identity). */
+/** Whether any parameter is an `@inline struct` with **two or more** fields —
+ *  the shape the byval pointer is the correct ABI for. */
+function signatureHasMultiFieldInlineStructParam(parameterTypes: Type[]): bool {
+  for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+    let parameterType = unchecked(parameterTypes[i]);
+    if (
+      Signature.isInlineStructRef(parameterType) &&
+      Signature.fieldCountOf(parameterType) > 1
+    ) return true;
+  }
+  return false;
 }
