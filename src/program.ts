@@ -467,7 +467,7 @@ export class Program extends DiagnosticEmitter {
    * and a one-file user package is `LibraryEntry`, exactly like `~lib/array`.
    *
    * The CLI populates this at the two std parse sites, *before* `--lib` merges
-   * user libraries into the same `libraryFiles` map (`cli/index.js:520-534`),
+   * user libraries into the same `libraryFiles` map (`cli/index.js:528-541`),
    * which is the only point where membership still means "std". A transform
    * that must skip the compiler's own source — the async lowering does, so it
    * does not walk the standard library — tests this set instead.
