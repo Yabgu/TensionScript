@@ -510,6 +510,14 @@ export async function main(argv, options) {
   /** Marks the sources the parse just added as the compiler's own std. */
   function markStdSources(before) {
     const sources = program.sources;
+    // The compiled compiler does not expose its source list to JS: under
+    // `--wasm`, `newProgram()` returns an object whose `sources` and
+    // `stdSources` are both undefined (measured). The marks then cannot be
+    // made from here at all, so skip rather than crash. `stdSources` is read
+    // only by the async transform (`src/async/lower.ts`), which no bootstrap
+    // target configures — so this path is not left expecting marks that are
+    // absent.
+    if (!sources) return;
     for (let i = before, k = sources.length; i < k; ++i) {
       program.stdSources.add(sources[i]);
     }
@@ -520,7 +528,7 @@ export async function main(argv, options) {
     if (libPath.includes("/")) return; // in sub-directory: imported on demand
     let begin = stats.begin();
     stats.parseCount++;
-    const before = program.sources.length;
+    const before = program.sources ? program.sources.length : 0;
     assemblyscript.parse(program, libraryFiles[libPath], libraryPrefix + libPath + extension, false);
     markStdSources(before);
     stats.parseTime += stats.end(begin);
@@ -657,7 +665,7 @@ export async function main(argv, options) {
         const file = files[i];
         const begin = stats.begin();
         stats.parseCount++;
-        const before = program.sources.length;
+        const before = program.sources ? program.sources.length : 0;
         if (file) {
           assemblyscript.parse(program, file.sourceText, file.sourcePath, false);
           // A std file imported from one of std's sub-directories (`rt/common`,
