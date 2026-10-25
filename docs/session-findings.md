@@ -925,3 +925,133 @@ chosen, the transform sources needed to be compilable by the compiler, which
 exposed 55 type sites and 25 host-semantics sites. Each layer was only visible
 from the layer above it. The fixpoint was finally run — and it is empty — but
 the sequence is the finding: "stage 1 is green" was not one step from the proof.
+
+## Memory-model use-site overrides, 10.0a — four measurements, one real bug
+
+The scoping (`docs/interop-memory-conversions-scope.md`, PR #19) proposed three
+sub-phases. This is the first: the parse surface, three diagnostics, and the
+`@managed` → `@unmanaged` cell. Four points were measured before any code, and
+three of them changed what the phase had to do.
+
+### 1. The post-type spelling was accepted and ignored
+
+`v: V @inline` compiled as `(param i32)` with no byval prologue and **zero
+diagnostics**. The parser attaches every same-line `@name` to `type.attributes`
+(`src/parser.ts:871-886`) and only `@abi.alias` is ever consumed
+(`src/builtins.ts:1461-1486`); anything else is dropped. `x: f32
+@totally.bogus("q")` compiles clean, and that permissiveness is *tested* —
+`tests/parser/type-attributes.ts` contains `bare: i32 @custom;`.
+
+Now `TS6392`: a memory-model name in post-type position is refused, naming the
+pre-type form. `@abi.alias` and every other attribute are untouched, which is
+why the diagnostic is keyed on the *three model names* rather than on "unknown
+attribute" — the latter would have broken the deliberately-permissive channel.
+
+### 2. Pre-type was a parse error everywhere, so acceptance is additive
+
+`v: @inline V` → `TS1110 "Type expected"` at parameter, local, field and return;
+`TS1109 "Expression expected"` for `changetype<…>` and `Array<…>`, which are
+parsed as expressions first. Probed with all three model names plus `@final`.
+No file in the tree contains one.
+
+So accepting the form cannot change the output of a program that compiles —
+measured, not assumed: `npm test` is 0 failures and the `.wast` fixpoint is
+empty.
+
+### 3. `changetype` bypassed the refused cell in silence
+
+`@unmanaged → @managed` is refused by the type checker (`TS2322`) and the reason
+is sound — an unmanaged allocation has no GC header, so a traced reference to it
+reads a header that is not there. But `changetype<M>(u)` emitted a bare
+passthrough:
+
+```
+(func $conv (param $0 i32) (result i32)
+  local.get $0
+  return)
+```
+
+No diagnostic, no check. `changetype` is an intentional escape hatch, so this is
+not a defect in `changetype`; it is the reason the scoping refused to promise a
+safety property the language did not provide. The refusal now covers both
+paths, with the assignment's own diagnostic.
+
+### 4. The rooting bug — the reason this phase was more than a parser change
+
+`operandsTostack` (`src/compiler.ts:7454`) roots a call operand when the
+**callee's parameter type** is managed. That is right for a reference that stays
+a reference, and wrong for `g(changetype<U>(makeM()))`: the parameter is
+`@unmanaged`, so nothing roots the managed temporary.
+
+Measured, before:
+
+```
+(func $f (result i32)
+  call $makeM      ;; managed temporary, unrooted
+  call $g
+  return)
+```
+
+after:
+
+```
+(func $f (result i32)
+  (local $0 i32)
+  __stack_pointer -= 4; __stack_check; __stack_pointer[0] = 0
+  call $makeM; local.set $0
+  __stack_pointer[0] = $0    ;; the root
+  local.get $0; call $g
+  __stack_pointer += 4)
+```
+
+This is a **pre-existing use-after-free**, reachable since `changetype` existed
+— not something 10.0a introduced. Delivering the cell without it would have made
+the unsafe spelling the idiomatic one.
+
+**Why a side channel.** `operandsTostack` has `signature` + `operands`, and its
+three callers have no access to the argument's source type; `Signature` carries
+`Type[]`, not nodes. Threading an `argTypes` array through all of them is the
+10.0b change (the `Signature` surface). So `rootNextOperand` follows the
+pattern already in the file — `externalTempMark`, `sretDiscardMark`,
+`callSlotOffset`: set deep inside the argument's compilation (`changetype`),
+cleared before each argument, read immediately after in `compileCallDirect`'s
+argument loop. No signature changes; `operandsTostack` and its callers untouched.
+
+### The narrowing that held
+
+The scoping predicted ~25-40 sites would need the override threaded. **Zero
+did.** The free cells never consult the inline chokepoints
+(`isInlineStructType`, `Signature.isInlineStructRef`, `fieldCountOf`) — the
+conversion is identity `i32`, and the only decisions are the type-check
+permission (which needed no change: the override does not alter the resolved
+type, so the same-record case was always assignable) and the rooting. The
+inline row is 10.0b/10.0c.
+
+That is a second instance this session of a site-count being an upper bound
+rather than a work estimate: the sites that *read* a flag are not the sites that
+must *change* when one more way to set it appears.
+
+### The .wast gate's reasoning
+
+The gate was "empty except the unrooted-temporary shape — anything else is a
+regression." It is empty: 1339 fixtures byte-identical, both fixpoints empty
+(debug `a3da7d73…`, release `df525107…`). The new fixture
+`interop/managed-to-unmanaged-operand` is the only file whose output is new, and
+its `sumTemporary` is exactly the rooted shape above.
+
+The reasoning that makes an empty diff the *right* answer rather than a
+suspicious one: rooting is added only where a managed operand was previously
+unrooted, and no existing fixture passes a managed record to an unmanaged
+parameter. An empty diff therefore confirms the change is narrow; a non-empty
+one would have meant the flag leaked into an unrelated shape.
+
+### What is still open
+
+- A managed temporary that round-trips through **another call** before reaching
+  an unmanaged parameter (`g(h(changetype<U>(m)))`) is still unrooted — that
+  needs dataflow across the call, not a per-argument flag. Stated in the
+  CHANGELOG rather than left to be discovered.
+- The `@external` boundary still reads the declaration and drops an override
+  (10.0b).
+- Type aliases do not take a model (excluded deliberately: an alias is a
+  spelling for the declaration, not a use).
