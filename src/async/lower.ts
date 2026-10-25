@@ -438,7 +438,7 @@ export class AsyncLowerTransform {
     // expression node -- `docs/closures-plan.md` §3.3), and the carrier is
     // `state.$env`: the entry copies the received local in, the resume function
     // re-declares it from the state.
-    let foundEnv = expression != null ? envInfoOf.get(expression) : null;
+    let foundEnv = expression != null ? envInfoOf().get(expression) : null;
     let closureEnv: EnvInfo | null = foundEnv != null ? foundEnv : null;
     let closureEnvClass = closureEnv != null && closureEnv.kind == EnvKind.Struct
       ? closureEnv.envClass
@@ -1002,7 +1002,7 @@ export class AsyncLowerTransform {
     collectAwaitInfos(seq, infos);
     for (let i = 0, k = infos.length; i < k; ++i) {
       let info = infos[i];
-      awaitSites.set(info.node, new AwaitSite(
+      awaitSites().set(info.node, new AwaitSite(
         info.discriminator,
         awaitedFieldExpression(resumeVarName, info.fieldName, info.node.range)
       ));
@@ -2473,7 +2473,7 @@ function collectCreationEnvNames(statements: Statement[], into: Set<string>): vo
       case NodeKind.Expression: {
         let expression = (<ExpressionStatement>statement).expression;
         if (expression.kind == NodeKind.Function) {
-          let env = creationEnvOf.get(<FunctionExpression>expression);
+          let env = creationEnvOf().get(<FunctionExpression>expression);
           if (env != null) into.add(env);
         }
         break;
@@ -2483,7 +2483,7 @@ function collectCreationEnvNames(statements: Statement[], into: Set<string>): vo
         for (let j = 0, l = declarations.length; j < l; ++j) {
           let initializer = declarations[j].initializer;
           if (initializer != null && initializer.kind == NodeKind.Function) {
-            let env = creationEnvOf.get(<FunctionExpression>initializer);
+            let env = creationEnvOf().get(<FunctionExpression>initializer);
             if (env != null) into.add(env);
           }
         }

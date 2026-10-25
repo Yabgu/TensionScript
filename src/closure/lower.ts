@@ -2944,13 +2944,13 @@ class OwnerAnalysis {
             // whether this function's body owns an env, that it receives one
             // (kind Struct), and the class its own body env links to (§5.2).
             let parentClass = info.bodyParent != null ? assert(info.bodyParent.className) : null;
-            envInfoOf.set(functionExpression, new EnvInfo(
+            envInfoOf().set(functionExpression, new EnvInfo(
               EnvKind.Struct, className, info.ownEnv, true, parentClass, head.needsThis
             ));
             // The local at this creation site: the head's own local when the
             // creating function owns that scope, otherwise the env it received.
             let created = head.ownerFunction === currentFunction ? head : null;
-            creationEnvOf.set(
+            creationEnvOf().set(
               functionExpression,
               created != null ? assert(created.localName) : ENV_IN_LOCAL
             );
