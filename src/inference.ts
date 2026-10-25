@@ -35,6 +35,7 @@ import {
   UnaryPrefixExpression
 } from "./ast";
 import { Token } from "./tokenizer";
+import { getMapEntry } from "./util/collections";
 
 /**
  * Infers a type expression from an initializer's syntax.
@@ -105,7 +106,7 @@ export function inferTypeFromInitializer(
       // from chasing itself; declaration order already prevents most cycles.
       if (known == null || depth > 8) return null;
       let name = (<IdentifierExpression>initializer).text;
-      let type = known.get(name);
+      let type = getMapEntry(known, name);
       return type != null ? type : null;
     }
     case NodeKind.UnaryPrefix: {
