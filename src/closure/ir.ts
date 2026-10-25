@@ -89,7 +89,20 @@ export const ownerEnvOf = new Map<FunctionDeclaration, EnvInfo>();
  * before it clones the declaration (`compiler.ts:7335`), so the key survives
  * the clone.
  */
-export const envInfoOf = new Map<FunctionExpression, EnvInfo>();
+// A function, not a `const`: `new Map()` is not a compile-time constant, and a
+// global with a non-constant initializer is a read-before-initialized hazard for
+// any function body compiled before this file's walk reaches the declaration
+// (measured: `compiler.ts`'s `compileFunctionExpression`). The null-initialized
+// backing store *is* a constant, so reading it early is safe, and the accessor
+// is a function — always compilable on demand, in any order.
+let _envInfoOf: Map<FunctionExpression, EnvInfo> | null = null;
+export function envInfoOf(): Map<FunctionExpression, EnvInfo> {
+  let table = _envInfoOf;
+  if (table == null) {
+    _envInfoOf = table = new Map<FunctionExpression, EnvInfo>();
+  }
+  return table;
+}
 
 /**
  * The local that holds the environment to store in a closure's `_env`, keyed
@@ -97,4 +110,11 @@ export const envInfoOf = new Map<FunctionExpression, EnvInfo>();
  * can be created in more than one scope, and the local is the innermost owning
  * scope's at that site — so the site is the key, not the declaration.
  */
-export const creationEnvOf = new Map<FunctionExpression, string>();
+let _creationEnvOf: Map<FunctionExpression, string> | null = null;
+export function creationEnvOf(): Map<FunctionExpression, string> {
+  let table = _creationEnvOf;
+  if (table == null) {
+    _creationEnvOf = table = new Map<FunctionExpression, string>();
+  }
+  return table;
+}

@@ -39,4 +39,13 @@ export class AwaitSite {
  * the compiler are two halves of the same compiler, and the table is the seam
  * between them.
  */
-export const awaitSites = new Map<AwaitExpression, AwaitSite>();
+// A function, not a `const`, for the same reason as `closure/ir.ts`'s
+// `envInfoOf`: a non-constant global initializer is an ordering hazard.
+let _awaitSites: Map<AwaitExpression, AwaitSite> | null = null;
+export function awaitSites(): Map<AwaitExpression, AwaitSite> {
+  let table = _awaitSites;
+  if (table == null) {
+    _awaitSites = table = new Map<AwaitExpression, AwaitSite>();
+  }
+  return table;
+}

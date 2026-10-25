@@ -8016,7 +8016,7 @@ export class Compiler extends DiagnosticEmitter {
     // The closure transform records what this function's `_env` will mean,
     // keyed by the expression node -- the declaration above is a clone, so a
     // declaration-keyed table would not find it (`docs/closures-plan.md` §3.3).
-    let closureInfo = envInfoOf.get(expression);
+    let closureInfo = envInfoOf().get(expression);
     if (closureInfo) {
       prototype.envKind = closureInfo.kind;
       prototype.envClass = closureInfo.envClass;
@@ -8143,7 +8143,7 @@ export class Compiler extends DiagnosticEmitter {
     let valueType = this.currentType;
     let expr: ExpressionRef;
     if (instance.prototype.envKind == EnvKind.Struct) {
-      expr = this.makeEnvFunctionValue(instance, assert(creationEnvOf.get(expression)));
+      expr = this.makeEnvFunctionValue(instance, assert(creationEnvOf().get(expression)));
     } else if (instance.prototype.capturesThis) {
       expr = this.makeCapturingFunctionValue(instance);
     } else {
@@ -8616,7 +8616,7 @@ export class Compiler extends DiagnosticEmitter {
    * capability's own reader at the await site instead.
    */
   private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {
-    let site = awaitSites.get(expression);
+    let site = awaitSites().get(expression);
     if (!site) {
       // No lowering ran, or this await is one the transform did not take. Say so
       // rather than emitting a read of a record that does not exist.
