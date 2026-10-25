@@ -134,6 +134,7 @@ import {
   writeI32AsI64,
   writeI64AsI32
 } from "./util";
+import { getMapEntry } from "./util/collections";
 
 import {
   Resolver
@@ -577,7 +578,7 @@ export class Program extends DiagnosticEmitter {
   get taskPrototype(): ClassPrototype | null {
     let cached = this._taskPrototype;
     if (!cached) {
-      let element = this.elementsByName.get(CommonNames.Task);
+      let element = getMapEntry(this.elementsByName, CommonNames.Task);
       if (!element || element.kind != ElementKind.ClassPrototype) return null;
       this._taskPrototype = cached = <ClassPrototype>element;
     }
