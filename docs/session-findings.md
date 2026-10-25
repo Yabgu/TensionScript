@@ -197,11 +197,16 @@ repo*, and *does the rule count comment mentions*.
 | Follow-up | Why it is not in scope |
 |---|---|
 | ~~**SROA parameters** (field-list signatures)~~ | **Landed in PR #14** (`f55fe7d0`): `wasmParamCountOf` / `wasmParamStartOf` / `wasmParamCount` / `sourceIndexOf` are the only translation site; the callee gets one local per field; the call site expands arguments in field order. |
-| **SROA return (sret)** | `Signature#resultRefs` is a single `toRef()`, so a struct return needs a hidden destination parameter. Its site list is **not empty**: `compiler.ts:7070` (the interface-stub temp index) is already known, and by the pattern below there will be more. Design note: `docs/interop-sret-design.md`. |
+| ~~**SROA return (sret)**~~ | **Landed in PR #16** (`73fb7a57`): hidden destination parameter, the static call-temp stack, per-call-frame mark/restore. Design note: `docs/interop-sret-design.md`. |
+| ~~**`@external` temp**~~ | **Landed in PR #16** (`516104f9`): the caller's temp, `(param i32)`, borrowed for the call. |
 | **SROA for top-level statics** | Per-field WASM *globals*, or a shadow slot. Refused until then, with the alternative named. |
 | **SROA for GC-reference fields** | The mixed representation above — a design phase. |
 | **`T[N]` fields in `@inline struct`** | Deep SROA: N locals per array field, plus a `makeZero` arm for `FixedArray` (it asserts today, `compiler.ts` `makeZero`). |
-| **Closure capture, `@external` temp, inline nesting** | Later commits of the 1.0 phase (scoping §9, §10). |
+| **Closure capture, inline nesting** | Later commits of the 1.0 phase (scoping §9, §10). Closure capture needs inline nesting first (the environment is a class, and a value-typed field in one is nesting). |
+| **`@external` return of `@inline struct`** | An ABI version: the host would have to write `sizeof<T>` bytes into a slot it never allocated. The last refused case. |
+| **`--sretStackSize`** | The 4 KB limit is shared by sret and the `@external` temp, so this option is one limit for both. Structurally identical to `stackSize`. |
+| **`unmanaged-single-field-tool-convention`** | A one-scalar `@unmanaged struct` passes as a pointer where BasicCABI passes the scalar. Ratified *accept*: the engine's adapter reads records through `guest_read(ptr, len)` (`tension_adapter.h:184`), so aligning it would change a live ABI. Revisit only if a C-authored consumer appears. See Finding 3. |
+| **`--create=false` in the compiler test harness** | `tests/util/options.js`'s boolean parser treats `--create=false` as `true`, so there is no way to say "compare only" on the command line; passing it regenerates the fixtures from whatever build is present. Discovered the hard way (a broken build rewrote three fixtures). Also `--create` is `type: "b"`, so the value is never inspected. |
 
 ---
 
@@ -526,26 +531,105 @@ The binding now assigns parameter locals first, then byval field locals, and
 `getNonParameterLocalTypes` starts the additional list at `wasmParamCount()`,
 which is exactly where the second pass begins.
 
-**The single-field measurement — a defect, not just an ABI question.** The
-pre-work asked whether a one-field `@inline struct` at an `@external` position
-passes a pointer or the scalar. Measured: a pointer (`(param i32)`, call site
-`base + mark`, 16 bytes reserved). The tool convention says the scalar; the types
-are identical, so the mismatch is silent — which is why it is now refused at both
-boundaries.
+### Finding 1 — the single-field breakage: broken everywhere, not just at the boundary
 
-The measurement turned up something worse next door: **a one-field value-type
-parameter was unusable everywhere.** Three sites decided "unpack into fields"
-from `wasmParamCountOf(...) > 1`, and a one-field record spends exactly one slot.
-So `function take(s: S): i32 { return s.a; }` — no boundary involved — failed with
-the whole-value refusal, because the parameter was bound as an ordinary local of
-the record type with `toRef()`'s GC heap type. All three sites now key on the
-type, and `Signature.fieldCountOf` answers field counts. *Revert measured:*
-restoring the `> 1` test fails `inline-struct-single-field`.
+The pre-work asked a narrow question (does a one-field record pass a pointer or
+the scalar at an `@external` position?) and the answer was: **a pointer**
+(`(param i32)`, call site `base + mark`, 16 bytes reserved, field stored at
+`+0`). The tool convention says the scalar, and both spell `(param i32)`, so the
+mismatch is silent. That is why the shape is now refused at both boundaries.
 
-The general lesson, which has now bitten three times in this phase (constructors,
-inferred locals, single-field): **`wasmParamCountOf` conflates "how many WASM
-slots" with "is this an aggregate".** Anything that needs the second question must
-ask about the type, not the count.
+Measuring it turned up something worse next door. **A one-field value-type
+parameter was unusable everywhere**, including inside the module with no boundary
+involved. Three sites decided "unpack into fields" from
+`wasmParamCountOf(...) > 1`, and a one-field record spends exactly **one** WASM
+slot:
+
+| Site | What it did with `> 1` false |
+|---|---|
+| `program.ts` parameter binding | bound an ordinary local of the record type, with `toRef()`'s GC heap type, instead of an SROA field local |
+| `Signature#paramRefs` | emitted that heap type as the WASM parameter |
+| `Compiler#expandSroaArgument` | compiled the argument as a whole value — the refusal |
+
+So the minimal case failed:
+
+```ts
+@inline struct S { a: i32; }
+function take(s: S): i32 { return s.a; }   // AS100: reading an @inline struct value as a whole
+```
+
+All three now key on the **type** (`Signature.isInlineStructRef`) and use
+`Signature.fieldCountOf` where a field count is what is meant. Commit `3db469cd`
+both refuses the boundary case and fixes the internal one, because refusing alone
+would have told the author to "use a scalar" while the scalar-shaped value was
+silently broken.
+
+*Revert measured:* restoring the `> 1` test in the parameter binding fails
+`tests/compiler/interop/inline-struct-single-field.ts` — the guest function
+`addOne(s: S)` reaching `s.a` is the load-bearing assertion, and it is the same
+function the fixture exports through `run()`.
+
+### Finding 2 — `wasmParamCountOf` answers two questions, and was used for the wrong one
+
+`Signature.wasmParamCountOf(type)` answers **"how many WASM slots does this
+parameter spend?"** It was repeatedly read as **"is this parameter an
+aggregate?"** — a different question with a different answer precisely at one
+field, where an aggregate spends one slot.
+
+Three defects in this phase trace to that conflation:
+
+1. **The single-field breakage above** — three sites, one wrong reading.
+2. **The export flattening, pre-refusal** — the mirror signature was built from
+   the same per-field expansion, so an export declared `(param f32 f32)` for a
+   two-field record. Correct arity by the count's own rule; the count simply does
+   not say "this is a boundary".
+3. **The boundary temp's per-argument vs per-call shape** — deciding whether a
+   parameter needed a temp meant asking a slot-count helper about a *position*;
+   the answer was only well-defined once the signature carried the boundary as a
+   flag, and the flag (not the count) is what the call site consults.
+
+`Signature.fieldCountOf(type)` now separates the concepts, and
+`wasmParamSlotCountOf` / `isInlineStructRef` / `isByValPointerParam` split the
+remaining readings. **The rule for this audit, forward-looking:** *a helper that
+answers two questions will be used wrong for one of them — split it before the
+third defect, not after.* Two independent wrong readings are the signal; three is
+a pattern that has already cost three fixtures.
+
+The same shape of error appeared twice more in this phase in other helpers, which
+is why the rule is stated generally rather than about this function: the
+constructor flag (`sretDisabled`) had to be in the memoization key *and* absent
+for every other signature, and `getNonParameterLocalTypes`'s boundary had to be
+WASM arity rather than source arity.
+
+### Finding 3 — the `@unmanaged` single-field divergence: ratified, not aligned
+
+The same divergence exists for `@unmanaged`: a one-scalar `@unmanaged struct` also
+crosses a boundary as a **pointer**, where BasicCABI would pass the scalar. Nothing
+about `@inline struct` made this true — it was true before the phase, and the
+phase's measurement merely made it visible.
+
+**Ratified: accept, do not align.** The reasons are asymmetric, and the asymmetry
+is the decision:
+
+- The engine's adapter is **pointer-based by design**. Its only guest-memory path
+  is `guest_read(void *user, uint32_t ptr, void *dst, uint32_t len)`
+  (`tension-core/include/tension_adapter.h:184`) — a `(ptr, len)` pair — so every
+  record it touches, `@unmanaged` included, arrives and is read through a pointer.
+  Aligning `@unmanaged` to the scalar would change an ABI the adapter depends on
+  today.
+- BasicCABI is **a convention, not a law.** It describes how a C compiler targeting
+  WASM lowers struct arguments; nothing in WASM enforces it, and a host written
+  against this engine reads pointers.
+- `@inline struct` is **new**, so no caller depends on its pointer shape. Refusing
+  the one-field case there costs nothing and prevents a silent mismatch. Refusing
+  it for `@unmanaged` would break existing callers to fix a theoretical one.
+
+So the honest state is: one kind refuses the divergent shape (no dependants), two
+kinds keep it (the adapter depends on it), and the divergence is **filed** rather
+than hidden. Filed as **`unmanaged-single-field-tool-convention`** — revisit only
+if a C-authored consumer of an `@unmanaged` single-scalar parameter ever appears,
+at which point the choice is between flattening at the boundary and a documented
+"this engine passes record pointers" note in the interop surface.
 
 **Third finding (latent, not fixed).** The operand walk's `paramType.isManaged`
 check uses the *source* parameter's type, not the individual field's. Correct
