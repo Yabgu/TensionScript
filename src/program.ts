@@ -4126,8 +4126,12 @@ export class Function extends TypedElement {
           ));
           continue;
         }
-        let fieldCount = Signature.wasmParamCountOf(parameterType);
-        if (fieldCount > 1) {
+        // **Keyed on the type**, not on `wasmParamCountOf > 1`: a one-field
+        // record spends exactly one WASM slot, so a `> 1` test sent it down the
+        // ordinary-local path — bound as a local of the record type, with
+        // `toRef()`'s GC heap type, and `s.a` then had no SROA field to read.
+        // Every one-field value-type parameter was unusable.
+        if (Signature.isInlineStructRef(parameterType)) {
           let scopedLocals = this.flow.scopedLocals;
           if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
           let fieldLocals = new Map<string, Local>();

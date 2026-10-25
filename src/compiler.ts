@@ -1712,6 +1712,34 @@ export class Compiler extends DiagnosticEmitter {
     // `@managed` both cross as a single borrowed `i32`), and a caller-side
     // temp that materialises the value and passes its address is the phase's
     // next step; until it exists, nothing compiles here.
+    // A single-field value at a host boundary is refused by name: it is the one
+    // shape where the two conventions disagree *invisibly*. The C/WASM tool
+    // convention passes a struct whose only member is a scalar as the scalar
+    // itself; this compiler passes records as pointers. Both are `(param i32)`,
+    // so neither side fails to link — one reads an address as a number.
+    if (instance.is(CommonFlags.ModuleExport) || instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs)) {
+      let parameterTypes = signature.parameterTypes;
+      for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+        let parameterType = unchecked(parameterTypes[i]);
+        if (!Signature.isInlineStructRef(parameterType)) continue;
+        let fieldCount = Signature.fieldCountOf(parameterType);
+        if (fieldCount == 1) {
+          let parameterNode = instance.prototype.functionTypeNode.parameters[i];
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            parameterNode.type.range,
+            "an @inline struct with a single field at a host boundary (the C/WASM tool convention passes a one-scalar struct as the scalar itself, while this compiler passes records as pointers; both are `(param i32)`, so the disagreement is silent. Pass the scalar directly, or use a struct with two or more fields)"
+          );
+          break;
+        }
+      }
+    }
+
+    // Fallback for the **import** boundary: two or more fields, but the
+    // signature did not take the byval shape. Every real declaration does take
+    // it (`externalBoundary` is set by the resolver), so this exists to keep a
+    // future path from flattening silently — the failure mode Commit A of this
+    // phase removed.
     if (
       instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
       !signature.externalBoundary
@@ -1723,7 +1751,7 @@ export class Compiler extends DiagnosticEmitter {
           this.error(
             DiagnosticCode.Not_implemented_0,
             parameterNode.type.range,
-            "an @inline struct as an @external parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; pass an @unmanaged struct or a @managed struct, which cross as a single borrowed pointer, or pass the fields individually)"
+            "an @inline struct as an @external parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; the by-value temp is the implemented path, so this declaration did not take it)"
           );
           break; // one diagnostic per declaration
         }
@@ -1755,7 +1783,7 @@ export class Compiler extends DiagnosticEmitter {
           this.error(
             DiagnosticCode.Not_implemented_0,
             parameterNode.type.range,
-            "an @inline struct as an export parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; the export's by-value pointer parameter is the mirror of the @external temp and lands next)"
+            "an @inline struct as an export parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; the by-value pointer parameter is the implemented path, so this declaration did not take it)"
           );
           break; // one diagnostic per declaration
         }
@@ -11196,11 +11224,16 @@ export class Compiler extends DiagnosticEmitter {
     operands: ExpressionRef[],
     at: i32
   ): i32 {
-    let count = Signature.wasmParamCountOf(paramType);
-    if (count == 1) {
+    // **Keyed on the type**: a one-field record spends one WASM slot, so a
+    // `count == 1` test compiled it as a whole value — the refusal — instead of
+    // expanding its single field. The guest path never sees a byval pointer
+    // (that branch is handled before this call), so an `@inline struct` here is
+    // always unpacked into fields.
+    if (!Signature.isInlineStructRef(paramType)) {
       unchecked(operands[at] = this.compileExpression(argumentExpression, paramType, Constraints.ConvImplicit));
       return 1;
     }
+    let count = Signature.fieldCountOf(paramType);
     let local = argumentExpression.kind == NodeKind.Identifier
       ? this.currentFlow.lookupLocal((<IdentifierExpression>argumentExpression).text)
       : null;
