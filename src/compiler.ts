@@ -1699,6 +1699,34 @@ export class Compiler extends DiagnosticEmitter {
       );
     }
 
+    // Refused at the boundary, the other direction: an `@inline struct`
+    // parameter of an `@external` function. `paramRefs` expands a value type
+    // into one WASM parameter per field, so the import used to be declared as
+    // `(param f32 f32)` for a two-field record — which makes the record's field
+    // count, order and types part of the *host* ABI, with no `layout_hash`
+    // movement to record it. The host has no way to notice: it never sees the
+    // record, only the flattened scalars.
+    //
+    // Refused rather than silently flattened. The intended shape is the
+    // pointer one the other two record kinds already use (`@unmanaged` and
+    // `@managed` both cross as a single borrowed `i32`), and a caller-side
+    // temp that materialises the value and passes its address is the phase's
+    // next step; until it exists, nothing compiles here.
+    if (instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs)) {
+      let parameterTypes = signature.parameterTypes;
+      for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+        if (this.isInlineStructType(unchecked(parameterTypes[i]))) {
+          let parameterNode = instance.prototype.functionTypeNode.parameters[i];
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            parameterNode.type.range,
+            "an @inline struct as an @external parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; pass an @unmanaged struct or a @managed struct, which cross as a single borrowed pointer, or pass the fields individually)"
+          );
+          break; // one diagnostic per declaration
+        }
+      }
+    }
+
     let funcRef: FunctionRef = 0;
 
     // concrete function
