@@ -37,6 +37,7 @@ import { CommonFlags } from "../common";
 import { DiagnosticCode, Range } from "../diagnostics";
 import { Parser } from "../parser";
 import { Program } from "../program";
+import { getMapEntry } from "../util/collections";
 import { Token } from "../tokenizer";
 import { inferTypeFromInitializer } from "../inference";
 import {
@@ -209,8 +210,12 @@ export class EnvAnalysisRecord {
 /** The in-tree `afterParse` `Transform`. */
 export class ClosureLowerTransform {
 
-  /** The program being compiled. Assigned by the CLI onto the prototype. */
-  readonly program!: Program;
+  /**
+   * The program being compiled. Assigned by `applyInTreeTransforms`
+   * (`src/transforms.ts`), which is the pipeline the CLI runs; assigned on the
+   * prototype by the transform tests, which drive the class directly.
+   */
+  program!: Program;
 
   /** Analyses computed in the collect phase, consumed by the emit phase. */
   private analyses: Map<FunctionDeclaration, OwnerAnalysis> | null = null;
@@ -540,9 +545,12 @@ class ReservedScan {
       }
       case NodeKind.For: {
         let loop = <ForStatement>statement;
-        if (loop.initializer != null) this.visitStatement(loop.initializer);
-        if (loop.condition != null) this.visitExpression(loop.condition);
-        if (loop.incrementor != null) this.visitExpression(loop.incrementor);
+        let initializer = loop.initializer;
+        if (initializer != null) this.visitStatement(initializer);
+        let condition = loop.condition;
+        if (condition != null) this.visitExpression(condition);
+        let incrementor = loop.incrementor;
+        if (incrementor != null) this.visitExpression(incrementor);
         this.visitStatement(loop.body);
         break;
       }
@@ -557,7 +565,7 @@ class ReservedScan {
         let ifs = <IfStatement>statement;
         this.visitExpression(ifs.condition);
         this.visitStatement(ifs.ifTrue);
-        if (ifs.ifFalse != null) this.visitStatement(ifs.ifFalse);
+        if (ifs.ifFalse != null) this.visitStatement(assert(ifs.ifFalse));
         break;
       }
       case NodeKind.Return: {
@@ -585,8 +593,8 @@ class ReservedScan {
         this.visitStatements(tryStatement.bodyStatements);
         let catchVariable = tryStatement.catchVariable;
         if (catchVariable != null) this.check(catchVariable.text, catchVariable.range);
-        if (tryStatement.catchStatements != null) this.visitStatements(tryStatement.catchStatements);
-        if (tryStatement.finallyStatements != null) this.visitStatements(tryStatement.finallyStatements);
+        if (tryStatement.catchStatements != null) this.visitStatements(assert(tryStatement.catchStatements));
+        if (tryStatement.finallyStatements != null) this.visitStatements(assert(tryStatement.finallyStatements));
         break;
       }
       case NodeKind.Variable: {
@@ -594,7 +602,7 @@ class ReservedScan {
         for (let i = 0, k = declarations.length; i < k; ++i) {
           let declaration = declarations[i];
           this.check(declaration.name.text, declaration.name.range);
-          if (declaration.initializer != null) this.visitExpression(declaration.initializer);
+          if (declaration.initializer != null) this.visitExpression(assert(declaration.initializer));
         }
         break;
       }
@@ -647,7 +655,7 @@ class ReservedScan {
     for (let i = 0, k = parameters.length; i < k; ++i) {
       let parameter = parameters[i];
       this.check(parameter.name.text, parameter.name.range);
-      if (parameter.initializer != null) this.visitExpression(parameter.initializer);
+      if (parameter.initializer != null) this.visitExpression(assert(parameter.initializer));
     }
     let body = declaration.body;
     if (body != null) this.visitStatement(body);
@@ -663,7 +671,7 @@ class ReservedScan {
         case NodeKind.FieldDeclaration: {
           let field = <FieldDeclaration>member;
           this.check(field.name.text, field.name.range);
-          if (field.initializer != null) this.visitExpression(field.initializer);
+          if (field.initializer != null) this.visitExpression(assert(field.initializer));
           break;
         }
         case NodeKind.MethodDeclaration: {
@@ -862,7 +870,7 @@ class Scope {
   resolveFunctionValue(name: string): FunctionExpression | null {
     let scope: Scope | null = this;
     while (scope != null) {
-      let value = scope.functionValues.get(name);
+      let value = getMapEntry(scope.functionValues, name);
       if (value) return value;
       scope = scope.parent;
     }
@@ -896,7 +904,7 @@ class Scope {
   resolve(name: string): Binding | null {
     let scope: Scope | null = this;
     while (scope != null) {
-      let binding = scope.bindings.get(name);
+      let binding = getMapEntry(scope.bindings, name);
       if (binding) return binding;
       scope = scope.parent;
     }
@@ -1326,7 +1334,7 @@ class OwnerAnalysis {
     // free resume function, so the receiver must be a field of the body env —
     // which means the body owns one even if nothing is captured (§4.7.5).
     if (this.ownerBodyUsesThis && this.owner.isAsync && this.ownerThisType != null) {
-      let root = this.infos.get(this.owner);
+      let root = getMapEntry(this.infos, this.owner);
       let body = root != null ? root.ownsScope : null;
       // Only an env that already exists carries the receiver: a method with no
       // captures keeps the async transform's one-field this-struct, which is
@@ -1343,7 +1351,7 @@ class OwnerAnalysis {
    * (`const mid = () => …`); a truly anonymous one gets `$anon<k>`.
    */
   private ownerPrefix(owner: FunctionDeclaration): string {
-    let info = this.infos.get(owner);
+    let info = getMapEntry(this.infos, owner);
     if (info == null) return owner.name.text;
     let names = new Array<string>();
     let current: FunctionInfo | null = info;
@@ -1361,7 +1369,7 @@ class OwnerAnalysis {
 
   /** One function's contribution to its class name (§4.7.3). */
   private ownerNameOf(info: FunctionInfo): string {
-    let named = this.ownerNames.get(info.node);
+    let named = getMapEntry(this.ownerNames, info.node);
     if (named != null) return named;
     let name = info.node.name.text;
     if (name.length == 0) name = info.displayName;
@@ -1415,7 +1423,7 @@ class OwnerAnalysis {
       let scope = scopes[i];
       // A `$this`-only env is a real env class (C5b), so it counts as owning.
       if (!scopeOwns(scope)) continue;
-      let ownerInfo = this.infos.get(scope.ownerFunction);
+      let ownerInfo = getMapEntry(this.infos, scope.ownerFunction);
       if (ownerInfo != null) ownerInfo.ownEnv = true;
     }
     for (let i = infos.length - 1; i >= 0; --i) {
@@ -1472,7 +1480,7 @@ class OwnerAnalysis {
     let candidates = this.hostCallbackCandidates;
     for (let i = 0, k = candidates.length; i < k; ++i) {
       let candidate = candidates[i];
-      let info = this.infos.get(candidate.declaration);
+      let info = getMapEntry(this.infos, candidate.declaration);
       if (info != null && info.needed != null) {
         this.refuse(candidate.range, "a closure captured by a host callback (closures lowering)");
         break;
@@ -1519,7 +1527,7 @@ class OwnerAnalysis {
         body.className,
         true,
         false,
-        info.bodyParent != null ? info.bodyParent.className : null,
+        info.bodyParent != null ? assert(info.bodyParent).className : null,
         body.needsThis
       ));
     }
@@ -1644,7 +1652,7 @@ class OwnerAnalysis {
         let ifs = <IfStatement>statement;
         this.walkExpression(ifs.condition, scope, info, false);
         this.walkStatement(ifs.ifTrue, scope, info);
-        if (ifs.ifFalse != null) this.walkStatement(ifs.ifFalse, scope, info);
+        if (ifs.ifFalse != null) this.walkStatement(assert(ifs.ifFalse), scope, info);
         break;
       }
       case NodeKind.While: {
@@ -1675,8 +1683,10 @@ class OwnerAnalysis {
             this.walkStatement(initializer, loopScope, info);
           }
         }
-        if (loop.condition != null) this.walkExpression(loop.condition, loopScope, info, false);
-        if (loop.incrementor != null) this.walkExpression(loop.incrementor, loopScope, info, false);
+        let loopCondition = loop.condition;
+        if (loopCondition != null) this.walkExpression(loopCondition, loopScope, info, false);
+        let loopIncrementor = loop.incrementor;
+        if (loopIncrementor != null) this.walkExpression(loopIncrementor, loopScope, info, false);
         this.walkStatement(loop.body, loopScope, info);
         break;
       }
@@ -1702,7 +1712,8 @@ class OwnerAnalysis {
         let cases = switchStatement.cases;
         for (let i = 0, k = cases.length; i < k; ++i) {
           let switchCase = cases[i];
-          if (switchCase.label != null) this.walkExpression(switchCase.label, scope, info, false);
+          let label = switchCase.label;
+          if (label != null) this.walkExpression(label, scope, info, false);
           let caseScope = new Scope(ScopeKind.Block, scope, info.node, switchCase.range);
           this.scopeOfCase.set(switchCase, caseScope);
           this.scopes.push(caseScope);
@@ -1723,12 +1734,12 @@ class OwnerAnalysis {
             let binding = new Binding(catchVariable.text, null, catchScope, catchVariable as Node as VariableDeclaration, true);
             catchScope.bindings.set(binding.name, binding);
           }
-          this.walkStatements(tryStatement.catchStatements, catchScope, info);
+          this.walkStatements(assert(tryStatement.catchStatements), catchScope, info);
         }
         if (tryStatement.finallyStatements != null) {
           let finallyScope = new Scope(ScopeKind.Block, scope, info.node, tryStatement.range);
           this.scopes.push(finallyScope);
-          this.walkStatements(tryStatement.finallyStatements, finallyScope, info);
+          this.walkStatements(assert(tryStatement.finallyStatements), finallyScope, info);
         }
         break;
       }
@@ -1777,7 +1788,7 @@ class OwnerAnalysis {
       if (this.structFunctions.has(closure)) binding.closureValue = closure;
       // A function expression has no name of its own; the binding it is
       // declared into is the name a reader (and the analysis dump) uses.
-      let info = this.infos.get(closure.declaration);
+      let info = getMapEntry(this.infos, closure.declaration);
       if (info != null) info.displayName = declaration.name.text;
     }
     binding.isConst = (declaration.flags & CommonFlags.Const) != 0;
@@ -1900,7 +1911,7 @@ class OwnerAnalysis {
             if (closure != null) {
               // Recorded, not decided: a closure whose `needed` is still null
               // may become Struct once `finalizeNeeds` adds a body parent.
-              let info = this.infos.get(closure.declaration);
+              let info = getMapEntry(this.infos, closure.declaration);
               if (info != null && info.needed != null) {
                 this.refuse(closure.range,
                   "a closure captured by a host callback (closures lowering)");
@@ -2025,8 +2036,8 @@ class OwnerAnalysis {
       // instead of turning into a bare `TS2558`; extending it is its own phase,
       // because the async transform would have to carry the parameter list too.
       if (
-        mentionsTypeParameter(binding.type, this.typeParameters) ||
-        mentionsTypeParameter(binding.type, this.classTypeParameters)
+        mentionsTypeParameter(assert(binding.type), this.typeParameters) ||
+        mentionsTypeParameter(assert(binding.type), this.classTypeParameters)
       ) {
         if (inAsyncBody(binding.scope)) {
           this.refuse(identifier.range,
@@ -2392,10 +2403,13 @@ class OwnerAnalysis {
       if (rewritten.length == 1 && rewritten[0].kind == NodeKind.Expression) {
         info.node.body = rewritten[0];
       } else {
-        let returns = rewritten.length == 0
-          ? new Array<Statement>()
-          : rewritten.slice(0, rewritten.length - 1);
-        let last = rewritten.length == 0 ? null : rewritten[rewritten.length - 1];
+        let returns = new Array<Statement>();
+        let last: Statement | null = null;
+        if (rewritten.length != 0) {
+          let lastIndex = rewritten.length - 1;
+          last = rewritten[lastIndex];
+          for (let i = 0; i < lastIndex; ++i) returns.push(rewritten[i]);
+        }
         if (last != null && last.kind == NodeKind.Expression) {
           returns.push(Node.createReturnStatement(
             (<ExpressionStatement>last).expression,
@@ -2505,7 +2519,7 @@ class OwnerAnalysis {
     switch (statement.kind) {
       case NodeKind.Block: {
         let block = <BlockStatement>statement;
-        let blockScope = this.scopeOfBlock.get(block);
+        let blockScope = getMapEntry(this.scopeOfBlock, block);
         let inner = blockScope != null ? blockScope : scope;
         let rewritten = this.rewriteStatements(block.statements, inner, currentFunction, continueHook);
         return Node.createBlockStatement(rewritten, block.range);
@@ -2517,7 +2531,7 @@ class OwnerAnalysis {
         let declarations = variable.declarations;
         for (let i = 0, k = declarations.length; i < k; ++i) {
           let declaration = declarations[i];
-          let binding = this.bindingOf.get(declaration);
+          let binding = getMapEntry(this.bindingOf, declaration);
           if (binding != null && binding.captured) {
             let initializer = declaration.initializer;
             if (initializer != null) {
@@ -2533,8 +2547,9 @@ class OwnerAnalysis {
             // false, which is exactly "declared, not yet assigned".
             continue;
           }
-          if (declaration.initializer != null) {
-            declaration.initializer = this.rewriteExpression(declaration.initializer, scope, currentFunction);
+          let initializer = declaration.initializer;
+          if (initializer != null) {
+            declaration.initializer = this.rewriteExpression(initializer, scope, currentFunction);
           }
           kept.push(declaration);
         }
@@ -2564,7 +2579,7 @@ class OwnerAnalysis {
         return Node.createIfStatement(
           this.rewriteExpression(ifs.condition, scope, currentFunction),
           assert(this.rewriteStatement(ifs.ifTrue, scope, currentFunction, continueHook)),
-          ifs.ifFalse != null ? this.rewriteStatement(ifs.ifFalse, scope, currentFunction, continueHook) : null,
+          ifs.ifFalse != null ? this.rewriteStatement(assert(ifs.ifFalse), scope, currentFunction, continueHook) : null,
           ifs.range
         );
       }
@@ -2588,15 +2603,15 @@ class OwnerAnalysis {
       }
       case NodeKind.For: {
         let loop = <ForStatement>statement;
-        let loopScope = this.scopeOfLoop.get(loop);
+        let loopScope = getMapEntry(this.scopeOfLoop, loop);
         let inner = loopScope != null ? loopScope : scope;
         let ownsEnv = loopScope != null && loopScope.localName != null && loopScope.isLoopHeader;
         if (!ownsEnv) {
           let initializer = loop.initializer;
           return Node.createForStatement(
             initializer != null ? this.rewriteStatement(initializer, inner, currentFunction) : null,
-            loop.condition != null ? this.rewriteExpression(loop.condition, inner, currentFunction) : null,
-            loop.incrementor != null ? this.rewriteExpression(loop.incrementor, inner, currentFunction) : null,
+            loop.condition != null ? this.rewriteExpression(assert(loop.condition), inner, currentFunction) : null,
+            loop.incrementor != null ? this.rewriteExpression(assert(loop.incrementor), inner, currentFunction) : null,
             assert(this.rewriteStatement(loop.body, inner, currentFunction, null)),
             loop.range
           );
@@ -2628,7 +2643,7 @@ class OwnerAnalysis {
             if (rewrittenStatement != null) rewritten.push(rewrittenStatement);
           }
           cases.push(Node.createSwitchCase(
-            switchCase.label != null ? this.rewriteExpression(switchCase.label, scope, currentFunction) : null,
+            switchCase.label != null ? this.rewriteExpression(assert(switchCase.label), scope, currentFunction) : null,
             rewritten,
             switchCase.range
           ));
@@ -2647,18 +2662,20 @@ class OwnerAnalysis {
           if (rewritten != null) body.push(rewritten);
         }
         let catchStatements: Array<Statement> | null = null;
-        if (tryStatement.catchStatements != null) {
+        let rawCatchStatements = tryStatement.catchStatements;
+        if (rawCatchStatements != null) {
           catchStatements = new Array();
-          for (let i = 0, k = tryStatement.catchStatements.length; i < k; ++i) {
-            let rewritten = this.rewriteStatement(tryStatement.catchStatements[i], scope, currentFunction);
+          for (let i = 0, k = rawCatchStatements.length; i < k; ++i) {
+            let rewritten = this.rewriteStatement(rawCatchStatements[i], scope, currentFunction);
             if (rewritten != null) catchStatements.push(rewritten);
           }
         }
         let finallyStatements: Array<Statement> | null = null;
-        if (tryStatement.finallyStatements != null) {
+        let rawFinallyStatements = tryStatement.finallyStatements;
+        if (rawFinallyStatements != null) {
           finallyStatements = new Array();
-          for (let i = 0, k = tryStatement.finallyStatements.length; i < k; ++i) {
-            let rewritten = this.rewriteStatement(tryStatement.finallyStatements[i], scope, currentFunction);
+          for (let i = 0, k = rawFinallyStatements.length; i < k; ++i) {
+            let rewritten = this.rewriteStatement(rawFinallyStatements[i], scope, currentFunction);
             if (rewritten != null) finallyStatements.push(rewritten);
           }
         }
@@ -2744,20 +2761,22 @@ class OwnerAnalysis {
         let declarations = variable.declarations;
         for (let i = 0, k = declarations.length; i < k; ++i) {
           let declaration = declarations[i];
-          let binding = this.bindingOf.get(declaration);
+          let binding = getMapEntry(this.bindingOf, declaration);
           if (binding != null && binding.captured) {
-            if (declaration.initializer != null) {
+            let initializer = declaration.initializer;
+            if (initializer != null) {
               prelude.push(Node.createExpressionStatement(
                 this.assign(
                   this.fieldOf(loopScope, binding, declaration.name.range),
-                  this.rewriteExpression(declaration.initializer, loopScope, currentFunction),
+                  this.rewriteExpression(initializer, loopScope, currentFunction),
                   declaration.range
                 )
               ));
             }
           } else {
-            if (declaration.initializer != null) {
-              declaration.initializer = this.rewriteExpression(declaration.initializer, loopScope, currentFunction);
+            let initializer = declaration.initializer;
+            if (initializer != null) {
+              declaration.initializer = this.rewriteExpression(initializer, loopScope, currentFunction);
             }
             kept.push(declaration);
           }
@@ -2783,8 +2802,8 @@ class OwnerAnalysis {
 
     let rewritten = Node.createForStatement(
       keptInitializer,
-      loop.condition != null ? this.rewriteExpression(loop.condition, loopScope, currentFunction) : null,
-      loop.incrementor != null ? this.rewriteExpression(loop.incrementor, loopScope, currentFunction) : null,
+      loop.condition != null ? this.rewriteExpression(assert(loop.condition), loopScope, currentFunction) : null,
+      loop.incrementor != null ? this.rewriteExpression(assert(loop.incrementor), loopScope, currentFunction) : null,
       Node.createBlockStatement(bodyStatements, loop.body.range),
       loop.range
     );
@@ -2817,7 +2836,7 @@ class OwnerAnalysis {
   ): Expression {
     switch (expression.kind) {
       case NodeKind.This: {
-        let env = this.thisRefs.get(<ThisExpression>expression);
+        let env = getMapEntry(this.thisRefs, <ThisExpression>expression);
         if (env == null) return expression; // Receiver path: leave it alone
         // `$this` is a field of the receiver's env (§4.7.5). That env is the
         // head in the common case; when a nested owner's env is the head, the
@@ -2830,7 +2849,7 @@ class OwnerAnalysis {
       }
       case NodeKind.Identifier: {
         let identifier = <IdentifierExpression>expression;
-        let binding = this.refs.get(identifier);
+        let binding = getMapEntry(this.refs, identifier);
         if (binding == null) return expression;
         let field = this.fieldOfFor(binding, currentFunction, identifier.range);
         if (binding.hasInitFlag) {
@@ -2845,7 +2864,7 @@ class OwnerAnalysis {
         let binary = <BinaryExpression>expression;
         if (isAssignmentOperator(binary.operator) && binary.left.kind == NodeKind.Identifier) {
           let identifier = <IdentifierExpression>binary.left;
-          let binding = this.refs.get(identifier);
+          let binding = getMapEntry(this.refs, identifier);
           if (binding != null) {
             let target = this.fieldOfFor(binding, currentFunction, binary.left.range);
             let value = this.rewriteExpression(binary.right, scope, currentFunction);
@@ -2880,7 +2899,7 @@ class OwnerAnalysis {
       case NodeKind.UnaryPrefix: {
         let prefix = <UnaryPrefixExpression>expression;
         let binding = prefix.operand.kind == NodeKind.Identifier
-          ? this.refs.get(<IdentifierExpression>prefix.operand)
+          ? getMapEntry(this.refs, <IdentifierExpression>prefix.operand)
           : null;
         if (binding != null) {
           let target = this.fieldOfFor(binding, currentFunction, prefix.range);
@@ -2901,7 +2920,7 @@ class OwnerAnalysis {
       case NodeKind.UnaryPostfix: {
         let postfix = <UnaryPostfixExpression>expression;
         let binding = postfix.operand.kind == NodeKind.Identifier
-          ? this.refs.get(<IdentifierExpression>postfix.operand)
+          ? getMapEntry(this.refs, <IdentifierExpression>postfix.operand)
           : null;
         if (binding != null) {
           let target = this.fieldOfFor(binding, currentFunction, postfix.range);
@@ -2934,7 +2953,7 @@ class OwnerAnalysis {
       }
       case NodeKind.Function: {
         let functionExpression = <FunctionExpression>expression;
-        let info = this.infos.get(functionExpression.declaration);
+        let info = getMapEntry(this.infos, functionExpression.declaration);
         if (info != null) {
           this.rewriteFunctionBody(info);
           let head = info.needed;
@@ -2943,7 +2962,7 @@ class OwnerAnalysis {
             // §3.3's four facts, all final now: the head class `_env` names,
             // whether this function's body owns an env, that it receives one
             // (kind Struct), and the class its own body env links to (§5.2).
-            let parentClass = info.bodyParent != null ? assert(info.bodyParent.className) : null;
+            let parentClass = info.bodyParent != null ? assert(info.bodyParent).className : null;
             envInfoOf().set(functionExpression, new EnvInfo(
               EnvKind.Struct, className, info.ownEnv, true, parentClass, head.needsThis
             ));

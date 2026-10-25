@@ -99,6 +99,7 @@ import {
 import {
   cloneMap
 } from "./util";
+import { getMapEntry } from "./util/collections";
 
 import {
   Token,
@@ -2423,7 +2424,7 @@ export class Resolver extends DiagnosticEmitter {
       // a regular function binds `this` dynamically, so it is given no binding
       // here at all, and gets TS2332 below.
       let ownLocals = enclosing.flow.scopedLocals;
-      let thisLocal = ownLocals ? ownLocals.get(CommonNames.this_) : null;
+      let thisLocal = ownLocals ? getMapEntry(ownLocals, CommonNames.this_) : null;
       if (thisLocal) {
         if (escapedArrows) this.markCapturingArrows(escapedArrows, thisLocal.type);
         this.currentThisExpression = null;

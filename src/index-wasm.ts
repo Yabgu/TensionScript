@@ -241,6 +241,18 @@ export function setDebugInfo(options: Options, debug: bool): void {
 
 // Program
 
+/**
+ * Runs the compiler's own in-tree `afterParse` transforms (closure lowering,
+ * then async lowering) over a program.
+ *
+ * Exported as one flat function, not as the transform classes: the classes are
+ * compiler internals, and in this host they are only reachable as opaque
+ * handles. The host already holds the `Program` handle from `newProgram`, so
+ * this needs no AST surface — the transform runs inside the instance on the
+ * program it already has (`src/transforms.ts`).
+ */
+export { applyInTreeTransforms } from "./transforms";
+
 /** Creates a new Program. */
 export function newProgram(options: Options): Program {
   return new Program(options);
