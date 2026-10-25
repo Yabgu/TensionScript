@@ -1,0 +1,7 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: an @inline struct as an @external parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; pass an @unmanaged struct or a @managed struct, which cross as a single borrowed pointer, or pass the fields individually)",
+    "AS100: Not implemented: an @inline struct as an @external parameter (flattening the record into one WASM parameter per field would make its field list part of the host ABI; pass an @unmanaged struct or a @managed struct, which cross as a single borrowed pointer, or pass the fields individually)"
+  ]
+}
