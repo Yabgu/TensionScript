@@ -1745,7 +1745,8 @@ export class Compiler extends DiagnosticEmitter {
     // compiles here rather than something compiling on an undesigned ABI.
     if (
       instance.is(CommonFlags.ModuleExport) &&
-      !instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs)
+      !instance.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
+      !signature.exportByValParams
     ) {
       let parameterTypes = signature.parameterTypes;
       for (let i = 0, k = parameterTypes.length; i < k; ++i) {
@@ -1797,6 +1798,11 @@ export class Compiler extends DiagnosticEmitter {
       let flow = instance.flow;
       this.currentFlow = flow;
       let stmts = new Array<ExpressionRef>();
+
+      // An export's byval pointer parameters are copied into their SROA locals
+      // here, before the body: the mirror of sret's callee write, with loads.
+      // The pointer is the host's; nothing is allocated and nothing is restored.
+      if (signature.exportByValParams) this.emitExportByValPrologue(instance, stmts);
 
       if (!this.compileFunctionBody(instance, stmts)) {
         stmts.push(module.unreachable());
@@ -6934,7 +6940,7 @@ export class Compiler extends DiagnosticEmitter {
     let externalBase = 0;
     let externalMark: Local | null = null;
     let externalOffset = 0;
-    if (signature.externalBoundary) {
+    if (signature.byValPointerParams) {
       let total = 0;
       for (let i = 0; i < numArguments; ++i) {
         let parameterType = unchecked(parameterTypes[i]);
@@ -11343,6 +11349,57 @@ export class Compiler extends DiagnosticEmitter {
     );
   }
 
+  /**
+   * Copies an export's byval pointer parameters into their SROA field locals.
+   *
+   * The mirror of `compileSretReturnStatement`: sret writes each field to
+   * `(dest + offset)` at the callee's return; this reads each field from
+   * `(ptr + offset)` at the callee's entry. Between the two, the value crosses
+   * the boundary as memory in both directions, and the body never sees an
+   * address — it runs on the same SROA locals a guest call would bind.
+   *
+   * This is also what makes the copy *by value*: the fields are loaded once, so
+   * the caller's later mutation of the struct cannot be observed by the body.
+   */
+  private emitExportByValPrologue(
+    instance: Function,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let signature = instance.signature;
+    let flow = instance.flow;
+    let parameterTypes = signature.parameterTypes;
+    for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+      if (!signature.isExportByValParam(i)) continue;
+      let parameterName = instance.getParameterName(i);
+      let pointerLocal = flow.lookupLocal(parameterName + "$byval");
+      let parent = flow.lookupLocal(parameterName);
+      if (pointerLocal == null || parent == null || parent.fieldLocals == null) continue;
+      let fieldLocals = parent.fieldLocals;
+      let fields = assert(this.inlineStructFieldsOf(unchecked(parameterTypes[i])));
+      for (let j = 0, n = fields.length; j < n; ++j) {
+        let field = unchecked(fields[j]);
+        let to = fieldLocals.get(field.name);
+        // A field refused at declaration (a `T[N]` or GC-reference field) has
+        // no local: it was never part of the value.
+        if (!to) continue;
+        stmts.push(module.local_set(
+          to.index,
+          module.load(
+            field.type.byteSize,
+            false,
+            // A fresh address node per load: Binaryen's passes assume one
+            // parent per node.
+            module.local_get(pointerLocal.index, TypeRef.I32),
+            field.type.toRef(),
+            field.memoryOffset
+          ),
+          false
+        ));
+      }
+    }
+  }
+
   /** `base + mark + extra`, freshly built. Callers must not share the node:
    *  Binaryen's passes assume a single parent per expression. */
   private makeSretAddressPlus(base: i32, markLocal: Local, extra: i32): ExpressionRef {
@@ -11387,7 +11444,7 @@ export class Compiler extends DiagnosticEmitter {
       this.error(
         DiagnosticCode.Not_implemented_0,
         argumentExpression.range,
-        "passing this expression as an @inline struct to an @external function (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)"
+        "passing this expression as an @inline struct to a by-value parameter (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)"
       );
       return module.unreachable();
     }

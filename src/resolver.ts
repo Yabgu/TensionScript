@@ -3187,6 +3187,13 @@ export class Resolver extends DiagnosticEmitter {
     // `(param i32)`).
     let externalBoundary = prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
       signatureHasInlineStructParam(parameterTypes);
+    // An **export** is the mirror boundary: a value-type parameter crosses as a
+    // byval pointer the host provides, rather than as one WASM parameter per
+    // field (which is the silent ABI an export used to have). `ModuleExport` is
+    // set on the prototype by `markModuleExports` before any function resolves.
+    let exportByValParams = prototype.is(CommonFlags.ModuleExport) &&
+      !prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
+      signatureHasInlineStructParam(parameterTypes);
     let signature = Signature.create(
       this.program,
       parameterTypes,
@@ -3195,7 +3202,8 @@ export class Resolver extends DiagnosticEmitter {
       requiredParameters,
       hasRest,
       sretDisabled,
-      externalBoundary
+      externalBoundary,
+      exportByValParams
     );
 
     let nameInclTypeParameters = prototype.name;
