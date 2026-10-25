@@ -899,6 +899,24 @@ export abstract class TypeNode extends Node {
   currentlyResolving: bool = false;
 
   /**
+   * The memory model this **use** of the type asks for, or {@link MemoryModel.Any}
+   * when the use names none and the declaration's own model applies.
+   *
+   * Written by the parser from a pre-type decorator (`v: @inline V3`). It lives
+   * on the type node rather than on the declaration because one declaration is
+   * used in many places: a `@unmanaged` record passed to a caller that wants a
+   * GC reference is a property of *that* use, not of the record. The resolved
+   * {@link Type} is interned per `(prototype, typeArguments)` and is shared by
+   * every use, so an override cannot live there (`docs/interop-memory-
+   * conversions-scope.md` §3.2).
+   *
+   * A model names *storage*, and a value is exactly one of them at a time: the
+   * parser refuses a node that names two (`docs/` §4), so this is single-valued
+   * by construction rather than by convention.
+   */
+  memoryModel: MemoryModel = MemoryModel.Any;
+
+  /**
    * Attributes written after the type on the same line, e.g. `x: f32 @abi.alias("f")`.
    *
    * They live on the **type**, not on the declaration, because the same type
@@ -1106,6 +1124,30 @@ export class ParameterNode extends Node {
 }
 
 // special
+
+/**
+ * A memory model a use or declaration can name.
+ *
+ * The three models are the storage kinds a record can have: inline bytes (a
+ * value with no address), a GC-managed reference, and an unmanaged reference.
+ * `Any` is "this use names none", which is not a fourth model — it means the
+ * declaration's own model decides, and it is what every use-site has until an
+ * override is written.
+ *
+ * An enum rather than the decorator node: the parser refuses combinations and
+ * unknown spellings once, at parse time, so a reader never re-switches on
+ * spelling and never has to decide what two models would mean.
+ */
+export const enum MemoryModel {
+  /** No override: the declaration's model applies. */
+  Any = 0,
+  /** `@inline`: a value type, stored as bytes in locals/records. */
+  Inline = 1,
+  /** `@managed`: a GC-owned record reference. */
+  Managed = 2,
+  /** `@unmanaged`: a plain record pointer. */
+  Unmanaged = 3
+}
 
 /** Built-in decorator kinds. */
 export enum DecoratorKind {

@@ -12,7 +12,6 @@
   "Start function name '{0}' is invalid or conflicts with another export.": 110,
   "Element '{0}' not found.": 111,
   "Exchange of '{0}' values is not supported by all embeddings": 112,
-
   "Conversion from type '{0}' to '{1}' requires an explicit cast.": 200,
   "Conversion from type '{0}' to '{1}' will require an explicit cast when switching between 32/64-bit.": 201,
   "Type '{0}' cannot be changed to type '{1}'.": 202,
@@ -54,7 +53,6 @@
   "Ambiguous operator overload '{0}' (conflicting overloads '{1}' and '{2}').": 240,
   "An interface or abstract method '{0}' cannot have type parameters.": 241,
   "Cannot override generic method '{0}' with a non-generic method or vice versa.": 242,
-
   "Importing the table disables some indirect call optimizations.": 901,
   "Exporting the table disables some indirect call optimizations.": 902,
   "Expression compiles to a dynamic check at runtime.": 903,
@@ -63,7 +61,6 @@
   "Unnecessary definite assignment.": 906,
   "'NaN' does not compare equal to any other value including itself. Use isNaN(x) instead.": 907,
   "Comparison with -0.0 is sign insensitive. Use Object.is(x, -0.0) if the sign matters.": 908,
-
   "Unterminated string literal.": 1002,
   "Identifier expected.": 1003,
   "'{0}' expected.": 1005,
@@ -130,7 +127,6 @@
   "A default export can only be used in a module.": 1319,
   "An expression of type '{0}' cannot be tested for truthiness.": 1345,
   "An identifier or keyword cannot immediately follow a numeric literal.": 1351,
-
   "Duplicate identifier '{0}'.": 2300,
   "Cannot find name '{0}'.": 2304,
   "Module '{0}' has no exported member '{1}'.": 2305,
@@ -170,7 +166,7 @@
   "Property '{0}' is protected in type '{1}' but public in type '{2}'.": 2444,
   "Property '{0}' is protected and only accessible within class '{1}' and its subclasses.": 2445,
   "Variable '{0}' used before its declaration.": 2448,
-  "Cannot redeclare block-scoped variable '{0}'" : 2451,
+  "Cannot redeclare block-scoped variable '{0}'": 2451,
   "The type argument for type parameter '{0}' cannot be inferred from the usage. Consider specifying the type arguments explicitly.": 2453,
   "Variable '{0}' is used before being assigned.": 2454,
   "Type alias '{0}' circularly references itself.": 2456,
@@ -206,12 +202,14 @@
   "Type '{0}' has no call signatures.": 2757,
   "Get accessor '{0}' must be at least as accessible as the setter.": 2808,
   "This member cannot have an 'override' modifier because it is not declared in the base class '{0}'.": 4117,
-
   "File '{0}' not found.": 6054,
   "Numeric separators are not allowed here.": 6188,
   "Multiple consecutive numeric separators are not permitted.": 6189,
   "This expression is not callable because it is a 'get' accessor. Did you mean to use it without '()'?": 6234,
   "'super' must be called before accessing 'this' in the constructor of a derived class.": 17009,
   "'super' must be called before accessing a property of 'super' in the constructor of a derived class.": 17011,
-  "A struct cannot be both '@managed' and '@unmanaged'.": 6390
+  "A struct cannot be both '@managed' and '@unmanaged'.": 6390,
+  "A struct cannot be both '@inline' and '@managed'.": 6391,
+  "A memory-model decorator must precede the type it applies to: '{0}'.": 6392,
+  "Only one memory-model decorator may apply to a use.": 6393
 }
