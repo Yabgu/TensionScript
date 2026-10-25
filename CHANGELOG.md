@@ -136,6 +136,53 @@ One shape, one contract, three record kinds:
 The temp and sret share one stack, so the 4 KB limit and its abort are one
 limit; `--sretStackSize` covers both.
 
+### `@inline struct` on the export side, and single-field value types
+
+**Exports.** An export with an `@inline struct` parameter now declares
+`(param i32)` — a byval pointer the **host** supplies — and the callee copies
+each field into its SROA locals at entry. It used to declare `(param f32 f32)`
+for a two-field record: the field list as the host ABI, the same silent defect
+the `@external` side had, in the mirror direction. Refused first, then
+implemented, so the refusal remains as the fallback for a declaration that does
+not take the byval path.
+
+This is sret's mirror inside the same boundary:
+
+- sret **return**: the callee writes each field to `(dest + offset)` at exit.
+- export **parameter**: the callee reads each field from `(ptr + offset)` at entry.
+
+Both keep the value in memory on both sides, and the body runs on SROA locals
+either way. The single load per field is also what makes the copy by value: the
+caller's later mutation cannot be observed, and the body's writes land in its own
+locals (both asserted).
+
+**The pass-by-value model, all four positions:**
+
+| Position | Multi-field | Single-field |
+|---|---|---|
+| `@external` parameter | `(param i32)` — caller's temp | refused (convention mismatch) |
+| export parameter | `(param i32)` — host's byval pointer | refused (convention mismatch) |
+| `@external` return | refused (ABI version) | refused |
+| sret return (in-module) | `(dest, …)` | `(dest, …)` |
+
+**Single-field value types.** A one-field `@inline struct` parameter was
+unusable **anywhere**, not just at boundaries: the parameter binding, `paramRefs`
+and the argument expansion all decided "unpack into fields" from
+`wasmParamCountOf(...) > 1`, and a one-field record spends exactly one WASM slot.
+The binding therefore made an ordinary local of the record type (with `toRef()`'s
+GC heap type), `paramRefs` emitted that heap type, and the caller compiled the
+argument as a whole value — the refusal. All three sites now key on the type, and
+`Signature.fieldCountOf` answers the field count where that is what is meant, so
+"one field" and "one slot" stop being the same number.
+
+At a host boundary the single-field shape is **refused**, because the two
+conventions disagree invisibly: the C/WASM tool convention (BasicCABI) passes a
+struct whose only member is a scalar as that scalar, while this compiler passes
+records as pointers. Both are `(param i32)`, so a C module and this compiler link
+cleanly and then one reads an address as a number. Boundary detection now
+requires two or more fields, so the byval pointer and the temp apply exactly
+where the conventions agree.
+
 ### `@inline struct` pass-by-value (SROA parameters)
 
 A function parameter of `@inline struct` type now passes by value. The source

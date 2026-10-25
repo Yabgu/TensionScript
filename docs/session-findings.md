@@ -505,6 +505,48 @@ guard compiles a static message string, which leaves `currentType` pointing at
 that string; the call's type must be restated after wrapping, the same way the
 sret branch already did.
 
+## PR #16, continued: the export mirror and single-field value types
+
+**The export-flattening finding — the import defect, mirrored.** `export function
+take(v: V)` declared `(param f32 f32)` for a two-field record: the field list as
+the host ABI, with `layout_hash` not moving (it folds arena geometry, and this is
+a guest-side declaration the hash never sees). Exactly the defect the `@external`
+side had, in the outgoing direction. Refused first (`ca06c620`), then served by a
+byval pointer (`5069aeba`): the host materialises, the callee loads each field at
+entry. *Revert measured:* omitting the prologue fails
+`inline-struct-export-param-byval` — the fields are never loaded, so the sums are
+wrong — and the WAT comparison fails too.
+
+**Two passes, not one, for byval binding.** Field locals of a byval parameter are
+*additional* locals: the WASM signature spends one slot on the pointer, so the
+fields have to come after every parameter local. Binding them in source order
+gave local `i+1` the type of a WASM parameter that was really the next pointer —
+`local.set` with an `f32` value into an `i32` local, refused by the validator.
+The binding now assigns parameter locals first, then byval field locals, and
+`getNonParameterLocalTypes` starts the additional list at `wasmParamCount()`,
+which is exactly where the second pass begins.
+
+**The single-field measurement — a defect, not just an ABI question.** The
+pre-work asked whether a one-field `@inline struct` at an `@external` position
+passes a pointer or the scalar. Measured: a pointer (`(param i32)`, call site
+`base + mark`, 16 bytes reserved). The tool convention says the scalar; the types
+are identical, so the mismatch is silent — which is why it is now refused at both
+boundaries.
+
+The measurement turned up something worse next door: **a one-field value-type
+parameter was unusable everywhere.** Three sites decided "unpack into fields"
+from `wasmParamCountOf(...) > 1`, and a one-field record spends exactly one slot.
+So `function take(s: S): i32 { return s.a; }` — no boundary involved — failed with
+the whole-value refusal, because the parameter was bound as an ordinary local of
+the record type with `toRef()`'s GC heap type. All three sites now key on the
+type, and `Signature.fieldCountOf` answers field counts. *Revert measured:*
+restoring the `> 1` test fails `inline-struct-single-field`.
+
+The general lesson, which has now bitten three times in this phase (constructors,
+inferred locals, single-field): **`wasmParamCountOf` conflates "how many WASM
+slots" with "is this an aggregate".** Anything that needs the second question must
+ask about the type, not the count.
+
 **Third finding (latent, not fixed).** The operand walk's `paramType.isManaged`
 check uses the *source* parameter's type, not the individual field's. Correct
 today because an `@inline struct`'s fields are scalar or struct-pointer, so

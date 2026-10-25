@@ -399,6 +399,46 @@ the call, the host's second read returns the inner temp's bytes).
 
 ---
 
+## 8.5 The pass-by-value model, and the export mirror
+
+The `@external` temp and sret are two halves of one model: **a value crosses a
+call as memory, never as a value**. The `@inline struct` phase now covers all four
+positions:
+
+| Position | Multi-field | Single-field |
+|---|---|---|
+| `@external` parameter | `(param i32)` — the caller's temp; host borrows for the call | refused |
+| export parameter | `(param i32)` — the host's byval pointer; callee copies at entry | refused |
+| `@external` return | refused (an ABI version) | refused |
+| sret return (in-module) | `(dest, …)` hidden first parameter | `(dest, …)` |
+
+**Why "by value" is the right name for both directions.** The external temp is
+C#'s "structure by value: passes structures as In parameters" — the guest
+materialises a copy, the host reads it, and mutations do not leak back. The export
+mirror is the same model with the roles swapped: the host materialises the copy,
+and the callee *loads* each field once at entry, so the host's later mutation
+cannot be observed and the callee's writes land in its own locals. Both are the
+same guarantee stated from opposite sides, and both are asserted behaviourally
+rather than by signature.
+
+**Why the shapes agree.** The WASM tool convention (`BasicCABI.md`) passes a
+multi-scalar-field struct indirectly, as a byval pointer — which is exactly what
+`(param i32)` is, and exactly what the engine's adapter reads through
+(`guest_read(ptr, len)`, rule 6). So for multi-field records the tool convention,
+the C# model and this compiler's existing `@unmanaged`/`@managed` convention all
+agree, and one shape serves all three record kinds.
+
+**Why single-field is refused instead.** BasicCABI passes a struct whose only
+member is a scalar **as that scalar**. This compiler passes records as pointers.
+Both spell `(param i32)`, so nothing links-and-fails: one side reads an address as
+a number. That is the one place the conventions cannot be reconciled by
+inspection, so it is refused at the boundaries and left working inside the
+module, where no ABI is involved. The eventual fix is a deliberate flatten
+special case for one-field records at the boundary — not a change to the temp,
+which is correct for every shape the conventions agree on.
+
+---
+
 ## 9. Recommendation
 
 **Proceed, as its own PR, with mechanism (B).** The order:
