@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Bootstrap self-compile: the compiler's own source now compiles
+
+`npm run bootstrap:*` stage 1 ran red on every tip in this fork: the compiler
+rejected its own source with 229 errors (212 `TS2448`, 17 `TS2322`). It now
+compiles clean — **0 errors**, debug and release.
+
+Three changes, all in compiler source:
+
+- **Diagnostic relaxation.** A read of a global whose initializer is a
+  compile-time constant is no longer refused. The `used before its declaration`
+  diagnostic models an initialization-order hazard; a constant has no operands
+  and so no order to observe. Non-constant initializers are still refused.
+- **A second predicate.** `Expression.evaluatesToConst` sees through `Assertion`
+  and numeric `UnaryPrefix` (minus `++`/`--`), so `<Index>-1` counts as the
+  constant it is. Deliberately **not** a widening of `compilesToConst`: that one
+  gates filling omitted arguments with their initializers, and widening it
+  removed the varargs stub in four fixtures — an output change for programs that
+  compile today.
+- **Accessors for the four non-constant tables.** `envInfoOf`, `creationEnvOf`,
+  `awaitSites` and `TypeRef.Funcref` became accessor functions over
+  null-initialized backing stores. A prelude hoist was measured and rejected: a
+  file's walk does not guarantee its globals compile before the function bodies
+  that read them.
+
+**The `@lazy` path is closed, both forms.** `@lazy` on a variable is a TypeScript
+syntax error (`TS1206`, plus an unsuppressible eslint parse error); on a class
+member it parses and lints but fails `npm run build` with `ReferenceError: lazy
+is not defined`. The scoping ratified a mechanism the toolchain rejects.
+
+**Not yet verified end to end.** `bootstrap:debug` exits 1 at stage 2, on a
+failure unrelated to ordering: the CLI marks std sources through
+`program.sources` / `program.stdSources`, which exist on the JS compiler and are
+`undefined` when the compiler runs as WASM. That path had never been reached
+before, because stage 1 always failed first. Until it is fixed the self-host
+fixpoint — the final `.wast` diff — cannot run.
+
+Neutrality for *user* programs is measured: `npm test` passes all 1339 fixtures
+against their checked-in `.wat` byte for byte, and `npm run check` is green.
+Programs that previously failed to compile now compile — additive and
+backward-compatible.
+
+Version: **minor** by the additive reading; the exact release (0.9.1, 0.10.0, or
+bundled with the `@inline struct` batch) is the user's decision.
+
 ### `@inline struct` phase complete (scalar and struct-ref fields)
 
 The minimum viable value type is finished. What is in:

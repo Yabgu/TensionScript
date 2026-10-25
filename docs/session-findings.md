@@ -638,3 +638,83 @@ today because an `@inline struct`'s fields are scalar or struct-pointer, so
 exist: the walk's `-1` sentinel and its `isManaged` check both depend on the
 flattening being field-safe, which it is only for unmanaged fields. Gated by the
 GC-ref-fields phase.
+
+---
+
+## Bootstrap self-compile — the ordering phase
+
+**Finding: the ratified mechanism was invisible to the toolchain.** The scoping
+measured `@lazy` on namespace constants as the fix and verified it as
+byte-identical WAT. Both of its spellings are dead:
+
+- On a **variable declaration**, `@lazy` is an AssemblyScript grammar extension
+  TypeScript rejects: `tsc` reports `TS1206: Decorators are not valid here`, and
+  `@typescript-eslint` reports a **parse** error, which no directive can
+  suppress — a parse error is raised before rules run. `// @ts-ignore` closes the
+  tsc half and cannot touch the eslint half.
+- On a **class member**, it parses and lints (TS treats it as a decorator
+  expression; `// @ts-ignore` covers the undefined `lazy` name), but
+  `npm run build` fails at module evaluation: `ReferenceError: lazy is not
+  defined`. The JS build passes the decorator through as a runtime call, and
+  `src/` contains no other decorator, so the path had never been exercised.
+
+The lesson is about verification order: a WAT measurement answers "does this
+change output?", not "does this build?". The gate that would have caught it —
+`npm run check` — was run only after the annotation set was applied, at which
+point it reported 29 errors against a fix that had already been adopted.
+
+**Finding: the diagnostic was a false positive for constants.** `compileGlobalLazy`
+refused any read of a global not yet compiled, on the theory that its initializer
+might not have run. A constant initializer has no operands, so there is no order
+it could observe. Relaxing that cleared 208 of 212 errors. The boundary is
+pinned by `tests/compiler/variable-access-in-initializer.ts`, which keeps
+`let b = (b = 4, 3)` **inside a function body** as `TS2448` — which is why the
+relaxation is keyed on the initializer being constant, not on the read being
+runtime code.
+
+**Finding: `compilesToConst` answers two questions, so widening it broke one.**
+Adding `Assertion` and `UnaryPrefix` to `Expression.compilesToConst` clears
+`<Index>-1`, and also changes the gate for filling omitted arguments with their
+initializers (`compiler.ts:7576`): four fixtures lost their varargs stub
+(`call-optional`, `call-inferred`, `std/string`, `std/typedarray`) — emitted
+output changed for code that compiles today. Split instead:
+`evaluatesToConst` for the ordering question, `compilesToConst` unchanged for
+the codegen question. Same pattern as `wasmParamCountOf`: a helper that answers
+two questions gets used wrong for one of them.
+
+**Finding: a file's walk does not order its globals before its readers.**
+Instrumented walk order: `compiler.ts` is file 32 of 71 and imports
+`closure/ir.ts` at 33, yet `closure/ir.ts`'s own globals compiled after the
+refusals. So "hoist the declarations to a file imported first" does not work —
+import order is not a compile order for globals. The four remaining tables
+became accessors over null-initialized backing stores: `null` is a constant
+(so reading the store is already allowed), and a function is compilable on
+demand in any order.
+
+**Finding: the self-host harness was never reachable, and now is not runnable.**
+With stage 1 at 0 errors, `bootstrap:debug` proceeds to stage 2 and dies in
+`cli/index.js:523` — the CLI marks std sources through `program.sources` and
+`program.stdSources`, properties that exist on the JS compiler and are
+`undefined` under `--wasm`. Measured directly: `newProgram()` returns an object
+whose `.sources` is `undefined` for the WASM module, and the same CLI runs fine
+when the compiler is JS. This is independent of the ordering work and was
+invisible while stage 1 failed. Until it is fixed, the self-host fixpoint (the
+final `.wast` diff, the phase's strongest neutrality proof) cannot run; the
+interim proof is `npm test`'s 1339 fixtures compared byte for byte against their
+checked-in `.wat`.
+
+**Measurement note: "byte-identical for a literal" is not "byte-identical".**
+The scoping's §1.6(a) measured `@lazy` on one literal-valued constant and
+generalised. Re-measured across four shapes (identical file names, so no path
+artifacts leak into the WAT):
+
+- namespace `const` with a literal initializer — **identical**, as reported;
+- module-scope `const` with a literal initializer — **identical**;
+- `static readonly` field — the global's declaration **moves later** in the
+  module (same initializer, different order);
+- `const` with a non-literal initializer (`new Map()`) — the per-file
+  `$start:<file>` function **folds into `$~start`**.
+
+Only the first two are byte-identical, and those are the two the toolchain
+refuses to accept. The generalisation was sound for the property it measured and
+wrong for the property relied on.
