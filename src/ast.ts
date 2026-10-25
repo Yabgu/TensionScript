@@ -821,6 +821,39 @@ export abstract class Node {
     return false;
   }
 
+  /**
+   * Tests whether this node's value cannot depend on execution order: a
+   * constant, a cast of one, or a numeric sign applied to one.
+   *
+   * Deliberately a separate predicate rather than a wider
+   * {@link compilesToConst}. That one gates filling omitted arguments with
+   * their initializers (`compiler.ts:7576`), where accepting more nodes removes
+   * the varargs stub and changes the emitted module for programs that compile
+   * today (measured: `call-optional`, `call-inferred`, `std/string`,
+   * `std/typedarray`). This predicate answers a narrower question — is there an
+   * initialization order this initializer could observe? — and is used only by
+   * the global-ordering diagnostic.
+   */
+  get evaluatesToConst(): bool {
+    switch (this.kind) {
+      // A cast cannot change the value and cannot call user code.
+      case NodeKind.Assertion: {
+        return (<AssertionExpression>changetype<Node>(this)).expression.evaluatesToConst; // TS
+      }
+      // A sign applied to a constant is a constant. `++` / `--` are excluded
+      // deliberately: they read and write their operand, so they are not values.
+      case NodeKind.UnaryPrefix: {
+        let unary = <UnaryPrefixExpression>changetype<Node>(this); // TS
+        let operator = unary.operator;
+        if (operator == Token.Plus || operator == Token.Minus) {
+          return unary.operand.evaluatesToConst;
+        }
+        break;
+      }
+    }
+    return this.compilesToConst;
+  }
+
   private isAccessOn(kind: NodeKind): bool {
     let node = changetype<Node>(this);
     if (node.kind == NodeKind.Call) {

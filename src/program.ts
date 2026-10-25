@@ -2220,13 +2220,13 @@ export class Program extends DiagnosticEmitter {
       if (element.hasDecorator(DecoratorFlags.InlineStruct)) {
         this.error(
           DiagnosticCode.Not_implemented_0,
-          Range.join(declaration.name.range, declaration.extendsType.range),
+          Range.join(declaration.name.range, assert(declaration.extendsType).range),
           "inheritance on an @inline struct (a value type is final: no base class, no virtual methods)"
         );
       } else if (element.hasDecorator(DecoratorFlags.ManagedStruct)) {
         this.error(
           DiagnosticCode.Not_implemented_0,
-          Range.join(declaration.name.range, declaration.extendsType.range),
+          Range.join(declaration.name.range, assert(declaration.extendsType).range),
           "inheritance on an @managed struct (its fields must stay at fixed offsets from the reference)"
         );
       } else {
@@ -4264,7 +4264,7 @@ export class Function extends TypedElement {
   }
 
   /** Adds a local of the specified type, with an optional name. */
-  addLocal(type: Type, name: string | null = null, declaration: VariableDeclaration | null = null): Local {
+  addLocal(type: Type, name: string | null = null, declaration: VariableLikeDeclarationStatement | null = null): Local {
     // if it has a name, check previously as this method will throw otherwise
     let localsByIndex = this.localsByIndex;
     let localIndex = localsByIndex.length;

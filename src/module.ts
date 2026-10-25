@@ -70,7 +70,12 @@ export namespace TypeRef {
   export const F64: TypeRef = 5 /* _BinaryenTypeFloat64 */;
   export const V128: TypeRef = 6 /* _BinaryenTypeVec128 */;
   // reference/gc types
-  export const Funcref = binaryen._BinaryenTypeFuncref();
+  // A function, not a `const`: the value comes from Binaryen at runtime, so a
+  // global would be a read-before-initialized hazard for any function body
+  // compiled before this file's walk reaches the declaration.
+  export function funcref(): TypeRef {
+    return binaryen._BinaryenTypeFuncref();
+  }
   export const Externref = binaryen._BinaryenTypeExternref();
   export const Anyref = binaryen._BinaryenTypeAnyref();
   export const Eqref = binaryen._BinaryenTypeEqref();
@@ -2478,7 +2483,7 @@ export class Module {
     let cArr = allocPtrArray(names);
     let tableRef = binaryen._BinaryenGetTable(this.ref, cStr);
     if (!tableRef) {
-      tableRef = binaryen._BinaryenAddTable(this.ref, cStr, initial, maximum, TypeRef.Funcref);
+      tableRef = binaryen._BinaryenAddTable(this.ref, cStr, initial, maximum, TypeRef.funcref());
     } else {
       binaryen._BinaryenTableSetInitial(tableRef, initial);
       binaryen._BinaryenTableSetMax(tableRef, maximum);
@@ -2491,7 +2496,7 @@ export class Module {
   ensureFunctionTable(name: string): void {
     let cStr = this.allocStringCached(name);
     if (!binaryen._BinaryenGetTable(this.ref, cStr)) {
-      binaryen._BinaryenAddTable(this.ref, cStr, 0, Module.UNLIMITED_TABLE, TypeRef.Funcref);
+      binaryen._BinaryenAddTable(this.ref, cStr, 0, Module.UNLIMITED_TABLE, TypeRef.funcref());
     }
   }
 
