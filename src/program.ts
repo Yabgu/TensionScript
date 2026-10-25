@@ -4078,7 +4078,20 @@ export class Function extends TypedElement {
         this.localsByIndex[local.index] = local;
         flow.setLocalFlag(local.index, LocalFlags.Initialized);
       }
+      if (signature.hasHiddenDestParam) {
+        // Sret: the hidden destination pointer, at the first slot after `this`.
+        // It has no source name — nothing in the body can refer to it — so it
+        // is not installed in `scopedLocals`; only `localsByIndex` and the
+        // initialized flag know about it. `getNonParameterLocalTypes` starts
+        // the body locals after `wasmParamCount()`, which counts this slot.
+        let local = new Local("$sretDest", localIndex++, Type.u32, this);
+        this.localsByIndex[local.index] = local;
+        flow.setLocalFlag(local.index, LocalFlags.Initialized);
+      }
       let parameterTypes = signature.parameterTypes;
+      // Field locals of byval parameters, filled in the second pass so that the
+      // parameter locals stay contiguous from index 0.
+      let byValFields: ByValFieldBinding[] | null = null;
       for (let i = 0, k = parameterTypes.length; i < k; ++i) {
         let parameterType = parameterTypes[i];
         let parameterName = this.getParameterName(i);
@@ -4086,8 +4099,39 @@ export class Function extends TypedElement {
         // same SROA shape `compileSroaLocal` gives a local: `localIndex` advances
         // by N, and the parent binding is a fieldLocals map with no index of its
         // own (`-1`, which is also what makes a bare read of it refuse).
-        let fieldCount = Signature.wasmParamCountOf(parameterType);
-        if (fieldCount > 1) {
+        // An **export** byval parameter spends two things: one pointer local
+        // (the host's address) and one local per field (the copy the prologue
+        // fills). Binding only the fields would leave the pointer unbound and
+        // the signature's single `i32` with nowhere to land.
+        if (signature.isExportByValParam(i)) {
+          let scopedLocals = this.flow.scopedLocals;
+          if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
+          let pointerLocal = new Local(
+            parameterName + "$byval",
+            localIndex++,
+            Type.u32,
+            this
+          );
+          this.localsByIndex[pointerLocal.index] = pointerLocal;
+          flow.setLocalFlag(pointerLocal.index, LocalFlags.Initialized);
+          scopedLocals.set(parameterName + "$byval", pointerLocal);
+          // The field locals are **additional** locals, not parameters: the
+          // WASM signature spends one slot per byval pointer, so they have to
+          // come after every parameter local. Deferred to the second pass
+          // below — interleaving them here would give local `i+1` the type of a
+          // WASM parameter that is really the next pointer.
+          if (!byValFields) byValFields = new Array();
+          unchecked(byValFields[byValFields.length] = new ByValFieldBinding(
+            i, parameterName, parameterType, new Map<string, Local>()
+          ));
+          continue;
+        }
+        // **Keyed on the type**, not on `wasmParamCountOf > 1`: a one-field
+        // record spends exactly one WASM slot, so a `> 1` test sent it down the
+        // ordinary-local path — bound as a local of the record type, with
+        // `toRef()`'s GC heap type, and `s.a` then had no SROA field to read.
+        // Every one-field value-type parameter was unusable.
+        if (Signature.isInlineStructRef(parameterType)) {
           let scopedLocals = this.flow.scopedLocals;
           if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
           let fieldLocals = new Map<string, Local>();
@@ -4126,6 +4170,42 @@ export class Function extends TypedElement {
         scopedLocals.set(parameterName, local);
         this.localsByIndex[local.index] = local;
         flow.setLocalFlag(local.index, LocalFlags.Initialized);
+      }
+
+      // Second pass: the field locals of byval parameters. They are additional
+      // locals (the signature spends one slot on the pointer), so they follow
+      // every parameter local; `getNonParameterLocalTypes` starts the
+      // additional list at `wasmParamCount()`, which is exactly where these
+      // begin.
+      if (byValFields) {
+        for (let i = 0, k = byValFields.length; i < k; ++i) {
+          let binding = unchecked(byValFields[i]);
+          let parameterName = binding.parameterName;
+          let parameterType = binding.parameterType;
+          let fieldLocals = binding.fieldLocals;
+          let classReference = assert(parameterType.classReference);
+          let members = assert(classReference.members);
+          for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
+            let member = unchecked(_values[j]);
+            if (member.kind != ElementKind.PropertyPrototype) continue;
+            let property = (<PropertyPrototype>member).instance;
+            if (property == null || !property.isField) continue;
+            let fieldLocal = new Local(
+              parameterName + "$" + property.name,
+              localIndex++,
+              property.type,
+              this
+            );
+            fieldLocals.set(property.name, fieldLocal);
+            this.localsByIndex[fieldLocal.index] = fieldLocal;
+            flow.setLocalFlag(fieldLocal.index, LocalFlags.Initialized);
+          }
+          let parent = new Local(parameterName, -1, parameterType, this);
+          parent.fieldLocals = fieldLocals;
+          let scopedLocals = this.flow.scopedLocals;
+          if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
+          scopedLocals.set(parameterName, parent);
+        }
       }
     }
     if (program.instancesByName.has(this.internalName)) {
@@ -5420,4 +5500,15 @@ export function getDefaultParameterName(index: i32): string {
     cachedDefaultParameterNames.push(`$${i}`);
   }
   return cachedDefaultParameterNames[index];
+}
+
+/** One byval parameter's pending field-locals binding, filled in the second
+ *  binding pass so that parameter locals stay contiguous from index 0. */
+class ByValFieldBinding {
+  constructor(
+    public index: i32,
+    public parameterName: string,
+    public parameterType: Type,
+    public fieldLocals: Map<string, Local>
+  ) {}
 }
