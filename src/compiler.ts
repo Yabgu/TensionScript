@@ -7010,6 +7010,10 @@ export class Compiler extends DiagnosticEmitter {
     }
     for (let i = 0; i < numArguments; ++i) {
       let parameterType = unchecked(parameterTypes[i]);
+      // Cleared before the argument is compiled and read immediately after: the
+      // flag is set by `changetype` when it reinterprets a managed record as an
+      // unmanaged one, and this is where the produced operand is known.
+      this.rootNextOperand = false;
       if (externalMark != null && this.isInlineStructType(parameterType)) {
         operands[index++] = this.makeExternalTempArgument(
           unchecked(argumentExpressions[i]), parameterType,
@@ -7020,6 +7024,12 @@ export class Compiler extends DiagnosticEmitter {
         index += this.expandSroaArgument(
           unchecked(argumentExpressions[i]), parameterType, operands, index
         );
+      }
+      if (this.rootNextOperand) {
+        // One operand, and it is `operands[index - 1]`: an `@inline struct`
+        // argument expands to several, but a managed record never does.
+        unchecked(operands[index - 1] = this.module.tostack(unchecked(operands[index - 1])));
+        this.rootNextOperand = false;
       }
     }
     assert(index == numOperands);
@@ -11332,6 +11342,31 @@ export class Compiler extends DiagnosticEmitter {
    *  guard/restore statements have to wrap the call node. */
   private externalTempMark: Local | null = null;
   private externalTempSize: i32 = 0;
+
+  /**
+   * Set while compiling an argument that reinterprets a **managed** record as an
+   * **unmanaged** one, so the call that consumes it can root the pointer.
+   *
+   * The shadow stack roots a call operand when the **callee's parameter type** is
+   * managed (`operandsTostack`). That is the right rule for a reference that
+   * stays a reference, and the wrong one here: `g(changetype<U>(makeM()))` gives
+   * `g` an `@unmanaged` parameter, so nothing roots the temporary and the
+   * collector can reclaim it while `g` still holds the pointer. The object is
+   * still GC-managed — only the *view* is unmanaged — so the operand has to be
+   * rooted the same way a managed one is.
+   *
+   * A side channel rather than a parameter, following `externalTempMark` /
+   * `sretDiscardMark`: the decision is made while the argument's expression is
+   * compiled (deep inside `compileExpression`, in `changetype`) and consumed by
+   * the argument loop in `compileCallDirect`, which is the only place that knows
+   * where the operand landed. Reset before each argument, read immediately
+   * after, so a nested call cannot inherit it.
+   */
+  private rootNextOperand: bool = false;
+  /** Marks the operand being compiled as needing a shadow-stack root. */
+  markOperandForRooting(): void {
+    this.rootNextOperand = true;
+  }
 
   /**
    * Reserves the static call-temp region, once per module, and returns its base.

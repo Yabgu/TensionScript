@@ -3780,6 +3780,14 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
     );
     return module.unreachable();
   }
+  // The free cell: a managed record viewed as an unmanaged one. The pointer is
+  // the same word, so this is identity — but the object is still GC-managed, so
+  // a callee taking it as an `@unmanaged` parameter must have it rooted across
+  // the call. Signal that to `compileCallDirect`'s argument loop, which is the
+  // only place that knows where the operand ends up.
+  if (isUnmanagedRecord(toType) && isManagedRecord(fromType)) {
+    compiler.markOperandForRooting();
+  }
   if (!fromType.isChangeableTo(toType)) {
     compiler.error(
       DiagnosticCode.Type_0_cannot_be_changed_to_type_1,
