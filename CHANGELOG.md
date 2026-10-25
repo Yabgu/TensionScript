@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+### Memory-model use-site overrides — 10.0a
+
+A use may name the memory model it wants: `v: @inline Vec3`. The declaration
+keeps its own model, and the override applies to that use alone. Plain `struct`
+is unchanged — `@unmanaged` remains the default (the 0.9.0 flip to a managed
+default was cancelled; see `src/parser.ts`).
+
+**What lands**
+
+- **Pre-type decorators**, at every position that goes through the one type
+  parser: parameter, local, field, return type, `changetype` target, `Array<T>`
+  element, function-type parameter/return. Type aliases are excluded — an alias
+  is a spelling for the declaration, not a use.
+- **`@inline @managed` is refused** (`TS6391`), mirroring the existing
+  `@managed`/`@unmanaged` refusal. It used to be accepted silently and produced a
+  hybrid: the inline flag plus a GC allocation, so every value-typed path treated
+  a GC reference as a value.
+- **The post-type spelling is refused** (`TS6392`). `v: V @inline` compiled as a
+  plain pointer with the attribute dropped — accepted and ignored. `@abi.alias`
+  and every other post-type attribute are untouched.
+- **`changetype<@managed V>(u)` from an `@unmanaged` value is refused**
+  (`TS2322`, the assignment refusal's shape). The type-directed path already
+  refused the cell; `changetype` reinterpreted the pointer in silence, and the
+  collector would follow a reference with no header behind it.
+
+**The free cell, and the bug under it**
+
+`@managed` → `@unmanaged` is identity — both are one pointer to the same
+record. Measured: `let u: @unmanaged M = m` and a call to a `@unmanaged M`
+parameter already compile and already root, because the override does not change
+the resolved type, so the parameter is still managed.
+
+What was broken is the cross-record route. `g(changetype<U>(makeM()))` gives `g`
+an `@unmanaged` parameter, and the shadow stack rooted call operands by the
+*callee's parameter type* — so nothing rooted the temporary:
+
+```
+before:  call $makeM; call $g          ;; no frame, no slot, no store
+after:   frame, slot, store, call $g   ;; the managed→managed shape
+```
+
+**This closes a pre-existing use-after-free**, reachable since `changetype`
+existed: a collection inside `g`, or in anything it called, could reclaim the
+record while `g` held the pointer.
+
+**Output.** `npm test`: 1339 fixtures plus the new
+`interop/managed-to-unmanaged-operand`, 0 failures — every existing program
+emits byte-identical output. The `.wast` fixpoint is empty in both
+configurations. The only shape that changes is the one above.
+
+**Not in this release.** The `@external` boundary still reads the declaration's
+model and drops a use-site override (10.0b, the `Signature` change).
+`@inline → @managed` has no emitter yet (10.0c). And the root covers a direct
+operand: a managed temporary that round-trips through another call before
+reaching an unmanaged parameter is still unrooted.
+
+Version: **minor** — the parse surface is additive (pre-type decorators were a
+parse error at every position), and the two refusals only reject spellings that
+were silently meaningless.
+
 ### Bootstrap self-compile: the compiler's own source now compiles
 
 `npm run bootstrap:*` stage 1 ran red on every tip in this fork: the compiler
