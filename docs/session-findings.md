@@ -454,6 +454,57 @@ the fixture's runtime assert at instantiation. The fixture also carries the
 combined shape — `Calc#scale(this, dest, p.a, p.b, k)` — so the shift and the
 parameter flattening are exercised together, which is where they would disagree.
 
+## PR #16, continued: the `@external` argument temp
+
+**The silent-flattening finding.** An `@external` declaration with an `@inline
+struct` parameter emitted one WASM parameter per field — `(import "env"
+"host_use" (func (param f32 f32) (result i32)))` for a two-field record. That
+made the record's field list part of the host ABI with nothing recording it:
+`layout_hash` folds arena geometry, and the host never sees the record. Measured
+against the other two kinds: `@unmanaged` and `@managed` both emitted
+`(param i32)`, so the value type was the only one with a different shape at the
+same boundary. Refused first (`af88469e`), then served by the temp
+(`516104f9`); the refusal stays as the fallback for a boundary signature without
+the flag, and *that* is reachable — clearing the flag makes
+`inline-struct-external-param-temp` fail on the diagnostic.
+
+**One shape, one contract.** After the phase, all three record kinds cross as a
+single borrowed pointer:
+
+| Declaration | Import signature | Host receives |
+|---|---|---|
+| `@unmanaged struct` | `(param i32)` | borrowed pointer to the caller's record |
+| `@managed struct` | `(param i32)` | borrowed reference |
+| `@inline struct` | `(param i32)` | borrowed pointer to a caller-materialised temp |
+
+The adapter has no per-field expectation anywhere: its only guest-memory path is
+`guest_read(user, uint32_t ptr, void *dst, uint32_t len)`
+(`tension_adapter.h:184`), and rule 6 (`:57-58`) makes it borrow.
+
+**The temp's re-entrancy, measured.** The restore goes after the call node
+because the host reads the temp during the call. Re-entry *inside* that window is
+safe because the mark is a WASM local: `callback()`'s frame allocates above the
+outer block and restores to the outer's post-bump value.
+*Revert measured:* moving the restore before the call makes the host's second
+read across re-entry return the **inner** temp's bytes — `before=3, after=101`,
+`outer()` 205 instead of 107 — and the fixture's WAT comparison fails.
+*Fixture:* `inline-struct-external-param-reentrancy.ts` (the glue re-enters the
+guest and reads the same pointer twice).
+
+**A per-call mark, not per-argument.** Two value-type arguments in one call take
+one mark, one bump by the sum (32 = two 16-byte slices), one guard and one
+restore; each argument gets a distinct slice, asserted by the host comparing the
+two addresses. Bumping by the total before any operand is evaluated is what lets
+a nested call allocate above the whole block rather than between two slices.
+
+**Two traps the implementation hit, both recorded because they are cheap to
+repeat.** (1) `paramRefs` for the boundary slot must be `TypeRef.I32` explicitly:
+`toRef()` on an `@inline struct` builds a GC heap type via `ensureType`, which
+produced a `~lib/string/String` type error in the first attempt. (2) The overflow
+guard compiles a static message string, which leaves `currentType` pointing at
+that string; the call's type must be restated after wrapping, the same way the
+sret branch already did.
+
 **Third finding (latent, not fixed).** The operand walk's `paramType.isManaged`
 check uses the *source* parameter's type, not the individual field's. Correct
 today because an `@inline struct`'s fields are scalar or struct-pointer, so

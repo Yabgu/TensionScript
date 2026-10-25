@@ -93,6 +93,49 @@ and an `@inline struct` field of another record (inline nesting). Sret **does
 not** need multi-value results — the design note's §8 described a problem this
 model does not have, because the value never enters the pipeline.
 
+### `@inline struct` at the `@external` boundary (the argument temp)
+
+An `@external` function taking an `@inline struct` now receives the **address**
+of a temp the guest materialises, so the import is `(param i32)` — the same
+shape `@unmanaged` and `@managed` already crossed in. Before this, `paramRefs`
+expanded the record into one WASM parameter per field, so for a two-field record
+the import was `(param f32 f32)`: the record's field count, order and types
+became part of the host ABI, `layout_hash` did not move (it folds arena
+geometry), and the host could not notice — it never sees the record, only the
+flattened scalars.
+
+One shape, one contract, three record kinds:
+
+| Declaration | Import signature | What the host gets |
+|---|---|---|
+| `@unmanaged struct U` | `(param i32)` | a borrowed pointer to the caller's record |
+| `@managed struct M` | `(param i32)` | a borrowed reference |
+| `@inline struct V` | `(param i32)` | a borrowed pointer to the caller's temp |
+
+- **Signature.** `Signature.externalBoundary` (part of the memoization key)
+  makes `wasmParamSlotCountOf` answer 1 for a value-type parameter; `paramRefs`,
+  `wasmParamCount`, `wasmParamStartOf` and `sourceIndexOf` all ask it, so a
+  boundary signature and a guest signature cannot disagree. The slot's ref is
+  `i32` explicitly, not `toRef()` — an `@inline struct`'s ref is a GC heap type.
+- **Call site.** One mark per call (a WASM local), one bump by the sum of the
+  arguments' rounded sizes, one guard, one restore; each argument is stored into
+  `(base + mark + offset)` inside its own operand block, and the address is what
+  the call receives. Bumping by the total first is what lets a nested call in the
+  argument stream allocate above the whole block.
+- **Lifetime.** The restore follows the call node, because the host reads the
+  temp while the call runs. That is sound because the host *borrows*:
+  `tension_adapter.h` rule 6 (`:57-58`) — "An adapter never caches a pointer into
+  guest memory and never holds a slice across a call" — and its only guest-memory
+  path is `guest_read(ptr, dst, len)` (`:184`). An async host that retained the
+  pointer would need a different contract; the code would not change.
+- **Refused, still.** A non-local argument: the temp is filled by copying an
+  SROA local's fields, so a call result or a literal has nothing to copy. The
+  declaration-time refusal from the first commit of this phase remains as the
+  fallback for any boundary signature without the flag.
+
+The temp and sret share one stack, so the 4 KB limit and its abort are one
+limit; `--sretStackSize` covers both.
+
 ### `@inline struct` pass-by-value (SROA parameters)
 
 A function parameter of `@inline struct` type now passes by value. The source

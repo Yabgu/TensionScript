@@ -552,6 +552,15 @@ host_call_foo(x)  →  temp = <D or C slot>; store fields; call host_call_foo(te
   `TENSION_ADAPTER_ABI_VERSION 3u` (`:78`) and nothing in it is touched; the
   import list and its signature are unchanged, so no hash is recomputed (and
   `layout_hash` does not fold guest-side anything — §13).
+- **Implemented.** The caller marks the static call-temp stack, bumps by the sum
+  of the arguments' rounded sizes, stores each value into `(base + mark +
+  offset)`, passes the address, and restores after the call — the host reads the
+  temp while the call runs. This agrees with the paragraph above but the
+  measurement in §1.6 covered only `@unmanaged` and `@managed`: an `@inline
+  struct` parameter had been silently flattened to one WASM parameter per field
+  until this phase, which is why the phase opened with a refusal. The slot is
+  `i32` explicitly (`toRef()` on a value type is a GC heap type). The stack is
+  shared with sret, so `--sretStackSize` is one limit for both.
 
 This is the payoff of the WASM observation in the brief: WASM has no
 struct-by-value ABI at all, so the temp is a *compilation detail*, not an ABI
@@ -591,7 +600,7 @@ out is what keeps this a 1.0 feature.
 | `@inline struct` local, field read/write | **in** | SROA; 1 instruction (§6). |
 | Assignment `y = x` | **in** | `N × local.set`; no aliasing (§5.1). |
 | Guest-internal parameter | **in** | Per-field operands (§5.2). |
-| `@external` parameter | **in** | Temp pointer; import stays `(param i32)` (§8). |
+| `@external` parameter | **in — implemented** | Temp pointer; import is `(param i32)` (§8). |
 | Capture in a closure | **in** | Field-wise capture into the env class (§5.3) — with the capture-by-value rule ratified. |
 | Internal return | **in — implemented** (sret: hidden first parameter, 4 KB static call-temp stack in the data segment, per-call-frame bump) | sret (§9). |
 | `@external` return | **out** | Needs an ABI change (§9). |
