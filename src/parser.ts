@@ -881,7 +881,7 @@ export class Parser extends DiagnosticEmitter {
       let attribute = this.parseDecorator(tn);
       if (!attribute) break;
       if (!type.attributes) type.attributes = [ attribute ];
-      else type.attributes.push(attribute);
+      else assert(type.attributes).push(attribute);
     }
 
     return type;
