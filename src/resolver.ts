@@ -3185,15 +3185,22 @@ export class Resolver extends DiagnosticEmitter {
     // field list becomes part of the host ABI (measured: `(param f32 f32)` for
     // a two-field record, while `@unmanaged` and `@managed` both emitted
     // `(param i32)`).
+    // Only a **multi-field** record takes the pointer shape. A one-scalar
+    // record is passed directly by the C/WASM tool convention (BasicCABI: a
+    // struct whose only member is a scalar is passed as that scalar), while
+    // this compiler would pass a pointer — the WAT types are identical
+    // (`i32`), so the mismatch is silent. That case is refused at the
+    // boundaries instead of being promised in one convention and shipped in the
+    // other; see the refusal in `Compiler#compileFunction`.
     let externalBoundary = prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
-      signatureHasInlineStructParam(parameterTypes);
+      signatureHasMultiFieldInlineStructParam(parameterTypes);
     // An **export** is the mirror boundary: a value-type parameter crosses as a
     // byval pointer the host provides, rather than as one WASM parameter per
     // field (which is the silent ABI an export used to have). `ModuleExport` is
     // set on the prototype by `markModuleExports` before any function resolves.
     let exportByValParams = prototype.is(CommonFlags.ModuleExport) &&
       !prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
-      signatureHasInlineStructParam(parameterTypes);
+      signatureHasMultiFieldInlineStructParam(parameterTypes);
     let signature = Signature.create(
       this.program,
       parameterTypes,
@@ -4145,12 +4152,14 @@ export class Resolver extends DiagnosticEmitter {
  *  whether an `@external` signature needs the host-boundary pointer shape; a
  *  declaration with no value-type parameter keeps its ordinary signature (and
  *  its memoized identity). */
-function signatureHasInlineStructParam(parameterTypes: Type[]): bool {
+/** Whether any parameter is an `@inline struct` with **two or more** fields —
+ *  the shape the byval pointer is the correct ABI for. */
+function signatureHasMultiFieldInlineStructParam(parameterTypes: Type[]): bool {
   for (let i = 0, k = parameterTypes.length; i < k; ++i) {
-    let classReference = unchecked(parameterTypes[i]).classReference;
+    let parameterType = unchecked(parameterTypes[i]);
     if (
-      classReference != null &&
-      classReference.hasDecorator(DecoratorFlags.InlineStruct)
+      Signature.isInlineStructRef(parameterType) &&
+      Signature.fieldCountOf(parameterType) > 1
     ) return true;
   }
   return false;

@@ -1,0 +1,7 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: an @inline struct with a single field at a host boundary (the C/WASM tool convention passes a one-scalar struct as the scalar itself, while this compiler passes records as pointers; both are `(param i32)`, so the disagreement is silent. Pass the scalar directly, or use a struct with two or more fields)",
+    "AS100: Not implemented: an @inline struct with a single field at a host boundary (the C/WASM tool convention passes a one-scalar struct as the scalar itself, while this compiler passes records as pointers; both are `(param i32)`, so the disagreement is silent. Pass the scalar directly, or use a struct with two or more fields)"
+  ]
+}

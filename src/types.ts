@@ -1308,21 +1308,23 @@ export class Signature {
     if (hasHiddenDest) unchecked(typeRefs[at++] = TypeRef.I32);
     for (let i = 0; i < numParameterTypes; ++i) {
       let parameterType = unchecked(parameterTypes[i]);
-      let count = this.wasmParamSlotCountOf(i);
       if (this.isByValPointerParam(i)) {
-        // The host boundary: the caller materialises the value and passes its
+        // A host boundary: the caller materialises the value and passes its
         // address. Not `toRef()` — an `@inline struct`'s ref is a GC heap type
-        // (`ensureType`), which is a different ABI and would need the GC
-        // feature; the slot here is a plain pointer, exactly as `@unmanaged`
-        // and `@managed` cross.
+        // (`ensureType`), a different ABI that would need the GC feature. The
+        // slot here is a plain pointer, exactly as `@unmanaged` and `@managed`
+        // cross.
         unchecked(typeRefs[at++] = TypeRef.I32);
-      } else if (count == 1) {
-        // Scalar or reference: one ref, exactly as before.
-        unchecked(typeRefs[at++] = parameterType.toRef());
-      } else {
-        // `@inline struct`: one ref per field, in declaration order — the same
+      } else if (Signature.isInlineStructRef(parameterType)) {
+        // An unpacked value: one ref per field, in declaration order — the
         // order `compileSroaLocal` lays the locals out in, so the callee's
         // local index i+k matches the caller's argument i+k.
+        //
+        // **Keyed on the type, not on the count.** A one-field record spends
+        // exactly one WASM slot, so a `count == 1` test was true for it too;
+        // taking that branch gave the parameter `toRef()` (a GC heap type) and
+        // the callee a plain local instead of an SROA field, which made every
+        // one-field value-type parameter unusable.
         let classReference = assert(parameterType.classReference);
         let members = assert(classReference.members);
         for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
@@ -1332,6 +1334,9 @@ export class Signature {
           if (property == null || !property.isField) continue;
           unchecked(typeRefs[at++] = property.type.toRef());
         }
+      } else {
+        // Scalar or reference: one ref, exactly as before.
+        unchecked(typeRefs[at++] = parameterType.toRef());
       }
     }
     return createType(typeRefs);
