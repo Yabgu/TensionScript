@@ -1228,7 +1228,7 @@ export class Compiler extends DiagnosticEmitter {
    */
   private hasConstantInitializer(global: Global): bool {
     let initializer = global.initializerNode;
-    return initializer != null && initializer.compilesToConst;
+    return initializer != null && initializer.evaluatesToConst;
   }
 
   /** Compiles a global variable. */
