@@ -485,7 +485,7 @@ export class Resolver extends DiagnosticEmitter {
     if (!elementType) return null;
     if (
       elementType.classReference != null &&
-      elementType.classReference.hasDecorator(DecoratorFlags.InlineStruct)
+      assert(elementType.classReference).hasDecorator(DecoratorFlags.InlineStruct)
     ) {
       if (reportMode == ReportMode.Report) {
         this.error(
@@ -3178,7 +3178,7 @@ export class Resolver extends DiagnosticEmitter {
     // unchanged keeps their signature key (and the type-id sequence) stable.
     let sretDisabled = prototype.is(CommonFlags.Constructor) &&
       returnType.classReference != null &&
-      returnType.classReference.hasDecorator(DecoratorFlags.InlineStruct);
+      assert(returnType.classReference).hasDecorator(DecoratorFlags.InlineStruct);
     // An `@external` declaration is a **host** boundary: an `@inline struct`
     // parameter crosses as the address of a temp the guest materialises, one
     // `i32`, not as one WASM parameter per field. Without this the import's

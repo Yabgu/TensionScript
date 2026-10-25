@@ -3740,7 +3740,7 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   // `@unmanaged struct`'s job.
   if (
     toType.classReference != null &&
-    toType.classReference.hasDecorator(DecoratorFlags.InlineStruct)
+    assert(toType.classReference).hasDecorator(DecoratorFlags.InlineStruct)
   ) {
     compiler.error(
       DiagnosticCode.Not_implemented_0,

@@ -6518,10 +6518,11 @@ export class Compiler extends DiagnosticEmitter {
         classReference != null &&
         classReference.hasDecorator(DecoratorFlags.ManagedStruct)
       ) {
+        let typeArguments = expression.typeArguments;
         this.error(
           DiagnosticCode.Not_implemented_0,
-          expression.typeArguments && expression.typeArguments.length > i
-            ? expression.typeArguments[i].range
+          typeArguments && typeArguments.length > i
+            ? unchecked(typeArguments[i]).range
             : expression.range,
           "COPY_STRUCT on an @managed struct (a raw byte copy bypasses the GC write barrier)"
         );
@@ -11246,7 +11247,7 @@ export class Compiler extends DiagnosticEmitter {
       for (let k = 0; k < count; ++k) unchecked(operands[at + k] = this.module.unreachable());
       return count;
     }
-    let fieldLocals = local.fieldLocals;
+    let fieldLocals = assert(local.fieldLocals);
     let classReference = assert(paramType.classReference);
     let members = assert(classReference.members);
     let pushed = 0;
@@ -11408,7 +11409,7 @@ export class Compiler extends DiagnosticEmitter {
       let pointerLocal = flow.lookupLocal(parameterName + "$byval");
       let parent = flow.lookupLocal(parameterName);
       if (pointerLocal == null || parent == null || parent.fieldLocals == null) continue;
-      let fieldLocals = parent.fieldLocals;
+      let fieldLocals = assert(parent.fieldLocals);
       let fields = assert(this.inlineStructFieldsOf(unchecked(parameterTypes[i])));
       for (let j = 0, n = fields.length; j < n; ++j) {
         let field = unchecked(fields[j]);
@@ -11481,7 +11482,7 @@ export class Compiler extends DiagnosticEmitter {
       );
       return module.unreachable();
     }
-    let fieldLocals = local.fieldLocals;
+    let fieldLocals = assert(local.fieldLocals);
     let fields = assert(this.inlineStructFieldsOf(type));
     let stmts = new Array<ExpressionRef>();
     for (let i = 0, k = fields.length; i < k; ++i) {
@@ -11777,10 +11778,11 @@ export class Compiler extends DiagnosticEmitter {
       let field = unchecked(fields[i]);
       if (!this.isSroaFieldType(field.type)) {
         let fieldDeclaration = assert(field.prototype.fieldDeclaration);
+        let fieldTypeNode = fieldDeclaration.type;
         this.error(
           DiagnosticCode.Not_implemented_0,
-          fieldDeclaration.type
-            ? fieldDeclaration.type.range
+          fieldTypeNode
+            ? fieldTypeNode.range
             : fieldDeclaration.name.range,
           field.type.kind == TypeKind.FixedArray
             ? "a T[N] field in an @inline struct (SROA keeps one WASM local per field; array fields are the deep-SROA phase)"
@@ -11863,7 +11865,7 @@ export class Compiler extends DiagnosticEmitter {
       if (source && source.fieldLocals) {
         for (let i = 0, k = fields.length; i < k; ++i) {
           let fieldName = unchecked(fields[i]).name;
-          let from = assert(source.fieldLocals.get(fieldName));
+          let from = assert(assert(source.fieldLocals).get(fieldName));
           let to = assert(fieldLocals.get(fieldName));
           initializers.push(
             module.local_set(to.index, module.local_get(from.index, from.type.toRef()), false)
