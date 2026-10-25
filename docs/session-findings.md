@@ -850,12 +850,47 @@ is moving the marking inside `parse` — its own small phase, not this one.
 comparison (`git diff --no-index` of the two `.wast` files, the last step of
 each script) empty:
 
-- debug: `b5953eb9…` = `b5953eb9…` (34,725,729 bytes each);
-- release: `761f3d89…` = `761f3d89…` (15,202,144 bytes each).
+- debug: `20154872…` = `20154872…`;
+- release: `5b4b9a22…` = `5b4b9a22…`.
 
 Stage 0's output (the JS compiler) and stage 2's output (the compiler compiled
 by the compiler compiled by the JS compiler) are the same text. The aggregate
 neutrality proof for the ordering relaxation now exists.
+
+### The Bootstrap job's fixture suite: 10 more host-parity sites, in the compiler core
+
+The `.wast` fixpoint compiles **one** input: the compiler's own source. CI's
+Bootstrap job does more — it runs the whole fixture suite through the
+self-hosted compiler (`npm run test:compiler -- --wasm
+build/assemblyscript.<t>-bootstrap.js`), which had never run in this fork
+because stage 1 always failed first. Enabled, it found the same divergence in
+the core: `Key does not exist in ~lib/map.ts`, first at fixture
+`compiler/typeof`, in `Compiler#compileFunctionExpression`'s
+`envInfoOf().get(expression)`.
+
+Audited rather than chased one abort at a time: 58 `.get(` sites in `src/` have
+no `has` within four lines, of which **10** read a map where a miss is a
+legitimate answer (the rest read keys from a `Map_keys` iteration — present by
+construction — or sit inside `assert(...get(...))`, which fails on both hosts
+either way):
+
+- `compiler.ts`: `contextual.get(name)` (a type argument that may be absent),
+  four `fieldLocals.get(field.name)` / `fieldLocals.get(property.name)` reads
+  whose callers already `continue` on `null` (an `@inline struct` field refused
+  at declaration has no local), and one `readTarget.get(field.name)`;
+- `inference.ts`: an alias chain's `known.get(name)`;
+- `program.ts`: `elementsByName.get(CommonNames.Task)` in `taskPrototype`;
+- `resolver.ts`: `scopedLocals.get(CommonNames.this_)`;
+- `types.ts`: `Type.fixedArray`'s cache — **upstream code**, so the divergence
+  is not only in this fork's additions.
+
+All ten use `getMapEntry`. With them, the fixture suite is green through both
+bootstrap compilers (debug and release), and through the CI cross-step that
+compiles the release target with the debug bootstrap compiler.
+
+The lesson is the same one gap 1 taught, at a wider radius: "the compiler
+compiles itself" and "the compiler runs the same programs as itself" are two
+different properties, and the fixpoint proves only the first.
 
 ### Item 5: the `variables.ts` unit test does not exist
 

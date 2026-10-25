@@ -60,8 +60,18 @@ closed:
 **Aggregate neutrality, now proven.** `npm run bootstrap` (debug and release)
 runs to completion and its final step — `git diff --no-index` of the two
 `.wast` files — is **empty**: the JS compiler's output and stage 2's output are
-byte-identical (debug `b5953eb9…`, release `761f3d89…`). The ordering relaxation
-does not change codegen; this is not a release boundary.
+byte-identical (debug `20154872…`, release `5b4b9a22…`). The ordering
+relaxation does not change codegen; this is not a release boundary.
+
+The fixpoint compiles one input — the compiler's own source. CI's Bootstrap job
+compiles **every fixture** with the self-hosted compiler, and that had never
+run either. Enabled, it exposed ten more sites of the same host difference:
+`Map#get` throws on a missing key under the wasm standard library and answers
+`undefined` under JS, and ten reads in the compiler core treat a miss as a
+legitimate answer (`Type.fixedArray`'s cache among them — upstream code, not
+this fork's). They now go through `getMapEntry`, and the fixture suite is green
+through the debug and the release bootstrap compiler, and through the
+cross-compile step.
 
 Neutrality for *user* programs is unchanged: `npm test` passes all 1339
 fixtures against their checked-in `.wat` byte for byte, and `npm run check` is
