@@ -120,6 +120,23 @@ can contain a boundary override — before 10.0a the pre-type form was a parse
 error at every position, and 10.0a's own notes say the boundary drops the
 override.
 
+**Postscript — the `u8` regression, and the gate that caught it.** The first
+merge of 10.0b shipped a defect: the `memoryModels` array was typed `u8[]` while
+receiving `i32` enum values — an implicit narrowing invisible to `tsc` and to
+esbuild, and rejected by TensionScript's own compiler with
+`AS200: Conversion from type 'i32' to 'u8' requires an explicit cast`. It broke
+both Bootstrap gates on `main`. Fixed in PR #23 by typing the array `i32[]`
+(enum codes are `i32`; a cast at three sites would only move the mismatch
+somewhere a reader has to decode).
+
+`npm run check` and `npm test` both passed the broken tree, which is the point:
+**the self-compile gate (`npm run bootstrap:*`) is now recorded as mandatory
+before push and before merge for any PR touching `src/`.** The sibling audit that
+followed found no remaining `AS200` site in `src/` — the class is a 32-bit value
+(including enum members, plain and `const`) flowing into a sub-32-bit type
+without a cast, and `bootstrap:*` compiles all of `src/`, so a passing
+self-compile is stronger evidence than any grep.
+
 ### Bootstrap self-compile: the compiler's own source now compiles
 
 `npm run bootstrap:*` stage 1 ran red on every tip in this fork: the compiler

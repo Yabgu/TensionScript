@@ -1197,3 +1197,107 @@ compiles the compiler's own source.
 The fix is the general lesson: type the value as what it is. The models array
 holds enum codes, so it is `i32[]`; typing it `u8` bought nothing and needed three
 casts to be legal under the stricter compiler.
+
+---
+
+## The red-main incident: what the bug was, and the four rules it produced
+
+10.0b shipped a defect to `main` and broke both Bootstrap gates. This section is
+the record: the bug, why two of three gates missed it, what the sweep found, and
+the process rules that prevent recurrence.
+
+### The bug, precisely
+
+`Signature.memoryModels` was typed `u8[]` while the values written into it are
+`MemoryModel` enum members — which in TensionScript are `i32`. Three sites did the
+narrowing implicitly: the field's type, the array's fill, and the accessor's
+return. `tsc --noEmit` (`npm run check`) accepts implicit narrowing; esbuild
+(`npm test`'s build step) never type-checks at all. Only the self-compile —
+`npm run bootstrap:debug` / `bootstrap:release`, which compiles `src/` **with
+TensionScript itself** — rejects it.
+
+**The class, measured.** Nine shapes, six fire:
+
+| # | Shape | Result |
+|---|---|---|
+| 1 | `let a: u8 = 1;` — literal | clean |
+| 2 | `let b: u8 = i;` — `i32` local | **AS200** |
+| 3 | `let c: u8 = Plain.B;` — plain enum member | **AS200** |
+| 4 | `let d: u8 = CEnum.Y;` — `const enum` member | **AS200** |
+| 5 | `arr: Array<u8>`; `arr[0] = i;` — `i32` element | **AS200** |
+| 6 | `arr[1] = Plain.C;` — enum element | **AS200** |
+| 7 | `takesU8(i);` — `i32` argument | **AS200** |
+| 8 | `takesU32(i);` — `i32` to `u32` | clean |
+| 9 | `let e: u32 = i;` — `i32` to `u32` | clean |
+
+And across the narrow widths, `i32` into each: `i8` **AS200**, `u8` **AS200**,
+`i16` **AS200**, `u16` **AS200**; `i32` and `u32` clean.
+
+So the rule is: **any 32-bit value — including enum members, plain and `const` —
+flowing into a sub-32-bit type without a cast.** Literals are exempt, same-width
+is exempt. Enum codes being `i32` is what makes "type the array as the enum's
+width" a trap: there is no narrower enum width to match.
+
+### The sibling audit: no remaining `AS200` site in `src/`
+
+- `Array<u8> | Array<i8> | Array<u16> | Array<i16>` — **one hit, a comment**
+  (`builtins.ts:4768`, the `v128.shuffle` doc line).
+- Narrow scalars (`: u8`, `: i8`, `: u16`, `: i16`) — **three, all parameters of
+  binaryen SIMD wrappers** (`module.ts:2044`, `:2052`, `:2103`), and all four call
+  sites in `builtins.ts` pass an explicit `<u8>idx`. Correct pattern, not the bug.
+- Narrow casts — every one is an explicit `<u8>` / `<i8>` etc., which is the
+  fixed form.
+
+The audit is **stronger than a grep**: `npm run bootstrap:*` compiles all of
+`src/` and passes on merged `main`, so there is no `AS200` site left anywhere in
+the compiler's source, not merely none in the patterns we thought to search for.
+
+### The measurement trap that nearly produced a false "no siblings"
+
+The first probe of the class put the shapes in an **unexported, uncalled**
+function, and it compiled clean. Signatures and bodies resolve **lazily**: an
+unused function's parameters are never resolved and its body is never compiled, so
+its errors never fire.
+
+Any probe of this class must **export or call** the function. The `forceResolution`
+helper in the 10.0b refusal fixtures exists for exactly this reason — the
+`@external` and guest-parameter refusals are only reachable once a call site forces
+the signature to be built.
+
+This trap is general: it applies to every refusal, every type-level check, and
+every codegen path in this compiler. A fixture that "compiles clean" may only be
+proving that nothing looked at it.
+
+### Four process rules
+
+**1. The self-compile gate is mandatory before push *and* before merge for any PR
+touching `src/`.** `npm run check` (`tsc --noEmit`) and `npm test` (esbuild, plus
+`dist/` fixtures) both pass code that TensionScript's own compiler rejects with
+`AS200`. Only `npm run bootstrap:debug` + `npm run bootstrap:release` compiles
+`src/`. The `u8` bug — three implicit narrowings — is the instance. Cost of
+compliance: ~35 seconds (debug) plus ~30 (release) locally. Cost of skipping it:
+a red `main` and a follow-up PR.
+
+**2. No feature branch without a PR.** CI runs on PRs. A pushed branch with no PR
+is a branch nothing verifies — which is exactly how the `u8` bug reached a merged
+branch: the branch was pushed as crash insurance, no PR existed, so no run
+happened, and the self-compile first ran after the PR was opened. Crash insurance
+is a real need, but the insurance that matters is CI. Open the PR (even as a
+draft) **before** the push that needs verifying.
+
+**3. Verify `headRefOid`, don't poll stale checks.** When a PR's head advances (a
+push), the check list may still describe the previous tip. Compare
+`gh pr view --json headRefOid` against `git rev-parse <branch>` before reading any
+check result. This session spent ~10 minutes polling a run that had already been
+superseded; the diagnosis is two seconds. Note also that `gh api
+.../commits/<sha>/check-runs` returns **404** for a raw SHA in this repo — the
+checks API wants a ref, so use `gh pr checks` or `gh run list`.
+
+**4. "Mergeable" ≠ "green."** GitHub's mergeable status means it *can* merge, not
+that the checks on the tip that would merge passed. Before merging, verify the
+tip's checks. This session has now seen both kinds: merging past *pre-existing*
+red (Bootstrap was red on `main` for unrelated reasons before 10.0b existed — the
+harness work), and merging past *new* red that the branch itself introduced. The
+second is the worse failure, because the branch's claim of "green" was false
+rather than merely stale. Recommendation: check the tip's CI before merging, even
+in repos without branch protection.
