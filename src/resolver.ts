@@ -80,7 +80,8 @@ import {
   NewExpression,
   ArrayLiteralExpression,
   ArrowKind,
-  ExpressionStatement
+  ExpressionStatement,
+  MemoryModel
 } from "./ast";
 
 import {
@@ -186,7 +187,71 @@ export class Resolver extends DiagnosticEmitter {
       default: assert(false);
     }
     node.currentlyResolving = false;
+    // A use may name the memory model it wants (`v: @inline V3`). A model that
+    // names **storage the source does not have** cannot be honoured by any
+    // emitter, so it is refused here — at the single chokepoint every type
+    // position goes through — rather than reaching codegen as a claim that is
+    // silently dropped. The models that *are* honourable are left alone; see
+    // `checkMemoryModelOverride`.
+    if (resolved != null && node.memoryModel != MemoryModel.Any) {
+      resolved = this.checkMemoryModelOverride(node, resolved, reportMode);
+    }
     return resolved;
+  }
+
+  /**
+   * Refuses a use-site memory model the source value cannot satisfy.
+   *
+   * A memory model names **storage**: inline bytes, a GC-owned record, or a
+   * plain pointer. A use can narrow or reinterpret between those only where the
+   * value already has what the target needs. Two cells cannot be satisfied at
+   * all, and both are claims rather than conversions:
+   *
+   * - **`@managed` over an `@unmanaged` declaration** — the collector traces a
+   *   reference through a header the record does not have. No emitter can
+   *   invent the header, so a use cannot confer provenance. (`TS6394`.)
+   * - **`@unmanaged`/`@managed` over an `@inline` declaration** — a value is
+   *   stored as one local per field and has **no address** at all, so there is
+   *   nothing to lend as a pointer and nothing a header could sit in front of.
+   *   (`TS6395`.)
+   *
+   * Everything else is left to the emitters: `@unmanaged` over `@managed` is
+   * the identity cell (10.0a), `@inline` over a pointer declaration is the
+   * copy cell (the boundary temp and the export byval prologue), and a model
+   * equal to the declaration's own is a no-op.
+   */
+  private checkMemoryModelOverride(
+    node: TypeNode,
+    type: Type,
+    reportMode: ReportMode
+  ): Type | null {
+    let asked = node.memoryModel;
+    let declared = declaredMemoryModelOf(type);
+    // Not a record (a scalar, an array, a function type, a class): there is no
+    // declared model to contradict, so there is nothing to refuse here.
+    if (declared == MemoryModel.Any || asked == declared) return type;
+    if (asked == MemoryModel.Managed && declared == MemoryModel.Unmanaged) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Type_0_has_no_GC_header_so_a_use_cannot_make_it_managed_declare_the_record_managed_instead,
+          node.range, type.toString()
+        );
+      }
+      return null;
+    }
+    if (
+      (asked == MemoryModel.Unmanaged || asked == MemoryModel.Managed) &&
+      declared == MemoryModel.Inline
+    ) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Type_0_is_a_value_with_no_address_so_a_use_cannot_view_it_as_1_use_the_value_or_keep_it_inline,
+          node.range, type.toString(), memoryModelToString(asked)
+        );
+      }
+      return null;
+    }
+    return type;
   }
 
   /** Resolves a {@link NamedTypeNode} to a concrete {@link Type}. */
@@ -3105,6 +3170,10 @@ export class Resolver extends DiagnosticEmitter {
     let signatureParameters = signatureNode.parameters;
     let numSignatureParameters = signatureParameters.length;
     let parameterTypes = new Array<Type>(numSignatureParameters);
+    // The memory model each use asked for, one entry per parameter. Allocated
+    // only when some parameter names one, so the ordinary signature (and its
+    // memoization key) is exactly what it was before this phase.
+    let memoryModels: u8[] | null = null;
     let requiredParameters = 0;
     let hasRest = false;
     for (let i = 0; i < numSignatureParameters; ++i) {
@@ -3142,6 +3211,16 @@ export class Resolver extends DiagnosticEmitter {
         return null;
       }
       parameterTypes[i] = parameterType;
+      let typeNodeModel = typeNode.memoryModel;
+      if (typeNodeModel != MemoryModel.Any) {
+        if (memoryModels == null) {
+          memoryModels = new Array<u8>(numSignatureParameters);
+          for (let j = 0; j < numSignatureParameters; ++j) {
+            unchecked(memoryModels[j] = MemoryModel.Any);
+          }
+        }
+        unchecked(memoryModels[i] = typeNodeModel);
+      }
     }
 
     // resolve return type
@@ -3194,14 +3273,14 @@ export class Resolver extends DiagnosticEmitter {
     // boundaries instead of being promised in one convention and shipped in the
     // other; see the refusal in `Compiler#compileFunction`.
     let externalBoundary = prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
-      signatureHasMultiFieldInlineStructParam(parameterTypes);
+      signatureHasMultiFieldByValParam(parameterTypes, memoryModels);
     // An **export** is the mirror boundary: a value-type parameter crosses as a
     // byval pointer the host provides, rather than as one WASM parameter per
     // field (which is the silent ABI an export used to have). `ModuleExport` is
     // set on the prototype by `markModuleExports` before any function resolves.
     let exportByValParams = prototype.is(CommonFlags.ModuleExport) &&
       !prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
-      signatureHasMultiFieldInlineStructParam(parameterTypes);
+      signatureHasMultiFieldByValParam(parameterTypes, memoryModels);
     let signature = Signature.create(
       this.program,
       parameterTypes,
@@ -3211,7 +3290,8 @@ export class Resolver extends DiagnosticEmitter {
       hasRest,
       sretDisabled,
       externalBoundary,
-      exportByValParams
+      exportByValParams,
+      memoryModels
     );
 
     let nameInclTypeParameters = prototype.name;
@@ -4149,19 +4229,53 @@ export class Resolver extends DiagnosticEmitter {
   }
 }
 
-/** Whether any source parameter type is an `@inline struct`. Used to decide
- *  whether an `@external` signature needs the host-boundary pointer shape; a
- *  declaration with no value-type parameter keeps its ordinary signature (and
- *  its memoized identity). */
-/** Whether any parameter is an `@inline struct` with **two or more** fields —
- *  the shape the byval pointer is the correct ABI for. */
-function signatureHasMultiFieldInlineStructParam(parameterTypes: Type[]): bool {
+/** Whether any parameter **crosses by value** with **two or more** fields — the
+ *  shape the byval pointer is the correct ABI for.
+ *
+ *  "Crosses by value" is the declaration's `@inline struct` **or** a use that
+ *  names `@inline` over a pointer declaration. Both put one address on the wire
+ *  and a field list in the callee, so both take the byval shape; a parameter
+ *  that does neither keeps its ordinary signature and its memoized identity.
+ *
+ *  One field stays excluded on purpose: the C/WASM tool convention passes a
+ *  one-scalar struct as the scalar itself, so `(param i32)` means two different
+ *  things and the disagreement is silent. That case is refused at the boundary
+ *  (`Compiler#compileFunction`), and the refusal covers the override spelling
+ *  too because it asks the same question. */
+function signatureHasMultiFieldByValParam(
+  parameterTypes: Type[],
+  memoryModels: u8[] | null
+): bool {
   for (let i = 0, k = parameterTypes.length; i < k; ++i) {
     let parameterType = unchecked(parameterTypes[i]);
-    if (
-      Signature.isInlineStructRef(parameterType) &&
-      Signature.fieldCountOf(parameterType) > 1
-    ) return true;
+    let byValue = Signature.isInlineStructRef(parameterType) ||
+      (memoryModels != null && unchecked(memoryModels[i]) == MemoryModel.Inline);
+    if (byValue && Signature.fieldCountOf(parameterType) > 1) return true;
   }
   return false;
+}
+
+/** The memory model a record's **declaration** names, or
+ *  {@link MemoryModel.Any} when `type` is not a record.
+ *
+ *  The inverse of the use-site reading: `TypeNode.memoryModel` says what a use
+ *  asks for, this says what the value actually is. The two are compared in
+ *  `Resolver#checkMemoryModelOverride`. */
+function declaredMemoryModelOf(type: Type): MemoryModel {
+  let classReference = type.classReference;
+  if (classReference == null) return MemoryModel.Any;
+  if (classReference.hasDecorator(DecoratorFlags.InlineStruct)) return MemoryModel.Inline;
+  if (classReference.hasDecorator(DecoratorFlags.ManagedStruct)) return MemoryModel.Managed;
+  if (classReference.hasDecorator(DecoratorFlags.Unmanaged)) return MemoryModel.Unmanaged;
+  return MemoryModel.Any;
+}
+
+/** How a memory model is spelled in a diagnostic, including the `@`. */
+function memoryModelToString(model: MemoryModel): string {
+  switch (model) {
+    case MemoryModel.Inline: return "@inline";
+    case MemoryModel.Managed: return "@managed";
+    case MemoryModel.Unmanaged: return "@unmanaged";
+    default: return "@none";
+  }
 }

@@ -1,0 +1,13 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
+    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
+    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'.",
+    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'.",
+    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
+    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
+    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'.",
+    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'."
+  ]
+}

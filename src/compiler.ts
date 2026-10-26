@@ -1747,7 +1747,11 @@ export class Compiler extends DiagnosticEmitter {
       let parameterTypes = signature.parameterTypes;
       for (let i = 0, k = parameterTypes.length; i < k; ++i) {
         let parameterType = unchecked(parameterTypes[i]);
-        if (!Signature.isInlineStructRef(parameterType)) continue;
+        // Keyed on "crosses by value", not "is an `@inline struct`": an `@inline`
+        // override over a pointer declaration crosses as a byval pointer too, so
+        // a one-field record under it has exactly the same invisible
+        // disagreement and is refused in exactly the same place.
+        if (!signature.crossesByValueParam(i)) continue;
         let fieldCount = Signature.fieldCountOf(parameterType);
         if (fieldCount == 1) {
           let parameterNode = instance.prototype.functionTypeNode.parameters[i];
@@ -6986,26 +6990,39 @@ export class Compiler extends DiagnosticEmitter {
       // `$sretDest`.
       operands[index++] = sretDest;
     }
-    // `@external` boundary: an `@inline struct` argument crosses as the address
-    // of a slot the caller materialises here, not as one operand per field.
-    // One mark covers the whole call — every argument's temp comes out of the
-    // same block, which is what keeps the restore a single operation.
+    // A by-value argument crosses as the address of a slot the caller
+    // materialises here, not as one operand per field. One mark covers the whole
+    // call — every argument's temp comes out of the same block, which is what
+    // keeps the restore a single operation.
+    //
+    // The mark is published to `makeCallDirect` through `this.externalTempMark`
+    // **after** the arguments are compiled, not before: an argument may itself
+    // contain a call (`f(makeM())`), and every `compileCallDirect` resets that
+    // field on entry, so publishing early lets a nested call erase the outer
+    // call's temp — the stores are emitted and the mark/bump/guard around the
+    // call is missing, leaving them to write through an uninitialised offset.
     this.externalTempMark = null;
     this.externalTempSize = 0;
     let externalBase = 0;
     let externalMark: Local | null = null;
     let externalOffset = 0;
+    let externalTotal = 0;
     if (signature.byValPointerParams) {
       let total = 0;
       for (let i = 0; i < numArguments; ++i) {
-        let parameterType = unchecked(parameterTypes[i]);
-        if (this.isInlineStructType(parameterType)) total += this.sretSizeOf(parameterType);
+        // Keyed on the **signature's** answer, not the type's: an `@inline`
+        // override over a pointer declaration crosses by value too, and only the
+        // signature knows (its `memoryModels` carry the use-site model). Asking
+        // `isInlineStructType` would size no temp for it and then hand the host a
+        // pointer it is not allowed to keep.
+        if (signature.isByValPointerParam(i)) {
+          total += this.sretSizeOf(unchecked(parameterTypes[i]));
+        }
       }
       if (total > 0) {
         externalBase = this.ensureSretStack();
         externalMark = this.currentFlow.getTempLocal(Type.u32);
-        this.externalTempMark = externalMark;
-        this.externalTempSize = total;
+        externalTotal = total;
       }
     }
     for (let i = 0; i < numArguments; ++i) {
@@ -7014,7 +7031,7 @@ export class Compiler extends DiagnosticEmitter {
       // flag is set by `changetype` when it reinterprets a managed record as an
       // unmanaged one, and this is where the produced operand is known.
       this.rootNextOperand = false;
-      if (externalMark != null && this.isInlineStructType(parameterType)) {
+      if (externalMark != null && signature.isByValPointerParam(i)) {
         operands[index++] = this.makeExternalTempArgument(
           unchecked(argumentExpressions[i]), parameterType,
           externalBase, assert(externalMark), externalOffset
@@ -7026,13 +7043,27 @@ export class Compiler extends DiagnosticEmitter {
         );
       }
       if (this.rootNextOperand) {
-        // One operand, and it is `operands[index - 1]`: an `@inline struct`
-        // argument expands to several, but a managed record never does.
-        unchecked(operands[index - 1] = this.module.tostack(unchecked(operands[index - 1])));
         this.rootNextOperand = false;
+        // A **by-value** argument never takes this branch's operand: the thing
+        // that landed at `operands[index - 1]` is the temp's address on the
+        // call-temp stack, not the managed value it was copied from. Rooting it
+        // would hand the collector a word with no header in front of it. Nothing
+        // is lost by skipping — the copy is complete before the call node runs,
+        // so the source is already dead when anything could collect, and a
+        // *local* source is rooted by its own frame slot for the whole function.
+        if (!signature.isByValPointerParam(i)) {
+          // One operand, and it is `operands[index - 1]`: an `@inline struct`
+          // argument expands to several, but a managed record never does.
+          unchecked(operands[index - 1] = this.module.tostack(unchecked(operands[index - 1])));
+        }
       }
     }
     assert(index == numOperands);
+    // Publish the temp's lifetime now that no argument can reset it. `null` for a
+    // call with no by-value parameter, which `makeCallDirect` reads as "nothing
+    // to wrap".
+    this.externalTempMark = externalMark;
+    this.externalTempSize = externalTotal;
     return this.makeCallDirect(instance, operands, reportNode, (constraints & Constraints.WillDrop) != 0);
   }
 
@@ -7499,7 +7530,21 @@ export class Compiler extends DiagnosticEmitter {
         continue;
       }
       let paramType = unchecked(parameterTypes[sourceIndex]);
-      if (paramType.isManaged) {
+      // **Rooting keys on what the value is, never on the model a use names.**
+      // `paramType` is the resolved type — the declaration's model — and nothing
+      // here reads `signature.memoryModels`: a use-site override selects between
+      // copy, identity and refuse, and has no say in whether an object is
+      // collected. That is what keeps `@unmanaged` over a `@managed` declaration
+      // rooted (10.0a's free cell).
+      //
+      // A **byval operand is skipped**, because it is not the value: it is the
+      // address of a temp the argument materialised, and that temp lives on the
+      // call-temp stack, not on the GC heap. Stacking it would hand the collector
+      // a word with no header in front of it. Nothing is lost by skipping: the
+      // copy is complete before the call node runs, so the source is already dead
+      // when anything could collect, and a *local* source is rooted by its own
+      // frame slot for the whole function.
+      if (paramType.isManaged && !signature.isByValPointerParam(sourceIndex)) {
         let operand = operands[operandIndex];
         if (this.needToStack(operand)) {
           operands[operandIndex] = module.tostack(operand);
@@ -11471,7 +11516,7 @@ export class Compiler extends DiagnosticEmitter {
       let parent = flow.lookupLocal(parameterName);
       if (pointerLocal == null || parent == null || parent.fieldLocals == null) continue;
       let fieldLocals = assert(parent.fieldLocals);
-      let fields = assert(this.inlineStructFieldsOf(unchecked(parameterTypes[i])));
+      let fields = assert(this.recordFieldsOf(unchecked(parameterTypes[i])));
       for (let j = 0, n = fields.length; j < n; ++j) {
         let field = unchecked(fields[j]);
         let to = getMapEntry(fieldLocals, field.name);
@@ -11532,34 +11577,81 @@ export class Compiler extends DiagnosticEmitter {
     let local = argumentExpression.kind == NodeKind.Identifier
       ? this.currentFlow.lookupLocal((<IdentifierExpression>argumentExpression).text)
       : null;
-    if (local == null || local.fieldLocals == null) {
-      // A value has no address, so there is nothing to copy into the temp. This
-      // is the same rule the guest-internal parameter path applies, restated
-      // for the host boundary: only a local can cross.
+    let fieldLocals = local != null ? local.fieldLocals : null;
+    let fields = this.recordFieldsOf(type);
+    if (fields == null) {
+      // Not a record at all. The callers only ask for a temp when the signature
+      // said this parameter crosses by value, which implies a record type.
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        argumentExpression.range,
+        "passing this expression to a by-value parameter (the temp is filled field by field, which needs a record type)"
+      );
+      return module.unreachable();
+    }
+    let stmts = new Array<ExpressionRef>();
+    if (fieldLocals != null) {
+      // **Value source.** The argument is an SROA local: one local per field and
+      // no address, so the fields are copied out of those locals.
+      for (let i = 0, k = fields.length; i < k; ++i) {
+        let field = unchecked(fields[i]);
+        let fieldLocal = getMapEntry(fieldLocals, field.name);
+        // A field refused at declaration was never part of the value; there is
+        // nothing to store and no representation to store it as.
+        if (!fieldLocal) continue;
+        stmts.push(module.store(
+          field.type.byteSize,
+          // A fresh address node per store (one parent per node).
+          this.makeSretAddressPlus(base, markLocal, offset),
+          module.local_get(fieldLocal.index, fieldLocal.type.toRef()),
+          field.type.toRef(),
+          field.memoryOffset
+        ));
+      }
+    } else if (Signature.isInlineStructRef(type)) {
+      // An `@inline struct` **value** with no local behind it: a call result, a
+      // `new`, a field access. There is no address to copy from and no SROA shape
+      // to copy — the same refusal this path has always given, restated because
+      // the memory source below is now a second way in. This is *not* the
+      // pointer case: `@inline` here is the declaration's own model, so the
+      // argument really is a value.
       this.error(
         DiagnosticCode.Not_implemented_0,
         argumentExpression.range,
         "passing this expression as an @inline struct to a by-value parameter (the temp is filled by copying a local's fields; a value has no address, so only a local can be passed)"
       );
       return module.unreachable();
-    }
-    let fieldLocals = assert(local.fieldLocals);
-    let fields = assert(this.inlineStructFieldsOf(type));
-    let stmts = new Array<ExpressionRef>();
-    for (let i = 0, k = fields.length; i < k; ++i) {
-      let field = unchecked(fields[i]);
-      let fieldLocal = getMapEntry(fieldLocals, field.name);
-      // A field refused at declaration was never part of the value; there is
-      // nothing to store and no representation to store it as.
-      if (!fieldLocal) continue;
-      stmts.push(module.store(
-        field.type.byteSize,
-        // A fresh address node per store (one parent per node).
-        this.makeSretAddressPlus(base, markLocal, offset),
-        module.local_get(fieldLocal.index, fieldLocal.type.toRef()),
-        field.type.toRef(),
-        field.memoryOffset
-      ));
+    } else {
+      // **Memory source.** The argument is a pointer to the record — a
+      // `@managed` or `@unmanaged` declaration the use asked to take by value.
+      // Evaluated exactly once, into a temp local, so every field is loaded from
+      // the same address and a side-effecting argument cannot run more than once.
+      let usizeType = this.options.usizeType;
+      let pointerExpr = this.compileExpression(
+        argumentExpression, type, Constraints.ConvImplicit
+      );
+      let pointerLocal = this.currentFlow.getTempLocal(usizeType);
+      let pointer = usizeType.toRef();
+      stmts.push(module.local_set(pointerLocal.index, pointerExpr, false));
+      for (let i = 0, k = fields.length; i < k; ++i) {
+        let field = unchecked(fields[i]);
+        stmts.push(module.store(
+          field.type.byteSize,
+          this.makeSretAddressPlus(base, markLocal, offset),
+          // A fresh address node and a fresh load per store (one parent per
+          // node). The load reads the *record* at the field's own offset; the
+          // store writes the temp at the same offset.
+          module.load(
+            field.type.byteSize,
+            false,
+            module.local_get(pointerLocal.index, pointer),
+            field.type.toRef(),
+            field.memoryOffset
+          ),
+          field.type.toRef(),
+          field.memoryOffset
+        ));
+      }
     }
     stmts.push(this.makeSretAddressPlus(base, markLocal, offset));
     return module.block(null, stmts, TypeRef.I32);
@@ -11962,6 +12054,21 @@ export class Compiler extends DiagnosticEmitter {
       classReference == null ||
       !classReference.hasDecorator(DecoratorFlags.InlineStruct)
     ) return null;
+    return this.recordFieldsOf(type);
+  }
+
+  /**
+   * The instance fields of **any** record — `@inline`, `@managed` or
+   * `@unmanaged` — in declaration order, or `null` when `type` is not a record.
+   *
+   * Needed because a use can take a pointer declaration by value
+   * (`v: @inline U`): the fields it copies are the record's, wherever that
+   * record's own model put them. `inlineStructFieldsOf` is this plus the
+   * declaration check, which is what the SROA paths want.
+   */
+  recordFieldsOf(type: Type): Property[] | null {
+    let classReference = type.classReference;
+    if (classReference == null) return null;
     let fields = new Array<Property>();
     let members = classReference.members;
     if (members) {

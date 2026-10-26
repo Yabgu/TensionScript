@@ -1055,3 +1055,128 @@ one would have meant the flag leaked into an unrelated shape.
   (10.0b).
 - Type aliases do not take a model (excluded deliberately: an alias is a
   spelling for the declaration, not a use).
+
+---
+
+## PR (10.0b): the boundary honours the use — and five traps on the way
+
+The scoping (`docs/memconv-signature-scope.md`) named two predicates, one flag
+derivation and one temp branch as the decision surface. That was right about the
+*decisions* and incomplete about the *sites*: five places needed more than it
+said, and four of them are invisible until a cell actually emits.
+
+### The three refusals: a use cannot confer what the source lacks
+
+- **`TS6394` — provenance.** An `@unmanaged` record is a plain pointer; there is
+  no GC header for the collector to trace. `@managed` over it is a claim no
+  emitter can satisfy, because the bytes belong to whoever allocated them.
+  `changetype<@managed U>(u)` reaches the same cell from the escape hatch and now
+  reports the same code — one rule, one number, wherever it is written.
+- **`TS6395` — no address.** An `@inline` struct is one local per field and no
+  local of its own. `@unmanaged` asks to lend an address that does not exist;
+  `@managed` asks for a handle to it. Same missing thing, one code, with the
+  target model named in the message.
+- Both live at the single `Resolver#resolveType` chokepoint rather than at each
+  emitter, so parameter, local, field, return, `changetype` target and function
+  type are covered by construction and cannot drift apart. Refusing at the
+  annotation also closes the assignment hole for free: `let m: @managed U;` does
+  not resolve, so a later assignment never runs.
+
+**ReportMode is per-call resolver state, not options.** The guard is the
+`reportMode` *parameter* — `resolveFunction` runs in `Swallow` at
+`resolver.ts:1547` and `:3275` while discovering overrides and resolving base
+members. A brief that says `program.options.reportMode` is wrong; no such field
+exists (`ReportMode` is declared at `resolver.ts:116` and threaded as an
+argument). Measured on a base/derived pair whose method parameter makes the
+impossible claim: **one** diagnostic, not two.
+
+### The rooting invariant
+
+> **Rooting keys on what the value is — the declaration's model — never on the
+> model a use names.**
+
+`operandsTostack` reads `paramType.isManaged` and nothing else. What 10.0b adds
+there is only an exclusion: a **by-value operand is not the value**, it is the
+address of a temp on the call-temp stack, and stacking it would hand the
+collector a word with no header in front of it. Measured: `importCopyM`
+(`@inline` over `@managed`) emits **zero** shadow-stack references; its control
+`importBorrowM` emits six.
+
+Nothing is lost by skipping. The copy completes before the call node runs, so the
+source is already dead when anything could collect; a *local* source is rooted by
+its own frame slot for the whole function; and a *parameter* source is only read
+during the copy, which precedes the call.
+
+The same exclusion had to go into **10.0a's `rootNextOperand`** — a second
+rooting site, in the argument loop rather than in `operandsTostack`. It stacked
+`operands[index - 1]`, which for a byval parameter is the temp address. Measured
+before the fix: `takeCopyOfU(changetype<U>(makeM()))` stored the temp address into
+the shadow stack and then passed it as the argument.
+
+### The five sites the scoping did not name
+
+| # | Trap | What it costs if missed |
+|---|---|---|
+| 1 | `makeExternalTempArgument` required `fieldLocals` (an SROA local); a pointer source has none | the override compiles to a refusal, or (if the check were loosened) stores garbage |
+| 2 | `inlineStructFieldsOf` is `@inline`-only; the copy needs any record's fields | every `@inline`-over-pointer cell finds zero fields and copies nothing |
+| 3 | `operandsTostack` roots a byval operand | the collector traces a call-temp address as a GC reference |
+| 4 | `externalTempMark` published before the arguments compile | an argument that is a call erases the outer temp: stores emitted, mark/bump/guard missing, writing through an uninitialised offset |
+| 5 | `rootNextOperand` (10.0a) roots a byval operand | same as 3, via the other rooting path |
+
+Traps 4 and 5 were found by *emitting*, not by reading: both produce a module
+that validates and a program whose values are right in the common case, and only
+the WAT shows the missing guard or the stacked temp address.
+
+### The memo key's `!mm:` segment
+
+Appended only when some parameter names a model, so a program with no overrides
+produces exactly the key it produced before. Measured by instrumenting `create`
+and dumping every key over the whole fixture corpus: **42 301 keys, 6 containing
+`!mm:` (3 distinct), all from the new fixture.** `equals` and `clone` were
+updated with it, because `create` asserts `equals` on a key hit — a key that
+distinguishes what `equals` does not is an assertion failure, not a subtle bug.
+
+`Signature.isAssignableTo` deliberately does **not** consult the models: a
+function taking the override is still assignable where the plain signature is
+expected, so the override narrows a boundary without changing a type.
+
+### The ten-cell matrix, now auditable
+
+| From \ To | `@inline` | `@managed` | `@unmanaged` |
+|---|---|---|---|
+| **`@inline`** | identity (SROA) | **refused** `TS6395` | **refused** `TS6395` |
+| **`@managed`** | **ships** — copy (temp / prologue) | identity | identity (rooted) |
+| **`@unmanaged`** | **ships** — copy (temp / prologue) | **refused** `TS6394` | identity |
+
+Three identity, three ship, three refuse. The refused cells are unreachable from
+either direction: the resolver refuses the annotation, so no emitter ever sees
+one.
+
+### The same-model control
+
+The fixture carries `sameModelU(v: @unmanaged U)` and `sameModelM(v: @managed M)`
+beside the plain declarations, and they are **byte-identical** to them. Without
+that pair, a change that altered ordinary code would leave every cell above
+looking correct: the cells only assert that the override *does* something, never
+that a no-op override stays a no-op.
+
+### The stale-checkout trap
+
+The primary checkout sat at `65d8b774` — two merges behind `origin/main`, clean,
+and wrong: no `memoryModel` in `src/ast.ts`, no `rootNextOperand` in
+`src/compiler.ts`. `git status` says "clean" and every test passes, because the
+tree is a consistent older tree. **Measure from `origin/main` content or a fresh
+worktree, never from the primary checkout's working tree**, and check for a
+symbol the phase depends on (`grep memoryModel src/ast.ts`) before trusting a
+line number.
+
+### What is still open
+
+- A managed temporary that round-trips through another call before reaching a
+  non-byval unmanaged parameter (`g(h(changetype<U>(m)))`) is still unrooted:
+  that needs dataflow across the call, not a per-argument flag.
+- `@inline → @managed` (10.0c) does not exist — and under the rules above it is a
+  conversion, not an override: it would need an allocation plus a copy, which is
+  why it was never in this phase's scope.
+- Type aliases still do not take a model (an alias is a spelling for the
+  declaration, not a use).
