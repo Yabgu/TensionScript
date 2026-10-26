@@ -1,0 +1,12 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6394: Type 'interop/memory-model-provenance-refusals/U' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead.",
+    "TS6394: Type 'interop/memory-model-provenance-refusals/U' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead.",
+    "TS6394: Type 'interop/memory-model-provenance-refusals/U' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead.",
+    "TS6394: Type 'interop/memory-model-provenance-refusals/U' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead.",
+    "TS6394: Type 'interop/memory-model-provenance-refusals/U' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead.",
+    "TS6394: Type 'interop/memory-model-provenance-refusals/U' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead.",
+    "TS6394: Type 'interop/memory-model-provenance-refusals/U' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead."
+  ]
+}

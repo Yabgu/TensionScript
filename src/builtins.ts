@@ -3773,10 +3773,15 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   // that is not there. The type-directed path refuses it (`assignableTo`); this
   // is the same refusal on the escape hatch, which otherwise reinterprets the
   // pointer in silence.
+  //
+  // One rule, one code: a use-site `@managed` over an `@unmanaged` declaration
+  // is the same claim and is refused with the same diagnostic in the resolver
+  // (`Resolver#checkMemoryModelOverride`), so a reader sees one message and one
+  // number wherever they write it.
   if (isManagedRecord(toType) && isUnmanagedRecord(fromType)) {
     compiler.error(
-      DiagnosticCode.Type_0_is_not_assignable_to_type_1,
-      ctx.reportNode.range, fromType.toString(), toType.toString()
+      DiagnosticCode.Type_0_has_no_GC_header_so_a_use_cannot_make_it_managed_declare_the_record_managed_instead,
+      ctx.reportNode.range, fromType.toString()
     );
     return module.unreachable();
   }
