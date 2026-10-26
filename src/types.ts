@@ -1013,6 +1013,45 @@ export function typesToString(types: Type[]): string {
   return sb.join(",");
 }
 
+/**
+ * The numeric codes carried by {@link Signature.memoryModels}, one per source
+ * parameter.
+ *
+ * Mirrored from `MemoryModel` (`ast.ts`) because `types.ts` is imported by
+ * `ast.ts` and therefore cannot import it back. The values must stay in step; a
+ * mismatch is caught by `Signature.create`'s key-vs-`equals` assertion the first
+ * time two signatures with different models are built.
+ */
+export const enum MemoryModelCode {
+  /** No model named at the use: the declaration's own applies. */
+  None = 0,
+  /** `@inline`: a value, copied in and out. */
+  Inline = 1,
+  /** `@managed`: a GC-owned record reference. */
+  Managed = 2,
+  /** `@unmanaged`: a plain record pointer. */
+  Unmanaged = 3
+}
+
+/** One character per entry, for the memoization key: `-`, `i`, `m`, `u`.
+ *  Returns the empty string when no parameter named a model, so a program that
+ *  uses no overrides produces exactly the key it produced before this existed. */
+function memoryModelsToKeySegment(memoryModels: u8[] | null): string {
+  if (memoryModels == null) return "";
+  let length = memoryModels.length;
+  if (!length) return "";
+  let chars = new Array<string>(length);
+  for (let i = 0; i < length; ++i) {
+    let code = unchecked(memoryModels[i]);
+    unchecked(chars[i] =
+      code == MemoryModelCode.Inline ? "i" :
+      code == MemoryModelCode.Managed ? "m" :
+      code == MemoryModelCode.Unmanaged ? "u" : "-"
+    );
+  }
+  return "!mm:" + chars.join("") + ":";
+}
+
 /** Represents a fully resolved function signature. */
 export class Signature {
   /** Construct a new signature. */
@@ -1048,6 +1087,23 @@ export class Signature {
      *  `externalBoundary`, which is the same shape with the guest on the other
      *  side of the call. Part of the memoization key for the same reason. */
     exportByValParams: bool = false,
+    /** The memory model each **use** of a parameter named, one entry per source
+     *  parameter, or `null` when no parameter named one.
+     *
+     *  Part of the memoization key, because two declarations with the same
+     *  parameter types can cross a boundary differently: `f(v: @inline U)` is a
+     *  byval copy and `g(v: @unmanaged U)` is a borrowed pointer, and both have
+     *  parameter type `U`. A signature-level boolean cannot separate them
+     *  (`f(a: @inline U, b: @unmanaged U)` and its mirror agree on "some
+     *  parameter is inline"), so the key carries the per-parameter answer.
+     *
+     *  `null` — not an all-zero array — for the ordinary case, so a program that
+     *  names no model allocates nothing and every key is byte-identical to the
+     *  one it had before this field existed. Values are the numeric codes of
+     *  `MemoryModel` (`ast.ts`), mirrored in the `MEMORY_MODEL_*` constants
+     *  below because `types.ts` is imported by `ast.ts` and cannot import it
+     *  back. */
+    memoryModels: u8[] | null = null
   ): Signature {
     // get the usize type, and the type of the signature
     let usizeType = program.options.usizeType;
@@ -1062,7 +1118,7 @@ export class Signature {
     let nextId = program.nextSignatureId;
     
     // construct the signature and calculate it's unique key
-    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, sretDisabled, externalBoundary, exportByValParams, nextId, type);
+    let signature = new Signature(program, parameterTypes, returnType, thisType, requiredParameters, hasRest, sretDisabled, externalBoundary, exportByValParams, memoryModels, nextId, type);
     // Constructors and ordinary functions can share parameter and return types
     // but not the hidden destination parameter, and an `@external` declaration
     // can share them with a guest function but not the pointer shape, so both
@@ -1070,6 +1126,7 @@ export class Signature {
     let uniqueKey = (sretDisabled ? "!sret-disabled:" : "")
       + (externalBoundary ? "!external-boundary:" : "")
       + (exportByValParams ? "!export-byval:" : "")
+      + memoryModelsToKeySegment(memoryModels)
       + signature.toString();
 
     // check if it exists, and return it
@@ -1108,11 +1165,33 @@ export class Signature {
     /** Whether an `@inline struct` parameter of an export crosses as a byval
      *  pointer the host provides. */
     public readonly exportByValParams: bool,
+    /** The memory model each use of a parameter named, one entry per source
+     *  parameter, or `null` when no parameter named one. See
+     *  {@link MemoryModelCode}. */
+    public readonly memoryModels: u8[] | null,
     /** Unique id representing this signature. */
     public readonly id: u32,
     /** Respective function type. */
     public readonly type: Type,
   ) {}
+
+  /**
+   * The model source parameter `sourceIndex` named at its use, or
+   * {@link MemoryModelCode.None} when it named none (or when nothing named one
+   * anywhere and the array is `null`).
+   *
+   * This is what the **use** asked for, not what the value is: the declaration's
+   * own model is still on the `Type`
+   * (`type.classReference.hasDecorator(...)`). The boundary emitters want both —
+   * the override decides *how the parameter crosses*, the type decides what may
+   * be done with it. See `docs/memconv-signature-scope.md` §5.2 for why rooting
+   * deliberately reads only the second.
+   */
+  memoryModelOf(sourceIndex: i32): u8 {
+    let memoryModels = this.memoryModels;
+    if (memoryModels == null) return MemoryModelCode.None;
+    return unchecked(memoryModels[sourceIndex]);
+  }
 
   /**
    * How many WASM parameters one source parameter occupies.
@@ -1377,6 +1456,22 @@ export class Signature {
     if (this.externalBoundary != other.externalBoundary) return false;
     if (this.exportByValParams != other.exportByValParams) return false;
 
+    // The per-parameter models decide how each parameter crosses, so two
+    // signatures with the same types can still differ here (`f(v: @inline U)`
+    // copies, `g(v: @unmanaged U)` borrows). The key already separates them;
+    // this is what `create`'s `assert(signature.equals(existing))` checks.
+    let selfMemoryModels = this.memoryModels;
+    let otherMemoryModels = other.memoryModels;
+    if ((selfMemoryModels == null) != (otherMemoryModels == null)) return false;
+    if (selfMemoryModels != null) {
+      let otherModels = assert(otherMemoryModels);
+      let numModels = selfMemoryModels.length;
+      if (numModels != otherModels.length) return false;
+      for (let i = 0; i < numModels; ++i) {
+        if (unchecked(selfMemoryModels[i]) != unchecked(otherModels[i])) return false;
+      }
+    }
+
     // check return type
     if (!this.returnType.equals(other.returnType)) return false;
 
@@ -1540,7 +1635,8 @@ export class Signature {
       hasRest,
       this.sretDisabled,
       this.externalBoundary,
-      this.exportByValParams
+      this.exportByValParams,
+      this.memoryModels
     );
   }
 }

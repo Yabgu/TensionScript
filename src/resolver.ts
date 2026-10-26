@@ -3170,6 +3170,10 @@ export class Resolver extends DiagnosticEmitter {
     let signatureParameters = signatureNode.parameters;
     let numSignatureParameters = signatureParameters.length;
     let parameterTypes = new Array<Type>(numSignatureParameters);
+    // The memory model each use asked for, one entry per parameter. Allocated
+    // only when some parameter names one, so the ordinary signature (and its
+    // memoization key) is exactly what it was before this phase.
+    let memoryModels: u8[] | null = null;
     let requiredParameters = 0;
     let hasRest = false;
     for (let i = 0; i < numSignatureParameters; ++i) {
@@ -3207,6 +3211,16 @@ export class Resolver extends DiagnosticEmitter {
         return null;
       }
       parameterTypes[i] = parameterType;
+      let typeNodeModel = typeNode.memoryModel;
+      if (typeNodeModel != MemoryModel.Any) {
+        if (memoryModels == null) {
+          memoryModels = new Array<u8>(numSignatureParameters);
+          for (let j = 0; j < numSignatureParameters; ++j) {
+            unchecked(memoryModels[j] = MemoryModel.Any);
+          }
+        }
+        unchecked(memoryModels[i] = typeNodeModel);
+      }
     }
 
     // resolve return type
@@ -3276,7 +3290,8 @@ export class Resolver extends DiagnosticEmitter {
       hasRest,
       sretDisabled,
       externalBoundary,
-      exportByValParams
+      exportByValParams,
+      memoryModels
     );
 
     let nameInclTypeParameters = prototype.name;
