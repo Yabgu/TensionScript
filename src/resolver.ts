@@ -80,7 +80,8 @@ import {
   NewExpression,
   ArrayLiteralExpression,
   ArrowKind,
-  ExpressionStatement
+  ExpressionStatement,
+  MemoryModel
 } from "./ast";
 
 import {
@@ -186,7 +187,71 @@ export class Resolver extends DiagnosticEmitter {
       default: assert(false);
     }
     node.currentlyResolving = false;
+    // A use may name the memory model it wants (`v: @inline V3`). A model that
+    // names **storage the source does not have** cannot be honoured by any
+    // emitter, so it is refused here — at the single chokepoint every type
+    // position goes through — rather than reaching codegen as a claim that is
+    // silently dropped. The models that *are* honourable are left alone; see
+    // `checkMemoryModelOverride`.
+    if (resolved != null && node.memoryModel != MemoryModel.Any) {
+      resolved = this.checkMemoryModelOverride(node, resolved, reportMode);
+    }
     return resolved;
+  }
+
+  /**
+   * Refuses a use-site memory model the source value cannot satisfy.
+   *
+   * A memory model names **storage**: inline bytes, a GC-owned record, or a
+   * plain pointer. A use can narrow or reinterpret between those only where the
+   * value already has what the target needs. Two cells cannot be satisfied at
+   * all, and both are claims rather than conversions:
+   *
+   * - **`@managed` over an `@unmanaged` declaration** — the collector traces a
+   *   reference through a header the record does not have. No emitter can
+   *   invent the header, so a use cannot confer provenance. (`TS6394`.)
+   * - **`@unmanaged`/`@managed` over an `@inline` declaration** — a value is
+   *   stored as one local per field and has **no address** at all, so there is
+   *   nothing to lend as a pointer and nothing a header could sit in front of.
+   *   (`TS6395`.)
+   *
+   * Everything else is left to the emitters: `@unmanaged` over `@managed` is
+   * the identity cell (10.0a), `@inline` over a pointer declaration is the
+   * copy cell (the boundary temp and the export byval prologue), and a model
+   * equal to the declaration's own is a no-op.
+   */
+  private checkMemoryModelOverride(
+    node: TypeNode,
+    type: Type,
+    reportMode: ReportMode
+  ): Type | null {
+    let asked = node.memoryModel;
+    let declared = declaredMemoryModelOf(type);
+    // Not a record (a scalar, an array, a function type, a class): there is no
+    // declared model to contradict, so there is nothing to refuse here.
+    if (declared == MemoryModel.Any || asked == declared) return type;
+    if (asked == MemoryModel.Managed && declared == MemoryModel.Unmanaged) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Type_0_has_no_GC_header_so_a_use_cannot_make_it_managed_declare_the_record_managed_instead,
+          node.range, type.toString()
+        );
+      }
+      return null;
+    }
+    if (
+      (asked == MemoryModel.Unmanaged || asked == MemoryModel.Managed) &&
+      declared == MemoryModel.Inline
+    ) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Type_0_is_a_value_with_no_address_so_a_use_cannot_view_it_as_1_use_the_value_or_keep_it_inline,
+          node.range, type.toString(), memoryModelToString(asked)
+        );
+      }
+      return null;
+    }
+    return type;
   }
 
   /** Resolves a {@link NamedTypeNode} to a concrete {@link Type}. */
@@ -4164,4 +4229,29 @@ function signatureHasMultiFieldInlineStructParam(parameterTypes: Type[]): bool {
     ) return true;
   }
   return false;
+}
+
+/** The memory model a record's **declaration** names, or
+ *  {@link MemoryModel.Any} when `type` is not a record.
+ *
+ *  The inverse of the use-site reading: `TypeNode.memoryModel` says what a use
+ *  asks for, this says what the value actually is. The two are compared in
+ *  `Resolver#checkMemoryModelOverride`. */
+function declaredMemoryModelOf(type: Type): MemoryModel {
+  let classReference = type.classReference;
+  if (classReference == null) return MemoryModel.Any;
+  if (classReference.hasDecorator(DecoratorFlags.InlineStruct)) return MemoryModel.Inline;
+  if (classReference.hasDecorator(DecoratorFlags.ManagedStruct)) return MemoryModel.Managed;
+  if (classReference.hasDecorator(DecoratorFlags.Unmanaged)) return MemoryModel.Unmanaged;
+  return MemoryModel.Any;
+}
+
+/** How a memory model is spelled in a diagnostic, including the `@`. */
+function memoryModelToString(model: MemoryModel): string {
+  switch (model) {
+    case MemoryModel.Inline: return "@inline";
+    case MemoryModel.Managed: return "@managed";
+    case MemoryModel.Unmanaged: return "@unmanaged";
+    default: return "@none";
+  }
 }

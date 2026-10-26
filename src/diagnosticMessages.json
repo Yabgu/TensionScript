@@ -211,5 +211,7 @@
   "A struct cannot be both '@managed' and '@unmanaged'.": 6390,
   "A struct cannot be both '@inline' and '@managed'.": 6391,
   "A memory-model decorator must precede the type it applies to: '{0}'.": 6392,
-  "Only one memory-model decorator may apply to a use.": 6393
+  "Only one memory-model decorator may apply to a use.": 6393,
+  "Type '{0}' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead.": 6394,
+  "Type '{0}' is a value with no address, so a use cannot view it as '{1}'; use the value, or keep it '@inline'.": 6395
 }
