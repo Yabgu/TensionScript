@@ -1247,16 +1247,36 @@ export class Signature {
   }
 
   /**
-   * Whether source parameter `sourceIndex` crosses a host boundary as a single
-   * `i32` address instead of one WASM operand per field.
+   * Whether source parameter `sourceIndex` **crosses by value** — one `i32`
+   * address instead of one WASM operand per field.
    *
-   * Both halves matter: the signature must be a host-boundary signature, and
-   * the parameter must actually be an `@inline struct` (every other type already
-   * spends one operand).
+   * Two ways to earn it, and they are deliberately one predicate so no emitter
+   * can honour one and miss the other:
+   *
+   * - **The declaration is an `@inline struct`.** The value has no pointer
+   *   representation of its own, so a boundary must send an address.
+   * - **The use names `@inline` over a pointer declaration.** The record has an
+   *   address, and the override asks for a copy of what is there — the same
+   *   copy, read from memory instead of from SROA locals.
+   *
+   * The reverse is not a thing: `@unmanaged`/`@managed` over an `@inline`
+   * declaration is refused (`TS6395`), because a value has no address to lend.
+   */
+  crossesByValueParam(sourceIndex: i32): bool {
+    if (Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]))) return true;
+    return this.memoryModelOf(sourceIndex) == MemoryModelCode.Inline;
+  }
+
+  /**
+   * Whether source parameter `sourceIndex` crosses a **host boundary** as a
+   * single `i32` address instead of one WASM operand per field.
+   *
+   * Both halves matter: the signature must be a host-boundary signature, and the
+   * parameter must cross by value (every other type already spends one operand).
    */
   isExternalPointerParam(sourceIndex: i32): bool {
     if (!this.externalBoundary) return false;
-    return Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]));
+    return this.crossesByValueParam(sourceIndex);
   }
 
   /** Whether source parameter `sourceIndex` of an **export** crosses as a byval
@@ -1264,7 +1284,7 @@ export class Signature {
    *  callee copies the fields in at entry. */
   isExportByValParam(sourceIndex: i32): bool {
     if (!this.exportByValParams) return false;
-    return Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]));
+    return this.crossesByValueParam(sourceIndex);
   }
 
   /** Whether this signature spends **one `i32` address** on a value-type

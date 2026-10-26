@@ -3273,14 +3273,14 @@ export class Resolver extends DiagnosticEmitter {
     // boundaries instead of being promised in one convention and shipped in the
     // other; see the refusal in `Compiler#compileFunction`.
     let externalBoundary = prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
-      signatureHasMultiFieldInlineStructParam(parameterTypes);
+      signatureHasMultiFieldByValParam(parameterTypes, memoryModels);
     // An **export** is the mirror boundary: a value-type parameter crosses as a
     // byval pointer the host provides, rather than as one WASM parameter per
     // field (which is the silent ABI an export used to have). `ModuleExport` is
     // set on the prototype by `markModuleExports` before any function resolves.
     let exportByValParams = prototype.is(CommonFlags.ModuleExport) &&
       !prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
-      signatureHasMultiFieldInlineStructParam(parameterTypes);
+      signatureHasMultiFieldByValParam(parameterTypes, memoryModels);
     let signature = Signature.create(
       this.program,
       parameterTypes,
@@ -4229,19 +4229,28 @@ export class Resolver extends DiagnosticEmitter {
   }
 }
 
-/** Whether any source parameter type is an `@inline struct`. Used to decide
- *  whether an `@external` signature needs the host-boundary pointer shape; a
- *  declaration with no value-type parameter keeps its ordinary signature (and
- *  its memoized identity). */
-/** Whether any parameter is an `@inline struct` with **two or more** fields —
- *  the shape the byval pointer is the correct ABI for. */
-function signatureHasMultiFieldInlineStructParam(parameterTypes: Type[]): bool {
+/** Whether any parameter **crosses by value** with **two or more** fields — the
+ *  shape the byval pointer is the correct ABI for.
+ *
+ *  "Crosses by value" is the declaration's `@inline struct` **or** a use that
+ *  names `@inline` over a pointer declaration. Both put one address on the wire
+ *  and a field list in the callee, so both take the byval shape; a parameter
+ *  that does neither keeps its ordinary signature and its memoized identity.
+ *
+ *  One field stays excluded on purpose: the C/WASM tool convention passes a
+ *  one-scalar struct as the scalar itself, so `(param i32)` means two different
+ *  things and the disagreement is silent. That case is refused at the boundary
+ *  (`Compiler#compileFunction`), and the refusal covers the override spelling
+ *  too because it asks the same question. */
+function signatureHasMultiFieldByValParam(
+  parameterTypes: Type[],
+  memoryModels: u8[] | null
+): bool {
   for (let i = 0, k = parameterTypes.length; i < k; ++i) {
     let parameterType = unchecked(parameterTypes[i]);
-    if (
-      Signature.isInlineStructRef(parameterType) &&
-      Signature.fieldCountOf(parameterType) > 1
-    ) return true;
+    let byValue = Signature.isInlineStructRef(parameterType) ||
+      (memoryModels != null && unchecked(memoryModels[i]) == MemoryModel.Inline);
+    if (byValue && Signature.fieldCountOf(parameterType) > 1) return true;
   }
   return false;
 }
