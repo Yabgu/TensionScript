@@ -3173,7 +3173,7 @@ export class Resolver extends DiagnosticEmitter {
     // The memory model each use asked for, one entry per parameter. Allocated
     // only when some parameter names one, so the ordinary signature (and its
     // memoization key) is exactly what it was before this phase.
-    let memoryModels: u8[] | null = null;
+    let memoryModels: i32[] | null = null;
     let requiredParameters = 0;
     let hasRest = false;
     for (let i = 0; i < numSignatureParameters; ++i) {
@@ -3214,7 +3214,7 @@ export class Resolver extends DiagnosticEmitter {
       let typeNodeModel = typeNode.memoryModel;
       if (typeNodeModel != MemoryModel.Any) {
         if (memoryModels == null) {
-          memoryModels = new Array<u8>(numSignatureParameters);
+          memoryModels = new Array<i32>(numSignatureParameters);
           for (let j = 0; j < numSignatureParameters; ++j) {
             unchecked(memoryModels[j] = MemoryModel.Any);
           }
@@ -4244,7 +4244,7 @@ export class Resolver extends DiagnosticEmitter {
  *  too because it asks the same question. */
 function signatureHasMultiFieldByValParam(
   parameterTypes: Type[],
-  memoryModels: u8[] | null
+  memoryModels: i32[] | null
 ): bool {
   for (let i = 0, k = parameterTypes.length; i < k; ++i) {
     let parameterType = unchecked(parameterTypes[i]);
