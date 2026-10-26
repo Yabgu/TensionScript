@@ -1,6 +1,84 @@
 # Changelog
 
-## Unreleased
+## 0.10.0
+
+Completes the C-model interop arc: `@inline struct` value types, memory-model
+use-site overrides at every position, and the bootstrap self-compile. The C-layout
+foundation this builds on (`struct` / `@unmanaged struct`, `@managed struct`,
+`T[N]` inline arrays, `@abi.alias` + `abiNameOf`, `COPY_STRUCT`, C-compatible
+`sizeof`) shipped in 0.8.0 and 0.9.0 — see those sections below.
+
+**Minor.** Every addition is additive: a program that compiles on 0.9.0 compiles
+unchanged and emits the same output. `struct` remains `@unmanaged` by default,
+exactly as it already was; the 0.9.0 preview of a managed default stays cancelled.
+
+### `@inline struct` value types
+
+A record can be a **value**: bytes in locals, copied on assignment, passed by
+value, returned by value. Scalar and struct-reference fields.
+
+- Type kind + per-use refusals; SROA locals (`compileSroaLocal`), SROA parameters
+  (flattened signatures + source-to-WASM param mapping).
+- sret returns — free functions and instance methods — through a hidden
+  destination parameter on the shared call-temp stack. Constructors are excluded
+  (`sretDisabled`): they return the allocated `this`, not a value.
+- `@external` boundary: the caller materialises a temp and passes its **address**,
+  so an import is one `(param i32)` rather than one operand per field.
+- Export mirror: the host supplies the address and the prologue copies the fields
+  into SROA locals at entry.
+- **A single-field record is refused at every boundary.** The C/WASM tool
+  convention passes a one-scalar struct as the scalar itself while this compiler
+  passes a pointer; both are `(param i32)`, so the disagreement would be silent.
+
+### Memory-model use-site overrides (10.0a + 10.0b)
+
+A use may name the model it wants — `v: @inline Vec3` — while the declaration
+keeps its own. Part of the point is that the **template** decides storage and the
+**use** decides how this one value crosses.
+
+- Pre-type `@inline` / `@managed` / `@unmanaged` at parameter, local, field,
+  return type, `changetype` target, `Array<T>` element, and function-type
+  parameter/return positions. Type aliases are excluded: an alias is a spelling
+  for the declaration, not a use.
+- Diagnostics: **TS6390** (`@managed @unmanaged`), **TS6391** (`@inline
+  @managed`), **TS6392** (post-type spelling — this was previously accepted and
+  silently ignored), **TS6393** (only one memory-model decorator per use),
+  **TS6394** (provenance), **TS6395** (no address).
+- The free cell (`@managed` ↔ `@unmanaged`) with rooting — including the
+  cross-record `changetype` route, which was a pre-existing use-after-free.
+- The two boundary cells (`@inline` over a pointer declaration): import temp copy
+  and export byval prologue.
+- The three refused cells: `@managed` over `@unmanaged` (no GC header to trace)
+  and `@unmanaged`/`@managed` over `@inline` (no address to lend). A use cannot
+  confer what the source lacks; allocation is not a conversion.
+- Rooting invariant: rooting keys on what the value **is**, never on the model a
+  use names. A by-value operand is a temp address, not a GC reference, and is
+  never stacked.
+
+### Bootstrap self-compile
+
+`npm run bootstrap:*` stage 1 ran red on every tip in this fork — the compiler
+rejected its own source with 229 errors. It now compiles clean: **0 errors**,
+debug and release, and the `.wast` fixpoint is byte-identical at aggregate scope.
+
+- Diagnostic relaxation: a read of a global whose initializer is a compile-time
+  constant is no longer refused (the `used-before-declaration` check models an
+  initialization-order hazard that a constant does not have).
+- Split predicate for the constant-initializer test; accessors for the four
+  non-constant tables; CLI guard.
+- CLI/WASM harness: `applyInTreeTransforms`, shadow-stack sizing, host parity for
+  the compiler core's map reads.
+
+### Fixes
+
+- **`memoryModels` was `u8[]` receiving `i32` enum values** — an implicit
+  narrowing invisible to `tsc` and to esbuild, and rejected by TensionScript's own
+  compiler with `AS200`. It broke both Bootstrap gates on `main`. Typed `i32[]`
+  (PR #23). The self-compile gate is now recorded as mandatory before push and
+  before merge for any PR touching `src/`; the sibling audit found no remaining
+  `AS200` site.
+- **TS2322 for the `changetype` case is unified to TS6394** — one rule, one code,
+  wherever the provenance claim is written.
 
 ### Memory-model use-site overrides — 10.0a
 
