@@ -1036,7 +1036,7 @@ export const enum MemoryModelCode {
 /** One character per entry, for the memoization key: `-`, `i`, `m`, `u`.
  *  Returns the empty string when no parameter named a model, so a program that
  *  uses no overrides produces exactly the key it produced before this existed. */
-function memoryModelsToKeySegment(memoryModels: u8[] | null): string {
+function memoryModelsToKeySegment(memoryModels: i32[] | null): string {
   if (memoryModels == null) return "";
   let length = memoryModels.length;
   if (!length) return "";
@@ -1103,7 +1103,7 @@ export class Signature {
      *  `MemoryModel` (`ast.ts`), mirrored in the `MEMORY_MODEL_*` constants
      *  below because `types.ts` is imported by `ast.ts` and cannot import it
      *  back. */
-    memoryModels: u8[] | null = null
+    memoryModels: i32[] | null = null
   ): Signature {
     // get the usize type, and the type of the signature
     let usizeType = program.options.usizeType;
@@ -1168,7 +1168,7 @@ export class Signature {
     /** The memory model each use of a parameter named, one entry per source
      *  parameter, or `null` when no parameter named one. See
      *  {@link MemoryModelCode}. */
-    public readonly memoryModels: u8[] | null,
+    public readonly memoryModels: i32[] | null,
     /** Unique id representing this signature. */
     public readonly id: u32,
     /** Respective function type. */
@@ -1187,7 +1187,7 @@ export class Signature {
    * be done with it. See `docs/memconv-signature-scope.md` §5.2 for why rooting
    * deliberately reads only the second.
    */
-  memoryModelOf(sourceIndex: i32): u8 {
+  memoryModelOf(sourceIndex: i32): i32 {
     let memoryModels = this.memoryModels;
     if (memoryModels == null) return MemoryModelCode.None;
     return unchecked(memoryModels[sourceIndex]);

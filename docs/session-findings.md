@@ -1180,3 +1180,20 @@ line number.
   why it was never in this phase's scope.
 - Type aliases still do not take a model (an alias is a spelling for the
   declaration, not a use).
+
+### `npm run check` is not the self-compile
+
+`npm run check` runs `tsc --noEmit`. The **Bootstrap** gate compiles `src/` with
+TensionScript itself, and the two disagree about implicit narrowing: `tsc` accepts
+`Array<u8>` receiving `i32` enum values, TensionScript refuses it with
+`AS200: Conversion from type 'i32' to 'u8' requires an explicit cast`.
+
+This bit 10.0b because the branch was pushed as crash insurance *without* a PR, so
+nothing local ever ran the self-compile; the failure surfaced on CI with the PR.
+**Run `npm run bootstrap:debug` before pushing a change to `src/`**, not just
+`npm run check` / `npm test` — `npm test` builds `dist/` with esbuild and never
+compiles the compiler's own source.
+
+The fix is the general lesson: type the value as what it is. The models array
+holds enum codes, so it is `i32[]`; typing it `u8` bought nothing and needed three
+casts to be legal under the stricter compiler.
