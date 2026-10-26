@@ -53,14 +53,72 @@ emits byte-identical output. The `.wast` fixpoint is empty in both
 configurations. The only shape that changes is the one above.
 
 **Not in this release.** The `@external` boundary still reads the declaration's
-model and drops a use-site override (10.0b, the `Signature` change).
-`@inline → @managed` has no emitter yet (10.0c). And the root covers a direct
-operand: a managed temporary that round-trips through another call before
-reaching an unmanaged parameter is still unrooted.
+model and drops a use-site override (10.0b, below). `@inline → @managed` has no
+emitter (10.0c). And the root covers a direct operand: a managed temporary that
+round-trips through another call before reaching an unmanaged parameter is still
+unrooted.
 
 Version: **minor** — the parse surface is additive (pre-type decorators were a
 parse error at every position), and the two refusals only reject spellings that
 were silently meaningless.
+
+### Memory-model use-site overrides — 10.0b (the boundary)
+
+`v: @inline U` now means something at a boundary: **take a copy** of a record the
+declaration says to borrow. Four cells ship; three are refused by name.
+
+**The ten-cell matrix, auditable.** Three of the nine model pairs are identity
+(same model, or `@unmanaged` over `@managed`), three ship, three refuse:
+
+- **Ship — `@inline` over a pointer declaration** (`@managed` or `@unmanaged`).
+  Import: the guest fills a call-temp from the pointer, field by field, and the
+  host gets that temp's address. Export: the host supplies the value's address
+  and the prologue copies it into SROA locals at entry. The record's own model is
+  untouched; only the use takes a copy.
+- **Refuse — `@managed` over `@unmanaged`** (`TS6394`). An `@unmanaged` record is
+  a plain pointer: there is no GC header for the collector to trace. A use cannot
+  confer provenance. `changetype<@managed U>(u)` is the same claim and now
+  reports the same code (10.0a used `TS2322`).
+- **Refuse — `@unmanaged`/`@managed` over `@inline`** (`TS6395`). A value is one
+  local per field and has no address, so there is nothing to lend as a pointer
+  and nothing a header could sit in front of. On an export this would be worse
+  than useless: with the byval predicate off, `paramRefs` falls through to one
+  ref per field, which makes the record's field list the host ABI.
+
+The rule both refusals state: **a use cannot confer what the source lacks.**
+
+**The contract, stated.** `@inline` at a boundary is a copy — host writes
+afterwards do not reach the guest, and the guest's writes stay in its locals.
+`@unmanaged` is a borrow — the bytes are the caller's, live for the call, and
+neither side may retain the pointer past it (the adapter's rule 6 for the
+guest→host direction).
+
+**The rooting invariant.** Rooting keys on what the value *is* — the resolved
+type, i.e. the declaration's model — never on the model a use names. A use
+selects between copy, identity and refuse; it does not decide whether an object
+is collected. Concretely: `@unmanaged` over a `@managed` declaration still roots
+(10.0a's free cell), and a **by-value operand roots nothing**, because the operand
+is the temp's address on the call-temp stack, not a GC reference — stacking it
+would hand the collector a word with no header in front of it.
+
+**The memoization key** gains a `!mm:` segment listing one character per
+parameter, appended only when some parameter names a model. Without it,
+`f(v: @inline U)` and `g(v: @unmanaged U)` have the same parameter type, the
+same boundary flag and therefore the same `Signature` — measured, they emitted
+byte-identical bodies. With it they are distinct. Signatures that name no model
+produce exactly the key they produced before (42 301 keys dumped across the
+fixture corpus; 6 contain the segment, all from the new fixture).
+
+**Output.** `npm test` exit 0, `npm run check` exit 0, every existing fixture
+byte-identical — the override was inert before this release, and zero programs in
+the tree write one at a boundary. The new `memory-model-boundary-cells` fixture
+pins the four shapes and asserts the copy/borrow distinction at runtime; its
+same-model controls are measured byte-identical to the plain declarations.
+
+Version: **minor**, in the same unreleased cycle as 10.0a. No published program
+can contain a boundary override — before 10.0a the pre-type form was a parse
+error at every position, and 10.0a's own notes say the boundary drops the
+override.
 
 ### Bootstrap self-compile: the compiler's own source now compiles
 
