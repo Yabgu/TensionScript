@@ -525,9 +525,10 @@ export abstract class Node {
     decorators: DecoratorNode[] | null,
     flags: CommonFlags,
     values: EnumValueDeclaration[],
+    underlyingTypeNode: TypeNode | null,
     range: Range
   ): EnumDeclaration {
-    return new EnumDeclaration(name, decorators, flags, values, range);
+    return new EnumDeclaration(name, decorators, flags, values, underlyingTypeNode, range);
   }
 
   static createEnumValueDeclaration(
@@ -2153,6 +2154,8 @@ export class EnumDeclaration extends DeclarationStatement {
     flags: CommonFlags,
     /** Enum value declarations. */
     public values: EnumValueDeclaration[],
+    /** Underlying type node, if any (`enum Foo: u8 { … }`). */
+    public underlyingTypeNode: TypeNode | null,
     /** Source range. */
     range: Range
   ) {
