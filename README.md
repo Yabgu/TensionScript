@@ -11,8 +11,8 @@ and the package are its own: it does not collide with `asc` (AssemblyScript's
 compiler) or `tsc` (TypeScript's), so a project that installs both compilers
 always resolves the one it named.
 
-**Current version: 0.10.0.** A feature showcase — one section per capability, with
-runnable examples and the refused forms — is in preparation; the detailed scoping
+**Current version: 0.10.0.** The [feature showcase](docs/showcase.md) has one
+section per capability, with runnable examples and the refused forms; the scoping
 notes it draws from are in [`docs/`](docs/).
 
 ## Install
@@ -51,31 +51,36 @@ tip at fork time) — the measurement and its method are in
   arrays, `@abi.alias` + `abiNameOf` (a field's C name, distinct from its
   TensionScript name), `COPY_STRUCT`, and a C-compatible `sizeof` that includes
   trailing padding. A `layout_hash` computed against the engine catches layout
-  drift when a session opens.
+  drift when a session opens. See [showcase §1](docs/showcase.md) and
+  §2 for `@managed struct`.
 - **Value types.** `@inline struct` gives a record value semantics: SROA locals,
   copy on assignment, flattened (SROA) parameters, sret returns through a hidden
   destination parameter, an `@external` argument temp, and an export-side byval
   mirror. One-field records are refused at every boundary — the C/WASM tool
   convention passes a one-scalar struct as the scalar itself, which would
-  disagree silently.
+  disagree silently. See
+  [showcase §3](docs/showcase.md).
 - **Memory-model overrides.** A *use* can name the model it wants
   (`v: @inline Vec3`) while the declaration keeps its own. `@managed` ↔
   `@unmanaged` is the free cell; `@inline` over a pointer declaration is the
   boundary cell (import temp copy, export byval). Three cells are refused by
-  principle: a use cannot confer storage the value does not have.
+  principle: a use cannot confer storage the value does not have. See
+  [showcase §4](docs/showcase.md).
 - **Async/await.** `await` is the marker. The scheduler contract is
   park / wake / resume with the task table owned by the guest; the shipped
   implementation is the push path (the pull path was retired in 0.7.0).
-  Host-driven runtime tests cover it.
+  Host-driven runtime tests cover it. See
+  [showcase §5](docs/showcase.md).
 - **Closures.** Capture, a synthesized environment class, and `this`/environment
   unification. The captured binding has exactly one home. `this` in an arrow
   function resolves to the nearest enclosing non-arrow receiver — TypeScript's
-  rule.
+  rule. See [showcase §6](docs/showcase.md).
 - **Lazy expressions.** `@lazy` defers an expression's evaluation to the binding's
   first read, memoized. Three forms: `@lazy f()` (deferred, synchronous),
   `@lazy await f()` (deferred, awaited at the read), and
   `@lazy await spawn(f)` (launched at the declaration, joined at the read).
-  `spawn` is the eager primitive.
+  `spawn` is the eager primitive. See
+  [showcase §7](docs/showcase.md).
 - **Bootstrap self-compile.** The compiler compiles its own source: 229 errors
   down to 0, with the `.wast` fixpoint byte-identical across the stages.
 
@@ -111,14 +116,16 @@ for lacking an AS equivalent.
 
 ## What's next
 
+[`docs/showcase.md`](docs/showcase.md) is the per-capability reference — examples,
+semantics, and what each feature refuses.
 [`docs/fork-arc-scope.md`](docs/fork-arc-scope.md) sequences the remaining work.
 Deferred and named, each with its reason in
 [`docs/session-findings.md`](docs/session-findings.md):
 
 - **Sized enums** — `enum Foo: u8 { … }`, scoped in
-  [`docs/sized-enums-scope.md`](docs/sized-enums-scope.md); implementation
-  pending. Would make the `AS200` class (an `i32` enum into a `u8` field)
-  unrepresentable.
+  [`docs/sized-enums-scope.md`](docs/sized-enums-scope.md) and described as
+  pending in [showcase §8](docs/showcase.md); implementation pending. Would make
+  the `AS200` class (an `i32` enum into a `u8` field) unrepresentable.
 - **Inline nesting** — an `@inline struct` as a field of another record.
 - **`T[N]` fields in `@inline struct`** — deep SROA, one local per element.
 - **GC-reference fields in `@inline struct`** — an SROA'd field has no address,
@@ -128,6 +135,9 @@ Deferred and named, each with its reason in
 - **SROA for top-level statics** — per-field globals, or a shadow slot.
 - **`lazy-await-type-inference`** — lifting `@lazy await`'s declared-type
   requirement (`TS6399`).
+
+The full deferred list, with the reason for each, is
+[showcase §9](docs/showcase.md).
 
 ## Links
 
