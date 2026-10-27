@@ -1,0 +1,23 @@
+{
+  "asc_flags": [
+   ],
+  "stderr": [
+    "AS200: Conversion from type 'i32' to 'u8' requires an explicit cast.",
+    "TS6404: Enum member 'A' does not fit the underlying type 'u8'.",
+    "TS6404: Enum member 'B' does not fit the underlying type 'u8'.",
+    "TS6404: Enum member 'B' does not fit the underlying type 'u8'.",
+    "TS6404: Enum member 'C' does not fit the underlying type 'u8'.",
+    "AS200: Conversion from type 'i32' to 'u8' requires an explicit cast.",
+    "AS200: Conversion from type 'i32' to 'u8' requires an explicit cast.",
+    "TS6404: Enum member 'A' does not fit the underlying type 'u8'.",
+    "AS200: Conversion from type 'i32' to 'i8' requires an explicit cast.",
+    "TS6404: Enum member 'A' does not fit the underlying type 'i8'.",
+    "AS200: Conversion from type 'i32' to 'u16' requires an explicit cast.",
+    "TS6404: Enum member 'A' does not fit the underlying type 'u16'.",
+    "TS6404: Enum member 'A' does not fit the underlying type 'u8'.",
+    "TS6403: An enum underlying type must be one of i8, u8, i16, u16, i32 or u32, not 'bool'.",
+    "TS6403: An enum underlying type must be one of i8, u8, i16, u16, i32 or u32, not 'i64'.",
+    "TS6403: An enum underlying type must be one of i8, u8, i16, u16, i32 or u32, not 'f32'.",
+    "EOF"
+  ]
+}

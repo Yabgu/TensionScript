@@ -25,6 +25,8 @@ import {
   Class,
   ClassPrototype,
   Interface,
+  Enum,
+  EnumValue,
   Function,
   FunctionPrototype,
   VariableLikeElement,
@@ -81,7 +83,8 @@ import {
   ArrayLiteralExpression,
   ArrowKind,
   ExpressionStatement,
-  MemoryModel
+  MemoryModel,
+  EnumDeclaration
 } from "./ast";
 
 import {
@@ -119,6 +122,19 @@ export const enum ReportMode {
   Report,
   /** Swallow errors. */
   Swallow
+}
+
+/** Whether a type can back an enum's storage: a 32-bit or narrower integer scalar, nothing else. */
+function isValidEnumUnderlyingType(type: Type): bool {
+  switch (type.kind) {
+    case TypeKind.I8:
+    case TypeKind.U8:
+    case TypeKind.I16:
+    case TypeKind.U16:
+    case TypeKind.I32:
+    case TypeKind.U32: return true;
+    default: return false; // bool, i64/u64, isize/usize, f32/f64, v128, references
+  }
 }
 
 /** Provides tools to resolve types and expressions. */
@@ -308,7 +324,7 @@ export class Resolver extends DiagnosticEmitter {
 
     } else {
 
-      // Handle enums (become i32)
+      // Handle enums (the underlying type; i32 unless declared)
       if (element.kind == ElementKind.Enum) {
         if (typeArgumentNodes && typeArgumentNodes.length > 0) {
           if (reportMode == ReportMode.Report) {
@@ -318,15 +334,16 @@ export class Resolver extends DiagnosticEmitter {
             );
           }
         }
+        let enumType = this.resolveEnumType(<Enum>element, reportMode);
         if (node.isNullable) {
           if (reportMode == ReportMode.Report) {
             this.error(
               DiagnosticCode.Type_0_cannot_be_nullable,
-              node.range, `${element.name}/i32`
+              node.range, `${element.name}/${enumType.toString()}`
             );
           }
         }
-        return Type.i32;
+        return enumType;
       }
 
       // Handle classes and interfaces
@@ -431,6 +448,56 @@ export class Resolver extends DiagnosticEmitter {
       );
     }
     return null;
+  }
+
+  /**
+   * Resolves an enum's declared underlying type, once, and threads it to the
+   * enum element and its members.
+   *
+   * An enum has no type of its own: its `Type` **is** the storage class, so
+   * every `.byteSize` reader (`sizeof`, `offsetof`, field offsets, array
+   * strides, load/store widths) follows from this one answer. `enum Foo { … }`
+   * has no underlying type node and stays `i32`, exactly as before.
+   */
+  resolveEnumType(
+    /** The enum to resolve. */
+    enumElement: Enum,
+    /** How to proceed with eventual diagnostics. */
+    reportMode: ReportMode = ReportMode.Report
+  ): Type {
+    if (enumElement.underlyingTypeResolved) return enumElement.type;
+    let underlyingTypeNode = (<EnumDeclaration>enumElement.declaration).underlyingTypeNode;
+    if (!underlyingTypeNode) { // `enum Foo { … }`: i32, as it always was
+      enumElement.underlyingTypeResolved = true;
+      return enumElement.type;
+    }
+    // `enum A: B` / `enum B: A` terminates on the second visit with the default.
+    if (enumElement.underlyingTypeResolving) return Type.i32;
+    enumElement.underlyingTypeResolving = true;
+    let type = this.resolveType(underlyingTypeNode, null, enumElement.parent, null, reportMode);
+    enumElement.underlyingTypeResolving = false;
+    if (!type) return Type.i32; // reported by resolveType; not marked resolved so a reporting pass can retry
+    if (!isValidEnumUnderlyingType(type)) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.An_enum_underlying_type_must_be_one_of_i8_u8_i16_u16_i32_or_u32_not_0,
+          underlyingTypeNode.range, type.toString()
+        );
+      }
+      return Type.i32;
+    }
+    enumElement.refineType(type);
+    let members = enumElement.members;
+    if (members) {
+      for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+        let member = unchecked(_values[i]);
+        if (member.kind == ElementKind.EnumValue) {
+          (<EnumValue>member).refineType(type);
+        }
+      }
+    }
+    enumElement.underlyingTypeResolved = true;
+    return type;
   }
 
   /** Resolves a {@link FunctionTypeNode} to a concrete {@link Type}. */
