@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — showcase
+
+**`docs/showcase.md` added** — one section per capability: a runnable example, the
+semantics that matter, and the forms that are refused. Nine sections: C-model
+interop, `@managed struct`, `@inline struct` value types, memory-model overrides,
+async/await, closures, lazy expressions, sized enums (**marked pending** — the
+scoping merged, the implementation has not), and the deferred list.
+
+Every example compiles on this commit. Each was run through `tensionscript`; the
+wasm sizes and the behavioural results are in the commit message. The one block
+that does not compile is the refusal demonstration in §4, labelled as such in the
+prose and pinned to the three diagnostics it produces (`TS6394`, `TS6395`, ×2).
+
+Writing it found three things worth recording:
+
+- **A struct-typed field is a 4-byte reference, not inline.** `@unmanaged struct
+  Outer { tag: u8; inner: Inner }` with a 16-byte `Inner` is 8 bytes, not 20 —
+  measured. The showcase says so, and inline nesting is on the deferred list.
+- **An `@inline struct` argument must be a local.** `dot(add(a, b), add(a, b))` is
+  refused (`AS100`), because an sret result has no address to hand over. The first
+  draft of §3's example did exactly that and did not compile; corrected, and the
+  rule is now documented where a reader will hit it.
+- **`layout_hash` is the engine's.** It is computed in the Tension repository
+  (`tension-core/src/adapter/mod.rs`, `tension-framework/assembly/runtime/layout.ts`)
+  and appears in this repository only in comments. The showcase credits it
+  accurately rather than listing it as a TensionScript feature.
+
+**The README's Status section now cross-links to it** — one `showcase §N` pointer
+per capability, plus a link from *What's next*. Section numbers rather than URL
+anchors, because GitHub's anchor slugging is easy to get subtly wrong and a
+section number cannot rot.
+
 ## Unreleased — documentation
 
 **README rewritten.** Three statements in it were contradicted by the tree, and had
