@@ -3423,6 +3423,20 @@ export abstract class TypedElement extends DeclaredElement {
     this.type = type;
     this.set(CommonFlags.Resolved);
   }
+
+  /**
+   * Replaces the already-resolved type of this element.
+   *
+   * A default is installed at construction — an `Enum` and each of its members
+   * is i32 — and a declaration that names an underlying type (`enum E: u8`)
+   * refines it afterwards. Nothing memoizes an element's `Type`, so the
+   * refinement is safe; `setType`'s assert guards against double *resolution*,
+   * which this is not.
+   */
+  refineType(type: Type): void {
+    this.type = type;
+    this.set(CommonFlags.Resolved);
+  }
 }
 
 /** A file representing the implicit top-level namespace of a source. */
@@ -3645,6 +3659,13 @@ export class Namespace extends DeclaredElement {
 /** An enum. */
 export class Enum extends TypedElement {
   toStringFunctionName: string | null = null;
+
+  /** Whether the declaration's underlying type node has been resolved (memo for `Resolver#resolveEnumType`). */
+  underlyingTypeResolved: bool = false;
+
+  /** Reentrancy guard while resolving the underlying type, so `enum A: B` / `enum B: A` terminates. */
+  underlyingTypeResolving: bool = false;
+
   /** Constructs a new enum. */
   constructor(
     /** Simple name. */
@@ -3665,6 +3686,9 @@ export class Enum extends TypedElement {
       declaration
     );
     this.decoratorFlags = decoratorFlags;
+    // The default, and what every `enum Foo { … }` keeps: an enum is i32 unless
+    // the declaration names an underlying type (`enum Foo: u8 { … }`), which
+    // `Resolver#resolveEnumType` resolves and installs here.
     this.setType(Type.i32);
   }
 
@@ -3768,7 +3792,10 @@ export class EnumValue extends VariableLikeElement {
       declaration
     );
     this.decoratorFlags = decoratorFlags;
-    this.setType(Type.i32);
+    // A member is storage-classed with its enum. The enum's type is i32 here
+    // (the members are created during initialization); resolving a declared
+    // underlying type reinstalls both through `Resolver#resolveEnumType`.
+    this.setType(parent.type);
   }
 
   /** Whether this enum value is immutable. */
