@@ -1418,7 +1418,7 @@ export class Parser extends DiagnosticEmitter {
     startPos: i32
   ): EnumDeclaration | null {
 
-    // at 'enum': Identifier '{' (EnumValueDeclaration (',' EnumValueDeclaration )*)? '}' ';'?
+    // at 'enum': Identifier (':' Type)? '{' (EnumValueDeclaration (',' EnumValueDeclaration )*)? '}' ';'?
 
     if (tn.next() != Token.Identifier) {
       this.error(
@@ -1428,6 +1428,13 @@ export class Parser extends DiagnosticEmitter {
       return null;
     }
     let identifier = Node.createIdentifierExpression(tn.readIdentifier(), tn.range());
+    // An underlying type (`enum Foo: u8 { … }`) narrows the storage class of
+    // every member and every use. Absent, the enum stays i32, as it always was.
+    let underlyingTypeNode: TypeNode | null = null;
+    if (tn.skip(Token.Colon)) {
+      underlyingTypeNode = this.parseType(tn, false);
+      if (!underlyingTypeNode) return null;
+    }
     if (tn.next() != Token.OpenBrace) {
       this.error(
         DiagnosticCode._0_expected,
@@ -1457,6 +1464,7 @@ export class Parser extends DiagnosticEmitter {
       decorators,
       flags,
       members,
+      underlyingTypeNode,
       tn.range(startPos, tn.pos)
     );
     ret.overriddenModuleName = this.currentModuleName;

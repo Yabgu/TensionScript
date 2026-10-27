@@ -1018,6 +1018,11 @@ export class ASTBuilder {
     if (node.is(CommonFlags.Const)) sb.push("const ");
     sb.push("enum ");
     this.visitIdentifierExpression(node.name);
+    let underlyingTypeNode = node.underlyingTypeNode;
+    if (underlyingTypeNode) {
+      sb.push(": ");
+      this.visitTypeNode(underlyingTypeNode);
+    }
     let values = node.values;
     let numValues = values.length;
     if (numValues) {
