@@ -6,7 +6,8 @@
     "AS100: Not implemented: an @inline struct at top level (a global is a pointer slot, so two values would alias; declare it inside a function)",
     "AS100: Not implemented: an @inline struct value in a type argument (Array<T>) (value types are not implemented here yet; a pointer would alias)",
     "AS100: Not implemented: changetype to an @inline struct (a value has no pointer representation; use @unmanaged struct for a view over bytes)",
-    "AS100: Not implemented: an @inline struct value in a field (inline nesting is a later phase) (value types are not implemented here yet; a pointer would alias)",
-    "AS100: Not implemented: an inline array (T[N]) of an @inline struct (elements by value are a later phase)"
+    "AS100: Not implemented: an @inline struct nested inside an @inline value (the outer is one WASM local per field, so the inner would have to be flattened into the outer's leaves -- that is SROA flattening, sub-phase B)",
+    "AS100: Not implemented: an inline array (T[N]) of an @inline struct (elements by value are a later phase)",
+    "AS100: Not implemented: an @inline struct as a class field (a class field is a pointer slot; inline-in-heap is a separate, deferred case -- use an @unmanaged or @managed record field)"
   ]
 }

@@ -7,6 +7,6 @@
     "AS100: Not implemented: an @inline struct value in a type argument (Array<T>)",
     "AS100: Not implemented: an @inline struct value in a type argument (Array<T>)",
     "AS100: Not implemented: reading an @inline struct value as a whole",
-    "AS100: Not implemented: an @inline struct value in a field (inline nesting is a later phase)"
+    "AS100: Not implemented: an @inline struct as a class field (a class field is a pointer slot; inline-in-heap is a separate, deferred case -- use an @unmanaged or @managed record field)"
   ]
 }

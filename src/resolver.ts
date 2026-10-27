@@ -3569,6 +3569,46 @@ export class Resolver extends DiagnosticEmitter {
   /** Currently resolving classes. */
   private resolveClassPending: Set<Class> = new Set();
 
+  /**
+   * The first leaf field of an `@inline struct` that is a GC reference, or
+   * `null` when every leaf is a value.
+   *
+   * "Leaf" is transitive: a nested `@inline struct` field is not a field of the
+   * outer record in the collector's eyes — there is no header in front of it and
+   * no entry in `__visit` — so what matters is the innermost fields. A `T[N]` of
+   * GC references counts as managed too: `Type.isManaged` does not see through a
+   * fixed array (`isManaged<Other[4]>()` is false, `types.ts:372-379`), which is
+   * the same blind spot the `@managed` field refusal records.
+   *
+   * `seen` guards the walk, it does not diagnose: the cycle refusal in the
+   * layout loop reports the real error, and this walk must not recurse forever
+   * through a shape that is already refused.
+   */
+  private findManagedLeaf(type: Type, seen: Set<Class>): Property | null {
+    let classReference = type.classReference;
+    if (classReference == null || seen.has(classReference)) return null;
+    seen.add(classReference);
+    let members = classReference.members;
+    if (!members) return null;
+    // TODO: for (let [memberName, member] of members) {
+    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+      let member = unchecked(_values[i]);
+      if (member.kind != ElementKind.PropertyPrototype) continue;
+      let property = (<PropertyPrototype>member).instance;
+      if (property == null || !property.isField) continue;
+      let fieldType = property.type;
+      if (fieldType.isManaged) return property;
+      if (fieldType.kind == TypeKind.FixedArray) {
+        let elementType = fieldType.fixedElementType;
+        if (elementType != null && elementType.isManaged) return property;
+      } else if (declaredMemoryModelOf(fieldType) == MemoryModel.Inline) {
+        let nested = this.findManagedLeaf(fieldType, seen);
+        if (nested != null) return nested;
+      }
+    }
+    return null;
+  }
+
   /** Resolves a class prototype using the specified concrete type arguments. */
   resolveClass(
     /** The prototype of the class. */
@@ -3916,7 +3956,80 @@ export class Resolver extends DiagnosticEmitter {
                   }
                 }
                 if (needsLayout) {
-                  let byteSize = fieldType.byteSize;
+                  // === Inline nesting, sub-phase A ==========================
+                  // A field whose **type** is an `@inline struct` stores the
+                  // value's bytes inline instead of a 4-byte pointer
+                  // (`docs/inline-nesting-scope.md` §2.2). The decorator at the
+                  // field position (`inner: @inline Inner`) does *not* decide
+                  // this: `checkMemoryModelOverride` returns the type unchanged
+                  // when the request matches the declaration or the declaration
+                  // has no model (`:248`), so it is an assertion, not a gate.
+                  // What decides it is the type, and this is the one place the
+                  // layout reads it.
+                  //
+                  // **Both hazards are checked here, before the extent is
+                  // read.** The order is load-bearing: the field-nesting
+                  // refusal runs *after* this block, so a recursive shape used
+                  // to lay the field out as a 4-byte pointer first. A cycle
+                  // check placed at the refusal site would read the pending
+                  // instance's `nextMemoryOffset` (0) that this block had
+                  // already consumed — the silent zero would be *computed*
+                  // before it was refused, and any reader in between would keep
+                  // it. Checking first means the wrong extent never exists.
+                  let inlineFieldClass: Class | null = null;
+                  if (declaredMemoryModelOf(fieldType) == MemoryModel.Inline) {
+                    let innerClass = fieldType.classReference;
+                    if (innerClass != null) {
+                      inlineFieldClass = innerClass;
+                      let inlineFieldTypeNode = assert(boundPrototype.fieldDeclaration).type!;
+                      // (1) The silent-zero hazard (§2.6). `resolveClass`
+                      // returns a *pending* instance on re-entry
+                      // (`:3587-3590`), and a pending instance still carries
+                      // the default extent 0 and alignment 0. A self- or
+                      // mutually-referential inline field would therefore take
+                      // 0 bytes, give `sizeof` 0, and report nothing.
+                      // `pendingClasses` already answers this question for
+                      // bases and interfaces, so no new pass is needed.
+                      if (pendingClasses.has(innerClass)) {
+                        this.error(
+                          DiagnosticCode.Not_implemented_0,
+                          inlineFieldTypeNode.range,
+                          "a recursive @inline struct: '" + innerClass.name +
+                            "' would have an infinite size (it contains itself, directly or through another @inline struct, by value)"
+                        );
+                        break;
+                      }
+                      // (2) The transitive GC-reference hazard (§2.8). An
+                      // `@inline struct` with a GC-reference field is refused
+                      // when a *local* of it is declared, but the type itself
+                      // still resolves — so nesting would put a collected
+                      // pointer inside a value, where neither `__visit` (which
+                      // walks a class's fields) nor a write barrier can see it.
+                      let managedLeaf = this.findManagedLeaf(innerClass.type, new Set<Class>());
+                      if (managedLeaf != null) {
+                        this.error(
+                          DiagnosticCode.Not_implemented_0,
+                          inlineFieldTypeNode.range,
+                          "an @inline struct field '" + managedLeaf.name +
+                            "' of '" + innerClass.name + "' is a GC reference, and" +
+                            (instance.hasDecorator(DecoratorFlags.ManagedStruct)
+                              ? " the __visit pass walks the outer's fields -- an inline field's GC pointer is invisible to it, so the collector would not trace it"
+                              : " an inline field's GC pointer is invisible to the collector -- the field looks safe but is not; the escape hatch is a hand-written byte layout, not an @inline field")
+                        );
+                        break;
+                      }
+                    }
+                  }
+                  // The extent is the inner value's whole layout, not the
+                  // pointer's 4 bytes; the alignment is the record's own, not
+                  // the 4-byte reference's. Both numbers already exist --
+                  // `nextMemoryOffset` and `alignLog2` are exactly what
+                  // `sizeof` and `alignof` report for the type (§2.3), so no
+                  // reader moves, and every non-inline field takes the
+                  // `fieldType` side unchanged.
+                  let byteSize = inlineFieldClass != null
+                    ? inlineFieldClass.nextMemoryOffset
+                    : fieldType.byteSize;
                   // A managed struct is a record whose extent `sizeof` reports,
                   // so a field that cannot be constructed or traced would make
                   // that number a lie. Both refusals are by name here, at the
@@ -3957,7 +4070,9 @@ export class Resolver extends DiagnosticEmitter {
                   // both crashed on 24 and over-aligned a 16-byte array to 16,
                   // putting `arr` at 16 in `{a:i32; arr:f32[4]; b:i32}` and the
                   // record at 36 instead of 24.
-                  let alignLog2 = fieldType.alignLog2;
+                  let alignLog2 = inlineFieldClass != null
+                    ? inlineFieldClass.alignLog2
+                    : fieldType.alignLog2;
                   assert(alignLog2 >= 0);
                   if (alignLog2 > classAlignLog2) classAlignLog2 = alignLog2;
                   let mask = (1 << alignLog2) - 1;
@@ -3971,14 +4086,44 @@ export class Resolver extends DiagnosticEmitter {
                 // (other checks are performed once an element is compiled)
                 let typeNode = assert(boundPrototype.fieldDeclaration).type;
                 if (typeNode) {
-                  // An `@inline struct` field is inline *nesting*: the outer
-                  // record would need the inner value's bytes inline, which is
-                  // the layout-loop branch this phase does not add (§7.2 of the
-                  // scoping). Also covers a `@managed`/`@unmanaged` struct field
-                  // of an `@inline struct` type, and `T[N]` handled below.
-                  this.program.checkInlineStructValue(
-                    fieldType, typeNode, "a field (inline nesting is a later phase)"
-                  );
+                  // An `@inline struct` field is **accepted** when the outer is
+                  // a pointer-layout record (`@unmanaged` / `@managed`): the
+                  // layout branch above gives it the value's own extent and
+                  // alignment, which is the C inline-nesting shape
+                  // (`struct Outer { struct Inner inner; }`).
+                  //
+                  // Inside an **`@inline`** outer it is refused by name: that
+                  // outer is itself a value, stored as one WASM local per
+                  // field, so the inner would have to be flattened into the
+                  // outer's own leaves -- SROA flattening, sub-phase B. The
+                  // cycle and GC-reference hazards were already checked above,
+                  // before this field took an extent.
+                  if (
+                    declaredMemoryModelOf(fieldType) == MemoryModel.Inline
+                  ) {
+                    if (instance.hasDecorator(DecoratorFlags.InlineStruct)) {
+                      this.error(
+                        DiagnosticCode.Not_implemented_0,
+                        typeNode.range,
+                        "an @inline struct nested inside an @inline value (the outer is one WASM local per field, so the inner would have to be flattened into the outer's leaves -- that is SROA flattening, sub-phase B)"
+                      );
+                    } else if (
+                      !instance.hasDecorator(DecoratorFlags.Unmanaged) &&
+                      !instance.hasDecorator(DecoratorFlags.ManagedStruct)
+                    ) {
+                      // A plain class: its fields are heap slots reached through a
+                      // reference, so an inline field would be inline *in the heap* --
+                      // the class's allocation size, its `__visit` and its
+                      // constructors would all have to learn about it. That is the
+                      // deferred inline-in-heap case, refused by name so it cannot
+                      // ship as a silently pointer-sized slot.
+                      this.error(
+                        DiagnosticCode.Not_implemented_0,
+                        typeNode.range,
+                        "an @inline struct as a class field (a class field is a pointer slot; inline-in-heap is a separate, deferred case -- use an @unmanaged or @managed record field)"
+                      );
+                    }
+                  }
                   this.program.checkTypeSupported(fieldType, typeNode);
                 }
               }
