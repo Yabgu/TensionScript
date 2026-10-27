@@ -1,0 +1,6 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6401: A 'spawn' produces a Task; this one is never awaited, so the task's result is discarded."
+  ]
+}
