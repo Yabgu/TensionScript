@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — fork posture
+
+**`docs/fork-posture.md`** — the fork's philosophical close, in one page. Seven
+sections: what this fork is (base pinned at `b6bda05c`, `@acakar/tensionscript`,
+the Tension engine's guest language); why it is a fork (the memory-model split,
+the scheduler contract, sized enums, `@lazy`, the bootstrap self-compile); what it
+deliberately shares with AssemblyScript (parser structure, std core, Binaryen
+backend, test discipline); what it does not (the tracking claim, the merge, any
+standing commit count); the quarterly sync cadence with the cherry-pick as the
+unit of sync; the deferred items with their frame; and the posture itself.
+
+**Every number carries its SHA and date**, because the numbers move: the fork is
+**154 commits ahead of its base** at `ef18ae56`, where
+[`fork-arc-scope.md`](docs/fork-arc-scope.md) §5 recorded **117** at `c3be16fc`.
+Both are right for their commit — which is exactly why `README.md`'s "117 commits
+ahead" was stale by 37 and is now stated with its measurement point.
+
+**`README.md` corrected against the tree**, in the same commit because it is the
+same claim:
+
+- **"Sized enums — implementation pending" deleted.** Sized enums shipped in #33;
+  the bullet outlived the feature by one release. This is the second time a
+  shipped feature was documented as pending (showcase §8 was the first), so the
+  posture doc's "nothing is claimed without a citation" now covers the README's
+  "What's next" list too.
+- **The commit count is dated rather than asserted** (154 at `ef18ae56`).
+- **"What's next" opens with the posture doc**, which is the permanent frame;
+  `fork-arc-scope.md` keeps the phase sequencing, and the full deferred list
+  points at both showcase §9 and posture §6.
+
 ## Unreleased — sized enums (fork-arc Phase 3)
 
 **`enum Foo: T { … }`** — an enum can now declare its storage class, C23-style.
