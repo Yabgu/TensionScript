@@ -156,6 +156,7 @@ import {
   ThrowStatement,
   TryStatement,
   VariableStatement,
+  VariableDeclaration,
   VoidStatement,
   WhileStatement,
 
@@ -457,10 +458,47 @@ const FUNCTION_INDEX_OFFSET: u32 = 0;
  */
 const CLOSURE_ENV_IN_LOCAL = "$closureEnvIn";
 
+/**
+ * What the compiler remembers about one `@lazy` local: the two cells and the
+ * deferred expression.
+ *
+ * The cells are ordinary WASM locals the compiler allocated itself — the value
+ * and a `bool` that says whether it has been computed. There is no synthesized
+ * getter function and no closure, because a getter would need a *type* for the
+ * cell, and the transform time at which a getter could be synthesized is before
+ * resolution, when the type of an unannotated initializer is not yet known. The
+ * compiler, by contrast, is compiling precisely because it has the type in hand.
+ *
+ * The price is that the expression is compiled once per read site rather than
+ * once per binding: two reads emit two guarded copies of the initializer, and the
+ * flag makes sure only the first executes. That is the trade the lowering makes,
+ * and it is why a reader of the emitted module sees the call site inside a read.
+ */
+class LazyLocal {
+  constructor(
+    /** Index of the local that holds the memoized value. */
+    public valueIndex: i32,
+    /** Index of the local that holds the first-read flag. */
+    public doneIndex: i32,
+    /** The deferred expression, compiled at the first read. */
+    public expression: Expression
+  ) {}
+}
+
 export class Compiler extends DiagnosticEmitter {
 
   /** Program reference. */
   program: Program;
+
+  /**
+   * The `@lazy` locals of the function currently being compiled.
+   *
+   * Keyed by `Local` rather than by name or index, because that is what
+   * `compileIdentifierExpression` has when a read arrives: the resolver has
+   * already turned the identifier into its element. Cleared per function so a
+   * later function cannot see an earlier one's cells.
+   */
+  private lazyLocals: Map<Local, LazyLocal> | null = null;
   /** Module instance being compiled. */
   get module(): Module { return this.program.module; }
   /** Provided options. */
@@ -3350,6 +3388,109 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Compiles a variable statement. Returns `0` if an initializer is not necessary. */
+  /**
+   * Compiles `let a = @lazy EXPR` — a declaration whose initializer is deferred.
+   *
+   * Three things happen here and nothing else:
+   *
+   * 1. the **type** of EXPR is obtained (`Type`, not a type node: the annotation
+   *    if there is one, otherwise the resolver's answer for the deferred
+   *    expression itself, which is a question about types and emits nothing);
+   * 2. two cells are allocated — one for the value, one for the first-read flag;
+   * 3. the flag is cleared. The value is deliberately *not* initialized: the
+   *    point of the cell is that its first write happens at the first read.
+   *
+   * `EXPR` is not compiled here at all. It is compiled at each read site, inside
+   * the guard (`compileIdentifierExpression`), which is what makes "the first
+   * read evaluates it" true rather than merely intended.
+   *
+   * The two cells are ordinary locals of the enclosing function, so the async
+   * lowering lifts them across a suspension for free when this declaration sits
+   * in an awaiting body — the same lifting every other cross-await local gets.
+   */
+  private compileLazyLocal(
+    declaration: VariableDeclaration,
+    typeNode: TypeNode | null,
+    lazy: LazyExpression,
+    flow: Flow
+  ): ExpressionRef {
+    let module = this.module;
+    let resolver = this.resolver;
+    let name = declaration.name.text;
+    let inner = lazy.expression;
+
+    // 1. the value's type
+    let type: Type | null = null;
+    if (typeNode) {
+      type = resolver.resolveType( // reports
+        typeNode, flow,
+        flow.sourceFunction,
+        cloneMap(flow.contextualTypeArguments)
+      );
+      if (!type) return 0;
+      this.program.checkTypeSupported(type, typeNode);
+    } else {
+      type = resolver.resolveExpression( // reports
+        inner, flow, Type.auto, ReportMode.Report
+      );
+      if (!type) return 0;
+      if (type == Type.void) {
+        this.error(
+          DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+          declaration.range, type.toString(), "<auto>"
+        );
+        return 0;
+      }
+    }
+
+    // An `@inline struct` value has no local of its own — its fields live in one
+    // local per field — so there is no single cell to memoize. Refused by name
+    // rather than decomposed: a per-field lazy cell is a different representation
+    // and belongs to the SROA design, not here.
+    if (this.inlineStructFieldsOf(type) != null) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        declaration.range,
+        "a '@lazy' binding of an @inline struct value"
+      );
+      return 0;
+    }
+
+    // 2. the cells
+    if (flow.getScopedLocal(name) != null) {
+      this.error(
+        DiagnosticCode.Duplicate_identifier_0,
+        declaration.name.range, name
+      );
+      return 0;
+    }
+    let valueLocal = flow.addScopedLocal(name, type);
+    // Named through `addLocal` rather than pooled: a temp the compiler reuses
+    // would let two `@lazy` bindings share one flag, and the second binding's
+    // guard would then re-run the first binding's initializer.
+    let doneLocal = flow.targetFunction.addLocal(Type.bool, name + "$lazyDone", null);
+    flow.unsetLocalFlag(doneLocal.index, ~0);
+
+    // The value is written by the guard before any read, so the flow's
+    // "initialized" state is set here rather than inferred from an assignment
+    // that, in the emitted code, sits inside a conditional.
+    flow.setLocalFlag(valueLocal.index, LocalFlags.Initialized);
+    if (type.isShortIntegerValue) {
+      flow.unsetLocalFlag(valueLocal.index, ~0);
+      flow.setLocalFlag(valueLocal.index, LocalFlags.Initialized | LocalFlags.Wrapped);
+    }
+
+    // 3. register, and clear the flag
+    let lazyLocals = this.lazyLocals;
+    if (lazyLocals == null) {
+      lazyLocals = new Map<Local, LazyLocal>();
+      this.lazyLocals = lazyLocals;
+    }
+    lazyLocals.set(valueLocal, new LazyLocal(valueLocal.index, doneLocal.index, inner));
+
+    return module.local_set(doneLocal.index, module.i32(0), false);
+  }
+
   private compileVariableStatement(
     statement: VariableStatement
   ): ExpressionRef {
@@ -3377,6 +3518,20 @@ export class Compiler extends DiagnosticEmitter {
       // Resolve type if annotated
       let typeNode = declaration.type;
       let initializerNode = declaration.initializer;
+
+      // `@lazy EXPR`: the initializer is not compiled here. It is compiled at the
+      // first read instead, behind a flag, and memoized (see `compileLazyLocal`).
+      // This must come before either branch below, because both of them compile
+      // the initializer — the annotated one to convert it, the inferred one to
+      // learn its type — and compiling it here is exactly what `@lazy` defers.
+      if (initializerNode != null && initializerNode.kind == NodeKind.Lazy) {
+        let lazyStmt = this.compileLazyLocal(
+          declaration, typeNode, <LazyExpression>initializerNode, flow
+        );
+        if (lazyStmt != 0) initializers.push(lazyStmt);
+        continue;
+      }
+
       if (typeNode) {
         type = resolver.resolveType( // reports
           typeNode, flow,
@@ -3871,11 +4026,11 @@ export class Compiler extends DiagnosticEmitter {
         break;
       }
       case NodeKind.Lazy: {
-        // The `@lazy` *lowering* is a follow-up: this arm exists so a legal
-        // `@lazy EXPR` is compiled rather than crashing, and it is deliberately
-        // the eager reading with a warning rather than a silent deferral. The
-        // node's position was already checked by the parser (`TS6397`), so by
-        // the time anything here is compiled the placement is legal.
+        // Reached only for a `@lazy` the declaration path did *not* take -- in
+        // practice, a binding the closure transform captured, whose storage and
+        // initializer were rewritten onto an environment object before codegen.
+        // The eager reading plus a warning is the honest fallback: the
+        // alternative is an uninitialized cell, i.e. a wrong answer.
         //
         // The inner expression is compiled with this call's contextual type and
         // constraints, exactly as if the wrapper were not written: `@lazy` is
@@ -3883,7 +4038,7 @@ export class Compiler extends DiagnosticEmitter {
         // type that already matches, so nothing is converted twice.
         let lazy = <LazyExpression>expression;
         this.warning(
-          DiagnosticCode.The_lazy_lowering_is_not_implemented_yet_the_expression_is_evaluated_eagerly,
+          DiagnosticCode.A_lazy_expression_in_this_position_is_not_lowered_it_is_evaluated_eagerly,
           lazy.range
         );
         expr = this.compileExpression(lazy.expression, contextualType, constraints);
@@ -8517,6 +8672,17 @@ export class Compiler extends DiagnosticEmitter {
         if (local.is(CommonFlags.Inlined)) {
           return this.compileInlineConstant(local, contextualType, constraints);
         }
+        // A `@lazy` binding: the read is the evaluation. One guard per *read*
+        // rather than one per containing statement — the flag makes the
+        // difference invisible at run time (only the first guard body executes),
+        // and per-read needs no flow analysis at all.
+        let lazyLocals = this.lazyLocals;
+        if (lazyLocals != null) {
+          let lazyInfo = getMapEntry(lazyLocals, local);
+          if (lazyInfo != null) {
+            return this.compileLazyLocalRead(local, lazyInfo, expression);
+          }
+        }
         let localIndex = local.index;
         if (!flow.isLocalFlag(localIndex, LocalFlags.Initialized)) {
           this.error(
@@ -8654,6 +8820,61 @@ export class Compiler extends DiagnosticEmitter {
       expression.range
     );
     return module.unreachable();
+  }
+
+  /**
+   * Compiles a read of a `@lazy` binding: the guard, then the cell.
+   *
+   * Emitted shape, where `EXPR` is the deferred initializer:
+   *
+   * ```
+   * (if (i32.eqz (local.get $done))
+   *   (then (local.set $value EXPR) (local.set $done 1)))
+   * (local.get $value)
+   * ```
+   *
+   * The expression is compiled here, at the read, which is the whole semantic of
+   * `@lazy` — not at the declaration. It is compiled once per read site, so a
+   * binding read twice emits two guarded copies and the flag makes only the first
+   * run; that is the price of having no getter, and it is visible in the module.
+   */
+  private compileLazyLocalRead(
+    local: Local,
+    info: LazyLocal,
+    reportNode: Expression
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let type = local.type;
+    let valueIndex = info.valueIndex;
+    let doneIndex = info.doneIndex;
+
+    let valueExpr = this.compileExpression(info.expression, type, Constraints.ConvImplicit); // reports
+    if (!valueExpr) return module.unreachable();
+    if (type.isShortIntegerValue) valueExpr = this.ensureSmallIntegerWrap(valueExpr, type);
+    let valueType = this.currentType;
+    valueExpr = this.convertExpression(valueExpr, valueType, type, false, info.expression);
+    let setValue = module.local_set(valueIndex, valueExpr, type.isManaged);
+    let setDone = module.local_set(doneIndex, module.i32(1), false);
+    let guard = module.if(
+      module.unary(UnaryOp.EqzI32, module.local_get(doneIndex, TypeRef.I32)),
+      module.block(null, [ setValue, setDone ], TypeRef.None)
+    );
+
+    let localIndex = valueIndex;
+    let isNonNull = flow.isLocalFlag(localIndex, LocalFlags.NonNull, false);
+    if (type.isNullableReference && isNonNull && (!type.isExternalReference || this.options.hasFeature(Feature.GC))) {
+      this.currentType = type.nonNullableType;
+    } else {
+      this.currentType = type;
+    }
+    // `reportNode` is unused beyond debugging: the guard carries no range of its
+    // own, and every diagnostic inside it was reported when `EXPR` compiled.
+    if (this.options.sourceMap) this.addDebugLocation(guard, reportNode.range);
+    return module.block(null, [
+      guard,
+      module.local_get(localIndex, this.currentType.toRef())
+    ], this.currentType.toRef());
   }
 
   private compileIdentifierExpressionBuiltin(
