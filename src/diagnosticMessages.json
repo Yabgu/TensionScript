@@ -216,5 +216,5 @@
   "Type '{0}' is a value with no address, so a use cannot view it as '{1}'; use the value, or keep it '@inline'.": 6395,
   "A '@lazy' decorator must precede the expression it defers, not follow a type.": 6396,
   "'@lazy' expressions must be the initializer of a variable declaration.": 6397,
-  "The '@lazy' lowering is not implemented yet; the expression is evaluated eagerly.": 6398
+  "A '@lazy' expression in this position is not lowered; it is evaluated eagerly.": 6398
 }

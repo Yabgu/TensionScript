@@ -1,8 +1,0 @@
-{
-  "asc_flags": [],
-  "stderr": [
-    "TS6398: The '@lazy' lowering is not implemented yet; the expression is evaluated eagerly.",
-    "TS6398: The '@lazy' lowering is not implemented yet; the expression is evaluated eagerly.",
-    "TS6398: The '@lazy' lowering is not implemented yet; the expression is evaluated eagerly."
-  ]
-}
