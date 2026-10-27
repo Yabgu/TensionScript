@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — documentation
+
+**README rewritten.** Three statements in it were contradicted by the tree, and had
+been since the binary rename: `async/await — pending` and `closures — pending`
+(both shipped), and *"Everything else tracks the upstream project it was forked
+from"* (the fork is 117 commits ahead of its AS base — `docs/fork-arc-scope.md` §5).
+The Status section is now a feature list with a one-line description per
+capability, the current version is stated, and what the fork **deliberately
+shares** with AssemblyScript — parser structure, std core, Binaryen backend — is
+named rather than implied.
+
+**`docs/async-phase1.md`** — `ASYNC_PHASE1.md` moved out of the repository root,
+where it sat among the scoping docs' proper home, and marked historical: the
+`TODO(lowering)` markers it tells a reader to delete are gone, and the two plan
+documents it cites live in the Tension repository.
+
+**Restored: the 0.10.0 section of this file** (571 lines). It was deleted by the
+lazy-arc consolidation in #29, which took a slice bounded by the wrong heading. The
+restore is verbatim and section-verified.
+
+**An engine-side follow-up, filed not fixed:** a wire record may adopt a sized enum
+only after the C-side enum width is measured in the Tension repository — otherwise
+a `u8`-sized enum moves the arena's `layout_hash`. Out of scope here.
+
 ## Unreleased — `@lazy` in expression position (the arc)
 
 `@lazy` defers an expression's evaluation to the binding's first read and memoizes
