@@ -219,5 +219,6 @@
   "A '@lazy' expression in this position is not lowered; it is evaluated eagerly.": 6398,
   "A '@lazy await' binding needs a declared type: the memo cells are lifted into the task's state struct, and a state field needs a syntactic type ('{0}').": 6399,
   "A '@lazy await' binding cannot be read from a nested function: a capture moves the storage, and the memo cell is a state field ('{0}').": 6400,
-  "A 'spawn' produces a Task; this one is never awaited, so the task's result is discarded.": 6401
+  "A 'spawn' produces a Task; this one is never awaited, so the task's result is discarded.": 6401,
+  "An 'await' forces an immediate read of '@lazy', so the deferral is nullified; drop the '@lazy', or remove the 'await'.": 6402
 }
