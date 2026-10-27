@@ -213,5 +213,8 @@
   "A memory-model decorator must precede the type it applies to: '{0}'.": 6392,
   "Only one memory-model decorator may apply to a use.": 6393,
   "Type '{0}' has no GC header, so a use cannot make it '@managed'; declare the record '@managed' instead.": 6394,
-  "Type '{0}' is a value with no address, so a use cannot view it as '{1}'; use the value, or keep it '@inline'.": 6395
+  "Type '{0}' is a value with no address, so a use cannot view it as '{1}'; use the value, or keep it '@inline'.": 6395,
+  "A '@lazy' decorator must precede the expression it defers, not follow a type.": 6396,
+  "'@lazy' expressions must be the initializer of a variable declaration.": 6397,
+  "The '@lazy' lowering is not implemented yet; the expression is evaluated eagerly.": 6398
 }

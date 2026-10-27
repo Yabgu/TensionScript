@@ -51,6 +51,7 @@ import {
   CallExpression,
   ClassExpression,
   FunctionExpression,
+  LazyExpression,
   IdentifierExpression,
   StringLiteralExpression,
 
@@ -155,6 +156,19 @@ function memoryModelOfDecoratorName(name: Expression): MemoryModel {
   return MemoryModel.Any;
 }
 
+/**
+ * Whether a decorator is the bare `@lazy` spelling.
+ *
+ * Matched by node shape, not by the type's position: `@lazy` is the only
+ * decorator whose meaning is "defer the expression that follows", so it is the
+ * only one that must never be read as a type attribute.
+ */
+function isLazyDecorator(decorator: DecoratorNode): bool {
+  let name = decorator.name;
+  return name.kind == NodeKind.Identifier
+    && (<IdentifierExpression>name).text == "lazy";
+}
+
 /** Whether two models are the `@inline` + `@managed` contradiction. */
 function isInlineManagedPair(a: MemoryModel, b: MemoryModel): bool {
   return (a == MemoryModel.Inline && b == MemoryModel.Managed) ||
@@ -183,6 +197,26 @@ export class Parser extends DiagnosticEmitter {
   // TODO: Remove when multi-value feature will enable by default.
   /** Compiler options. */
   options: Options | null = null;
+
+  /**
+   * Every `@lazy` expression created while parsing the current file that has not
+   * turned out to be a declaration's initializer root.
+   *
+   * The position rule -- a `LazyExpression` is legal only as the root of a
+   * variable declaration's initializer -- cannot be a grammar rule, because the
+   * parser builds the node before it knows what encloses it. So every node is
+   * recorded at creation, the legal ones are struck off by
+   * {@link parseVariableDeclaration} when it sees one as its initializer, and
+   * whatever remains when the file ends is reported (`TS6397`) in
+   * {@link parseFile}.
+   *
+   * This is a walk over the parser's own creations rather than over the finished
+   * tree, and it is therefore exact: `parseLazyExpression` is the only site that
+   * creates the node, so no `@lazy` spelling can miss the accounting and no
+   * expression kind has to be enumerated by hand.
+   */
+  private unplacedLazyExpressions: Set<LazyExpression> | null = null;
+
   /** Constructs a new parser. */
   constructor(
     diagnostics: DiagnosticMessage[] | null = null,
@@ -252,6 +286,20 @@ export class Parser extends DiagnosticEmitter {
         statements.push(statement);
       } else {
         this.skipStatement(tn);
+      }
+    }
+
+    // Whatever `@lazy` expression was not struck off as a declaration's
+    // initializer root is in a position the feature cannot serve: there is no
+    // name to defer to. Reported here, once per node, in source order.
+    let unplaced = this.unplacedLazyExpressions;
+    this.unplacedLazyExpressions = null;
+    if (unplaced != null) {
+      for (let _values = Set_values(unplaced), i = 0, k = _values.length; i < k; ++i) {
+        this.error(
+          DiagnosticCode._lazy_expressions_must_be_the_initializer_of_a_variable_declaration,
+          unchecked(_values[i]).range
+        );
       }
     }
   }
@@ -976,6 +1024,17 @@ export class Parser extends DiagnosticEmitter {
         );
         continue;
       }
+      // `@lazy` defers an expression, so a type is the wrong thing for it to
+      // follow. Accepted here it would be silently ignored -- measured: `let
+      // x: i32 @lazy = 5;` compiled clean and meant nothing -- which is the
+      // same trap the memory-model refusal above exists to close.
+      if (isLazyDecorator(attribute)) {
+        this.error(
+          DiagnosticCode.A_lazy_decorator_must_precede_the_expression_it_defers_not_follow_a_type,
+          attribute.range
+        );
+        continue;
+      }
       if (!type.attributes) type.attributes = [ attribute ];
       else assert(type.attributes).push(attribute);
     }
@@ -1279,6 +1338,23 @@ export class Parser extends DiagnosticEmitter {
       }
       initializer = this.parseExpression(tn, Precedence.Comma + 1);
       if (!initializer) return null;
+      // A `@lazy` expression here is the one legal placement: this declaration
+      // supplies the name the memo cell and the read-site guard hang on.
+      if (initializer.kind == NodeKind.Lazy) {
+        let unplaced = this.unplacedLazyExpressions;
+        if (unplaced != null) unplaced.delete(<LazyExpression>initializer);
+        // A `@lazy` that *awaits* cannot be evaluated eagerly, which is the
+        // only reading this foundation can offer: its `await` needs the async
+        // lowering, and that transform does not see through the wrapper. Refused
+        // here, by name, rather than left to fail later with a message about the
+        // enclosing async body.
+        if ((<LazyExpression>initializer).expression.kind == NodeKind.Await) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            initializer.range, "a '@lazy' expression that awaits (the lazy lowering)"
+          );
+        }
+      }
       if (flags & CommonFlags.DefinitelyAssigned) {
         this.error(
           DiagnosticCode.Declarations_with_initializers_cannot_also_have_definite_assignment_assertions,
@@ -4074,6 +4150,13 @@ export class Parser extends DiagnosticEmitter {
         return Node.createUnaryPrefixExpression(token, operand, tn.range(startPos, tn.pos));
       }
 
+      // LazyExpression -- `@lazy EXPR`, and only that spelling
+      case Token.At: {
+        let operand = this.parseLazyExpression(tn, startPos);
+        if (!operand) return null;
+        return operand;
+      }
+
       // AwaitExpression (ES2017)
       case Token.Await: {
         let awaitEnd = tn.pos;
@@ -4562,6 +4645,60 @@ export class Parser extends DiagnosticEmitter {
       }
     }
     return args;
+  }
+
+  /**
+   * Parses `@lazy EXPR`: the deferral form of `@lazy`, in expression position.
+   *
+   * Called with `@` already consumed, from the `Token.At` arm of
+   * {@link parseExpressionStart}. That arm is the whole grammar change: `@` had
+   * no reading in expression position at all — it fell into the `default:` arm of
+   * the same switch and reported `Expression expected` — so intercepting it
+   * cannot change what an existing program means.
+   *
+   * **Binds like `await`.** The operand is parsed at `Precedence.UnaryPrefix`,
+   * the same precedence the `await` arm uses, so `@lazy f() + 1` is
+   * `(@lazy f()) + 1` and not `@lazy (f() + 1)`. One operand per `@lazy`; a
+   * second `@lazy` nests (`@lazy @lazy f()`), and the transformation refuses it
+   * rather than the grammar.
+   *
+   * Only the spelling `@lazy` is accepted here. Any other name is a decorator
+   * the compiler has no reading for in expression position, which is `AS212` --
+   * the same code `parseType` raises for a non-memory-model decorator before a
+   * type.
+   */
+  parseLazyExpression(
+    tn: Tokenizer,
+    startPos: i32
+  ): LazyExpression | null {
+
+    // before: '@' Identifier Expression
+
+    if (!tn.skipIdentifier()) {
+      this.error(
+        DiagnosticCode.Identifier_expected,
+        tn.range()
+      );
+      return null;
+    }
+    let name = tn.readIdentifier();
+    if (name != "lazy") {
+      this.error(
+        DiagnosticCode.Decorator_0_is_not_valid_here,
+        tn.range(startPos, tn.pos), name
+      );
+      return null;
+    }
+    let expression = this.parseExpression(tn, Precedence.UnaryPrefix);
+    if (!expression) return null;
+    let ret = Node.createLazyExpression(expression, tn.range(startPos, tn.pos));
+    let unplaced = this.unplacedLazyExpressions;
+    if (unplaced == null) {
+      unplaced = new Set();
+      this.unplacedLazyExpressions = unplaced;
+    }
+    unplaced.add(ret);
+    return ret;
   }
 
   parseExpression(

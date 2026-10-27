@@ -81,6 +81,7 @@ export const enum NodeKind {
   UnaryPostfix,
   UnaryPrefix,
   Await,
+  Lazy,
   Compiled,
 
   // statements
@@ -452,6 +453,13 @@ export abstract class Node {
     range: Range
   ): AwaitExpression {
     return new AwaitExpression(operand, range);
+  }
+
+  static createLazyExpression(
+    expression: Expression,
+    range: Range
+  ): LazyExpression {
+    return new LazyExpression(expression, range);
   }
 
   static createCompiledExpression(
@@ -1784,6 +1792,49 @@ export class AwaitExpression extends Expression {
     range: Range
   ) {
     super(NodeKind.Await, range);
+  }
+}
+
+/**
+ * Represents a `@lazy expression`: defer this expression's evaluation to the
+ * first read of the binding it initializes, memoized.
+ *
+ * `@lazy` in **expression** position means deferral. `@lazy` on a **global**
+ * declaration means something else entirely -- an ordering permission that lets
+ * the initializer be compiled as though it ran at the top of the file's start
+ * function (`Compiler#compileGlobal`, the `DecoratorFlags.Lazy` arm). Two
+ * meanings, one token, and the carrier is what distinguishes them: a `Global`
+ * wears a decorator flag, an expression wears this node. No dispatch site can
+ * confuse the two, because a `Global` and an `Expression` never occupy the same
+ * position in a switch.
+ *
+ * **The node is not compiled.** Every `@lazy EXPR` is either lowered by the lazy
+ * transform or refused, and both happen before resolution, so `LazyExpression`
+ * must never reach `Compiler#compileExpression` -- whose dispatch ends in
+ * `assert(false)`, i.e. a crash with no diagnostic. `Compiler#validateLazy`
+ * erases every instance before compilation and reports any it cannot place; a
+ * survivor is a transform bug, and the guard is what turns it into a message
+ * instead of a crash.
+ *
+ * Shaped like `AwaitExpression` rather than a `UnaryExpression`: there is no
+ * operator token to carry, because `@lazy` is not a token -- `Token.At` plus the
+ * identifier `lazy` is the spelling, and `operatorTokenToString` has no
+ * rendering for it.
+ *
+ * **Position is constrained, and not by the grammar.** A `LazyExpression` is
+ * legal only as the root of a variable declaration's initializer, because that
+ * is the only place with a *name* to hang the memo cell and the read-site guard
+ * on -- `g(@lazy f())` parses (the operand is an ordinary expression) but has no
+ * read site to defer to, so it is refused by name rather than by a parse error.
+ */
+export class LazyExpression extends Expression {
+  constructor(
+    /** The expression whose evaluation is deferred. */
+    public expression: Expression,
+    /** Source range. */
+    range: Range
+  ) {
+    super(NodeKind.Lazy, range);
   }
 }
 

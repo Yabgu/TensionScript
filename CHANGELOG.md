@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased — `@lazy` in expression position (foundation)
+
+`@lazy EXPR` parses, and is refused where it cannot mean anything. **The
+lowering is not in this change**: a legal `@lazy EXPR` is evaluated eagerly today
+and says so (`TS6398`). Syntax and safety first, deferral second — because the
+compiler's expression dispatch ends in `assert(false)`, so a node that reaches it
+unhandled is a crash with no diagnostic at all (measured: `AssertionError` at
+`compiler.ts:3889`, exit code 2, no `ERROR` line).
+
+`@lazy` now has **two meanings, one token**, and the carrier is what distinguishes
+them: on a global declaration it is the existing *ordering permission* (a
+`DecoratorFlags.Lazy` on the element, which lets the initializer be compiled as
+though it ran at the top of the file's start function); on an expression it is
+*deferral*, carried by a `LazyExpression` node. No dispatch site has to ask which
+one it is looking at — a `Global` and an `Expression` never occupy the same
+position in a switch.
+
+### Parsing
+
+- **`@lazy EXPR`** — a `Token.At` arm in `Parser#parseExpressionStart`, the single
+  switch that dispatches every prefix operator. `@` had no reading in expression
+  position before this (it fell into that switch's `default:` and reported
+  `Expression expected`), so intercepting it cannot change what an existing
+  program means.
+- **Binds like `await`**, at `Precedence.UnaryPrefix`: `@lazy f() + 1` is
+  `(@lazy f()) + 1`.
+
+### Refusals
+
+- **A declaration initializer is the only legal position** (`TS6397`). Deferral
+  needs a name for the memo cell and the read-site guard; `g(@lazy f())` has no
+  read site to defer to. Enforced by accounting rather than by lookahead: every
+  node is recorded at creation, the legal one is struck off by
+  `parseVariableDeclaration`, and the remainder is reported when the file ends.
+- **`@lazy` as a type attribute** (`TS6396`). Measured before this: `let x: i32
+  @lazy = 5;` compiled clean, because the post-type loop accepts any decorator
+  that is not a memory model — a spelling that looks like it means something and
+  meant nothing. The check sits beside the memory-model refusal (`TS6392`).
+- **`@lazy await …`** (`AS100`, until the lowering). An `await` in the operand
+  needs the async transform, which cannot see through the wrapper. Measured before
+  this refusal: the file failed later with "Not implemented: this async body",
+  naming the enclosing function rather than the construct.
+
+### The eager stopgap (temporary)
+
+`TS6398` (warning) plus compiling the inner expression with the caller's
+contextual type and constraints. Deferral is a *when*, not a *what*: `@lazy EXPR`
+has the type of `EXPR`, so nothing is converted twice and inference is unchanged.
+The warning disappears with the lowering.
+
+### Closure transparency
+
+A `@lazy` operand is transparent to capture analysis (`closure/lower.ts`,
+`NodeKind.Lazy` in all three expression walks). Measured without it: a function
+that captures `x` and reads `x` inside `@lazy x` fails to build with
+`TS2304: Cannot find name 'x'` — the storage moved into the environment and the
+operand's read stayed a bare local.
+
+### Not in this change
+
+The lowering itself (`@lazy f()`, `@lazy await f()`, `@lazy await spawn(f)`), the
+`spawn` marker, and the unawaited-`Task` warning.
+
 ## 0.10.0
 
 Completes the C-model interop arc: `@inline struct` value types, memory-model

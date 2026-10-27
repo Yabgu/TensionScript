@@ -145,6 +145,7 @@ import {
   ForStatement,
   ForOfStatement,
   AwaitExpression,
+  LazyExpression,
   FunctionDeclaration,
   IfStatement,
   ImportStatement,
@@ -3867,6 +3868,25 @@ export class Compiler extends DiagnosticEmitter {
       }
       case NodeKind.Await: {
         expr = this.compileLoweredAwaitExpression(<AwaitExpression>expression);
+        break;
+      }
+      case NodeKind.Lazy: {
+        // The `@lazy` *lowering* is a follow-up: this arm exists so a legal
+        // `@lazy EXPR` is compiled rather than crashing, and it is deliberately
+        // the eager reading with a warning rather than a silent deferral. The
+        // node's position was already checked by the parser (`TS6397`), so by
+        // the time anything here is compiled the placement is legal.
+        //
+        // The inner expression is compiled with this call's contextual type and
+        // constraints, exactly as if the wrapper were not written: `@lazy` is
+        // not a conversion, and the outer conversion block below then sees a
+        // type that already matches, so nothing is converted twice.
+        let lazy = <LazyExpression>expression;
+        this.warning(
+          DiagnosticCode.The_lazy_lowering_is_not_implemented_yet_the_expression_is_evaluated_eagerly,
+          lazy.range
+        );
+        expr = this.compileExpression(lazy.expression, contextualType, constraints);
         break;
       }
       case NodeKind.Compiled: {
