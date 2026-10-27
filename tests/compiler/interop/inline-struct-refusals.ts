@@ -19,7 +19,8 @@
 //   - ...but **not** a return type any more: an `@inline struct` return is
 //     sret (the caller passes a hidden destination pointer) — see
 //     `inline-struct-sret.ts`.
-//   - a field of another record (inline nesting)
+//   - a field of an `@inline` value (SROA flattening, sub-phase B)
+//   - a field of a plain class (inline-in-heap; deferred)
 //   - `T[N]` of an `@inline struct`
 //   - `Array<T>` (a type argument is a pointer slot)
 //   - `changetype` to one (a value has no address to reinterpret)
@@ -45,10 +46,20 @@ let globalValue: P = new P();
 // this function is here so `run()` exercises a discarded sret call
 function makes(): P { return new P(); }
 
-// a field of another record: inline nesting
-@unmanaged struct Outer {
+// A field of an **`@inline`** value: the outer is one WASM local per field, so
+// the inner would have to be flattened into the outer's leaves — SROA
+// flattening, sub-phase B. (An `@unmanaged`/`@managed` outer ACCEPTS an
+// `@inline` field now — see `interop/inline-nesting-layout.ts`.)
+@inline struct NestedOuter {
   a: u8 = 0;
   p: P = {};
+}
+
+// A field of a plain class: the class field is a pointer slot, so an inline
+// field would be inline *in the heap* — its allocation size, `__visit` and
+// constructors would all have to learn about it. Deferred; refused by name.
+class Holder {
+  p: P = new P();
 }
 
 // `T[N]` of an `@inline struct`: elements by value
@@ -76,8 +87,11 @@ export function run(): void {
   makes();
   arrayOf();
   view(0);
-  // Forces the two records' layouts to resolve, which is where the field and
-  // `T[N]` refusals are raised.
-  let n: u32 = sizeof<Outer>() + sizeof<Arrays>();
+  // Forces the records' layouts to resolve, which is where the field and
+  // `T[N]` refusals are raised. `Holder` needs its own use: a refusal inside a
+  // class that nothing resolves never fires (measured — the same reachability
+  // the nesting refusal always had).
+  let n: u32 = sizeof<NestedOuter>() + sizeof<Arrays>();
   if (n == 1) globalValue = new P();
+  if (n == 2) new Holder();
 }

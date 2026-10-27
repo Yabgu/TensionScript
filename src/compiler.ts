@@ -6534,11 +6534,18 @@ export class Compiler extends DiagnosticEmitter {
             return stored;
           }
         }
-        // Inline nesting is refused at the field's declaration. Do not compile
-        // the setter here: its parameter would be a value type with no address,
-        // and the generated setter cannot bind it. The declaration diagnostic is
-        // the report; this keeps codegen from crashing on top of it.
+        // `w.inner = v` on an inline field: the value has no address, so the
+        // store would have to be one `store` per leaf — the companion of the
+        // SROA copy paths, in the other direction. Sub-phase A writes the
+        // *leaves* (`w.inner.a = 5`, through the inner's setter against the
+        // field's address); the whole-value form is refused by name rather than
+        // compiled as something that stores nothing.
         if (propertyInstance.isField && this.isInlineStructType(propertyInstance.type)) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            valueExpression.range,
+            "assigning a whole value to an @inline struct field (the value has no address, so there is nothing to store; assign the field's own fields, e.g. `w.inner.a = ...`)"
+          );
           this.currentType = tee ? propertyInstance.type : Type.void;
           return module.unreachable();
         }
@@ -10594,20 +10601,26 @@ export class Compiler extends DiagnosticEmitter {
             );
           }
         }
-        // Inline nesting: an `@inline struct` field of an ordinary (heap)
-        // record is refused at declaration. Do not call the getter — its return
-        // type has no value representation. The declaration diagnostic stands.
-        if (propertyInstance.isField && this.isInlineStructType(propertyInstance.type)) {
-          this.currentType = propertyInstance.type;
-          return module.unreachable();
-        }
+        // Inline nesting (sub-phase A): an `@inline struct` field of a
+        // pointer-layout record holds the value's bytes inline, so — like an
+        // inline array — there is no value to read at the field's offset and
+        // nothing to call a getter *with*: the type has no representation the
+        // WASM value stack can carry. The access compiles to `base + offset`,
+        // typed as the field, and a chained read (`o.inner.x`) then resolves the
+        // inner's own accessor against that **address** — which is exactly the
+        // `i32` `this` a record accessor already takes. No summation of offsets
+        // is needed: each step compiles its own hop.
+        //
         // An inline array field is storage, not a value: there is nothing to
         // read at the field's offset, only bytes to address. So the access
         // compiles to `base + fieldOffset`, typed as the array, and the
         // element-access path indexes from there. Without this branch the getter
         // would be called with a type that has no value representation
         // (`Type#toRef` has no case for it) and the module would not build.
-        if (propertyInstance.type.kind == TypeKind.FixedArray) {
+        if (
+          propertyInstance.type.kind == TypeKind.FixedArray ||
+          (propertyInstance.isField && this.isInlineStructType(propertyInstance.type))
+        ) {
           let thisType = this.resolver.resolveExpression(
             assert(thisExpression), this.currentFlow
           );
@@ -12745,12 +12758,44 @@ export class Compiler extends DiagnosticEmitter {
       // only interested in fields (resolved during class finalization)
       let property = (<PropertyPrototype>member).instance;
       if (!property || !property.isField || property.getBoundClassOrInterface() != classInstance) continue;
-      // An `@inline struct` field is inline nesting and was refused at
-      // declaration. Do not materialise it: `makeZero`/the setter would need
-      // the value's address, which is exactly what the type does not have.
-      // Skipping codegen lets the recorded diagnostic surface instead of
-      // crashing in the generated constructor.
-      if (this.isInlineStructType(property.type)) continue;
+      // An `@inline struct` field is a value stored inline in the object. There
+      // is no `local.set`/`store` that can copy a whole value into it — the
+      // value has no address and the field has no single scalar width — so the
+      // two cases are separated rather than skipped alike:
+      //
+      //   `= {}` (or no initializer): nothing to store. `__new` hands back
+      //      zeroed memory and every leaf is zero, which is exactly what an
+      //      empty literal means. This is the idiom a `@managed` record needs to
+      //      satisfy the definite-assignment rule (TS2564), so it must compile.
+      //
+      //   anything else: a named refusal. Before this branch existed the field
+      //      was refused at declaration, so the skip could not lose anything;
+      //      now the declaration is legal, and a silent skip would compile a
+      //      record whose initializer never ran — measured: `inner: Good =
+      //      { a: 11, b: 22 }` read back 0 with no diagnostic.
+      if (this.isInlineStructType(property.type)) {
+        let fieldInitializer = property.initializerNode;
+        // A class field is refused by name at declaration (inline-in-heap), so
+        // there is nothing to say here: reporting the initializer too would make
+        // one mistake look like two.
+        let isRecordField = classInstance.hasDecorator(DecoratorFlags.Unmanaged) ||
+          classInstance.hasDecorator(DecoratorFlags.ManagedStruct);
+        if (fieldInitializer != null && isRecordField) {
+          if (
+            fieldInitializer.kind == NodeKind.Literal &&
+            (<LiteralExpression>fieldInitializer).isLiteralKind(LiteralKind.Object) &&
+            (<ObjectLiteralExpression>fieldInitializer).names.length == 0
+          ) {
+            continue; // `= {}`: all zero, which is what the allocation already is
+          }
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            fieldInitializer.range,
+            "an initializer on an @inline struct field (the value is stored inline and has no address to copy into; the allocation is already zero, so `= {}` is allowed -- assign the field's own fields after construction)"
+          );
+        }
+        continue;
+      }
       assert(!property.isAny(CommonFlags.Const));
       let fieldPrototype = property.prototype;
       let parameterIndex = fieldPrototype.parameterIndex;
