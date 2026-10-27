@@ -473,6 +473,9 @@ Measured on this commit (the assertions live in
 - Nothing in the layout path learned about enums. The 55 `.byteSize` readers,
   the switch, the casts and the record accessors all needed zero changes: the
   enum *is* its `Type`, and this phase repoints the type.
+  (The count reads 56 on a merged tree because `resolver.ts:458`'s doc comment
+  mentions `.byteSize` in prose; the diff confirms zero *reader* changes — 53
+  code occurrences on both sides of the change.)
 
 Accepted underlying types are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`. Anything
 else — `bool`, `i64`, a float, a reference — is refused by name (`TS6403`).
