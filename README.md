@@ -39,10 +39,10 @@ import tensionscript from "@acakar/tensionscript/asc";
 ## Status
 
 TensionScript is a **fork of AssemblyScript**, and it does not aim for upstream
-merge: AssemblyScript's repository is a reference, not a target. As of this
-release the fork is **117 commits ahead of its AS base** (`b6bda05c`, upstream's
-tip at fork time) — the measurement and its method are in
-[`docs/fork-arc-scope.md`](docs/fork-arc-scope.md) §5.
+merge: AssemblyScript's repository is a reference, not a target. The base is
+pinned at `b6bda05c` (upstream's tip at fork time) and the fork is **154
+commits ahead of it**, measured at `ef18ae56`. Why the fork exists, what it
+shares, and how it stays current: [`docs/fork-posture.md`](docs/fork-posture.md).
 
 ### What this fork adds
 
@@ -116,16 +116,14 @@ for lacking an AS equivalent.
 
 ## What's next
 
-[`docs/showcase.md`](docs/showcase.md) is the per-capability reference — examples,
-semantics, and what each feature refuses.
+[`docs/fork-posture.md`](docs/fork-posture.md) is the frame: what this fork is,
+what it deliberately shares with AssemblyScript, what it diverges on, and the
+quarterly sync cadence. [`docs/showcase.md`](docs/showcase.md) is the
+per-capability reference — examples, semantics, and what each feature refuses.
 [`docs/fork-arc-scope.md`](docs/fork-arc-scope.md) sequences the remaining work.
 Deferred and named, each with its reason in
 [`docs/session-findings.md`](docs/session-findings.md):
 
-- **Sized enums** — `enum Foo: u8 { … }`, scoped in
-  [`docs/sized-enums-scope.md`](docs/sized-enums-scope.md) and described as
-  pending in [showcase §8](docs/showcase.md); implementation pending. Would make
-  the `AS200` class (an `i32` enum into a `u8` field) unrepresentable.
 - **Inline nesting** — an `@inline struct` as a field of another record.
 - **`T[N]` fields in `@inline struct`** — deep SROA, one local per element.
 - **GC-reference fields in `@inline struct`** — an SROA'd field has no address,
@@ -137,13 +135,15 @@ Deferred and named, each with its reason in
   requirement (`TS6399`).
 
 The full deferred list, with the reason for each, is
-[showcase §9](docs/showcase.md).
+[showcase §9](docs/showcase.md) and [posture §6](docs/fork-posture.md).
 
 ## Links
 
 - Tension (the engine these guests run on): https://github.com/Yabgu/Tension
 - TensionScript (this compiler): https://github.com/Yabgu/TensionScript
-- Fork posture and phase sequencing:
+- Fork posture — what the fork is, what it shares, how it stays current:
+  [`docs/fork-posture.md`](docs/fork-posture.md)
+- Fork arc and phase sequencing:
   [`docs/fork-arc-scope.md`](docs/fork-arc-scope.md)
 - Session findings — what each measurement found, and the traps:
   [`docs/session-findings.md`](docs/session-findings.md)
