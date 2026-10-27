@@ -1368,8 +1368,88 @@ pattern as 10.0b's `u8` array: structural typing in TS is not the language's rul
   awaited" — needs an await-context walk the transform does not have. Only the
   certainly-discarded statement-position form warns (`TS6401`).
 
-**W1's state, unresolved on purpose.** `await @lazy f()` is refused by `TS6397`
-(the position rule), not by a specific "await forces the read" diagnostic. A
-dedicated code would say more, and the position rule is stricter than warning —
-but adding a code for a shape the grammar already rejects at the declaration root
-is a decision for the user, not a default this phase should take.
+**W1's state — resolved, as a refinement rather than a relaxation.**
+`await @lazy f()` is refused, as it was, and now says why (`TS6402`). The
+`Token.Await` arm records the `LazyExpression` when it is the await's *immediate*
+operand, and `parseFile`'s report step picks the message by membership. The
+refusal and the position rule are untouched.
+
+The distinction is by immediate parent, and the fixture pins the control:
+`await @lazy f()` is `TS6402`; `await (0 + @lazy f())` stays `TS6397`, because the
+await does not directly nullify it — that `@lazy` is in an illegal position for a
+different reason. Without that third case the refinement could widen silently into
+"any `@lazy` under an `await`", which would be a worse message for a real class of
+mistake.
+
+The permissive reading (compile eagerly, warn) was considered and **not** taken.
+It would give `@lazy` "allowed but meaningless" semantics in exactly one context,
+which is the invisible-context shape this project avoids; if it is wanted later it
+is a separate design, not a message.
+
+---
+
+## The lazy-expression arc — the two-stage lowering, and three filed residuals
+
+**The arc's central finding, stated once: no single stage has both a type and a
+suspension.** The sync form needs the initializer's *type* to allocate its memo
+cell, and the only stage that has it is the compiler (after resolution). The
+awaited form needs to *suspend*, and the only stage that can plan a suspension is
+the async transform (before resolution, because a memo cell that crosses a
+suspension becomes a state field and a state field needs a syntactic type).
+
+That is not an implementation detail — it is why the arc has two lowerings and a
+required annotation:
+
+| form | lowered by | why there |
+|---|---|---|
+| `@lazy f()` | `compileLazyLocal` (compiler) | needs the type, allocates two locals |
+| `@lazy await f()` | `src/lazy/lower.ts` (AST rewrite) | needs the suspension path |
+| `@lazy await spawn(f)` | the same rewrite, call hoisted | needs the launch at the declaration |
+
+The price of the compiler-side choice is now visible in three pinned `.wat` pairs:
+a binding read twice emits the guarded initializer twice, and the flag makes only
+the first run. The price of the transform-side choice is `TS6399` — an annotation.
+
+**The self-compile caught a structural-typing cast that `tsc` accepted. Second
+instance of the 10.0b class.** The transform's first draft read AST fields through
+`interface DoStatementLike extends Statement` to avoid importing node classes.
+`tsc --noEmit` passed; `npm run bootstrap:debug` refused **11 sites**
+(`Type 'Statement' is not assignable to type 'DoStatementLike'`). The fix was to
+import the real classes. The 10.0b instance was a `u8[]` receiving `i32` enum
+values; this one is an interface cast. Different surface, same lesson: **TS's
+structural typing is not this language's rule, and the self-compile is the only
+gate that enforces the difference.** Two independent instances is enough to treat
+it as a pattern rather than an anecdote — any new code that leans on structural
+compatibility between two AST node shapes should expect this refusal.
+
+### Residuals filed
+
+**1. `lazy-await-type-inference` (medium).** `@lazy await` requires a declared type
+(`TS6399`). The constraint is inherited, not introduced: a memo cell that crosses
+a suspension becomes a field of the task's state struct, and the async lowering
+already refuses `let v = await f();` for the same reason. The workaround is one
+annotation (`let a: T = @lazy await f();`), which is why this is filed rather than
+blocking. Lifting it needs either a post-resolution transform hook (which does not
+exist — `applyInTreeTransforms` is `afterParse` only) or a return-type inference
+for calls, which `src/inference.ts` deliberately does not attempt ("everything it
+cannot name from syntax alone returns null"). Orthogonal to lazy expressions; it
+would equally help `let v = await f();`.
+
+**2. `w3-await-context-walk` (small-to-medium).** W3 lands for the certainly-
+discarded form: a statement-position `spawn(f)` warns (`TS6401`). The weaker half
+— `let t = spawn(f);` whose binding is never awaited — is **not** implemented,
+because it needs "is any read of this binding an await", an await-context walk the
+transform does not have. Today the `spawn` marker is stripped and the binding holds
+an ordinary `Task`, so the program is correct and merely silent. The walk that
+would close it is the same one that would let W2's user-facing text distinguish
+"never read" from "read but never awaited".
+
+**3. `lazy-captured-binding-deferred` (small).** A `@lazy` binding that the closure
+transform captured takes the **eager** path with `TS6398`: correct answer, early
+evaluation. The reason is ordering, not oversight — the closure transform rewrites
+the binding's storage and initializer onto an environment object, so by the time
+the compiler sees the declaration there is no `LazyExpression` left to lower. The
+deferred path for a captured binding needs a post-resolution hook (the same missing
+hook as residual 1) or an enabling step that erases the `@lazy` node before closure
+runs and re-materialises the guard after. Measured: the annotated case compiles
+with the warning and returns the right value (`82` for two reads).
