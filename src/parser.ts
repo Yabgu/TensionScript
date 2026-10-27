@@ -156,6 +156,19 @@ function memoryModelOfDecoratorName(name: Expression): MemoryModel {
   return MemoryModel.Any;
 }
 
+/**
+ * Whether a decorator is the bare `@lazy` spelling.
+ *
+ * Matched by node shape, not by the type's position: `@lazy` is the only
+ * decorator whose meaning is "defer the expression that follows", so it is the
+ * only one that must never be read as a type attribute.
+ */
+function isLazyDecorator(decorator: DecoratorNode): bool {
+  let name = decorator.name;
+  return name.kind == NodeKind.Identifier
+    && (<IdentifierExpression>name).text == "lazy";
+}
+
 /** Whether two models are the `@inline` + `@managed` contradiction. */
 function isInlineManagedPair(a: MemoryModel, b: MemoryModel): bool {
   return (a == MemoryModel.Inline && b == MemoryModel.Managed) ||
@@ -974,6 +987,17 @@ export class Parser extends DiagnosticEmitter {
         this.error(
           DiagnosticCode.A_memory_model_decorator_must_precede_the_type_it_applies_to_0,
           attribute.range, attribute.name.range.toString()
+        );
+        continue;
+      }
+      // `@lazy` defers an expression, so a type is the wrong thing for it to
+      // follow. Accepted here it would be silently ignored -- measured: `let
+      // x: i32 @lazy = 5;` compiled clean and meant nothing -- which is the
+      // same trap the memory-model refusal above exists to close.
+      if (isLazyDecorator(attribute)) {
+        this.error(
+          DiagnosticCode.A_lazy_decorator_must_precede_the_expression_it_defers_not_follow_a_type,
+          attribute.range
         );
         continue;
       }
