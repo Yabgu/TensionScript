@@ -1465,3 +1465,119 @@ fixtures) and `bootstrap:debug` all exit 0.
 
 Residuals filed, unchanged by the merge: `lazy-await-type-inference`,
 `w3-await-context-walk`, `lazy-captured-binding-deferred`.
+
+---
+
+## Sized enums (fork-arc Phase 3)
+
+**An enum is its `Type`. That is the whole phase.** The scoping found it; this
+session confirmed it by making the repoint and watching 55 `.byteSize` readers,
+`compileSwitchStatement`, the cast path and the record accessors need nothing.
+The load-bearing site is `Resolver#resolveType`'s enum arm (`src/resolver.ts`),
+which answered `return Type.i32;` without ever consulting the element — so
+`Enum.setType` and `EnumValue.setType` could not have been changed *alone*, the
+resolver would have kept handing i32 to every use. The repoint is
+`Resolver#resolveEnumType`, called from the type arm **and** from `compileEnum`
+(an exported-only enum is never written as a type, and its members still fold and
+range-check at the right width).
+
+| # | Finding | Test that fails on regression | Kind |
+|---|---|---|---|
+| p | A sized enum's width reaches layout with no enum-specific code: `sizeof` 1, field `offsetof` 1, `T[N]` stride 1, `store8`/`load8_u` | `tests/compiler/interop/sized-enum-layout.ts` (the `== 1` / `offsetof` / `load<u8>` assertions, plus the neighbouring-byte check) | behavioural, three-way |
+| q | `w.color = Color.Blue` into a `u8` field needs no cast (was `AS200`) | same fixture, the `Rec` block; revert the resolver arm and it fails with 2× `AS200` — measured | behavioural |
+| r | A member that does not fit the declared width is refused at the declaration, before codegen | `tests/compiler/interop/sized-enum-refusals.ts` (+ `.json`, 13 pinned diagnostics); remove the guard and all six `TS6404` patterns go missing — measured | behavioural, three-way |
+| s | A non-integer underlying type is refused by name | same fixture, the three `TS6403` patterns | behavioural |
+| t | The 108 existing enums are unchanged | the whole compiler suite: 305 fixtures whose committed `.wat` snapshots predate this change, still byte-identical; count 305 → 307 with exactly the two new fixtures | structural |
+
+**The const-enum mask was a real trap, and the guard is why it is still not
+one.** `compileInlineConstant`'s `U8`/`U16` arm computes
+`i64_low(value) & mask` — it *masks*, it does not refuse. Before this phase that
+was unreachable for a 300-valued member, because no `u8`-typed element with an
+out-of-range value could exist (the declaration already refused). Sizing an enum
+makes the arm reachable: without a guard, `const enum E: u8 { A = 300 }` inlines
+as **44**. The guard therefore goes at the *member declaration*, before the
+constant exists. The scoping called this ordering; the measurement that made it
+necessary is that a folded constant is not a literal — `enum E: u8 { A = 200 +
+200 }` produces `TS6404` and **no** `AS200`, because `let x: u8 = 200 + 200`
+compiles silently today. The conversion machinery refuses literals only.
+
+**One diagnostic split, stated because it looks like an inconsistency.** A
+literal out of range reports *both* `AS200` (the conversion refusal, existing
+machinery) and `TS6404` (the declaration guard, which names the member and the
+width). Each says something true; only the second is actionable, because there is
+nothing to cast in a declaration. The scoping asked for exactly this split.
+
+**The vacuous probe: a clean grep is not evidence unless the tool ran.** `dist/`
+is gitignored, so a fresh worktree has no `dist/asc.js`, and
+`bin/tensionscript.js` dies with `ERR_MODULE_NOT_FOUND` — whose output contains no
+`^ERROR` line, so `grep -E "^ERROR"` finds nothing and the probe "passes". Six
+probes passed vacuously in the scoping session for exactly this reason. The
+countermeasure used here is a **positive and a negative control before any
+measurement**: a file that must compile clean, and a file that must fail. If the
+negative control does not error, the tool is not running and no subsequent
+"clean" output means anything. Same shape as the stale-checkout trap: a clean
+result is evidence only when the machinery that should have produced a dirty one
+was shown to work.
+
+**The self-compile caught what `tsc` and `esbuild` both accepted — third and
+fourth instances of the 10.0b class.** The declaration guard's first draft wrote
+`value <= u8.MAX_VALUE`, an `i32` compared to a `u8`. `npm run build` (esbuild)
+passed, `npm run check` (tsc) passed, and `npm run bootstrap:debug` refused it:
+`TS2365: Operator '<=' cannot be applied to types 'i32' and 'u16'.` The fix is
+the idiom `src/flow.ts:1379` already uses — explicit `<i32>` casts on the bounds.
+The same guard's *first* version had a second defect the self-compile could not
+see and the fixture could: it tested `i64_is_i8(i64_new(bits))`, and an enum
+constant's i64 is built from the i32 bit pattern with a zero high word, so
+`A = -1` in an `i8` enum was rejected as out of range. Both were found by gates,
+neither by reading. **The self-compile remains the only gate that enforces this
+language's own typing rules; run it before every push.**
+
+### Filed, not fixed
+
+**1. `wire-records-with-sized-enums` (engine-side, blocking for adoption).** The
+language feature only *enables* narrow wire records; it does not make them
+correct. If the engine declares the corresponding C enum as `int`, a `u8`-sized
+guest enum changes the record's byte offsets and the arena's `layout_hash` moves.
+That measurement belongs to the Tension repository and was not made here —
+`layout_hash` is not verifiable read-only from this tree at all. No wire record in
+this repository adopts a sized enum, so nothing is currently wrong; the gate is
+prospective.
+
+**2. Signed-narrow domains (small, unblocked).** `i8`/`i16` are accepted and their
+members are range-checked as signed. What is *not* implemented is any nominal
+guarantee that a signed enum's negative members survive a round trip through an
+*unsigned* field — that is ordinary `u8`/`i8` conversion behaviour, inherited
+rather than introduced, and it is unchanged by this phase.
+
+**3. `sized-enum-external-boundary` (unmeasured, small).** A sized enum in an
+`@external` signature was not probed. The narrow scalar is already an i32 in the
+wasm ABI, so the expected answer is "no change" — `(param i32)` promotion rather
+than `(param i8)`, which does not exist. That is a prediction, not a measurement.
+Probe it before any wire record uses a sized enum across the boundary, and record
+which of the three outcomes it is: promoted to `(param i32)`, refused by a
+diagnostic, or silently mis-emitted.
+
+**The backward-compat check that is actually decisive.** "No existing enum changed
+size" is hard to prove by inspection — the 108 declarations are spread over three
+directories and the layout is computed in code this phase touched. The measurement
+that settles it: build the self-compile (`.wast`, 35 MB) with the **old** compiler
+from the baseline source, then run the **new** compiler over the *same unchanged
+source*. Identical input, different compiler, so any difference is attributable to
+the change:
+
+```
+old compiler, baseline source   →  old.wast
+new compiler, baseline source   →  new.wast
+cmp old.wast new.wast           →  identical (byte for byte)
+```
+
+That covers all 68 enums in `src/` + `std/` in one check, `std/` included, and it
+is stronger than a fixture count because it compares emitted bytes rather than
+observable behaviour. The 40 enums under `tests/` are covered by the fixture
+snapshots instead: 305 `.wat` files committed before this change still match, so
+the delta is exactly the two new fixtures.
+
+Note what is *not* valid as a check: diffing the self-compile `.wast` from the
+branch against the one from `main`. The compiler's own source changed, so its own
+emitted code legitimately differs — the comparison has to hold the *input* fixed,
+not the output.

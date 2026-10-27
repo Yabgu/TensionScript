@@ -1545,6 +1545,12 @@ export class Compiler extends DiagnosticEmitter {
     if (element.is(CommonFlags.Compiled)) return !element.is(CommonFlags.Errored);
     element.set(CommonFlags.Compiled);
 
+    // The enum's storage class: i32 by default, the declared underlying type
+    // otherwise. Resolved here as well as at each type use, so an enum that is
+    // only exported — never written as a type — still folds and range-checks
+    // its members at the right width.
+    let underlyingType = this.resolver.resolveEnumType(element);
+
     let pendingElements = this.pendingElements;
     pendingElements.add(element);
 
@@ -1571,7 +1577,7 @@ export class Compiler extends DiagnosticEmitter {
         }
         let initExpr: ExpressionRef;
         if (valueNode) {
-          initExpr = this.compileExpression(valueNode, Type.i32,
+          initExpr = this.compileExpression(valueNode, underlyingType,
             Constraints.ConvImplicit
           );
           if (getExpressionId(initExpr) != ExpressionId.Const) {
@@ -1622,14 +1628,35 @@ export class Compiler extends DiagnosticEmitter {
         }
         this.currentFlow = previousFlow;
         if (initInStart) {
+          // A runtime initializer cannot be range-checked; the global stays an
+          // i32 slot, as every wasm global must (there is no i8/i16 global).
           module.addGlobal(enumValue.internalName, TypeRef.I32, true, module.i32(0));
           this.currentBody.push(
             this.makeGlobalAssignment(enumValue, initExpr, Type.i32, false)
           );
           previousValueIsMut = true;
         } else {
+          // A narrow underlying type refuses a value that does not fit, here,
+          // *before* any inlined constant exists: `compileInlineConstant`'s
+          // U8/U16 arm masks rather than refuses (300 would inline as 44), so
+          // the check has to precede it. This is also the only place that can
+          // see an implicit successor overflow (`A = 255, B`), which never
+          // passes through a literal conversion.
+          //
+          // The member is registered either way. The error already fails the
+          // compile, so nothing is emitted; skipping the global would make the
+          // *next* member's `global_get` reference a name that does not exist,
+          // which is a Binaryen exception rather than a diagnostic.
+          let constantValue = getConstValueI32(initExpr);
+          if (!this.enumMemberValueFits(constantValue, underlyingType)) {
+            this.error(
+              DiagnosticCode.Enum_member_0_does_not_fit_the_underlying_type_1,
+              valueNode ? valueNode.range : enumValue.identifierNode.range,
+              enumValue.name, underlyingType.toString()
+            );
+          }
           if (isInline) {
-            enumValue.setConstantIntegerValue(i64_new(getConstValueI32(initExpr)), Type.i32);
+            enumValue.setConstantIntegerValue(i64_new(constantValue), underlyingType);
             if (enumValue.is(CommonFlags.ModuleExport)) {
               module.addGlobal(enumValue.internalName, TypeRef.I32, false, initExpr);
             }
@@ -1645,6 +1672,33 @@ export class Compiler extends DiagnosticEmitter {
     this.currentParent = previousParent;
     pendingElements.delete(element);
     return true;
+  }
+
+  /**
+   * Whether an enum member's folded constant fits the enum's underlying type.
+   *
+   * The argument is the member's value as the i32 bit pattern the module
+   * carries (`getConstValueI32`), not a sign-extended i64: an enum constant is
+   * stored `i64_new(bits)`, whose high word is zero, so `i64_is_i8(-1)` is
+   * false for the bit pattern `0xFFFFFFFF` even though that is `-1` in i8.
+   *
+   * The bounds are written with explicit `<i32>` casts for the reason
+   * `flow.ts:1379` writes them that way: a `u8.MAX_VALUE` is u8-typed, and
+   * comparing an i32 to a u8 is `TS2365` under this compiler's own rules (not
+   * under tsc, which is why `npm run bootstrap:debug` is the gate).
+   *
+   * i32 and u32 accept every 32-bit pattern: the i32 wrap there is pre-existing
+   * behaviour (`enum E { A = 2147483648 }` emits `i32.const -2147483648`), and
+   * changing it would be a separate, breaking decision.
+   */
+  private enumMemberValueFits(value: i32, underlyingType: Type): bool {
+    switch (underlyingType.kind) {
+      case TypeKind.I8: return value >= <i32>i8.MIN_VALUE && value <= <i32>i8.MAX_VALUE;
+      case TypeKind.U8: return value >= 0 && value <= <i32>u8.MAX_VALUE;
+      case TypeKind.I16: return value >= <i32>i16.MIN_VALUE && value <= <i32>i16.MAX_VALUE;
+      case TypeKind.U16: return value >= 0 && value <= <i32>u16.MAX_VALUE;
+      default: return true;
+    }
   }
 
   private ensureEnumToString(enumElement: Enum, reportNode: Node): string | null {
@@ -10457,15 +10511,17 @@ export class Compiler extends DiagnosticEmitter {
         assert(parent.kind == ElementKind.Enum);
         let parentEnum = <Enum>parent;
         if (!this.compileEnum(parentEnum)) {
-          this.currentType = Type.i32;
+          this.currentType = parentEnum.type;
           return this.module.unreachable();
         }
-        this.currentType = Type.i32;
+        // A member's type is its enum's storage class (u8 for `enum E: u8`),
+        // which is what makes `let x: u8 = E.A` conversion-free. The emitted
+        // access is still an i32-slot global: wasm has no i8/i16 global.
+        this.currentType = enumValue.type;
         if (enumValue.is(CommonFlags.Inlined)) {
           assert(enumValue.constantValueKind == ConstantValueKind.Integer);
           return this.compileInlineConstant(enumValue, ctxType, constraints);
         }
-        assert(enumValue.type == Type.i32);
         return module.global_get(enumValue.internalName, TypeRef.I32);
       }
       case ElementKind.PropertyPrototype: {
