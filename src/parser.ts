@@ -217,6 +217,21 @@ export class Parser extends DiagnosticEmitter {
    */
   private unplacedLazyExpressions: Set<LazyExpression> | null = null;
 
+  /**
+   * The `@lazy` expressions an `await` consumed directly, recorded by the
+   * `Token.Await` arm of {@link parseExpressionStart}.
+   *
+   * These are the same refusals as every other unplaced `@lazy` -- `await` forces
+   * the read, so the deferral cannot mean anything -- but the *reason* is
+   * different and a reader deserves to be told which one they hit. Membership
+   * therefore only selects the message; the position rule still refuses the node.
+   *
+   * Recorded at the `await` rather than by walking the tree afterwards, because
+   * the operand is in hand there and the relationship (immediately under an
+   * `await`, not somewhere deeper) is exactly what the check is about.
+   */
+  private awaitNullifiedLazyExpressions: Set<LazyExpression> | null = null;
+
   /** Constructs a new parser. */
   constructor(
     diagnostics: DiagnosticMessage[] | null = null,
@@ -294,11 +309,21 @@ export class Parser extends DiagnosticEmitter {
     // name to defer to. Reported here, once per node, in source order.
     let unplaced = this.unplacedLazyExpressions;
     this.unplacedLazyExpressions = null;
+    let nullified = this.awaitNullifiedLazyExpressions;
+    this.awaitNullifiedLazyExpressions = null;
     if (unplaced != null) {
       for (let _values = Set_values(unplaced), i = 0, k = _values.length; i < k; ++i) {
+        let lazy = unchecked(_values[i]);
+        // Same refusal, two reasons. An `await` directly over the `@lazy` makes
+        // the deferral meaningless -- the read happens here, not at a first read
+        // that has already happened -- and saying that is more useful than the
+        // generic position rule, which would leave the reader wondering what
+        // position it wanted.
         this.error(
-          DiagnosticCode._lazy_expressions_must_be_the_initializer_of_a_variable_declaration,
-          unchecked(_values[i]).range
+          nullified != null && nullified.has(lazy)
+            ? DiagnosticCode.An_await_forces_an_immediate_read_of_lazy_so_the_deferral_is_nullified_drop_the_lazy_or_remove_the_await
+            : DiagnosticCode._lazy_expressions_must_be_the_initializer_of_a_variable_declaration,
+          lazy.range
         );
       }
     }
@@ -1343,17 +1368,10 @@ export class Parser extends DiagnosticEmitter {
       if (initializer.kind == NodeKind.Lazy) {
         let unplaced = this.unplacedLazyExpressions;
         if (unplaced != null) unplaced.delete(<LazyExpression>initializer);
-        // A `@lazy` that *awaits* cannot be evaluated eagerly, which is the
-        // only reading this foundation can offer: its `await` needs the async
-        // lowering, and that transform does not see through the wrapper. Refused
-        // here, by name, rather than left to fail later with a message about the
-        // enclosing async body.
-        if ((<LazyExpression>initializer).expression.kind == NodeKind.Await) {
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            initializer.range, "a '@lazy' expression that awaits (the lazy lowering)"
-          );
-        }
+        // The awaited form is lowered by `LazyAwaitTransform` (src/lazy/lower.ts),
+        // which splits the declaration and inserts the read-site guards. Its
+        // refusals -- a missing type node, a capture, a multi-declarator
+        // statement -- are reported there, where the reason is visible.
       }
       if (flags & CommonFlags.DefinitelyAssigned) {
         this.error(
@@ -4171,6 +4189,14 @@ export class Parser extends DiagnosticEmitter {
             DiagnosticCode._await_expressions_are_only_allowed_within_async_functions_and_at_the_top_levels_of_modules,
             tn.range(startPos, awaitEnd)
           );
+        }
+        if (operand.kind == NodeKind.Lazy) {
+          let nullified = this.awaitNullifiedLazyExpressions;
+          if (nullified == null) {
+            nullified = new Set();
+            this.awaitNullifiedLazyExpressions = nullified;
+          }
+          nullified.add(<LazyExpression>operand);
         }
         return Node.createAwaitExpression(operand, tn.range(startPos, tn.pos));
       }

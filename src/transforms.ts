@@ -23,6 +23,7 @@
 
 import { Program } from "./program";
 import { ClosureLowerTransform } from "./closure/lower";
+import { LazyAwaitTransform } from "./lazy/lower";
 import { AsyncLowerTransform } from "./async/lower";
 
 /**
@@ -32,7 +33,15 @@ import { AsyncLowerTransform } from "./async/lower";
  * which is what keeps the output of such a program byte-identical.
  */
 export function applyInTreeTransforms(program: Program): void {
-  // Closure lowering first: `ClosureLower` rewrites captures onto synthesized
+  // The `@lazy await` lowering first: it splits a deferred-await declaration into
+  // a flag and a cell and inserts a guard before each reading statement. Its
+  // output is ordinary locals and an ordinary `if` with an `await` in its body,
+  // which is what both transforms below already handle -- so running it first is
+  // what makes it a rewrite rather than a third lowering.
+  let lazyAwait = new LazyAwaitTransform();
+  lazyAwait.program = program;
+  lazyAwait.afterParse(program.parser);
+  // Closure lowering next: `ClosureLower` rewrites captures onto synthesized
   // environment objects, and the async transform's lifting rule then sees an
   // ordinary environment local and ordinary field accesses (`§3.1`).
   let closure = new ClosureLowerTransform();
