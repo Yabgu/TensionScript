@@ -11,6 +11,10 @@ and the package are its own: it does not collide with `asc` (AssemblyScript's
 compiler) or `tsc` (TypeScript's), so a project that installs both compilers
 always resolves the one it named.
 
+**Current version: 0.10.0.** A feature showcase — one section per capability, with
+runnable examples and the refused forms — is in preparation; the detailed scoping
+notes it draws from are in [`docs/`](docs/).
+
 ## Install
 
 ```sh
@@ -34,22 +38,107 @@ import tensionscript from "@acakar/tensionscript/asc";
 
 ## Status
 
-Forked from AssemblyScript. What this fork changes:
+TensionScript is a **fork of AssemblyScript**, and it does not aim for upstream
+merge: AssemblyScript's repository is a reference, not a target. As of this
+release the fork is **117 commits ahead of its AS base** (`b6bda05c`, upstream's
+tip at fork time) — the measurement and its method are in
+[`docs/fork-arc-scope.md`](docs/fork-arc-scope.md) §5.
 
-* **`this` in arrow functions — landed.** An arrow resolves `this` to the
-  receiver of the nearest enclosing non-arrow function, which is TypeScript's
-  rule, instead of to the enclosing function element. The receiver travels with
-  the function value in its environment and is delivered at each indirect call.
-* **async/await — pending.**
-* **closures — pending.**
+### What this fork adds
 
-Everything else tracks the upstream project it was forked from; the divergence is
-deliberate and each change lands with tests.
+- **C-model interop.** `@unmanaged struct` (a plain C-shaped record),
+  `@managed struct` (a GC-owned record with the same layout), `T[N]` inline
+  arrays, `@abi.alias` + `abiNameOf` (a field's C name, distinct from its
+  TensionScript name), `COPY_STRUCT`, and a C-compatible `sizeof` that includes
+  trailing padding. A `layout_hash` computed against the engine catches layout
+  drift when a session opens.
+- **Value types.** `@inline struct` gives a record value semantics: SROA locals,
+  copy on assignment, flattened (SROA) parameters, sret returns through a hidden
+  destination parameter, an `@external` argument temp, and an export-side byval
+  mirror. One-field records are refused at every boundary — the C/WASM tool
+  convention passes a one-scalar struct as the scalar itself, which would
+  disagree silently.
+- **Memory-model overrides.** A *use* can name the model it wants
+  (`v: @inline Vec3`) while the declaration keeps its own. `@managed` ↔
+  `@unmanaged` is the free cell; `@inline` over a pointer declaration is the
+  boundary cell (import temp copy, export byval). Three cells are refused by
+  principle: a use cannot confer storage the value does not have.
+- **Async/await.** `await` is the marker. The scheduler contract is
+  park / wake / resume with the task table owned by the guest; the shipped
+  implementation is the push path (the pull path was retired in 0.7.0).
+  Host-driven runtime tests cover it.
+- **Closures.** Capture, a synthesized environment class, and `this`/environment
+  unification. The captured binding has exactly one home. `this` in an arrow
+  function resolves to the nearest enclosing non-arrow receiver — TypeScript's
+  rule.
+- **Lazy expressions.** `@lazy` defers an expression's evaluation to the binding's
+  first read, memoized. Three forms: `@lazy f()` (deferred, synchronous),
+  `@lazy await f()` (deferred, awaited at the read), and
+  `@lazy await spawn(f)` (launched at the declaration, joined at the read).
+  `spawn` is the eager primitive.
+- **Bootstrap self-compile.** The compiler compiles its own source: 229 errors
+  down to 0, with the `.wast` fixpoint byte-identical across the stages.
+
+### What the fork deliberately shares
+
+The divergence is bounded, and the sharing is a decision rather than an accident:
+the **parser structure**, the **standard library's core**, and the **Binaryen
+backend** are AssemblyScript's. Where the fork extends one of those, the extension
+lands with fixtures — the `@lazy` prefix arm sits inside AS's expression dispatch,
+the record layout builds on AS's `Type` machinery, and std gains
+`task.ts`/`task-rt.ts` rather than replacing anything.
+
+## Differences from TypeScript
+
+- **No exceptions.** `try`/`catch` is `AS100: Not implemented: Exceptions`.
+- **No implicit `any`.** The type system is strict; a value has a type or the
+  program does not compile.
+- **`async` is the scheduler's contract, not `Promise`'s.** There is no
+  microtask queue and no `Promise<T>`; an async call produces a `Task<T>`, and
+  awaiting it parks the current task until the host resumes it.
+- **Structs are C-shaped, not TypeScript classes.** `@unmanaged struct` and
+  `@managed struct` have C layout and `sizeof`/`offsetof`; a class is a GC
+  reference, as in AssemblyScript.
+
+## Differences from AssemblyScript
+
+The fork is a fork. The divergence is deliberate, it is bounded, and each change
+lands with fixtures — see *What this fork adds* above for the list, and
+[`docs/fork-arc-scope.md`](docs/fork-arc-scope.md) for the measurement that
+established the posture. Features AssemblyScript cannot express — memory-model
+overrides, the scheduler contract — are in scope here; a feature is not rejected
+for lacking an AS equivalent.
+
+## What's next
+
+[`docs/fork-arc-scope.md`](docs/fork-arc-scope.md) sequences the remaining work.
+Deferred and named, each with its reason in
+[`docs/session-findings.md`](docs/session-findings.md):
+
+- **Sized enums** — `enum Foo: u8 { … }`, scoped in
+  [`docs/sized-enums-scope.md`](docs/sized-enums-scope.md); implementation
+  pending. Would make the `AS200` class (an `i32` enum into a `u8` field)
+  unrepresentable.
+- **Inline nesting** — an `@inline struct` as a field of another record.
+- **`T[N]` fields in `@inline struct`** — deep SROA, one local per element.
+- **GC-reference fields in `@inline struct`** — an SROA'd field has no address,
+  and the write barrier needs one.
+- **Closure capture of an `@inline` value** — needs inline nesting first.
+- **`@external` return of `@inline struct`** — an ABI version.
+- **SROA for top-level statics** — per-field globals, or a shadow slot.
+- **`lazy-await-type-inference`** — lifting `@lazy await`'s declared-type
+  requirement (`TS6399`).
 
 ## Links
 
-* Tension (the engine these guests run on): https://github.com/Yabgu/Tension
-* TensionScript (this compiler): https://github.com/Yabgu/TensionScript
+- Tension (the engine these guests run on): https://github.com/Yabgu/Tension
+- TensionScript (this compiler): https://github.com/Yabgu/TensionScript
+- Fork posture and phase sequencing:
+  [`docs/fork-arc-scope.md`](docs/fork-arc-scope.md)
+- Session findings — what each measurement found, and the traps:
+  [`docs/session-findings.md`](docs/session-findings.md)
+- Scheduler contract: [`docs/scheduler-contract.md`](docs/scheduler-contract.md)
+- Changelog: [`CHANGELOG.md`](CHANGELOG.md)
 
 ## Attribution and license
 
