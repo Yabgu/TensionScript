@@ -1,5 +1,16 @@
 # Async/await — Phase 1 (parser + AST)
 
+> **Historical record.** This is the scope note for async's *first* phase, written
+> before the lowering existed. The lowering has since landed: the
+> `Not_implemented_0` calls this note says to delete are gone, `async`/`await`
+> compile, and the current behaviour is specified in
+> [`scheduler-contract.md`](scheduler-contract.md). Kept because it records the
+> Phase-1 decisions — `isAsync` as a field rather than a flag bit, the parser-side
+> diagnostic placement, the TS1042 reuse — that the later phases inherited.
+>
+> Two references below are to documents that live in the **Tension** repository,
+> not this one: `docs/async-await-plan-v2.md` and `docs/async-complete.md`.
+
 Scope note for the first phase of `docs/async-await-plan-v2.md`. Phase 1
 recognizes `async` and `await` and builds the AST nodes. It contains **no
 lowering, no resolver semantics and no runtime**; those are later phases.
