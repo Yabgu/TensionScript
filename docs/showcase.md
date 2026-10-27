@@ -431,44 +431,68 @@ Refused / limitations:
 
 ---
 
-## 8. Sized enums — **pending**
+## 8. Sized enums
 
-**Status: in progress.** The scoping is merged
-([`sized-enums-scope.md`](sized-enums-scope.md), PR #30). The implementation is
-the next phase (fork-arc Phase 3). **The example below does not compile today** —
-it is the target, and it is marked rather than presented as working.
+An enum is a storage class, and `enum Foo: T { … }` declares which one. Without
+an underlying type an enum is `i32`, exactly as it always was; with one it is
+that type, and everything that reads a width follows — `sizeof`, `offsetof`,
+`alignof`, field offsets, `T[N]` strides, load and store widths.
 
 ```ts
-// Pending — fork-arc Phase 3.
 enum Color: u8 { Red, Green, Blue }
+
+@unmanaged struct Pixel {
+  flags: u8;
+  color: Color;
+}
+
+export function setColor(p: Pixel): void {
+  p.color = Color.Blue;   // no cast: the field is u8 and the enum is u8
+}
+
+export function byteSize(): i32 { return sizeof<Color>(); }        // 1
 ```
 
-Measured today: `ERROR TS1005: '{' expected.` — `parseEnum` goes from the
-identifier straight to `{`, so the colon is a parse error and nothing else about
-the form exists.
+Measured on this commit (the assertions live in
+`tests/compiler/interop/sized-enum-layout.ts`):
 
-What it would change, from the scoping's measurements:
+- `sizeof<Color>()` is **1**, `alignof<Color>()` is **0**. A plain `enum { … }`
+  is still **4** / **2** — the default did not flip.
+- `sizeof<Pixel>()` is **2** and `offsetof<Pixel>("color")` is **1** (from 8 and 4
+  when the enum was `i32`).
+- A `Color[3]` field is 3 bytes, stride 1 — no `shl 2`. In `{ n: u8; colors:
+  Color[3] }` that is `offsetof` 1, `sizeof` 4.
+- `p.color = Color.Blue` needs no cast. Before this phase the same assignment
+  was `AS200: Conversion from type 'i32' to 'u8' requires an explicit cast` —
+  the wire-record bug class.
+- A store through the field is `i32.store8`; a load is `i32.load8_u`, and
+  `w.flags` in the byte before it survives.
+- A `switch` on a `u8`-backed enum masks each use (`i32.and 255`) and compares
+  with `i32.eq` — the shape is unchanged, because it comes from the operand's
+  type.
+- Nothing in the layout path learned about enums. The 55 `.byteSize` readers,
+  the switch, the casts and the record accessors all needed zero changes: the
+  enum *is* its `Type`, and this phase repoints the type.
 
-- **Backward compatible.** `enum Foo { A, B }` stays `i32` — measured today:
-  `sizeof<Plain>()` is **4**. The default does not flip; the sized form is
-  opt-in. All 68 enums in `src/` + `std/` and 40 in `tests/` are plain, and none
-  would change size.
-- **The `AS200` class becomes unrepresentable.** Today an enum member into a
-  `u8` field is refused — measured:
-  `AS200: Conversion from type 'i32' to 'u8' requires an explicit cast` — because
-  enums are `i32` and a `u8` field cannot receive one without a cast. With a
-  `u8`-sized enum the assignment is same-width, and the wire-record shape
-  (`{ tag: u8; kind: E })` stops needing a cast at all.
-- **Layout is the payoff.** A `u8` enum field would take 1 byte instead of 4;
-  `E[3]` would take 3 instead of 12. Measured by substituting `u8` in the same
-  shapes, since the layout code is already type-driven: `{u8 tag; e}` is 2 bytes
-  (from 8), `offsetof` 1 (from 4), `{u8 n; u8[3]}` 4 (from 16).
-- **Nothing in the layout path needs to change.** The scoping found that an enum
-  *is* its `Type`, so repointing the type moves `sizeof`, `offsetof`, stride,
-  SROA widths, switch masks and cast widths at once.
+Accepted underlying types are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`. Anything
+else — `bool`, `i64`, a float, a reference — is refused by name (`TS6403`).
 
-Say `enum Color: u8 { … }` today and you get the parse error, which is the honest
-answer while the feature is pending.
+A member that does not fit the declared width is refused at the declaration
+(`TS6404`), before any codegen; that is what keeps `const enum` from inlining a
+truncated value, since the inlining path *masks*. A literal out of range also
+reports the existing `AS200`, because the conversion machinery refuses it first.
+Measured, `enum E: u8 { A = 200 + 200 }` is `TS6404` only — a folded constant is
+not a literal, and without the declaration guard it would compile silently.
+
+One consequence to state: a sized enum and its underlying scalar are the *same*
+`Type`, so `w.kind = E.A` into a `u8` field is legal. An enum does not add
+nominal checking — it never did. `case 99:` is accepted for the same reason it
+always was.
+
+A wire record may adopt a sized enum only after the C-side enum width is measured
+in the Tension repository: if the engine declares the corresponding enum `int`, a
+`u8`-sized guest enum moves the arena's `layout_hash`. Engine-side; out of scope
+here.
 
 ---
 
