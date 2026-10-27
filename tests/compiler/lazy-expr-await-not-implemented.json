@@ -1,0 +1,6 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: a '@lazy' expression that awaits (the lazy lowering)"
+  ]
+}

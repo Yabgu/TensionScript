@@ -46,6 +46,7 @@ import {
   AssertionExpression,
   AssertionKind,
   AwaitExpression,
+  LazyExpression,
   BinaryExpression,
   BlockStatement,
   CallExpression,
@@ -778,6 +779,16 @@ class ReservedScan {
       }
       case NodeKind.Await: {
         this.visitExpression((<AwaitExpression>expression).operand);
+        break;
+      }
+      case NodeKind.Lazy: {
+        // `@lazy EXPR` defers EXPR; it does not hide it. Descending is what keeps
+        // a capture inside the operand visible to this pass -- measured without
+        // this arm: `let a = @lazy x;` in a function that also captures `x`
+        // compiles the operand's read as a bare local while `x`'s storage has
+        // moved to the environment, and the build fails with
+        // `TS2304: Cannot find name 'x'`.
+        this.visitExpression((<LazyExpression>expression).expression);
         break;
       }
       default: break;
@@ -1971,6 +1982,11 @@ class OwnerAnalysis {
         this.walkExpression((<AwaitExpression>expression).operand, scope, info, false);
         return;
       }
+      case NodeKind.Lazy: {
+        // The operand is a read: `writeTarget` is false, exactly as for `await`.
+        this.walkExpression((<LazyExpression>expression).expression, scope, info, false);
+        return;
+      }
       default: {
         // Unknown expression kinds are not rewritten; if one hides a capture,
         // the compiler's own `declaredByFlow` check reports AS100.
@@ -3075,6 +3091,11 @@ class OwnerAnalysis {
         let awaitExpression = <AwaitExpression>expression;
         awaitExpression.operand = this.rewriteExpression(awaitExpression.operand, scope, currentFunction);
         return awaitExpression;
+      }
+      case NodeKind.Lazy: {
+        let lazyExpression = <LazyExpression>expression;
+        lazyExpression.expression = this.rewriteExpression(lazyExpression.expression, scope, currentFunction);
+        return lazyExpression;
       }
       default: {
         return expression;
