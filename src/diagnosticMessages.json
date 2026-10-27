@@ -216,5 +216,8 @@
   "Type '{0}' is a value with no address, so a use cannot view it as '{1}'; use the value, or keep it '@inline'.": 6395,
   "A '@lazy' decorator must precede the expression it defers, not follow a type.": 6396,
   "'@lazy' expressions must be the initializer of a variable declaration.": 6397,
-  "A '@lazy' expression in this position is not lowered; it is evaluated eagerly.": 6398
+  "A '@lazy' expression in this position is not lowered; it is evaluated eagerly.": 6398,
+  "A '@lazy await' binding needs a declared type: the memo cells are lifted into the task's state struct, and a state field needs a syntactic type ('{0}').": 6399,
+  "A '@lazy await' binding cannot be read from a nested function: a capture moves the storage, and the memo cell is a state field ('{0}').": 6400,
+  "A 'spawn' produces a Task; this one is never awaited, so the task's result is discarded.": 6401
 }

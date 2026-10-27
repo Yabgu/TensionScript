@@ -1,0 +1,6 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6399: A '@lazy await' binding needs a declared type: the memo cells are lifted into the task's state struct, and a state field needs a syntactic type ('a')."
+  ]
+}

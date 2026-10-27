@@ -1343,17 +1343,10 @@ export class Parser extends DiagnosticEmitter {
       if (initializer.kind == NodeKind.Lazy) {
         let unplaced = this.unplacedLazyExpressions;
         if (unplaced != null) unplaced.delete(<LazyExpression>initializer);
-        // A `@lazy` that *awaits* cannot be evaluated eagerly, which is the
-        // only reading this foundation can offer: its `await` needs the async
-        // lowering, and that transform does not see through the wrapper. Refused
-        // here, by name, rather than left to fail later with a message about the
-        // enclosing async body.
-        if ((<LazyExpression>initializer).expression.kind == NodeKind.Await) {
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            initializer.range, "a '@lazy' expression that awaits (the lazy lowering)"
-          );
-        }
+        // The awaited form is lowered by `LazyAwaitTransform` (src/lazy/lower.ts),
+        // which splits the declaration and inserts the read-site guards. Its
+        // refusals -- a missing type node, a capture, a multi-declarator
+        // statement -- are reported there, where the reason is visible.
       }
       if (flags & CommonFlags.DefinitelyAssigned) {
         this.error(
