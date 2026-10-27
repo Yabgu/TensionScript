@@ -1549,10 +1549,13 @@ guarantee that a signed enum's negative members survive a round trip through an
 *unsigned* field — that is ordinary `u8`/`i8` conversion behaviour, inherited
 rather than introduced, and it is unchanged by this phase.
 
-**3. `@external` / host-boundary sized enums (unmeasured).** A sized enum in an
+**3. `sized-enum-external-boundary` (unmeasured, small).** A sized enum in an
 `@external` signature was not probed. The narrow scalar is already an i32 in the
-wasm ABI, so the expected answer is "no change", but that is a prediction, not a
-measurement, and it is recorded as such.
+wasm ABI, so the expected answer is "no change" — `(param i32)` promotion rather
+than `(param i8)`, which does not exist. That is a prediction, not a measurement.
+Probe it before any wire record uses a sized enum across the boundary, and record
+which of the three outcomes it is: promoted to `(param i32)`, refused by a
+diagnostic, or silently mis-emitted.
 
 **The backward-compat check that is actually decisive.** "No existing enum changed
 size" is hard to prove by inspection — the 108 declarations are spread over three
