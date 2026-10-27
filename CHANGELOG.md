@@ -1,5 +1,64 @@
 # Changelog
 
+## Unreleased — `@lazy` in expression position (the lowering)
+
+The three forms are real. `@lazy` defers an expression's *evaluation* to the
+binding's first read and memoizes it; `spawn` is the marker that lets one launch
+escape the deferral while its `await` stays deferred.
+
+| Form | when `f` starts | when the await | never read |
+|---|---|---|---|
+| `@lazy f()` | first read | — (sync) | nothing: `f` is never called |
+| `@lazy await f()` | first read | first read | nothing: `f` is never called |
+| `@lazy await spawn(f())` | **the declaration** | first read | the task runs to completion, its value discarded |
+
+### Two lowerings, because the type question is different
+
+- **Sync** (`@lazy f()`): the compiler allocates two ordinary locals — the value
+  and a first-read flag — and emits the guard at each read
+  (`compileIdentifierExpression`). It can, because at compile time the type of an
+  unannotated initializer is known. Cost, stated plainly: the initializer is
+  compiled once per read *site*, so a binding read twice emits two guarded copies
+  and the flag makes only the first run. That is what "no getter" costs, and it is
+  visible in the emitted module.
+- **Awaited** (`@lazy await f()`): a rewrite (`src/lazy/lower.ts`, running before
+  the closure and async transforms) turns the declaration into a flag, a cell, and
+  `if (!b$done) { b = await f(); b$done = true; }` before each statement that
+  reads the binding. Every piece is a shape the async transform already lowers, so
+  the parking, the lifting and the resume points are the existing machinery — not
+  a third state machine.
+- **Awaited + `spawn`**: the same rewrite with the call hoisted into a task cell
+  at the declaration (`let b$task: Task<T> = f();`), and the guard awaiting that
+  cell. This is the only position in which `spawn` escapes the deferral.
+
+### One requirement, inherited rather than invented
+
+`@lazy await` needs a **declared type** (`TS6399`). A memo cell that crosses a
+suspension becomes a field of the task's state struct, and a state field needs a
+syntactic type — the same rule that already refuses `let v = await f();`. The sync
+form has no such requirement.
+
+### Diagnostics
+
+- `TS6399` — a `@lazy await` binding with no declared type.
+- `TS6400` — a read of the binding from a nested function (a capture moves the
+  storage; the memo cell is a state field).
+- `TS6401` — a statement-position `spawn`, whose Task is therefore discarded.
+- `TS6398` — retained, and now reached only where the lowering does not apply (a
+  binding the closure transform captured): the expression is evaluated eagerly and
+  the warning says so.
+
+### `spawn`
+
+A marker, not a function: `spawn(f(a))` is `f(a)` plus "this is a launch". It has
+no runtime, no scheduler surface and no std change, because a call to an `async`
+function already *is* the launch.
+
+**The weaker half of the unawaited-`spawn` warning is not implemented**: a
+`let t = spawn(f)` whose binding is never awaited needs an await-context walk the
+transform does not have. Only the certainly-discarded form (statement position) is
+reported.
+
 ## Unreleased — `@lazy` in expression position (foundation)
 
 `@lazy EXPR` parses, and is refused where it cannot mean anything. **The

@@ -1301,3 +1301,75 @@ harness work), and merging past *new* red that the branch itself introduced. The
 second is the worse failure, because the branch's claim of "green" was false
 rather than merely stale. Recommendation: check the tip's CI before merging, even
 in repos without branch protection.
+
+---
+
+## The `@lazy` lowering — what the shape cost, and what it did not
+
+**The sync form is in the compiler, the awaited form is an AST rewrite, and the
+split is forced by one fact: a transform runs before resolution.**
+
+The first plan for both was an AST transform with a synthesized getter, in the
+closure-transform's style. It cannot be: a getter needs a *type* for its memo
+cell, and at `afterParse` there is none for an unannotated initializer —
+`src/inference.ts` exists precisely because of that gap, and its table cannot name
+a call's return type. The compiler has the type because compiling is what it is
+doing, so the sync lowering allocates the cells there.
+
+The awaited form cannot live in the compiler either, for the opposite reason:
+`await` is a state transition of the *enclosing* function's machine, so it must be
+planned by the async transform, before resolution — where a memo cell becomes a
+state field, and a state field needs a syntactic type. Hence `TS6399`, and hence
+the requirement is the async transform's own rule (`let v = await f();` is refused
+the same way) rather than something `@lazy` introduced.
+
+**The price of "no getter" is per-read-site duplication, and it is deliberate.**
+Two reads emit two guarded copies of the initializer; the flag makes only the
+first execute. It is visible in the emitted module (the `.wat` pairs pin it) and
+it costs no correctness, only size. The alternative — one copy plus a synthesized
+function — needs the type the transform does not have.
+
+**Guard placement is per containing *statement*, and the guard's idempotence is
+what makes that safe.** A guard is a statement; a read can sit anywhere in an
+expression. One test before each reading statement covers every read in it, and an
+extra guard is a no-op. That property is also why the read *walker* may over-report
+freely: over-inserting costs a flag test, under-inserting reads an uninitialized
+cell.
+
+**`spawn` turned out to be a marker with no runtime at all.** A call to an `async`
+function already allocates the state, claims a task-table slot and runs the
+synchronous prefix in the caller's frame — `scheduler::park` is the only scheduler
+import in an emitted module and only appears when something suspends. So the
+"launch eagerly" half of `spawn` was already true, and stripping the marker is the
+whole implementation.
+
+**Two things were measured by hand before the transform existed**, and both were
+worth it: the desugared awaited shape compiled and returned `7 + 100` (one call
+for two reads), and the three spawn-timing claims returned `3031`. The transform's
+output is therefore a shape known to compile, park and resume, rather than one
+hoped to.
+
+**What the self-compile caught that `tsc` did not.** The probe's first draft used
+`interface DoStatementLike extends Statement` to read fields without importing the
+node classes. `tsc` accepted it; the AS200-class gate refused 11 sites
+(`Type 'Statement' is not assignable to type 'DoStatementLike'`). The fix was to
+import the real classes — `DoStatement`, `ExportDefaultStatement`,
+`NamespaceDeclaration`, `TernaryExpression`. Recorded because it is the same
+pattern as 10.0b's `u8` array: structural typing in TS is not the language's rule.
+
+**Not lowered, and named rather than left to be discovered:**
+
+- a `@lazy await` binding that a nested function reads (`TS6400`) — a capture
+  moves the storage, and the memo cell is a state field;
+- a binding the closure transform captured, in either form: it takes the eager
+  path with `TS6398`, and the answer is correct (`82` for two reads) even though
+  the evaluation is early;
+- the weaker half of the unawaited-`spawn` warning — "this binding is never
+  awaited" — needs an await-context walk the transform does not have. Only the
+  certainly-discarded statement-position form warns (`TS6401`).
+
+**W1's state, unresolved on purpose.** `await @lazy f()` is refused by `TS6397`
+(the position rule), not by a specific "await forces the read" diagnostic. A
+dedicated code would say more, and the position rule is stricter than warning —
+but adding a code for a shape the grammar already rejects at the declaration root
+is a decision for the user, not a default this phase should take.
