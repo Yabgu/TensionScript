@@ -1453,3 +1453,15 @@ deferred path for a captured binding needs a post-resolution hook (the same miss
 hook as residual 1) or an enabling step that erases the `@lazy` node before closure
 runs and re-materialises the guard after. Measured: the annotated case compiles
 with the warning and returns the right value (`82` for two reads).
+
+---
+
+**Lazy-expression arc closed on main.** The three forms are on `main` and were
+runtime-verified *after* the merge, not only on their branches: sync (`182`), await
+(`114`), spawn-escape (`3031`). Merge of #28 (`0bb68983`) and #29 (`98475d1f`); all
+eleven arc commits are ancestors of `main`, and all seven diagnostic codes
+(`TS6396`–`TS6402`) are present. Post-merge gates: build, check, `npm test` (317
+fixtures) and `bootstrap:debug` all exit 0.
+
+Residuals filed, unchanged by the merge: `lazy-await-type-inference`,
+`w3-await-context-walk`, `lazy-captured-binding-deferred`.
