@@ -51,6 +51,7 @@ import {
   CallExpression,
   ClassExpression,
   FunctionExpression,
+  LazyExpression,
   IdentifierExpression,
   StringLiteralExpression,
 
@@ -4074,6 +4075,13 @@ export class Parser extends DiagnosticEmitter {
         return Node.createUnaryPrefixExpression(token, operand, tn.range(startPos, tn.pos));
       }
 
+      // LazyExpression -- `@lazy EXPR`, and only that spelling
+      case Token.At: {
+        let operand = this.parseLazyExpression(tn, startPos);
+        if (!operand) return null;
+        return operand;
+      }
+
       // AwaitExpression (ES2017)
       case Token.Await: {
         let awaitEnd = tn.pos;
@@ -4562,6 +4570,53 @@ export class Parser extends DiagnosticEmitter {
       }
     }
     return args;
+  }
+
+  /**
+   * Parses `@lazy EXPR`: the deferral form of `@lazy`, in expression position.
+   *
+   * Called with `@` already consumed, from the `Token.At` arm of
+   * {@link parseExpressionStart}. That arm is the whole grammar change: `@` had
+   * no reading in expression position at all — it fell into the `default:` arm of
+   * the same switch and reported `Expression expected` — so intercepting it
+   * cannot change what an existing program means.
+   *
+   * **Binds like `await`.** The operand is parsed at `Precedence.UnaryPrefix`,
+   * the same precedence the `await` arm uses, so `@lazy f() + 1` is
+   * `(@lazy f()) + 1` and not `@lazy (f() + 1)`. One operand per `@lazy`; a
+   * second `@lazy` nests (`@lazy @lazy f()`), and the transformation refuses it
+   * rather than the grammar.
+   *
+   * Only the spelling `@lazy` is accepted here. Any other name is a decorator
+   * the compiler has no reading for in expression position, which is `AS212` --
+   * the same code `parseType` raises for a non-memory-model decorator before a
+   * type.
+   */
+  parseLazyExpression(
+    tn: Tokenizer,
+    startPos: i32
+  ): LazyExpression | null {
+
+    // before: '@' Identifier Expression
+
+    if (!tn.skipIdentifier()) {
+      this.error(
+        DiagnosticCode.Identifier_expected,
+        tn.range()
+      );
+      return null;
+    }
+    let name = tn.readIdentifier();
+    if (name != "lazy") {
+      this.error(
+        DiagnosticCode.Decorator_0_is_not_valid_here,
+        tn.range(startPos, tn.pos), name
+      );
+      return null;
+    }
+    let expression = this.parseExpression(tn, Precedence.UnaryPrefix);
+    if (!expression) return null;
+    return Node.createLazyExpression(expression, tn.range(startPos, tn.pos));
   }
 
   parseExpression(
