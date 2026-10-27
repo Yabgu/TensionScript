@@ -1,669 +1,705 @@
-# Concurrent await and the lazy local — scoping (v3)
+# Concurrent await and the lazy expression — scoping (v4)
 
-**Status:** scoping. Read-only on source. This branch adds one file.
+**Status:** scoping. Read-only on source; nothing here is implemented. Replaces
+the v3 draft on this branch, which designed the declaration form instead.
+
 **Base:** `origin/main` @ `c3be16fc` (release 0.10.0). Measured 2026-10-26.
 
-**Question.** Four forms of deferred work, distinguished by whether the callee
-starts at the declaration or at the first read, and whether the value is awaited
-at the read or never:
+**Target syntax** (ratified, and what this document measures):
 
-```
-@lazy EXPR                    defer EXPR's evaluation to first read, memoized
-@lazy await f()               call+await at first read
-@lazy await spawn(f)          spawn launches at declaration; await deferred to read
-@lazy spawn(f)                spawn launches at declaration; the Task is never awaited
+```ts
+let a = @lazy await spawn(f, args);   // spawn launches now, await deferred
+let b = @lazy await f();              // f deferred, awaited at read
+let c = @lazy f();                    // f deferred, sync
+let d = spawn(f);                     // launches now, no deferral
 ```
 
-**The premise this scoping tested and did not confirm.** The model above assumes
-`@lazy` means *deferred evaluation, memoized*. Measured in this tree, it does
-not, and never has — see §1. That is not a quibble about naming: it decides
-whether Phase 1 is a small reuse of the global mechanism (as the brief assumes)
-or new machinery with a new AST node. It is the latter.
+**Measurement 1 came back clean: there is no grammar conflict, and the whole
+syntax surface is 38 lines.** That is measured, not estimated — a throwaway
+prefix arm plus a `LazyExpression` node built cleanly and left the compiler suite
+(309 fixtures) and the parser suite green. Everything below is the design that
+measurement supports, plus one **spec ambiguity that needs your ruling** (§8.1).
 
-Everything below is measured on `origin/main` content in a throwaway worktree
-(`/tmp/spawn-probe`, since removed). §9 lists the commands and §8 lists what
-could not be measured read-only.
+§1–§6 are the six measurements. §7 is the cost. §8 is the recommendation. §9 is
+what could not be measured read-only.
 
 ---
 
-## 0. Measurements A–C, first
+## 1. Measurement 1 — expression-position parsing
 
-### A. Does the scheduler support launch-without-park?
+### Where the prefix dispatch is
 
-**There is no "launch" operation to support, because a call *is* the launch.**
+`Parser#parseExpressionStart` (`src/parser.ts:4053`) — one `switch` on the first
+token, and the only entry point for a prefix operator. Every prefix form already
+lives there:
 
-`f(args)` on an `async function` compiles to a plain call that:
+| Token | Line | Shape produced |
+|---|---|---|
+| `!`, `~`, `+`, `-`, `typeof`, `void`, `delete` | 4065–4075 | `UnaryPrefixExpression`, operand at `Precedence.UnaryPrefix` |
+| `await` | 4078 | `AwaitExpression`, operand at `Precedence.UnaryPrefix` |
+| `++`, `--` | 4163 | `UnaryPrefixExpression` (with a variable-operand check) |
+| `new`, `(`, `[`, `{`, `<`, literals, identifiers… | 4182, 4389, … | their own nodes |
+| **anything else** | **4486** | `default:` → `Expression_expected` (`TS1109`) |
 
-1. allocates `f$State` (`work$State#constructor`),
-2. builds the handle (`Task<T>#constructor`), stores it on `state.handle`,
-3. calls `__taskRegister(state)` — which **claims a task-table slot at
-   creation** (`std/assembly/task-rt.ts:383`, the 0.7.0d-pre change; the comment
-   there says "the table's capacity is a bound on *live* tasks, not on parked
-   ones"),
-4. calls `f$resume(state)` — running the synchronous prefix **inline in the
-   caller's frame**,
-5. returns the handle.
+`@` is **not** in that switch. Asked for an expression, the parser has no reading
+for `@` at all, so the `default` arm fires. That is the whole conflict question,
+and it answers itself: a `case Token.At:` intercepts exactly the position that is
+currently a hard parse error, so **no existing program changes meaning.**
 
-No scheduler call appears in steps 1–5. The scheduler learns about a task only
-when it suspends: `scheduler::park` is the *only* scheduler import in an emitted
-module, and it is absent from a module whose async functions never suspend and
-present in one that does. Measured side by side:
+`Token.At` already exists (`src/tokenizer.ts:164`, scanned at `:923`) — no lexer
+work.
 
-| probe | `scheduler::park` import |
-|---|---|
-| `a1.ts` — `async function work(x) { return x + 1; }`, handle held | absent |
-| `h1.ts` — the same function with `await h` inside | present, one call site in `f1$resume` |
+### The `@` token's other four positions, all disjoint
 
-So "launch eagerly" is the status quo, and `spawn` would add **zero scheduler
-work**. That is the single largest correction to the arc's cost model: the
-scheduler is finished for this feature; what is missing is syntax and lowering.
+Measured by grep and by probe:
 
-### B. Does `Task<T>` exist as a user type, or is `TaskRecord` an internal handle?
+| Position | Site | Reading today |
+|---|---|---|
+| declaration decorator, top level | `parseTopLevelStatement:269` | `@lazy const X = 1` accepted |
+| declaration decorator, class member | `parseClassMember:2224` | `@lazy static readonly M = 1` accepted |
+| pre-type | `parseType:669` | `v: @inline V3`; non-model decorators → `AS212` |
+| post-type attribute | `parseType:962` | `x: f32 @abi.alias("f")` |
+| **expression** | **none** | **`TS1109 Expression expected`** |
 
-Both exist, and they are different things:
+Expression position is the only one with no reading, and it is disjoint from the
+other four: `parseExpressionStart` is reached from `parseExpression`, which is
+never called where a decorator or a type is expected.
 
-- `std/assembly/task.ts:39` — `TaskRecord`, the eight-field layout (32 bytes:
-  `class_`, `key`, `payload`, `status`, `f0`, `f1`, `tag`, `done`). This is the
-  state the runtime's typed read goes through.
-- `std/assembly/task.ts:87` — `@final export class Task<T> { _record!: TaskRecord; }`.
-  A real class, instantiated per `T` by the ordinary class machinery
-  (`resolver.ts:2839`, `resolveAsyncCallType`), one word wide for every `T`.
+### The probe: what actually parses
 
-`Task<T>` is what an async call produces and what `await` consumes. `_record` is
-deliberately not `private` — the lowering reads it — but nothing else may touch
-it. **No wrapper is needed**: `Task<T>` is already the user type the design asks
-for, and a guest can hold one, pass one, store one in a global (measured), or
-return one.
+A probe built the node and the arm (§2, 38 lines) and dumped the AST. Every
+target form parses as intended:
 
-### C. Does `await a` where `a: Task<T>` work today?
+```
+let a = @lazy await spawn(f, 1);
+  VariableDeclaration
+    Lazy                          <== LazyExpression
+      Await                       <== await
+        Call callee=Identifier(spawn)   [spawn, f, 1]
 
-Yes, and it was run, not just compiled.
+let b = @lazy await g();      Lazy → Await → Call(g)
+let c = @lazy h();            Lazy → Call(h)
+let d = spawn(f);             Call(spawn) → [f]
+```
 
-- **Resolution**: `resolver.ts:1344` `resolveAwaitExpression` — the operand
-  resolves on its own, then `resolveTaskValueType` (`:1366`) matches the class
-  *by identity* against `program.taskPrototype` (not by name) and yields its type
-  argument. So `await t : Task<i32>` is `i32`, and `await 1` is `i32` unchanged.
-- **Codegen**: `compiler.ts:8674` `compileLoweredAwaitExpression` reads the
-  record at the payload offset (8) or `f0` (16), *not* re-evaluating the operand
-  — the value was produced before the suspension and parked with the task.
-- **Runtime, measured**:
+And the shapes the warnings need:
 
-  ```ts
-  async function add(x: i32): i32 { return x + 1; }
-  async function use(): i32 {
-    let t: Task<i32> = add(1);      // launch, handle held
-    let v: i32 = await t;           // settled → immediate, no park (§4.8)
-    return v + 1;
+```
+await @lazy f()      →  Await → Lazy → Call(f)        (W1's shape)
+@lazy f() + 1        →  Binary( Lazy → Call(f), 1 )   (binds like `await`: unary)
+g(@lazy f())         →  Call(g) → [ Lazy → Call(f) ]  (parses; no binding)
+@lazy @lazy f()      →  Lazy → Lazy → Call(f)         (redundant nest, parses)
+```
+
+`@lazy` at `Precedence.UnaryPrefix` gives TypeScript's own rule for `await`:
+`@lazy f() + 1` is `(@lazy f()) + 1`, not `@lazy (f() + 1)`. That is the right
+reading for "defer this expression", and it matches `await` exactly.
+
+### Four collisions the probe found, none fatal
+
+1. **`let x: i32 @lazy = 5;` compiles clean today** — `@lazy` is silently
+   accepted as a **post-type attribute** (`NamedType` carrying
+   `Decorator(lazy)`), because `parseType:962` accepts any non-memory-model
+   decorator there. Once `@lazy` means deferral, this is a decorator that does
+   nothing, in a position that looks like it might mean something. **Must be
+   refused**, using the refusal that already exists one branch up: the
+   memory-model case at `parseType:961`
+   (`A_memory_model_decorator_must_precede_the_type_it_applies_to_0`). One
+   condition, three lines.
+
+2. **`@lazy f();` as a top-level statement** → `TS1206 Decorators are not valid
+   here`, because `parseTopLevelStatement` consumes `@` as a decorator before any
+   statement parsing. Not a problem: §1.5 — a lazy expression is only meaningful
+   as a declaration initializer, so a statement-position one is always wrong.
+
+3. **`@lazy let x = 1;` inside a body** still fails `TS1109`: after `@lazy` the
+   parser wants an expression and finds `let`. The rejected declaration form
+   stays rejected — the syntax is expression-only, measured.
+
+4. **`@lazy 1` parses clean** (`let x: i32 = @lazy 1;`). Legal, pointless —
+   nothing to defer. One check in the transform, not a grammar issue.
+
+### The position rule this implies
+
+`@lazy EXPR` needs a **name** to hang the memo cell and the read-site guard on.
+The target syntax supplies it from the declaration (`let a = @lazy …`). But an
+expression can appear where there is no name:
+
+```ts
+g(@lazy f())       // parses; no binding, nothing to defer to
+return @lazy f()   // parses; same
+@lazy f() + 1      // parses; one cell for a sub-expression
+```
+
+**Design rule: a `LazyExpression` is legal only as the root of a variable
+declaration's initializer.** Everywhere else it is refused by name. This is not a
+limitation invented here — it is what the feature can mean: deferral with no read
+site is not deferral. The parser cannot enforce it (no context), so the transform
+does, at the same place it looks up the binding. Every shape the rule forbids was
+previously a parse error, so the refusal costs nothing in compatibility.
+
+---
+
+## 2. Measurement 2 — the AST node
+
+### What it is
+
+`AwaitExpression` (`src/ast.ts:1779`) is the template: a 12-line class with one
+field, `NodeKind.Await`, and a `Node.createAwaitExpression` factory. The probe's
+`LazyExpression` is the same shape:
+
+```ts
+export class LazyExpression extends Expression {
+  constructor(public expression: Expression, range: Range) {
+    super(NodeKind.Lazy, range);
   }
-  ```
-
-  `go() = 3`. A held `Task<T>` is awaited correctly; an already-settled await
-  returns without suspending.
-
-**Two limits on C, both measured, both load-bearing for the design:**
-
-- `await` on a **reference-typed** result is refused:
-  `AS100: Not implemented: a reference-typed await result`, on
-  `Task<string>` and on `Task<SomeClass>` alike. So every lazy-await form below
-  works for numerics and `bool` only.
-- `await` in a **non-async** function is refused at parse (`TS1308`), and —
-  measured — so is `await` at a module top level, *despite the diagnostic's text*
-  ("…and at the top levels of modules"). The message is TypeScript's; the
-  compiler does not implement that half. A lazy-await read therefore requires
-  every read site to be inside an async function.
-
----
-
-## 1. What `@lazy` actually means here (the correction)
-
-The brief's model — "`@lazy EXPR` defers EXPR's evaluation to first read,
-memoized" — is not what this compiler does. `@lazy` is a **compile- and
-evaluation-order permission**, not deferred evaluation.
-
-**Measured, at runtime:**
-
-```ts
-let ticks: i32 = 0;
-function bump(): i32 { ticks += 1; return ticks; }
-@lazy const lazyG: i32 = bump();
-const eagerG: i32 = bump();
-export function getTicks(): i32 { return ticks; }
-```
-
-Running the module and calling `getTicks()` **before any read of either global**:
-
-```
-getTicks() = 2
-readLazy() = 2
-readEager() = 1
-```
-
-Both initializers ran in `$~start`. The emitted start function is literally
-`call bump; global.set lazyG`. There is no guard word, no getter, no memo cell —
-and the declaration order in `$~start` is the only thing `@lazy` changes.
-
-**Measured, at the source:** `compiler.ts:1274` and `:1386` — when a global has
-`DecoratorFlags.Lazy`, `compileGlobal` swaps `currentFlow` to
-`global.file.startFunction.flow` while compiling the initializer. That is the
-whole mechanism: "compile this initializer as though it ran at the top of the
-file's start function," which makes it legal for the initializer to reference a
-global declared later. `resolver.ts:1479`'s own comment says it plainly:
-"Resolves a **lazily compiled** global, i.e. a static class field or annotated
-`@lazy`."
-
-**Where `@lazy` is accepted** (measured, four placements):
-
-| Placement | Result |
-|---|---|
-| module global (`@lazy const g = …`) | accepted |
-| class static field (`@lazy static readonly M = …`) | accepted |
-| function declaration | accepted |
-| **local** (`@lazy let x = …`) | **`TS1109: Expression expected.`** |
-| **expression** (`await @lazy f()`) | **`TS1109: Expression expected.`** |
-| getter (`@lazy get x()`) | `AS212: Decorator '@lazy' is not valid here.` |
-
-The parse failure is structural: `Parser#parseStatement` (`src/parser.ts:3302`)
-has no `Token.At` arm, so a `@` at statement position falls through to
-`parseExpressionStatement` and dies. And there is **no expression node that
-carries decorators** — `src/ast.ts` has 31 exported expression classes and not one has a
-`decorators` field, nor is there a `DecoratedExpression` or `SpawnExpression`.
-
-**Consequence for the design.** Two different costs hide behind one spelling:
-
-- `@lazy let t = EXPR` (declaration form) needs **no new AST node** — decorators
-  already exist on declaration nodes. This is the cheap surface.
-- `@lazy EXPR` (expression form, what the four-form table is written in) needs a
-  **new node kind**, because no expression can carry a decorator today.
-
-The rest of this document designs the declaration form and shows that it
-expresses all four meanings; §6 records what changes if the expression form is
-wanted anyway.
-
----
-
-## 2. The four forms, measured against the compiler
-
-Rewritten in declaration position — the form the parser can reach without a new
-node — with what each means in terms of machinery that exists:
-
-| Written (declaration form) | callee starts | await happens | never read | exists today |
-|---|---|---|---|---|
-| `let t = await f()` | immediately | immediately | n/a | **yes** (measured, `go() = 3`) |
-| `@lazy let t = f()` — sync `f` | first read | n/a | nothing | no |
-| `@lazy let t = f()` — async `f` | first read (the launch is the call) | caller's business | nothing launched | no |
-| `@lazy let t = await f()` | first read | first read | nothing | no |
-| `@lazy let t = await spawn(f)` | **declaration** | first read | task completes, value discarded | no |
-| `@lazy let t = spawn(f)` | **declaration** | never | task completes, `Task` retained, discarded | no |
-| `let t = spawn(f)` | declaration | wherever the user awaits | task completes, discarded, warn | no |
-
-Three things this table says that the brief's version does not:
-
-1. **`@lazy let t = f()` with an async `f` is already a deferred launch.**
-   Because the call *is* the launch (§0.A), deferring the call defers the launch.
-   That is a useful semantic the brief's table omits, and it is free once the
-   read-site inlining exists — no `spawn` needed.
-2. **`await @lazy f()` has no declaration-form equivalent that is redundant.**
-   `@lazy let t = await f()` defers *both* the call and the await, which is not
-   pointless. The redundancy the brief wants warning 1 for exists only if `@lazy`
-   can be written *inside* an expression that is already being awaited. In the
-   declaration form, warning 1 **has no reachable trigger** — see §4.
-3. **`@lazy spawn(f)` is the same as `let t = spawn(f)` with an unused
-   annotation**: the launch is at the declaration either way, and nothing awaits
-   it either way. `@lazy` buys nothing there, which is exactly what its warning
-   should say.
-
-### Never-read behavior, established by the runtime
-
-For the forms whose callee launched (rows 5–7), never reading means:
-
-- **The task runs to completion and the result is discarded.** Measured end to
-  end: a table of capacity **1**, two async tasks launched, both complete —
-  `status = 0`, `done = 1`, `payload` = the computed values. The first task's
-  slot is released on completion (`__taskComplete` → `finishTask`, `task-rt.ts:556`
-  → `:421`) before the second registers, so the release is what makes capacity 1
-  serve two sequential tasks.
-- **There is no cancellation.** `docs/scheduler-contract.md` names it out of
-  scope: "A task removed from the scheduler while parked is a future contract;
-  this one has no cancellation." So the model is JS's *complete-and-discard*, not
-  Rust's *cancel on scope exit*.
-- **A task that parks and is never delivered holds its slot and its state struct
-  forever.** Measured: capacity **2**; one manual registration plus one task
-  parked on a record nobody completes → that task reads `status = 0, done = 0`
-  (still parked), and the next launch is refused with `status = -28` (`-ENOSPC`)
-  and `done = 1`. The refusal is the bound working; the leak is real within it.
-
-The practical consequence for `@lazy await spawn(f)`: abandonment is safe *iff
-the spawned work completes*. A lazily-spawned task that parks forever is an
-invisible slot leak — invisible precisely because the `await` that would have
-surfaced it never ran.
-
----
-
-## 3. `spawn` — what the word would have to mean
-
-Measured: `spawn` does not exist. `spawn(f, 1)` is
-`TS2304: Cannot find name 'spawn'.`, and there is no `spawn`, `submit`,
-`enqueue`, or `schedule` anywhere in `std/`, `src/`, or the scheduler's host
-imports.
-
-Given §0.A, `spawn(f, args)` **cannot be a runtime primitive that does something
-a call does not** — the call already launches. So `spawn` can only be one of two
-things:
-
-**Option 1 — a marker on an ordinary call.** `spawn(f, a, b)` desugars to `f(a, b)`
-plus a bit that says "this call escapes the surrounding `@lazy`". Its only jobs
-are to lift the call out of the deferral and to give the unawaited-task warning a
-subject. Zero runtime cost, zero scheduler change; the desugaring is an AST
-rewrite.
-
-**Option 2 — a scheduling call that does not run the prefix in the caller's
-frame.** This would genuinely be a scheduler change (an executor entry point the
-host does not have today; `scheduler` exports only `park`). It would buy
-"launch without running any of the callee's synchronous prefix now" — real, but a
-*third* semantic the brief does not ask for, and it would need a host-side
-contract change in the engine.
-
-**Recommended: Option 1.** It is what the four forms need. Record Option 2 as a
-separate proposal, because it is the only version of `spawn` that would justify
-new scheduler surface.
-
-### The lowering, concretely
-
-`@lazy let t: i32 = await spawn(work(1));` inside an async function becomes:
-
-```ts
-// at the declaration site (hoisted out of the deferral):
-let $t$task: Task<i32> = work(1);      // the launch — ordinary call, §0.A
-let $t$done: bool = false;
-let $t$value: i32 = 0;
-
-// at each read site of `t` (inside the reader's own function):
-if (!$t$done) { $t$value = await $t$task; $t$done = true; }
-// …then use $t$value
-```
-
-**Measured: this shape compiles today.** Both halves were written by hand and
-compiled clean — the launch-then-deferred-await (`x2.ts`) and the guard+await+memo
-read (`x1.ts`):
-
-```ts
-async function reader(): i32 {
-  let task: Task<i32> = work(1);                     // launch at declaration
-  let done: bool = false;
-  let v: i32 = 0;
-  if (!done) { v = await task; done = true; }        // deferred await at read
-  return v;
 }
 ```
 
-The read-site `await` suspends **the reader**, which is the requirement — see §5
-for why a getter cannot do that.
+**Exported? Yes, it has to be.** `src/ast.ts` exports every node class, and
+`extra/ast.ts`'s `ASTBuilder` is exported through `index-js.ts` and used by
+`tests/parser.js:80` to serialize a parsed source. A private class cannot be
+named by the switches that need it. Measured cost: **18 lines in `ast.ts`** (enum
+entry + class + factory).
+
+### What hooks it needs — and the trap
+
+Three of the six files that switch on expression kinds terminate in
+**`assert(false)`**, not `default: break`:
+
+| file | switches over expression kind | terminator |
+|---|---|---|
+| `src/compiler.ts` | `compileExpression` | `assert(false)` at `:3889` |
+| `src/resolver.ts` | `doResolveExpression` | `assert(false); return null` |
+| `src/extra/ast.ts` | `ASTBuilder#visitNode` | `assert(false)` (6 sites) |
+| `src/closure/lower.ts` | 3 walks | `default: break` |
+| `src/async/lower.ts` | 7 sites | `default: break` |
+| `src/async/validate.ts` | 1 walk | `default: break` |
+
+**The compiler measures this as a crash, not a diagnostic.** Probe
+`return @lazy g();` with the node and arm in place but no lowering:
+
+```
+AssertionError: assertion failed
+    at r.compileExpression (src/compiler.ts:3889)
+    at r.compileReturnStatement (src/compiler.ts:3156)
+```
+
+Exit code 2, and **no `ERROR` line** — a crash that no diagnostic-shaped grep
+finds. Two consequences:
+
+- the transform must erase **every** `LazyExpression` before resolution, and
+- there must be an explicit guard for the case it does not, because the default
+  arm cannot produce a message. Recommended: a validation walk on the
+  `src/async/validate.ts` precedent (526 lines, pure traversal, no allocation)
+  reporting `Not implemented: a @lazy expression in <position>` for any survivor.
+  Without it, a transform bug is a compiler crash.
+
+`ASTBuilder` needs a real arm regardless: it is on a test path
+(`tests/parser.js` serializes parsed sources), so a fixture containing `@lazy`
+hits its `assert(false)` even when the compiler never does.
+
+The closure and async walks need **nothing** if the transform runs first — but
+note what their `default: break` does: `visitExpression` on a `Lazy` would visit
+*nothing*, so a survivor's children would be invisible to capture analysis. That
+is a silent-wrong-answer, which is a stronger argument for the guard than the
+crash is.
 
 ---
 
-## 4. The three warnings
+## 3. Measurement 3 — the lowering shapes
 
-### Infrastructure: present and adequate
+### The four forms, and what "never read" means for each
 
-- `DiagnosticEmitter` has `pedantic`, `info`, `warning`, `error`
-  (`src/diagnostics.ts:381–450`), and `Parser`, `Program` and `Compiler` all
-  extend it — so a transform can warn.
-- Warnings **do not fail a build**: `checkDiagnostics` (`cli/index.js:1203`)
-  increments `numErrors` only when `isError(diagnostic)` is true.
-- They are **suppressible**: `--disableWarning <code>` (`cli/options.json:335`).
-- They are **pinnable in fixtures**: `tests/compiler/field-initialization-warnings.json`
-  pins `AS906` and `AS233` in `stderr`. The catalogue holds 215 diagnostics and
-  none covers a discarded value, so all of these would be new codes.
+| Form | `f` starts | await happens | never read |
+|---|---|---|---|
+| `@lazy f()` | first read | n/a (sync) | **nothing** — `f` is never called |
+| `@lazy await f()` | first read | first read | **nothing** — `f` is never called |
+| `@lazy await spawn(f)` | **declaration** (the hoist) | first read | task **completes, result discarded** |
+| `spawn(f)` + await later | declaration | at the explicit await | task completes, discarded; warn if never awaited |
 
-### Where they must be computed — three measured ways it does not work
+The first two rows hold **by construction**: the call sits inside the guard, so a
+binding that is never read never reaches it. The third and fourth hold **by
+measurement** — a launched task runs whether or not anything reads it:
 
-The obvious site is `Compiler#compileExpressionStatement` (`compiler.ts:2878`).
-Every variant tried there failed, for three *different* reasons:
+- a launched-and-never-read task was **run** and read back `status = 0`,
+  `payload = 30` (the computed value): it completed and the value was discarded;
+- there is **no cancellation** — `docs/scheduler-contract.md` names it out of
+  scope — so the model is JS's *complete-and-discard*, not Rust's *cancel on
+  scope exit*;
+- a task that **parks forever** and is never awaited holds its task-table slot:
+  measured with a hand-bound table, the parked task stays `status 0 / done 0` and
+  the next launch is refused with `-28` (`ENOSPC`). That is the abandoned-`@lazy await spawn` failure mode, and it is
+  invisible precisely because the `await` that would have surfaced it never ran.
 
-1. **A fresh `resolveExpression` changes the output.** Resolving the statement's
-   expression to learn whether it is a `Task<T>` **shifted type-id instantiation
-   order**: 8 compiler fixtures failed (`simd`, `function-call`, `builtins`,
-   `issues/2707`, `duplicate-field-errors`, `class-errors`, and both async `.wat`
-   pairs). Suite green before the patch, red after.
-2. **The already-compiled type has been discarded.** Reading `this.currentType`
-   after the fact is byte-safe — the full compiler suite (309 `.ts` fixtures) passed —
-   but the warning **never fired**: `compileExpressionStatement` compiles with
-   contextual type `void`, so the task type is not what comes back.
-3. **`isAsync` is false by the time codegen runs.** Resolving only the *callee*
-   as an element (no expression resolution, no instantiation) is byte-safe and
-   still never fires — because the transform **clears the trait**:
-   `lower.ts:1008` sets `declaration.isAsync = false` after rewriting the entry,
-   for a good reason it documents ("keeping the trait would wrap it twice" — the
-   entry's declared return type is already `Task<T>`). So after lowering, no
-   element in the program is async, and "is this an unawaited async call?" is not
-   a question codegen can ask.
+### The three shapes
 
-The conclusion is structural, not a matter of finding a better call site: **the
-warning must be emitted inside the async transform, before `lower.ts:1008`
-runs** — where `isAsync` is still true and nothing has been instantiated. The
-natural home is `src/async/validate.ts`, which already walks statements and
-expressions by name, already has an `ExpressionStatement` arm (`:173`) and a
-`CallExpression` arm (`:426`), and already reports through the emitter. It is a
-pure traversal with a documented allocation invariant, so a warning there cannot
-perturb emission.
+Each was written out by hand — the exact desugaring the transform would emit —
+and compiled. All three compile clean; the memoized ones were also **run**.
 
-### The three, one at a time
+### Shape A — sync `@lazy f()`
 
-**W1 — `await @lazy f()`: "await forces the read; @lazy is pointless."**
+```ts
+// let c = @lazy f();
+// ⟶
+let c$done: bool = false;
+let c$val: T = <zero>;
+// before the first statement that reads `c`, once per execution of that statement:
+if (!c$done) { c$val = f(); c$done = true; }
+// each read of `c` ⟶ `c$val`
+```
 
-*Not implementable in the declaration form, because it has no reachable trigger.*
-The redundancy needs `@lazy` to appear inside an expression that is already
-awaited; in declaration position, `@lazy let t = await f()` is a *real* deferral
-of both the call and the await, not a no-op. Implementing W1 therefore requires
-the expression form (§1), i.e. a new AST node — and even then, the cleaner answer
-is to **refuse the form rather than warn about it**: a decorator that provably
-does nothing is a mistake, and this compiler's habit is to refuse
-(`AS212` on a getter, `TS6392` on a post-type memory-model spelling) rather than
-to warn and continue.
+Measured, **run**: a counter probe returned `182` (`41 + 41 + calls*100`), i.e.
+`f` was called **exactly once for two reads**.
 
-**Recommendation: drop W1.** It is the only one of the three whose trigger does
-not exist in the recommended syntax, and the diagnosis it offers is better
-delivered as an error at parse.
+Measured, compile: reads in arithmetic (`(a + a) * 2`), in a call argument, in a
+loop body (guard re-checked per iteration), and inside an arrow closure all
+compile. The closure case matters: the cells are ordinary locals, so the closure
+transform captures them into its environment with no special handling.
 
-**W2 — `@lazy spawn(f)` (or `let t = spawn(f)`) with no await: "the Task is never
-awaited; the result is discarded."**
+### Shape B — `@lazy await f()`
 
-Implementable, and *only* in the transform, because it is a **use** property: "is
-this cell ever awaited?" Two checks, both local:
+```ts
+let b$done: bool = false;
+let b$val: T = <zero>;
+if (!b$done) { b$val = await f(); b$done = true; }
+```
 
-- The **cheap half** is unconditional: if the initializer is a `spawn` call and
-  the annotated declaration is never read at all, that alone justifies the
-  warning, and "never read" is a flow/lookup question the resolver already
-  answers for every binding.
-- The **costly half** is "read but never awaited" — every read site must be
-  inspected, and `await t` may be nested (`await g(t)`, `await (t ? a : b)`). For
-  a value whose type is `Task<T>`, "was it awaited" is not a local property of
-  the read.
+Identical to A with one `await` in the guarded region. Measured compile-clean,
+including with the guard placed after an earlier `await` in the same function —
+the cells lift to state fields because they are ordinary lifted locals.
 
-**Recommendation: implement the cheap half now** ("declared, never read, and the
-initializer is a spawn") and scope the read-but-never-awaited half as a
-follow-up, since it needs an await-context walk the transform does not have.
-Note that `@lazy spawn(f)` is, measured, *exactly* equivalent to
-`let t = spawn(f)` with an unused annotation (§2) — so this warning can also be
-phrased "the `@lazy` here changes nothing."
+**The read site suspends, not the declaration.** That is why this cannot be a
+getter: `await` is a state transition of the *enclosing* function's machine
+(`src/async/lower.ts` sets `resumePoint`, parks, returns). A getter has its own
+machine, so one that awaited would hand back a `Task<T>` its caller still had to
+await.
 
-**W3 — `spawn(f)` unawaited at statement position.**
+### Shape C — `@lazy await spawn(f, args)`: the hoist
 
-**Implementable now, at zero cost, and measured.** The shape is an
-`ExpressionStatement` whose expression is a `spawn` call; `validate.ts` already
-visits exactly that. Scoped to `spawn`, no existing code can trip it — `spawn`
-does not exist yet.
+```ts
+let a$task: Task<T> = f(args);          // the launch, hoisted to the declaration
+let a$done: bool = false;
+let a$val: T = <zero>;
+if (!a$done) { a$val = await a$task; a$done = true; }
+```
 
-The interesting question is whether to extend it to **plain unawaited async
-calls** (`work(1);` with the result dropped), which is the same behavior written
-without the marker. Measured over the whole `tests/compiler` corpus (309 `.ts` fixtures):
+The only new step over B: the inner call moves **out** of the deferred region to
+the declaration site, and the deferred region awaits the already-launched handle.
 
-- **exactly one** statement-position dropped async call exists —
-  `tests/compiler/async-closure-value.ts:22`, `inner(changetype<Task<i32>>(0));`
-  (`async-closures-case6.ts` *assigns* its call to a global rather than dropping
-  it);
-- that fixture has **no pinned-stderr `.json`**, so a warning there costs no
-  fixture update;
-- `std/` and `src/` contain no real async functions at all — every textual
-  `async function` in `src/` is a comment or a string — so the self-compile is
-  unaffected.
+Why that is cheap here — and why this arc is smaller than it looks: **a call to an
+`async function` *is* the launch.** It allocates the state struct, builds the
+handle, claims a task-table slot at creation (`__taskRegister`,
+`std/assembly/task-rt.ts:383`), and runs the synchronous prefix inline in the
+caller's frame. `scheduler::park` is the only scheduler host import in an emitted
+module, and it appears only when something suspends.
 
-(Site counts above are a source-level scan for statement-position calls to
-declared `async function` names, not a compiler instrumented run: the compiler
-cannot answer the question at codegen time, per the three reasons above. The scan
-is mechanical and the single hit was confirmed by reading the file.)
+Measured on the two-launch probe: **no `scheduler` import at all**, and the
+emitted `go()` body is
 
-So the extension is affordable. It is still a **behavior change for users**
-(code that compiles silently would start warning), which is a decision for the
-phase, not a measurement. W3 scoped to `spawn` alone costs nothing at all,
-because `spawn` does not exist yet.
+```wat
+call $…/work          ;; launch 1
+call $…/work          ;; launch 2
+call Task<i32>#get:_record
+call TaskRecord#get:payload
+call Task<i32>#get:_record
+call TaskRecord#get:payload
+i32.add
+```
+
+Both launches before either read, then two reads. Run: `go() = 30` (`10 + 20`).
+**The parallel requirement is satisfied by construction** — the hoist is just
+"emit the call earlier".
+
+### What `spawn` has to be for this to work
+
+Measured: `spawn` does not exist (`TS2304`), and nothing in `std/`, `src/`, or the
+scheduler's imports resembles it. Given that a call is already the launch,
+`spawn` **cannot be a primitive that does something a call does not**. It is a
+marker, with exactly the three jobs you named:
+
+- escape the deferral when it is the operand of the `await` inside `@lazy`
+  (Shape C's hoist trigger);
+- give the unawaited-`Task` warning a subject;
+- launch eagerly by default — already true, nothing to do.
+
+Its desugaring is `spawn(f, args)` → `f(args)` plus a marker bit. Zero runtime,
+zero scheduler, zero std change.
+
+### Value types, measured
+
+`await` on a **reference-typed** result is refused today:
+`AS100: Not implemented: a reference-typed await result` — on `Task<string>` and
+`Task<SomeClass>` alike. Shapes B and C are therefore numeric/`bool` only until
+that is lifted. Shape A has no such limit.
 
 ---
 
-## 5. Why the mechanism is read-site inlining and not a getter
+## 4. Measurement 4 — the read-site rewrite
 
-The brief asks whether the getter mechanism exists for locals, and whether the
-spawn is "hoisted out of the getter." Measured, the getter framing cannot work,
-for a reason that is specific to this compiler's async model:
+### The question as posed has a different answer than expected
 
-> **`await` is a state transition of the enclosing function's machine, not a
-> call.** The lowering (`src/async/lower.ts`) rewrites the *body that contains*
-> the await: it sets `state.resumePoint`, parks, and returns
-> (`h1.wat`'s `f1$resume`: `set:$awaited1`, `set:resumePoint 1`, `__taskSettled`
-> → `__taskPark` → `return`). A getter has its own state machine; its caller
-> cannot suspend on it. A getter that awaited would return a `Task<T>` it never
-> awaited, and the read site would still have to await that.
+The brief asks which of the "113 `compileExpression` sites" intercepts a local's
+read. Measured: `this.compileExpression(` has **113 call sites** in
+`src/compiler.ts`, and **none of them needs to change.**
 
-So the deferred await must be **inlined at each read site**, where the reader's
-own machine can suspend. That is the design in §3, and it has three measured
-consequences:
+The interception is at the **AST level, before resolution**, not in codegen. By
+the time `compileExpression` runs, a read of a lazy binding is already an ordinary
+read of an ordinary local; codegen has nothing to know. This is the house
+pattern, not a new idea: `ClosureLowerTransform` rewrites every reference to a
+captured binding into an environment access at the AST, and codegen never learns
+that closures exist.
 
-- **One lazy-await read per statement.** `let v: i32 = await t1 + await t2;` is
-  already refused: `AS100: Not implemented: more than one await in one statement
-  (async lowering)`. Two lazy-await reads in one expression would hit the same
-  wall, so the feature must refuse (or split) that case explicitly.
-- **The read site must be inside an `async` function** (`TS1308` otherwise), and
-  the value must be a numeric/bool type (§0.C).
-- **The memo cells get lifted for free** — *if* the lazy expansion runs before the
-  async lowering. Measured: the cell pair read after a suspension
-  (`let done: bool; let v: i32; … let a = await h; if (!done) {…}`) lifts
-  correctly, with `done` and `v` becoming state fields.
+**So "how does the compiler know a local is lazy?" — it does not, and it must
+not.** The knowledge lives and dies inside the transform.
+
+### What the transform needs, and what already exists
+
+It needs a **scope walk with per-reference records**. Measured,
+`src/closure/lower.ts` has exactly that and has had it since the closures phase:
+
+- `class Scope` (`:829`) — `bindings: Map<string, Binding>`, plus block/loop
+  bookkeeping;
+- `class Binding` (`:796`) — name, type, `isConst`, `hasInitFlag`, `captured`;
+- `refs: Map<IdentifierExpression, Binding>` (`:1084`) and
+  `writes: Set<IdentifierExpression>` (`:1087`) — every reference resolved, reads
+  and writes distinguished;
+- a two-phase **collect → emit** `afterParse` (`:236`, `:224`) whose rationale is
+  written down: collect answers "would this pass synthesize anything" before
+  anything is mutated.
+
+The lazy transform is the same shape, one field smaller: for each
+`let a = @lazy EXPR`, collect the reads of `a`, then emit the cells, the guard
+before each containing statement, and the cell reads.
+
+**It cannot import them.** `Scope` and `Binding` are module-private (`class
+Scope`, not `export class Scope`). Three options: (a) export them from
+`closure/lower.ts`, (b) put the lazy transform in that module, (c) write a
+narrower walk in `src/lazy/lower.ts`. Sizes, for grounding: `closure/lower.ts`
+3289 lines, `async/lower.ts` 3451, `async/validate.ts` 526. A narrow walk that
+tracks only declared names per block (no capture analysis, no closure synthesis)
+is a fraction of those; (a) is cheapest and keeps one scope model in the codebase,
+at the cost of a wider module API.
+
+### Three details the walk must get right (each measured)
+
+- **Guard placement, not per-read splitting.** Because the value is memoized, one
+  guard per *containing statement* suffices and every read in that statement
+  becomes a cell read. Measured: `(a + a) * 2` compiles against a single guard —
+  far simpler than the per-read design, which would collide with the existing
+  `AS100: more than one await in one statement` refusal.
+- **A guard inside a loop stays inside the loop.** Placing it before the reading
+  statement preserves per-iteration re-checking; measured compiling, and correct:
+  a not-yet-evaluated binding evaluates at the first iteration that reaches a
+  read.
+- **Writes need a decision.** `let a = @lazy f(); a = 5;` — `Binding` already
+  tracks writes. Recommended: refuse. A memo cell plus an assignment has two
+  readings (reset the memo / bypass it) and no obvious winner; `const`-like
+  behaviour is the honest answer, and `TS2540`/`AS212` shapes exist.
 
 ### Transform order
 
-`applyInTreeTransforms` (`src/transforms.ts:34`) runs exactly two transforms, and
-the order is documented as load-bearing: **closure first, then async.**
-A lazy-local transform must be inserted **before async** (so its synthesized
-`await` is lowered) and has one real ordering question against **closure**:
+`applyInTreeTransforms` (`src/transforms.ts:34`) runs two transforms in a
+documented load-bearing order: **closure, then async**. The lazy transform must
+run **before both**:
 
-- *after closure* — the initializer has already been rewritten to environment
-  field accesses; duplicating it at read sites duplicates already-lowered code,
-  which is safe because the guard makes only one copy run;
-- *before closure* — closure sees each duplicated copy and rewrites captures in
-  each.
+- before **async**, so the `await` it synthesizes is lowered by the existing
+  machinery (measured, Shapes B/C);
+- before **closure**, so capture analysis sees the final code shape — the cells
+  and the guard — rather than having to rewrite already-rewritten environment
+  accesses.
 
-The second is more robust (one rule, applied to whatever the tree contains) and
-matches the existing rationale for putting closure first. Recommend: **lazy
-before closure** only if the lazy transform introduces no captures of its own;
-otherwise **between closure and async**. This must be decided by measurement in
-the phase, not here — it is the one ordering question I could not settle
-read-only, because it depends on the transform's actual output shape.
+One consequence: its synthesized names must join the shared reserved namespace
+(`isReservedName`, `closure/lower.ts:150-168`, which already holds `$init$`,
+`$env`, `$this`, `$parent`, `$awaitedN`). A `$lazy$` prefix is one line there. If
+it is forgotten, a user identifier can collide with a synthesized cell — and that
+guard exists precisely because this class of bug was found before (F14).
 
 ---
 
-## 6. If the expression form is wanted anyway
+## 5. Measurement 5 — the three warnings
 
-Everything above designs the declaration form. If `@lazy EXPR` must be spelled as
-an expression (the brief's literal model), the delta is:
+### Infrastructure: present, adequate, and not where you would put it
 
-- a new AST node kind (e.g. `LazyExpression`) plus parser support for `@`
-  at expression position — `parseStatement` and every expression parser entry;
-- `@lazy` must then be rejected everywhere it is a *declaration* decorator and
-  accepted everywhere it is not, or the two meanings coexist (an ordering
-  permission on declarations, a deferral on expressions) with the same spelling.
-  That ambiguity is worse than the node;
-- W1 becomes reachable, and the redundancy it names is real.
+`DiagnosticEmitter` has `pedantic`/`info`/`warning`/`error`
+(`src/diagnostics.ts:381–450`); `Parser`, `Program`, `Compiler` all extend it, so
+any transform can warn. Warnings do not fail a build (`checkDiagnostics` counts
+only `isError`, `cli/index.js:1203`), they are suppressible
+(`--disableWarning <code>`), and they are pinnable in fixtures
+(`tests/compiler/field-initialization-warnings.json` pins `AS906`/`AS233`). The
+catalogue holds 215 diagnostics and none names a discarded value, so all three are
+new codes.
 
-Cost: a parser + AST change touching the most-tested part of the compiler, plus a
-semantic collision on one word. **Recommend against.** The declaration form
-expresses all four meanings (§2) with zero parser change.
+Three measured reasons **not** to detect them at `compileExpressionStatement`
+(the site the v3 draft assumed):
 
----
+| variant at the statement site | suite | warning fires |
+|---|---|---|
+| fresh `resolveExpression` on the statement's expression | 8 fixtures fail (type-id order shifted) | yes |
+| read the already-compiled `this.currentType` | green | no — compiled as `void` |
+| resolve only the callee as an element, check `isAsync` | green | no — `lower.ts:1008` clears `isAsync` |
 
-## 7. Two phases
+All three belong in the transform, where the shapes are syntactic and nothing is
+instantiated.
 
-### Phase A — the lazy local (small, sync only)
+### W1 — `await @lazy f()`
 
-**Scope.** `@lazy let t: T = EXPR` inside a function body, where `EXPR` is
-synchronous and `T` is a scalar. Lowering: two hidden cells plus a guard at each
-read site (§3). Transform slot in `applyInTreeTransforms`, before async.
+**Shape (measured): `Await → Lazy → Call`.** Trivial to detect: an
+`AwaitExpression` whose operand is a `LazyExpression`.
 
-**What it does *not* reuse.** The brief calls this "small — reuses the global
-mechanism". Measured, there is nothing to reuse: `compileGlobalLazy`
-(`compiler.ts:1197`) is an ordering permission and produces no getter, no cell,
-and no memoization (§1). Phase A is new machinery. It is small for a different
-reason: it is **purely local syntactic sugar over cells the async lowering
-already knows how to lift**, with no runtime, no std, and no scheduler change.
+**Trivial to lower, too:** drop the wrapper and compile `await f()`. Await forces
+the read, so memoization is unobservable — the erasure is not a shortcut, it is
+the correct semantics. Emit the warning at the same moment.
 
-**Measured constraints to build against.**
+### W2 and W3 — and why they are one warning
 
-- Parser: add a `Token.At` arm to `parseStatement`, accept `@lazy` only on a
-  local `let`/`const`, reject everything else (AS212's shape already exists for
-  getters).
-- A read site must be splittable into a statement. (In Phase A there is no
-  await in the initializer, so this only constrains Phase B; the AS100
-  one-await-per-statement refusal is the precedent there.)
-- `T` must not be a reference type if the initializer awaits (§0.C); for the sync
-  phase any `T` is fine.
-- Cells must be declared *before* the first read, and before any await that
-  precedes a read, or the lift will not see them.
+- **W3** `spawn(f);` unawaited: `ExpressionStatement → Call(spawn)`. Measured
+  shape, trivially detectable.
+- **W2** `@lazy spawn(f)` whose `Task` is never awaited: `Lazy → Call(spawn)`.
 
-**What forces a no.** If the read-site expansion cannot be expressed as
-statements the async lowering accepts — i.e. if a read occurs inside a
-sub-expression the splitter cannot escape — then the *awaiting* half has to wait.
-The synchronous half is unaffected.
+Both are the same defect — **a `Task<T>` value that is never awaited** — at two
+positions. Recommend **one diagnostic, one message**, reported wherever the
+unawaited task value is found: at a statement-position `spawn` call, and at a lazy
+binding whose value is a `Task` and none of whose reads is awaited.
 
-**Verification, cheap and already available.** The emitted WAT for
-`x1.ts`/`x2.ts` (guard + await + memo) is the target shape; those two files
-compile today, so the phase's codegen can be pinned against an exact `.wat`
-before the transform exists.
+That second half is a **use property, not a shape property**: it needs "is any
+read of this binding an await?" — the walk the transform is already doing for
+`refs`. So it is nearly free inside the transform and expensive anywhere else.
 
-### Phase B — spawn and the warnings (medium, and smaller than assumed)
+**Affordability, measured:** of the 309 `.ts` fixtures in `tests/compiler`,
+exactly **one** contains a statement-position dropped async call
+(`async-closure-value.ts:22`, `inner(changetype<Task<i32>>(0));`), and that
+fixture has no pinned-stderr `.json`. `std/` and `src/` contain no real async
+functions (every textual `async function` in `src/` is a comment or a string), so
+the self-compile is unaffected. Extending W3 to plain unawaited async calls is
+therefore cheap — but it is a user-visible behaviour change, so it is your call,
+not a measurement.
 
-**Scope.** `spawn(f, args…)` as a marker (Option 1, §3), the hoist out of the
-`@lazy` initializer, W2's cheap half, and W3.
+### One thing to decide explicitly
 
-**What it does *not* need** — each item the brief listed as a prerequisite:
-
-- *launch-without-park* — **exists** (it is the call; `scheduler::park` is the
-  only scheduler import and only when suspending) §0.A;
-- *`Task<T>`* — **exists** as a user type with the boxed handle semantics
-  required §0.B;
-- *await-a-Task* — **exists**, and was run end to end §0.C;
-- *a Task wrapper around `TaskRecord`* — **not needed** §0.B.
-
-**What it does need** — and this is the honest cost:
-
-1. `spawn` as a **special form** in the `afterParse` stage: recognized by name,
-   desugared to a call, marked as escaping.
-2. The **hoist**: move the spawn call out of the deferred initializer to the
-   declaration site, and rewrite the deferred initializer to `await $t$task`.
-   Measured feasible — the hand-written expansion compiles (§3).
-3. **W3** in `validate.ts` (trivial), and **W2**'s "never read" half (a binding
-   lookup the resolver already does).
-4. A **decision** on extending W3 to plain unawaited async calls: affordable
-   (measured: one fixture, no pinned stderr) but user-visible.
-
-**What forces a no.** If `spawn` must mean "do not run the callee's synchronous
-prefix in the caller's frame" (Option 2), it becomes a scheduler-contract change
-with a new host entry point, and it belongs in the engine's repo, not this one.
-The four forms as specified do not require it.
-
-### Dependencies between them
-
-Phase B's hoist is *built on* Phase A's read-site inlining: `@lazy await spawn(f)`
-is "Phase A's cell" + "the launch moved out". So **A first, strictly**. Nothing
-in A depends on B. Neither depends on the fork-arc phases
-(`docs/fork-arc-scope.md`), though both are examples of the posture: features AS
-cannot express, landed on purpose.
+`await @lazy f()` is **allowed and lowered correctly**, and only warned about.
+That is the ratified choice and it is self-consistent — but it means the compiler
+emits code for a construct it calls pointless. Refusing is a one-line change in
+the same arm. Worth deciding rather than inheriting.
 
 ---
 
-## 8. What could not be measured read-only
+## 6. Measurement 6 — the two meanings of `@lazy`
 
-1. **A parking task resumed by a host.** The settled path was run end to end
-   (`go() = 3`); the suspend path is covered by `tests/async/runtime.js`'s
-   driver, which I read but did not execute against these probes. The park shape
-   in `h1.wat` was read, not driven.
-2. **Slot accounting under a real executor loop.** The `-ENOSPC` refusal and
+### The parser accepts both, and cannot confuse them
+
+Measured with the probe in place:
+
+- `@lazy const FOO: i32 = 1;` still parses through `parseTopLevelStatement:269`
+  and compiles exactly as before (probe: clean, and the global carries
+  `DecoratorFlags.Lazy` as it always did). **No regression.**
+- `@lazy f()` in an initializer parses through the new `parseExpressionStart` arm.
+
+The two never meet: at top level and at class-member position the `@` is consumed
+by a decorator loop *before* statement/expression parsing begins; inside an
+expression, only the new arm can see it. Disambiguation is **positional, decided
+before either reading is attempted** — no lookahead, no backtracking.
+
+The one place both readings could apply is a **top-level statement** `@lazy f();`
+— there the decorator reading wins and yields `TS1206 Decorators are not valid
+here` (measured). Which is the correct outcome anyway (§1.5).
+
+### The resolver distinguishes them by carrier, not by context
+
+This is what makes the two-meanings design safe rather than merely tolerable:
+
+| | carrier | meaning | lifetime |
+|---|---|---|---|
+| `@lazy const X` | `DecoratorFlags.Lazy` **on a `Global` element** | ordering permission: compile the initializer as though it ran at the top of the file's start function (`compiler.ts:1274`, `:1386` swap `currentFlow`) | survives into the program |
+| `@lazy EXPR` | a **`LazyExpression` node** | deferral + memoization | erased before resolve |
+
+Different objects, different phases. No resolver arm asks "which `@lazy` is
+this"; the question cannot arise, because a `Global` and an `Expression` never
+occupy the same position in any switch.
+
+**But it must be said out loud**, in the language docs and in
+`docs/fork-posture.md`: the same token means *"compile-time ordering permission"*
+on a declaration and *"run-time deferred evaluation"* on an expression. Those are
+not one concept wearing two hats — one changes what the compiler may do first,
+the other changes when the program does something. Position makes them
+distinguishable; a reader still deserves a sentence.
+
+### The collision that is real
+
+`let x: i32 @lazy = 5;` — accepted silently as a post-type attribute (measured:
+`NamedType` carrying `Decorator(lazy)`). Under the new reading that is a
+decorator that does nothing in a position that looks meaningful. Refuse it (§1,
+collision 1) — the same class of bug the memory-model phase closed for
+`V @inline`, with the same fix.
+
+---
+
+## 7. The cost
+
+Measured pieces first, then the estimate.
+
+| piece | measured | note |
+|---|---|---|
+| `src/ast.ts` — `NodeKind.Lazy`, class, factory | **+18 lines** | probe, builds |
+| `src/parser.ts` — `parseExpressionStart` arm | **+20 lines** | probe, builds |
+| `src/extra/ast.ts` — `ASTBuilder` arm | ~6 lines | required: `tests/parser.js` serializes sources |
+| `src/parser.ts` — post-type `@lazy` refusal | ~3 lines | the memory-model refusal is the template |
+| `isReservedName` — one prefix | ~1 line | `closure/lower.ts:150` |
+| validation walk for a surviving `LazyExpression` | ~40–60 lines | `async/validate.ts` precedent |
+| **the transform** — scope walk, cells, guards, hoist, warnings | **~120–180 lines** | the real work |
+| fixtures | 8–12 files | `.ts` + `.json` per refusal; `.wat` pairs for the three shapes |
+
+**Total: ~200–300 lines of source across 5 files, plus fixtures.** Your ~150–250
+estimate was close; the delta is the validation walk and the `ASTBuilder` arm,
+both found by measurement rather than assumed.
+
+The probe establishes the cheapest part as fact: **the whole syntax surface —
+node, kind, factory, prefix arm — is 38 lines, and it left the compiler suite (309
+fixtures) and `tests/parser.js` green.**
+
+What keeps the number from being higher, each measured:
+
+- **no scheduler work** — a call is the launch; the two-launch probe emits no
+  scheduler import at all;
+- **no `Task<T>` work** — the user type exists (`std/assembly/task.ts:87`) with
+  the handle semantics the hoist needs;
+- **no std change** — nothing in `std/` participates;
+- **no codegen change** — the 113 `compileExpression` sites are untouched because
+  the rewrite is at the AST;
+- **no new analysis invented** — the scope/binding model exists
+  (`Scope`/`Binding`/`refs` in `closure/lower.ts`), needing only to be shared or
+  narrowed.
+
+What could push it higher: lifting reference-typed await results (separate work,
+`AS100`-gated today), and the read-but-never-awaited half of the warning if it is
+attempted outside the transform.
+
+---
+
+## 8. Recommendation
+
+**The grammar is clean; build it.** Measurement 1 was the gate and it passed: 38
+lines, suites green, positional disambiguation with no lookahead, no existing
+program changes meaning.
+
+Sequence, smallest irreversible step first:
+
+1. **Node + parser arm + position rule + post-type refusal + the validation
+   guard.** No semantics yet: `@lazy EXPR` parses, and any surviving node is a
+   *diagnostic*, not a crash. This must land alone, because the `assert(false)`
+   defaults (measured, §2) make every later bug a compiler crash with no message.
+2. **Shape A (sync) in the transform.** Cells, guards, reads. This is the entire
+   read-site machinery; B and C are that machinery plus one operator and one
+   hoist. Measure against the run-probes in §3 (`182`, `30`).
+3. **Shape B (`@lazy await f()`)** — adds the `await` inside the guard.
+4. **Shape C (`@lazy await spawn(f)`)** — adds the hoist and the `spawn` marker.
+5. **Warnings.** W1 with the erasure (two lines of lowering plus a message);
+   W2/W3 as one diagnostic.
+
+Decisions I would make now, with the measurements attached:
+
+- **`@lazy spawn(f)` with no await: the "deferred launch" reading, warned
+  conditionally** — see §8.1. It makes `@lazy await spawn(f)` the only escape and
+  collapses W2 into W3.
+- **Writes to a lazy binding: refuse.** A memo cell plus assignment has two
+  readings and no obvious winner.
+- **Reference-typed lazy-await: out of scope**, matching today's `AS100`.
+- **W1: warn, as ratified** — noting it lowers correctly, so a change of heart to
+  "refuse" is one line.
+
+### 8.1 The spec ambiguity that needs your ruling
+
+Two statements in the ratified design pull in opposite directions:
+
+> "spawn … ESCAPES `@lazy`'s deferral — you cannot defer a spawn, because spawn
+> means 'launch now.'"
+
+> "`@lazy spawn(f)` — allowed but pathological (deferred spawn, Task never
+> awaited, result discarded)"
+
+"Escapes always" makes `@lazy spawn(f)` a **launch now** with a useless
+annotation — in which case the warning should be *"spawn escapes `@lazy`; the
+deferral is nullified"*, i.e. W1's message, not W2's. "Deferred spawn" makes it a
+**launch at first read**, contradicting the first sentence.
+
+**Recommended reading: escape only when `spawn` is the operand of the `await`
+inside the `@lazy`.**
+
+- It is the only reading under which "deferred spawn" is true, and it gives one
+  rule with no special cases: *inside `@lazy`, `await spawn(x)` launches now;
+  anything else defers.*
+- It makes `@lazy spawn(f)` a real fifth form rather than a mistake — deferred
+  launch with an explicitly awaited handle:
+  `let t = @lazy spawn(f); … await t;` is deferred-start, awaited when you choose.
+- It makes W2 conditional ("the `Task` is never awaited") instead of
+  unconditional — exactly the text you gave it — and makes W2 and W3 the same
+  defect, so one diagnostic covers both.
+
+Under the alternative ("escapes always"), `@lazy spawn(f)` and `spawn(f)` are
+identical, the warning is W1's message, and there is no fifth form. Both are
+implementable in the same arm; the choice changes the warning text and the form
+table, not the cost.
+
+---
+
+## 9. What could not be measured read-only
+
+1. **A parking task resumed by a real host.** The settled path was run
+   (`go() = 30`, and v3's `go() = 3`); the suspend path was read as WAT and is
+   covered by `tests/async/runtime.js`, which I read but did not drive against
+   these probes.
+2. **Slot accounting under a real executor loop.** Completion/discard and
    release-on-completion were measured with a hand-bound table and a node
-   harness; a real host that resumes tasks could interleave differently.
-3. **The transform-order question in §5** (lazy before vs. after closure). It
-   depends on the transform's own output shape, which does not exist yet.
-4. **Whether `@lazy` on a local interacts with the existing
-   `variable-access-in-initializer` fixture** (`var a = (a = 4, 3)` is `TS2448`).
-   A lazy cell read inside its own initializer would be a new ordering hazard; I
-   did not construct it.
-5. **The engine's executor.** What the host does with a completion whose task
-   was abandoned is the engine's side; `docs/scheduler-contract.md` §4.7 speaks
-   to *lost* completions, not *unwanted* ones, and the Tension repo is out of
-   scope for this arc.
-6. **Cost of a new AST node** (the expression form, §6) — estimated from the
-   parser's shape, not measured.
+   harness; a host that resumes tasks could interleave differently.
+3. **A lazy binding read from a *different* function** via capture. The guard
+   inside an arrow body compiles (§3, Shape A), and the cells are ordinary
+   captured locals, but I did not build the cross-function probe.
+4. **`ASTBuilder`'s printed form for a `LazyExpression`.** The arm is required
+   (measured: it would `assert(false)`), but the exact serialization was not
+   written, so `tests/parser.js`'s expected shape for it is unmeasured.
+5. **The `--wasm` self-host path** with a new node kind: the transforms run inside
+   the compiled compiler too, and I measured only the JS host.
+6. **Cost of lifting reference-typed await results** — out of scope, and the
+   `AS100` gate means no probe exists.
+7. **The engine's executor**, and what the host does with a completion nobody
+   wants: `docs/scheduler-contract.md` §4.7 addresses *lost* completions, not
+   *unwanted* ones. Tension is out of scope for this arc.
 
 ---
 
-## 9. Method — exact commands
+## 10. Method — exact commands
 
 Environment: this machine, node v24.21.0, 2026-10-26, base `c3be16fc`, in
-`git worktree add --detach /tmp/spawn-probe origin/main` with `node_modules`
-symlinked from the primary checkout. The primary checkout was not modified; the
-worktree was discarded.
+`git worktree add --detach /tmp/lazy-probe origin/main` with `node_modules`
+symlinked. The primary checkout was not modified; every probe patch was reverted
+before the worktree was discarded.
 
-Compile a probe and read the WAT:
+**The parse probe** (§1, §2): `src/ast.ts` +18, `src/parser.ts` +20 — a
+`NodeKind.Lazy`, a `LazyExpression` class, a `Node.createLazyExpression` factory,
+and one `case Token.At:` in `parseExpressionStart` that reads `lazy` and parses
+its operand at `Precedence.UnaryPrefix`. `npm run build` rc=0;
+`npm run test:compiler -- --parallel` rc=0; `node tests/parser.js` rc=0.
+
+AST shapes were read with a dump script over `dist/assemblyscript.js` (signature
+is `parse(program, text, path, isEntry)`, not `(program, path, text)` — worth
+noting, it cost a wrong first dump).
+
+Compile / read the WAT / run:
 
 ```
-node bin/tensionscript.js probe.ts --textFile probe.wat --optimizeLevel 0 --shrinkLevel 0 --debug
-node bin/tensionscript.js probe.ts --textFile probe-O3.wat          # default -O3
+node bin/tensionscript.js probe.ts --noEmit
+node bin/tensionscript.js probe.ts --textFile probe.wat --debug -O0
+node /tmp/runwasm.mjs probe.wasm go
 ```
 
-Run a probe (imports stubbed except `scheduler::park`, which was never reached):
+Runtime probes: `r1` (memoization → `182`), `r2` (two launches then reads → `30`,
+no `scheduler` import in the WAT), `r3` (launched and never read → `30`: the task
+completed and was discarded).
 
-```
-node /tmp/runwasm.mjs probe.wasm f1 f2 …
-```
+The crash measurement (§2) is `return @lazy g();` with the node and arm in place
+and no lowering: `AssertionError` at `compiler.ts:3889`, exit code 2, no `ERROR`
+line.
 
-The `@lazy`-is-not-lazy measurement (§1) is `l1.ts` + `getTicks()` before any
-read — the answer `2` is the whole measurement.
-
-The warning-site trap (§4) is three probe patches to `compileExpressionStatement`,
-each reverted, each measured with `npm run test:compiler -- --parallel` against a
-green baseline:
-
-| variant | suite | warning fires |
-|---|---|---|
-| fresh `resolveExpression` on the statement's expression | 8 fixtures fail | yes |
-| read the already-compiled `this.currentType` | green (309 fixtures) | no — compiled as `void` |
-| resolve only the callee as an element (`isAsync`) | green | no — `isAsync` already false |
-
-The dropped-call site count is a source scan:
-`python3` over `tests/compiler/**/*.ts` matching a line-initial call to a name
-declared `async function` in the same file, ending in `;`.
-
-The lazy-cell lift (§5) is `x4.ts` — clean compile, with `State#get:done` /
-`State#get:v` present in the WAT.
-
----
-
-## 10. Recommendation
-
-1. **Correct the model first.** `@lazy` does not defer evaluation in this
-   compiler, and cannot be made to without new machinery (§1). Write that down
-   before designing on top of it — otherwise Phase A looks like a reuse and gets
-   estimated as one.
-
-2. **Phase A, declaration form, synchronous first.** `@lazy let t = EXPR` with a
-   sync `EXPR`. It is the smallest thing that makes "deferred, memoized" true,
-   it needs no new AST node, and it produces exactly the cell machinery Phase B's
-   hoist reuses.
-
-3. **Phase B, `spawn` as a marker (Option 1), not a primitive.** Measured, the
-   "primitive" already exists as the ordinary call; `spawn` is a marker whose
-   only job is to escape the deferral and to give the warning a subject. This
-   makes Phase B materially smaller than the brief assumes on infrastructure, and
-   larger only where it must be: the hoist and the read-site inlining.
-
-4. **Drop W1; implement W3; implement W2's cheap half.** W1 has no reachable
-   trigger in the declaration form and is better as a parse error if the
-   expression form ever exists. W3 is free today. W2's "never read" half is a
-   lookup the resolver already performs; its "read but never awaited" half needs
-   an await-context walk, so scope it separately.
-
-5. **Do not build the expression form (§6)** unless a concrete user need appears.
-   It costs a new node kind and makes one word mean two things.
-
-6. **Say the abandonment rule out loud in the docs:** a lazily-spawned task that
-   is never read completes and discards (measured), there is no cancellation
-   (contract), and a task that parks forever holds its slot (measured, `-28` on
-   the next launch). Users will hit that last case, and it is the one place where
-   "nobody awaits it" becomes a resource bug rather than a wasted result.
+The fixture/warning affordability count (§5) is a source scan over
+`tests/compiler/**/*.ts` for a line-initial call to a name declared
+`async function` in the same file, ending in `;` — one hit.
