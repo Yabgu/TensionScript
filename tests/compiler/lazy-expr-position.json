@@ -1,0 +1,8 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6397: '@lazy' expressions must be the initializer of a variable declaration.",
+    "TS6397: '@lazy' expressions must be the initializer of a variable declaration.",
+    "TS6397: '@lazy' expressions must be the initializer of a variable declaration."
+  ]
+}

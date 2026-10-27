@@ -1,0 +1,6 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6396: A '@lazy' decorator must precede the expression it defers, not follow a type."
+  ]
+}
