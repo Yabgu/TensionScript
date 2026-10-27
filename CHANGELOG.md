@@ -1,639 +1,94 @@
 # Changelog
 
-## Unreleased — `@lazy` in expression position (foundation)
+## Unreleased — `@lazy` in expression position (the arc)
 
-`@lazy EXPR` parses, and is refused where it cannot mean anything. **The
-lowering is not in this change**: a legal `@lazy EXPR` is evaluated eagerly today
-and says so (`TS6398`). Syntax and safety first, deferral second — because the
-compiler's expression dispatch ends in `assert(false)`, so a node that reaches it
-unhandled is a crash with no diagnostic at all (measured: `AssertionError` at
-`compiler.ts:3889`, exit code 2, no `ERROR` line).
+`@lazy` defers an expression's evaluation to the binding's first read and memoizes
+it. Three forms, and the arc that shipped them is closed here.
 
-`@lazy` now has **two meanings, one token**, and the carrier is what distinguishes
-them: on a global declaration it is the existing *ordering permission* (a
-`DecoratorFlags.Lazy` on the element, which lets the initializer be compiled as
-though it ran at the top of the file's start function); on an expression it is
-*deferral*, carried by a `LazyExpression` node. No dispatch site has to ask which
-one it is looking at — a `Global` and an `Expression` never occupy the same
-position in a switch.
+| Form | when `f` starts | when the await | never read |
+|---|---|---|---|
+| `@lazy f()` | first read | — (sync) | nothing: `f` is never called |
+| `@lazy await f()` | first read | first read | nothing: `f` is never called |
+| `@lazy await spawn(f())` | **the declaration** | first read | the task runs to completion, its value discarded |
 
-### Parsing
+### Two lowerings, because no single stage has both a type and a suspension
 
-- **`@lazy EXPR`** — a `Token.At` arm in `Parser#parseExpressionStart`, the single
+- **Sync** (`@lazy f()`): the compiler allocates two ordinary locals — the value
+  and a first-read flag — and emits the guard at each read
+  (`compileIdentifierExpression`). It can, because at compile time the type of an
+  unannotated initializer is known. Cost: the initializer is compiled once per
+  read *site*, so a binding read twice emits two guarded copies and the flag makes
+  only the first run. Visible in the emitted module; pinned in the `.wat` pairs.
+- **Awaited** (`@lazy await f()`): a rewrite (`src/lazy/lower.ts`, before the
+  closure and async transforms) turns the declaration into a flag, a cell, and
+  `if (!b$done) { b = await f(); b$done = true; }` before each statement that reads
+  the binding. Every piece is a shape the async transform already lowers, so the
+  parking, the lifting and the resume points are the existing machinery — not a
+  third state machine. `src/async/lower.ts` was not modified.
+- **Awaited + `spawn`**: the same rewrite with the call hoisted into a task cell at
+  the declaration, and the guard awaiting that cell. The only position in which
+  `spawn` escapes the deferral; `spawn` is a marker, not a function, and has no
+  runtime of its own.
+
+### Diagnostics
+
+- `TS6399` — a `@lazy await` binding with no declared type. The constraint is
+  **inherited** from the async machinery (a state field needs a syntactic type);
+  `let v = await f();` without `@lazy` is refused the same way. The workaround is
+  one annotation.
+- `TS6400` — the binding is read from a nested function (a capture moves the
+  storage; the memo cell is a state field).
+- `TS6401` — a statement-position `spawn`, whose Task is therefore discarded.
+- `TS6402` — `await @lazy f()`: the await performs the read immediately, so the
+  deferral is nullified. A refinement of the position rule's message, not a
+  relaxation; the shape still refuses. The distinction is by *immediate* parent —
+  `await (0 + @lazy f())` keeps the generic `TS6397`.
+- `TS6398` — retained, and now reached only where the lowering does not apply (a
+  binding the closure transform captured): the expression is evaluated eagerly and
+  the warning says so.
+
+### Parsing, and the two foundation refusals
+
+- **`@lazy EXPR`** — one `Token.At` arm in `Parser#parseExpressionStart`, the
   switch that dispatches every prefix operator. `@` had no reading in expression
-  position before this (it fell into that switch's `default:` and reported
-  `Expression expected`), so intercepting it cannot change what an existing
-  program means.
-- **Binds like `await`**, at `Precedence.UnaryPrefix`: `@lazy f() + 1` is
+  position before it (it fell into that switch's `default:` and reported
+  `Expression expected`), so intercepting it cannot change what an existing program
+  means. Binds like `await`, at `Precedence.UnaryPrefix`, so `@lazy f() + 1` is
   `(@lazy f()) + 1`.
-
-### Refusals
-
-- **A declaration initializer is the only legal position** (`TS6397`). Deferral
-  needs a name for the memo cell and the read-site guard; `g(@lazy f())` has no
-  read site to defer to. Enforced by accounting rather than by lookahead: every
-  node is recorded at creation, the legal one is struck off by
-  `parseVariableDeclaration`, and the remainder is reported when the file ends.
-- **`@lazy` as a type attribute** (`TS6396`). Measured before this: `let x: i32
-  @lazy = 5;` compiled clean, because the post-type loop accepts any decorator
-  that is not a memory model — a spelling that looks like it means something and
-  meant nothing. The check sits beside the memory-model refusal (`TS6392`).
-- **`@lazy await …`** (`AS100`, until the lowering). An `await` in the operand
-  needs the async transform, which cannot see through the wrapper. Measured before
-  this refusal: the file failed later with "Not implemented: this async body",
-  naming the enclosing function rather than the construct.
-
-### The eager stopgap (temporary)
-
-`TS6398` (warning) plus compiling the inner expression with the caller's
-contextual type and constraints. Deferral is a *when*, not a *what*: `@lazy EXPR`
-has the type of `EXPR`, so nothing is converted twice and inference is unchanged.
-The warning disappears with the lowering.
-
-### Closure transparency
-
-A `@lazy` operand is transparent to capture analysis (`closure/lower.ts`,
-`NodeKind.Lazy` in all three expression walks). Measured without it: a function
-that captures `x` and reads `x` inside `@lazy x` fails to build with
-`TS2304: Cannot find name 'x'` — the storage moved into the environment and the
-operand's read stayed a bare local.
-
-### Not in this change
-
-The lowering itself (`@lazy f()`, `@lazy await f()`, `@lazy await spawn(f)`), the
-`spawn` marker, and the unawaited-`Task` warning.
-
-## 0.10.0
-
-Completes the C-model interop arc: `@inline struct` value types, memory-model
-use-site overrides at every position, and the bootstrap self-compile. The C-layout
-foundation this builds on (`struct` / `@unmanaged struct`, `@managed struct`,
-`T[N]` inline arrays, `@abi.alias` + `abiNameOf`, `COPY_STRUCT`, C-compatible
-`sizeof`) shipped in 0.8.0 and 0.9.0 — see those sections below.
-
-**Minor.** Every addition is additive: a program that compiles on 0.9.0 compiles
-unchanged and emits the same output. `struct` remains `@unmanaged` by default,
-exactly as it already was; the 0.9.0 preview of a managed default stays cancelled.
-
-### `@inline struct` value types
-
-A record can be a **value**: bytes in locals, copied on assignment, passed by
-value, returned by value. Scalar and struct-reference fields.
-
-- Type kind + per-use refusals; SROA locals (`compileSroaLocal`), SROA parameters
-  (flattened signatures + source-to-WASM param mapping).
-- sret returns — free functions and instance methods — through a hidden
-  destination parameter on the shared call-temp stack. Constructors are excluded
-  (`sretDisabled`): they return the allocated `this`, not a value.
-- `@external` boundary: the caller materialises a temp and passes its **address**,
-  so an import is one `(param i32)` rather than one operand per field.
-- Export mirror: the host supplies the address and the prologue copies the fields
-  into SROA locals at entry.
-- **A single-field record is refused at every boundary.** The C/WASM tool
-  convention passes a one-scalar struct as the scalar itself while this compiler
-  passes a pointer; both are `(param i32)`, so the disagreement would be silent.
-
-### Memory-model use-site overrides (10.0a + 10.0b)
-
-A use may name the model it wants — `v: @inline Vec3` — while the declaration
-keeps its own. Part of the point is that the **template** decides storage and the
-**use** decides how this one value crosses.
-
-- Pre-type `@inline` / `@managed` / `@unmanaged` at parameter, local, field,
-  return type, `changetype` target, `Array<T>` element, and function-type
-  parameter/return positions. Type aliases are excluded: an alias is a spelling
-  for the declaration, not a use.
-- Diagnostics: **TS6390** (`@managed @unmanaged`), **TS6391** (`@inline
-  @managed`), **TS6392** (post-type spelling — this was previously accepted and
-  silently ignored), **TS6393** (only one memory-model decorator per use),
-  **TS6394** (provenance), **TS6395** (no address).
-- The free cell (`@managed` ↔ `@unmanaged`) with rooting — including the
-  cross-record `changetype` route, which was a pre-existing use-after-free.
-- The two boundary cells (`@inline` over a pointer declaration): import temp copy
-  and export byval prologue.
-- The three refused cells: `@managed` over `@unmanaged` (no GC header to trace)
-  and `@unmanaged`/`@managed` over `@inline` (no address to lend). A use cannot
-  confer what the source lacks; allocation is not a conversion.
-- Rooting invariant: rooting keys on what the value **is**, never on the model a
-  use names. A by-value operand is a temp address, not a GC reference, and is
-  never stacked.
-
-### Bootstrap self-compile
-
-`npm run bootstrap:*` stage 1 ran red on every tip in this fork — the compiler
-rejected its own source with 229 errors. It now compiles clean: **0 errors**,
-debug and release, and the `.wast` fixpoint is byte-identical at aggregate scope.
-
-- Diagnostic relaxation: a read of a global whose initializer is a compile-time
-  constant is no longer refused (the `used-before-declaration` check models an
-  initialization-order hazard that a constant does not have).
-- Split predicate for the constant-initializer test; accessors for the four
-  non-constant tables; CLI guard.
-- CLI/WASM harness: `applyInTreeTransforms`, shadow-stack sizing, host parity for
-  the compiler core's map reads.
-
-### Fixes
-
-- **`memoryModels` was `u8[]` receiving `i32` enum values** — an implicit
-  narrowing invisible to `tsc` and to esbuild, and rejected by TensionScript's own
-  compiler with `AS200`. It broke both Bootstrap gates on `main`. Typed `i32[]`
-  (PR #23). The self-compile gate is now recorded as mandatory before push and
-  before merge for any PR touching `src/`; the sibling audit found no remaining
-  `AS200` site.
-- **TS2322 for the `changetype` case is unified to TS6394** — one rule, one code,
-  wherever the provenance claim is written.
-
-### Memory-model use-site overrides — 10.0a
-
-A use may name the memory model it wants: `v: @inline Vec3`. The declaration
-keeps its own model, and the override applies to that use alone. Plain `struct`
-is unchanged — `@unmanaged` remains the default (the 0.9.0 flip to a managed
-default was cancelled; see `src/parser.ts`).
-
-**What lands**
-
-- **Pre-type decorators**, at every position that goes through the one type
-  parser: parameter, local, field, return type, `changetype` target, `Array<T>`
-  element, function-type parameter/return. Type aliases are excluded — an alias
-  is a spelling for the declaration, not a use.
-- **`@inline @managed` is refused** (`TS6391`), mirroring the existing
-  `@managed`/`@unmanaged` refusal. It used to be accepted silently and produced a
-  hybrid: the inline flag plus a GC allocation, so every value-typed path treated
-  a GC reference as a value.
-- **The post-type spelling is refused** (`TS6392`). `v: V @inline` compiled as a
-  plain pointer with the attribute dropped — accepted and ignored. `@abi.alias`
-  and every other post-type attribute are untouched.
-- **`changetype<@managed V>(u)` from an `@unmanaged` value is refused**
-  (`TS2322`, the assignment refusal's shape). The type-directed path already
-  refused the cell; `changetype` reinterpreted the pointer in silence, and the
-  collector would follow a reference with no header behind it.
-
-**The free cell, and the bug under it**
-
-`@managed` → `@unmanaged` is identity — both are one pointer to the same
-record. Measured: `let u: @unmanaged M = m` and a call to a `@unmanaged M`
-parameter already compile and already root, because the override does not change
-the resolved type, so the parameter is still managed.
-
-What was broken is the cross-record route. `g(changetype<U>(makeM()))` gives `g`
-an `@unmanaged` parameter, and the shadow stack rooted call operands by the
-*callee's parameter type* — so nothing rooted the temporary:
-
-```
-before:  call $makeM; call $g          ;; no frame, no slot, no store
-after:   frame, slot, store, call $g   ;; the managed→managed shape
-```
-
-**This closes a pre-existing use-after-free**, reachable since `changetype`
-existed: a collection inside `g`, or in anything it called, could reclaim the
-record while `g` held the pointer.
-
-**Output.** `npm test`: 1339 fixtures plus the new
-`interop/managed-to-unmanaged-operand`, 0 failures — every existing program
-emits byte-identical output. The `.wast` fixpoint is empty in both
-configurations. The only shape that changes is the one above.
-
-**Not in this release.** The `@external` boundary still reads the declaration's
-model and drops a use-site override (10.0b, below). `@inline → @managed` has no
-emitter (10.0c). And the root covers a direct operand: a managed temporary that
-round-trips through another call before reaching an unmanaged parameter is still
-unrooted.
-
-Version: **minor** — the parse surface is additive (pre-type decorators were a
-parse error at every position), and the two refusals only reject spellings that
-were silently meaningless.
-
-### Memory-model use-site overrides — 10.0b (the boundary)
-
-`v: @inline U` now means something at a boundary: **take a copy** of a record the
-declaration says to borrow. Four cells ship; three are refused by name.
-
-**The ten-cell matrix, auditable.** Three of the nine model pairs are identity
-(same model, or `@unmanaged` over `@managed`), three ship, three refuse:
-
-- **Ship — `@inline` over a pointer declaration** (`@managed` or `@unmanaged`).
-  Import: the guest fills a call-temp from the pointer, field by field, and the
-  host gets that temp's address. Export: the host supplies the value's address
-  and the prologue copies it into SROA locals at entry. The record's own model is
-  untouched; only the use takes a copy.
-- **Refuse — `@managed` over `@unmanaged`** (`TS6394`). An `@unmanaged` record is
-  a plain pointer: there is no GC header for the collector to trace. A use cannot
-  confer provenance. `changetype<@managed U>(u)` is the same claim and now
-  reports the same code (10.0a used `TS2322`).
-- **Refuse — `@unmanaged`/`@managed` over `@inline`** (`TS6395`). A value is one
-  local per field and has no address, so there is nothing to lend as a pointer
-  and nothing a header could sit in front of. On an export this would be worse
-  than useless: with the byval predicate off, `paramRefs` falls through to one
-  ref per field, which makes the record's field list the host ABI.
-
-The rule both refusals state: **a use cannot confer what the source lacks.**
-
-**The contract, stated.** `@inline` at a boundary is a copy — host writes
-afterwards do not reach the guest, and the guest's writes stay in its locals.
-`@unmanaged` is a borrow — the bytes are the caller's, live for the call, and
-neither side may retain the pointer past it (the adapter's rule 6 for the
-guest→host direction).
-
-**The rooting invariant.** Rooting keys on what the value *is* — the resolved
-type, i.e. the declaration's model — never on the model a use names. A use
-selects between copy, identity and refuse; it does not decide whether an object
-is collected. Concretely: `@unmanaged` over a `@managed` declaration still roots
-(10.0a's free cell), and a **by-value operand roots nothing**, because the operand
-is the temp's address on the call-temp stack, not a GC reference — stacking it
-would hand the collector a word with no header in front of it.
-
-**The memoization key** gains a `!mm:` segment listing one character per
-parameter, appended only when some parameter names a model. Without it,
-`f(v: @inline U)` and `g(v: @unmanaged U)` have the same parameter type, the
-same boundary flag and therefore the same `Signature` — measured, they emitted
-byte-identical bodies. With it they are distinct. Signatures that name no model
-produce exactly the key they produced before (42 301 keys dumped across the
-fixture corpus; 6 contain the segment, all from the new fixture).
-
-**Output.** `npm test` exit 0, `npm run check` exit 0, every existing fixture
-byte-identical — the override was inert before this release, and zero programs in
-the tree write one at a boundary. The new `memory-model-boundary-cells` fixture
-pins the four shapes and asserts the copy/borrow distinction at runtime; its
-same-model controls are measured byte-identical to the plain declarations.
-
-Version: **minor**, in the same unreleased cycle as 10.0a. No published program
-can contain a boundary override — before 10.0a the pre-type form was a parse
-error at every position, and 10.0a's own notes say the boundary drops the
-override.
-
-**Postscript — the `u8` regression, and the gate that caught it.** The first
-merge of 10.0b shipped a defect: the `memoryModels` array was typed `u8[]` while
-receiving `i32` enum values — an implicit narrowing invisible to `tsc` and to
-esbuild, and rejected by TensionScript's own compiler with
-`AS200: Conversion from type 'i32' to 'u8' requires an explicit cast`. It broke
-both Bootstrap gates on `main`. Fixed in PR #23 by typing the array `i32[]`
-(enum codes are `i32`; a cast at three sites would only move the mismatch
-somewhere a reader has to decode).
-
-`npm run check` and `npm test` both passed the broken tree, which is the point:
-**the self-compile gate (`npm run bootstrap:*`) is now recorded as mandatory
-before push and before merge for any PR touching `src/`.** The sibling audit that
-followed found no remaining `AS200` site in `src/` — the class is a 32-bit value
-(including enum members, plain and `const`) flowing into a sub-32-bit type
-without a cast, and `bootstrap:*` compiles all of `src/`, so a passing
-self-compile is stronger evidence than any grep.
-
-### Bootstrap self-compile: the compiler's own source now compiles
-
-`npm run bootstrap:*` stage 1 ran red on every tip in this fork: the compiler
-rejected its own source with 229 errors (212 `TS2448`, 17 `TS2322`). It now
-compiles clean — **0 errors**, debug and release.
-
-Three changes, all in compiler source:
-
-- **Diagnostic relaxation.** A read of a global whose initializer is a
-  compile-time constant is no longer refused. The `used before its declaration`
-  diagnostic models an initialization-order hazard; a constant has no operands
-  and so no order to observe. Non-constant initializers are still refused.
-- **A second predicate.** `Expression.evaluatesToConst` sees through `Assertion`
-  and numeric `UnaryPrefix` (minus `++`/`--`), so `<Index>-1` counts as the
-  constant it is. Deliberately **not** a widening of `compilesToConst`: that one
-  gates filling omitted arguments with their initializers, and widening it
-  removed the varargs stub in four fixtures — an output change for programs that
-  compile today.
-- **Accessors for the four non-constant tables.** `envInfoOf`, `creationEnvOf`,
-  `awaitSites` and `TypeRef.Funcref` became accessor functions over
-  null-initialized backing stores. A prelude hoist was measured and rejected: a
-  file's walk does not guarantee its globals compile before the function bodies
-  that read them.
-
-**The `@lazy` path is closed, both forms.** `@lazy` on a variable is a TypeScript
-syntax error (`TS1206`, plus an unsuppressible eslint parse error); on a class
-member it parses and lints but fails `npm run build` with `ReferenceError: lazy
-is not defined`. The scoping ratified a mechanism the toolchain rejects.
-
-**The CLI/WASM harness is complete, and the self-host fixpoint runs.** Stage 2
-of the self-host used to stop in the harness at three gaps; all three are
-closed:
-
-- **The in-tree transforms run inside the compiler.** `ClosureLowerTransform`
-  and `AsyncLowerTransform` used to be classes the CLI constructed and handed a
-  program. That is impossible when the compiler is WebAssembly — compiler
-  classes cross the boundary as opaque handles — so the pipeline moved to
-  `src/transforms.ts` and both hosts call it through one flat export,
-  `applyInTreeTransforms(program)`. No transform class and no AST is exposed;
-  the ordering (closures before async) is written once. Programs declare no
-  transform and never did: the passes are always on, which is why gating them
-  on `asconfig` was not the answer.
-- **The shadow stack is sized for the compiler's own source.** Stage 1 aborted
-  with `~stack_check`'s `stack overflow`: the compiler's own build needs
-  ≈34.2 KB of shadow stack (measured: 34,048 fails, 34,304 passes) and the
-  default is 32,768. All five `src/asconfig.json` targets now request 65,536.
-  The abort is a capacity limit, not a runaway recursion — the JS compiler
-  compiles the same source with exit 0.
-- **The transform sources are portable between hosts.** They had never been
-  compiled by this compiler. Making them so was 55 nullability sites, one
-  spread, one `Set#forEach`, `null`-as-a-type (and `null`-as-a-`usize` in two
-  ternaries), and 25 `Map#get` sites where AS aborts on a missing key and JS
-  answers `undefined` (`getMapEntry` in `src/util/collections.ts` names the
-  guarded read once). Mechanical throughout; all output-neutral.
-
-**Aggregate neutrality, now proven.** `npm run bootstrap` (debug and release)
-runs to completion and its final step — `git diff --no-index` of the two
-`.wast` files — is **empty**: the JS compiler's output and stage 2's output are
-byte-identical (debug `20154872…`, release `5b4b9a22…`). The ordering
-relaxation does not change codegen; this is not a release boundary.
-
-The fixpoint compiles one input — the compiler's own source. CI's Bootstrap job
-compiles **every fixture** with the self-hosted compiler, and that had never
-run either. Enabled, it exposed ten more sites of the same host difference:
-`Map#get` throws on a missing key under the wasm standard library and answers
-`undefined` under JS, and ten reads in the compiler core treat a miss as a
-legitimate answer (`Type.fixedArray`'s cache among them — upstream code, not
-this fork's). They now go through `getMapEntry`, and the fixture suite is green
-through the debug and the release bootstrap compiler, and through the
-cross-compile step.
-
-Neutrality for *user* programs is unchanged: `npm test` passes all 1339
-fixtures against their checked-in `.wat` byte for byte, and `npm run check` is
-green. Programs that previously failed to compile now compile — additive and
-backward-compatible. The compiler's own module grows with both passes: debug
-+326 KB, release +132 KB.
-
-Version: **minor** by the additive reading; the exact release (0.9.1, 0.10.0, or
-bundled with the `@inline struct` batch) is the user's decision.
-
-### `@inline struct` phase complete (scalar and struct-ref fields)
-
-The minimum viable value type is finished. What is in:
-
-- **Type kind + per-use refusals.** `@inline struct` declares, lays out as a C
-  record (`sizeof`/`offsetof`/`alignof`), and every use the phase does not
-  support refuses **by name with a reason** rather than compiling as a pointer.
-  The refuse cell is the point: a silent pointer would alias, and that is the bug
-  the value type exists to remove.
-- **SROA locals.** One WASM local per field, `local.get`/`local.set` for access,
-  copy on assignment and on declaration. No address, no aliasing, no collector
-  interaction.
-- **SROA parameters.** Field-list signatures; `wasmParamCountOf` /
-  `wasmParamStartOf` / `wasmParamCount` / `sourceIndexOf` are the only
-  source-to-WASM index translation; the callee binds one local per field and the
-  caller expands the argument in declaration order.
-- **Sret returns**, free functions and instance methods. The hidden destination
-  is the **first** WASM parameter (after `this`), so it is local 0 for a free
-  function and local 1 for an instance method. Slots come from a static
-  call-temp stack inside `[16, __data_end)` with align 16 — outside the region
-  `visitStack` scans, so a slot is never a GC root — with a per-call-frame bump
-  pointer and mark/restore, and a 4 KB limit whose overflow **aborts**.
-- **`@external` parameters.** The caller materialises a temp on that stack and
-  passes `(param i32)`; the host borrows it for the call (adapter rule 6). One
-  mark and one bump cover all of a call's temps.
-- **Export parameters.** The mirror: `(param i32)` is a byval pointer the **host**
-  supplies, and the callee copies each field into its SROA locals at entry. sret
-  writes to `(dest + offset)` at exit; an export reads from `(ptr + offset)` at
-  entry. Between them a value crosses the boundary as memory in both directions.
-- **Single-field structs.** Usable inside the module (the field-count question is
-  now answered by `Signature.fieldCountOf`, not by a WASM slot count). Refused at
-  both host boundaries, where the C/WASM tool convention passes a one-scalar
-  struct **as the scalar** while this compiler passes records as pointers — both
-  `(param i32)`, so the mismatch would be silent. The `@unmanaged` case has the
-  same divergence and is **kept**, because the engine's adapter reads records
-  through `guest_read(ptr, len)` and already depends on it; filed as
-  `unmanaged-single-field-tool-convention`.
-- **Refused, with the reason named:** `@external` return of an `@inline struct`
-  (an ABI version: the host would have to write into a slot it never allocated),
-  a function value, a virtual method, an export, a global, a field, `Array<T>`,
-  `T[N]`, `changetype`, inheritance, and returning anything but a local.
-- **Multi-value results: superseded.** The memory-only model means there is no
-  whole value in the pipeline, so there is nothing for multi-value to carry. The
-  design note's §8 framed this as "set aside"; it was a mischaracterisation, and
-  the correction is recorded in the note and in the commit record.
-
-Deferred, each filed with a reason:
-
-- **Closure capture** — needs inline nesting (the environment is a class, and a
-  value-typed field in one is nesting).
-- **`T[N]` fields** — deep SROA plus a `makeZero` arm for `FixedArray`.
-- **GC-reference fields** — the mixed representation needs write barriers in SROA.
-- **Inline nesting** — a nested value type needs one local per leaf, and inherits
-  the layout question for record-typed fields.
-- **Top-level statics** — a global is a pointer slot, so two values would alias.
-- **`@external` return** — an ABI version change; the last refused case.
-- **`--sretStackSize`** — the 4 KB limit is shared by sret and the `@external`
-  temp, so this is one limit for both; structurally identical to `stackSize`.
-- **`unmanaged-single-field-tool-convention`** — see above.
-- **`--create=false` in the test harness** — the boolean parser treats it as
-  `true`, so there is no "compare only" spelling; it regenerates fixtures from
-  whatever build is present.
-
-### `@inline struct` returns (sret)
-
-A function can now return an `@inline struct`. The value is **memory-only**:
-it has no WASM representation, so the call has no result. The caller allocates a
-slot and passes its address as the hidden **first** WASM parameter (after
-`this`); the callee writes the fields into it and returns nothing.
-
-`Signature` gains `hasHiddenDestParam`. `wasmParamCount()` counts the hidden
-slot, `wasmParamStartOf()` starts after it, `paramRefs` emits `i32` first, and
-`resultRefs` is `None`. `sourceIndexOf(0)` is `-1`; its doc comment states both
-meanings of `-1` (hidden slot / past-the-end), because the second is only
-unambiguous when the caller checks `wasmParamCount()` first.
-
-- **Callee:** `$sretDest` is WASM local 0 (1 for an instance method). `return p`
-  writes one `memory.store` per SROA field at `(dest + memoryOffset)`;
-  `return new P()` writes zeros to the slot. Returning anything but a local is
-  refused by name.
-- **Caller:** mark, allocate, guard, call, read, restore. The mark lives in a
-  **WASM local**, so slots are per-call-**frame**: recursion and nested calls
-  each get their own, and the slot stack is LIFO. Reads happen before the
-  restore.
-- **Two consumers, no third:** `f().x` loads one field; `let q: P = f()` copies
-  every field into `q`'s locals; a discarded call allocates and unwinds.
-
-The slot comes from a **4 KB static call-temp stack inside the data segment**
-(`[16, __data_end)`), which `visitStack` does not scan — it walks
-`[__stack_pointer, __heap_base)` — so a slot is never a GC root and the base is
-a compile-time constant. The bump pointer is a plain `i32` global; `compileVisitGlobals`
-visits only class-typed globals, so it adds no GC edge and no interrupt
-threshold. Overflow **aborts** with a message naming the limit; `--sretStackSize`
-(structurally identical to `stackSize`) is a follow-up.
-
-Two sites the shape needs:
-
-- **`operandsTostack`**: the hidden slot is operand 0 and belongs to no source
-  parameter. Treating `sourceIndexOf(-1)` as "past the end" stopped the walk
-  before the first managed argument and never spilled it. Fixed by checking
-  `wasmParamCount()` first and advancing both indices past the hidden slot;
-  measured load-bearing by reverting it (the fixture's WAT diff is the missing
-  spill).
-- **The override stub's temp local** is `1 + wasmParamCount()`. Defensive: a
-  virtual method returning an `@inline struct` is refused before the stub runs.
-
-**Instance methods.** `$sretDest` sits at WASM local **1** for an instance
-method (`this` is local 0), and the return path selects it from
-`signature.thisType`. Covered by `inline-struct-sret-instance.ts`: a method
-returning the two-field value, and a method that takes an `@inline struct` **and**
-returns one — WASM `(this, dest, p.a, p.b, k)` — so the shift and the parameter
-flattening are exercised together. Measured load-bearing: with the instance
-destination read from local 0, the stores land on `this`, the WAT comparison
-fails, and the fixture's runtime assert traps at instantiation.
-
-**The refusal's reach, measured.** Every non-consumer use was compiled as a
-probe before the read path was written: `g(f())` (AS100, passing an expression
-as a value argument), `f() + 1` (TS2365), `return f()` in an `i32` function
-(TS2322), `a[i] = f()` (AS100: `Array<P>` is a refused type argument, and the
-store reads the value as a whole), and `obj.field = f()` (AS100: inline nesting
-at the field declaration). A bare `f()` is the one use that compiles, and it is
-safe: it allocates the slot, passes its address as the hidden destination,
-calls, and unwinds — it never reads the slot as a value. It is therefore the
-**third consumer** of the memory-only model, alongside `f().x` and
-`let q: P = f()`. Pinned in `inline-struct-sret-refusal-reach.ts`.
-
-**Constructors are not sret.** A constructor returns `this`, not a value, so it
-must not acquire the hidden destination parameter even when its class is an
-`@inline struct` (its declared return type is the class type). `Signature` gains
-`sretDisabled`, set only for an inline-struct constructor and part of the
-memoization key so a method with the same parameter and return types still gets
-the hidden parameter. Without it, `new P()` emitted a constructor with an unused
-destination parameter and no result — invalid WebAssembly. Ordinary
-constructors keep their existing signature identity.
-
-This also makes the **inferred local forms** value-correct: `let p = new P()`
-and `let q = f()` enter SROA (per-field locals, not a heap pointer), and
-`let q = p` is intercepted by the local lookup before the whole-value refusal.
-The fixture counts calls to prove `let q = f()` emits one runtime call.
-
-**A refused field must not reach codegen.** A class field of `@inline struct`
-is inline nesting and is refused at its declaration, but the generated
-constructor still called `makeZero` for it and the field's getter/setter were
-still compiled — crashing Binaryen's debug-info writer on a local-index
-mismatch. Constructor field initialization now skips the refused field, and the
-field getter/setter paths return `unreachable` with the declaration diagnostic
-as the report.
-
-Refused, unchanged by name: an export and an `@external` import (an ABI
-version), a function value, a virtual method, returning anything but a local,
-and an `@inline struct` field of another record (inline nesting). Sret **does
-not** need multi-value results — the design note's §8 described a problem this
-model does not have, because the value never enters the pipeline.
-
-### `@inline struct` at the `@external` boundary (the argument temp)
-
-An `@external` function taking an `@inline struct` now receives the **address**
-of a temp the guest materialises, so the import is `(param i32)` — the same
-shape `@unmanaged` and `@managed` already crossed in. Before this, `paramRefs`
-expanded the record into one WASM parameter per field, so for a two-field record
-the import was `(param f32 f32)`: the record's field count, order and types
-became part of the host ABI, `layout_hash` did not move (it folds arena
-geometry), and the host could not notice — it never sees the record, only the
-flattened scalars.
-
-One shape, one contract, three record kinds:
-
-| Declaration | Import signature | What the host gets |
-|---|---|---|
-| `@unmanaged struct U` | `(param i32)` | a borrowed pointer to the caller's record |
-| `@managed struct M` | `(param i32)` | a borrowed reference |
-| `@inline struct V` | `(param i32)` | a borrowed pointer to the caller's temp |
-
-- **Signature.** `Signature.externalBoundary` (part of the memoization key)
-  makes `wasmParamSlotCountOf` answer 1 for a value-type parameter; `paramRefs`,
-  `wasmParamCount`, `wasmParamStartOf` and `sourceIndexOf` all ask it, so a
-  boundary signature and a guest signature cannot disagree. The slot's ref is
-  `i32` explicitly, not `toRef()` — an `@inline struct`'s ref is a GC heap type.
-- **Call site.** One mark per call (a WASM local), one bump by the sum of the
-  arguments' rounded sizes, one guard, one restore; each argument is stored into
-  `(base + mark + offset)` inside its own operand block, and the address is what
-  the call receives. Bumping by the total first is what lets a nested call in the
-  argument stream allocate above the whole block.
-- **Lifetime.** The restore follows the call node, because the host reads the
-  temp while the call runs. That is sound because the host *borrows*:
-  `tension_adapter.h` rule 6 (`:57-58`) — "An adapter never caches a pointer into
-  guest memory and never holds a slice across a call" — and its only guest-memory
-  path is `guest_read(ptr, dst, len)` (`:184`). An async host that retained the
-  pointer would need a different contract; the code would not change.
-- **Refused, still.** A non-local argument: the temp is filled by copying an
-  SROA local's fields, so a call result or a literal has nothing to copy. The
-  declaration-time refusal from the first commit of this phase remains as the
-  fallback for any boundary signature without the flag.
-
-The temp and sret share one stack, so the 4 KB limit and its abort are one
-limit; `--sretStackSize` covers both.
-
-### `@inline struct` on the export side, and single-field value types
-
-**Exports.** An export with an `@inline struct` parameter now declares
-`(param i32)` — a byval pointer the **host** supplies — and the callee copies
-each field into its SROA locals at entry. It used to declare `(param f32 f32)`
-for a two-field record: the field list as the host ABI, the same silent defect
-the `@external` side had, in the mirror direction. Refused first, then
-implemented, so the refusal remains as the fallback for a declaration that does
-not take the byval path.
-
-This is sret's mirror inside the same boundary:
-
-- sret **return**: the callee writes each field to `(dest + offset)` at exit.
-- export **parameter**: the callee reads each field from `(ptr + offset)` at entry.
-
-Both keep the value in memory on both sides, and the body runs on SROA locals
-either way. The single load per field is also what makes the copy by value: the
-caller's later mutation cannot be observed, and the body's writes land in its own
-locals (both asserted).
-
-**The pass-by-value model, all four positions:**
-
-| Position | Multi-field | Single-field |
-|---|---|---|
-| `@external` parameter | `(param i32)` — caller's temp | refused (convention mismatch) |
-| export parameter | `(param i32)` — host's byval pointer | refused (convention mismatch) |
-| `@external` return | refused (ABI version) | refused |
-| sret return (in-module) | `(dest, …)` | `(dest, …)` |
-
-**Single-field value types.** A one-field `@inline struct` parameter was
-unusable **anywhere**, not just at boundaries: the parameter binding, `paramRefs`
-and the argument expansion all decided "unpack into fields" from
-`wasmParamCountOf(...) > 1`, and a one-field record spends exactly one WASM slot.
-The binding therefore made an ordinary local of the record type (with `toRef()`'s
-GC heap type), `paramRefs` emitted that heap type, and the caller compiled the
-argument as a whole value — the refusal. All three sites now key on the type, and
-`Signature.fieldCountOf` answers the field count where that is what is meant, so
-"one field" and "one slot" stop being the same number.
-
-At a host boundary the single-field shape is **refused**, because the two
-conventions disagree invisibly: the C/WASM tool convention (BasicCABI) passes a
-struct whose only member is a scalar as that scalar, while this compiler passes
-records as pointers. Both are `(param i32)`, so a C module and this compiler link
-cleanly and then one reads an address as a number. Boundary detection now
-requires two or more fields, so the byval pointer and the temp apply exactly
-where the conventions agree.
-
-### `@inline struct` pass-by-value (SROA parameters)
-
-A function parameter of `@inline struct` type now passes by value. The source
-parameter becomes one WASM local per field in the callee; the call site expands
-the argument into one operand per field, in declaration order.
-
-Source parameter `i` is no longer WASM parameter `i`: for
-`(p: P{2}, q: i32, r: P{2})` the WASM operands are `(p.x, p.y, q, r.x, r.y)`.
-`Signature` gains `wasmParamCountOf` / `wasmParamStartOf` / `wasmParamCount` /
-`sourceIndexOf`, and they are the only place that translation happens.
-
-Two sites that are easy to get wrong, both now covered by fixtures:
-
-- **`getNonParameterLocalTypes`** must use the *WASM* parameter count for
-  `numFixed`. With the source count, a parameter's trailing field locals land in
-  the "additional locals" list, one extra local is declared, and every body local
-  after it — the closure environment included — shifts one slot, silently.
-- **`operandsTostack`** asserted the source-arity relationship that flattening
-  breaks, and walked parameter types by operand index. It now maps through
-  `sourceIndexOf`.
-
-Arity *checks* stay source-arity (`maximum` is how many arguments the user
-wrote); only operand emission is flattened.
-
-Refused, unchanged: `@inline struct` as a top-level value and as a field.
-(`@inline struct` as a **return** is implemented — see the sret section above.)
-
-
-Developer-facing: `npm test` now runs the lint step via `pretest`; a fresh
-clone without a build fails at `pretest` naming the generated file. Build
-first (`npm run build`) as before — the requirement is unchanged, the error
-is clearer.
+- **`TS6396`** — `@lazy` after a type (`let x: i32 @lazy = 5;`). Measured before
+  the refusal existed: that compiled clean and meant nothing, because the post-type
+  loop accepts any decorator that is not a memory model. Same trap `TS6392` closed
+  for `V @inline`, refused in the same place.
+- **`TS6397`** — `@lazy` outside a declaration initializer root. Deferral needs a
+  name for the memo cell and the read-site guard; `g(@lazy f())` has no read site
+  to defer to. Enforced by accounting rather than lookahead: every node is recorded
+  at creation, the legal one is struck off by `parseVariableDeclaration`, and the
+  remainder is reported when the file ends.
+- **Closure transparency** — a `@lazy` operand is walked by all three of
+  `closure/lower.ts`'s expression walks. Measured without them: a function that
+  captures `x` and reads `x` inside `@lazy x` failed to build with
+  `TS2304: Cannot find name 'x'`.
+
+### `@lazy` has two meanings, one token
+
+On a **global declaration** it is the pre-existing *ordering permission*
+(`DecoratorFlags.Lazy`: the initializer is compiled as though it ran at the top of
+the file's start function). On an **expression** it is *deferral*. The carrier
+distinguishes them — a `Global` wears a flag, an expression wears a
+`LazyExpression` node — so no dispatch site has to ask which one it is looking at.
+
+### Filed, not fixed
+
+- **`lazy-await-type-inference`** — lift `TS6399`. Needs a post-resolution
+  transform hook (none exists) or return-type inference for calls. Medium.
+- **`w3-await-context-walk`** — the weaker half of the unawaited-`spawn` warning
+  (`let t = spawn(f)` never awaited). Small-to-medium.
+- **`lazy-captured-binding-deferred`** — a captured `@lazy` binding takes the eager
+  path with `TS6398`. Small.
+
+See `docs/session-findings.md` for each with its size and what would unblock it.
+
+---
 
 ## Unreleased — async test cleanup (the 50cceb36 debt)
 
