@@ -197,6 +197,26 @@ export class Parser extends DiagnosticEmitter {
   // TODO: Remove when multi-value feature will enable by default.
   /** Compiler options. */
   options: Options | null = null;
+
+  /**
+   * Every `@lazy` expression created while parsing the current file that has not
+   * turned out to be a declaration's initializer root.
+   *
+   * The position rule -- a `LazyExpression` is legal only as the root of a
+   * variable declaration's initializer -- cannot be a grammar rule, because the
+   * parser builds the node before it knows what encloses it. So every node is
+   * recorded at creation, the legal ones are struck off by
+   * {@link parseVariableDeclaration} when it sees one as its initializer, and
+   * whatever remains when the file ends is reported (`TS6397`) in
+   * {@link parseFile}.
+   *
+   * This is a walk over the parser's own creations rather than over the finished
+   * tree, and it is therefore exact: `parseLazyExpression` is the only site that
+   * creates the node, so no `@lazy` spelling can miss the accounting and no
+   * expression kind has to be enumerated by hand.
+   */
+  private unplacedLazyExpressions: Set<LazyExpression> | null = null;
+
   /** Constructs a new parser. */
   constructor(
     diagnostics: DiagnosticMessage[] | null = null,
@@ -266,6 +286,20 @@ export class Parser extends DiagnosticEmitter {
         statements.push(statement);
       } else {
         this.skipStatement(tn);
+      }
+    }
+
+    // Whatever `@lazy` expression was not struck off as a declaration's
+    // initializer root is in a position the feature cannot serve: there is no
+    // name to defer to. Reported here, once per node, in source order.
+    let unplaced = this.unplacedLazyExpressions;
+    this.unplacedLazyExpressions = null;
+    if (unplaced != null) {
+      for (let _values = Set_values(unplaced), i = 0, k = _values.length; i < k; ++i) {
+        this.error(
+          DiagnosticCode._lazy_expressions_must_be_the_initializer_of_a_variable_declaration,
+          unchecked(_values[i]).range
+        );
       }
     }
   }
@@ -1304,6 +1338,23 @@ export class Parser extends DiagnosticEmitter {
       }
       initializer = this.parseExpression(tn, Precedence.Comma + 1);
       if (!initializer) return null;
+      // A `@lazy` expression here is the one legal placement: this declaration
+      // supplies the name the memo cell and the read-site guard hang on.
+      if (initializer.kind == NodeKind.Lazy) {
+        let unplaced = this.unplacedLazyExpressions;
+        if (unplaced != null) unplaced.delete(<LazyExpression>initializer);
+        // A `@lazy` that *awaits* cannot be evaluated eagerly, which is the
+        // only reading this foundation can offer: its `await` needs the async
+        // lowering, and that transform does not see through the wrapper. Refused
+        // here, by name, rather than left to fail later with a message about the
+        // enclosing async body.
+        if ((<LazyExpression>initializer).expression.kind == NodeKind.Await) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            initializer.range, "a '@lazy' expression that awaits (the lazy lowering)"
+          );
+        }
+      }
       if (flags & CommonFlags.DefinitelyAssigned) {
         this.error(
           DiagnosticCode.Declarations_with_initializers_cannot_also_have_definite_assignment_assertions,
@@ -4640,7 +4691,14 @@ export class Parser extends DiagnosticEmitter {
     }
     let expression = this.parseExpression(tn, Precedence.UnaryPrefix);
     if (!expression) return null;
-    return Node.createLazyExpression(expression, tn.range(startPos, tn.pos));
+    let ret = Node.createLazyExpression(expression, tn.range(startPos, tn.pos));
+    let unplaced = this.unplacedLazyExpressions;
+    if (unplaced == null) {
+      unplaced = new Set();
+      this.unplacedLazyExpressions = unplaced;
+    }
+    unplaced.add(ret);
+    return ret;
   }
 
   parseExpression(
