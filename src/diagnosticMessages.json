@@ -222,5 +222,11 @@
   "A 'spawn' produces a Task; this one is never awaited, so the task's result is discarded.": 6401,
   "An 'await' forces an immediate read of '@lazy', so the deferral is nullified; drop the '@lazy', or remove the 'await'.": 6402,
   "An enum underlying type must be one of i8, u8, i16, u16, i32 or u32, not '{0}'.": 6403,
-  "Enum member '{0}' does not fit the underlying type '{1}'.": 6404
+  "Enum member '{0}' does not fit the underlying type '{1}'.": 6404,
+  "'@abi.align' requires a single integer literal argument; the alignment is a compile-time constant, so a computed value cannot be read where the layout is decided.": 6405,
+  "'@abi.align({0})': the alignment must be at least 1.": 6406,
+  "'@abi.align({0})': the alignment must be a power of two.": 6407,
+  "'@abi.align({0})' is less than the field type's natural alignment ({1}); asking for less is a lie, so it is refused rather than silently ignored.": 6408,
+  "'@abi.align({0})' is too large; the maximum is {1}.": 6409,
+  "Alignment is a property of the field, not its type. Place '@abi.align(N)' on the field declaration.": 6410
 }

@@ -1,0 +1,7 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6410: Alignment is a property of the field, not its type. Place '@abi.align(N)' on the field declaration.",
+    "1 parse error(s)"
+  ]
+}

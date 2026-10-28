@@ -53,6 +53,7 @@ import {
   FunctionExpression,
   LazyExpression,
   IdentifierExpression,
+  PropertyAccessExpression,
   StringLiteralExpression,
 
   Statement,
@@ -167,6 +168,19 @@ function isLazyDecorator(decorator: DecoratorNode): bool {
   let name = decorator.name;
   return name.kind == NodeKind.Identifier
     && (<IdentifierExpression>name).text == "lazy";
+}
+
+/** Whether a decorator is the `@abi.align` spelling, matched by dotted name. */
+function isAbiAlignDecorator(attribute: DecoratorNode): bool {
+  let name = attribute.name;
+  if (name.kind != NodeKind.PropertyAccess) return false;
+  let propertyAccess = <PropertyAccessExpression>name;
+  let expression = propertyAccess.expression;
+  if (expression.kind != NodeKind.Identifier) return false;
+  return (
+    (<IdentifierExpression>expression).text == "abi" &&
+    propertyAccess.property.text == "align"
+  );
 }
 
 /** Whether two models are the `@inline` + `@managed` contradiction. */
@@ -1078,6 +1092,18 @@ export class Parser extends DiagnosticEmitter {
       if (isLazyDecorator(attribute)) {
         this.error(
           DiagnosticCode.A_lazy_decorator_must_precede_the_expression_it_defers_not_follow_a_type,
+          attribute.range
+        );
+        continue;
+      }
+      // `@abi.align(N)` forces the alignment of the **slot a field occupies**,
+      // so it belongs on the field declaration. After a type it would sit on
+      // the type, which travels into parameters, locals and return types --
+      // positions with no storage to place -- and would be silently ignored
+      // there. Same trap as the two refusals above, so the same shape.
+      if (isAbiAlignDecorator(attribute)) {
+        this.error(
+          DiagnosticCode.Alignment_is_a_property_of_the_field_not_its_type_Place_abi_align_N_on_the_field_declaration,
           attribute.range
         );
         continue;

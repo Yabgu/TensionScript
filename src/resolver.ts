@@ -74,6 +74,7 @@ import {
   BinaryExpression,
   ThisExpression,
   SuperExpression,
+  DecoratorNode,
   CommaExpression,
   InstanceOfExpression,
   TernaryExpression,
@@ -122,6 +123,35 @@ export const enum ReportMode {
   Report,
   /** Swallow errors. */
   Swallow
+}
+
+/**
+ * Whether an attribute is `@abi.align`, matched by its exact dotted spelling.
+ *
+ * Same shape as `isAbiAliasAttribute` (`builtins.ts`): the `abi` name is not a
+ * resolved namespace, it is one attribute whose node is a property access. A
+ * bare `@align` is somebody else's decorator and does not match.
+ */
+function isAbiAlignDecorator(attribute: DecoratorNode): bool {
+  let name = attribute.name;
+  if (name.kind != NodeKind.PropertyAccess) return false;
+  let propertyAccess = <PropertyAccessExpression>name;
+  let expression = propertyAccess.expression;
+  if (expression.kind != NodeKind.Identifier) return false;
+  return (
+    (<IdentifierExpression>expression).text == "abi" &&
+    propertyAccess.property.text == "align"
+  );
+}
+
+/** The `@abi.align(N)` decorator among a field's decorators, or `null`. */
+function abiAlignDecoratorOf(decorators: DecoratorNode[] | null): DecoratorNode | null {
+  if (!decorators) return null;
+  for (let i = 0, k = decorators.length; i < k; ++i) {
+    let decorator = decorators[i];
+    if (isAbiAlignDecorator(decorator)) return decorator;
+  }
+  return null;
 }
 
 /** Whether a type can back an enum's storage: a 32-bit or narrower integer scalar, nothing else. */
@@ -4070,9 +4100,99 @@ export class Resolver extends DiagnosticEmitter {
                   // both crashed on 24 and over-aligned a 16-byte array to 16,
                   // putting `arr` at 16 in `{a:i32; arr:f32[4]; b:i32}` and the
                   // record at 36 instead of 24.
-                  let alignLog2 = inlineFieldClass != null
+                  let naturalAlignLog2 = inlineFieldClass != null
                     ? inlineFieldClass.alignLog2
                     : fieldType.alignLog2;
+                  let alignLog2 = naturalAlignLog2;
+                  // === `@abi.align(N)` — field-position alignment ==========
+                  // The attribute is read **here**, from the field declaration's
+                  // own decorators, not from a per-field wrapper `Type`: types are
+                  // interned per `(prototype, typeArguments)` and shared by every
+                  // use, so an alignment cannot live there (`ast.ts`, the
+                  // memory-model override note) — and `@abi.alias` already reads
+                  // its attribute from the declaration for the same reason
+                  // (`builtins.ts` `builtin_abiNameOf`). Reading it at this one
+                  // site is what makes the outer inherit: `classAlignLog2` below
+                  // is a running max, so a raised field alignment raises the
+                  // record's alignment, and the extent round-up does the rest.
+                  //
+                  // The **prefix** spelling (`@abi.align(16) b: u32`) is the only
+                  // one that reaches here. The post-type spelling is refused by
+                  // name in the parser (`parser.ts`, the post-type attribute
+                  // loop), because a type attribute travels into parameters,
+                  // locals and return types where there is no slot to align.
+                  //
+                  // All three models take this path — `@unmanaged`, `@managed`
+                  // and `@inline`. For an `@inline` record the read is not
+                  // decorative: its `alignLog2` is exactly what
+                  // `inlineFieldClass.alignLog2` above consumes when the value is
+                  // nested into a pointer-layout record (measured: `{x: f64}`
+                  // value → nested field at 8), so raising it is what lets a
+                  // value type carry the alignment its C twin has.
+                  let alignDecorator = abiAlignDecoratorOf(assert(boundPrototype.fieldDeclaration).decorators);
+                  if (alignDecorator) {
+                    let args = alignDecorator.args;
+                    let requested: i64 = i64_zero;
+                    let wellFormed = false;
+                    if (args && args.length == 1 && args[0].isLiteralKind(LiteralKind.Integer)) {
+                      requested = (<IntegerLiteralExpression>args[0]).value;
+                      wellFormed = true;
+                    }
+                    // Every refusal below **recovers to the natural alignment**
+                    // and keeps the field. Dropping the field would turn one
+                    // mistake into a cascade -- "Type has no property 'b'" at
+                    // every use of it -- and the first error already named the
+                    // defect.
+                    if (!wellFormed) {
+                      this.error(
+                        DiagnosticCode._abi_align_requires_a_single_integer_literal_argument_the_alignment_is_a_compile_time_constant_so_a_computed_value_cannot_be_read_where_the_layout_is_decided,
+                        alignDecorator.range
+                      );
+                    } else if (i64_lt(requested, i64_one)) {
+                      this.error(
+                        DiagnosticCode._abi_align_0_the_alignment_must_be_at_least_1,
+                        alignDecorator.range, requested.toString()
+                      );
+                    } else if (
+                      // `1 << log2` has to stay inside an i32 mask below, so the
+                      // alignment has to fit one. 2^30 is far past any ABI need
+                      // and is the last power of two whose mask arithmetic holds.
+                      // Bounded before the low word is taken, so every check
+                      // after it is i32 arithmetic the `.dts` typecheck accepts
+                      // (`i64` is opaque there) and cannot be fooled by a value
+                      // whose low word happens to be small.
+                      i64_gt(requested, i64_new(0x40000000, 0))
+                    ) {
+                      this.error(
+                        DiagnosticCode._abi_align_0_is_too_large_the_maximum_is_1,
+                        alignDecorator.range, requested.toString(), "1073741824"
+                      );
+                    } else {
+                      let requestedI32 = i64_low(requested);
+                      if ((requestedI32 & (requestedI32 - 1)) != 0) {
+                        this.error(
+                          DiagnosticCode._abi_align_0_the_alignment_must_be_a_power_of_two,
+                          alignDecorator.range, requested.toString()
+                        );
+                      } else {
+                        let naturalAlign: i32 = 1 << naturalAlignLog2;
+                        if (requestedI32 < naturalAlign) {
+                          this.error(
+                            DiagnosticCode._abi_align_0_is_less_than_the_field_type_s_natural_alignment_1_asking_for_less_is_a_lie_so_it_is_refused_rather_than_silently_ignored,
+                            alignDecorator.range, requested.toString(), naturalAlign.toString()
+                          );
+                        } else {
+                          let overridden: i32 = 0;
+                          let remaining: i32 = requestedI32;
+                          while (remaining > 1) {
+                            remaining >>= 1;
+                            ++overridden;
+                          }
+                          alignLog2 = overridden;
+                        }
+                      }
+                    }
+                  }
                   assert(alignLog2 >= 0);
                   if (alignLog2 > classAlignLog2) classAlignLog2 = alignLog2;
                   let mask = (1 << alignLog2) - 1;

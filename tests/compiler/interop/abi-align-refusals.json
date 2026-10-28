@@ -1,0 +1,10 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6407: '@abi.align(3)': the alignment must be a power of two.",
+    "TS6406: '@abi.align(0)': the alignment must be at least 1.",
+    "TS6408: '@abi.align(2)' is less than the field type's natural alignment (4); asking for less is a lie, so it is refused rather than silently ignored.",
+    "TS6405: '@abi.align' requires a single integer literal argument; the alignment is a compile-time constant, so a computed value cannot be read where the layout is decided.",
+    "4 compile error(s)"
+  ]
+}
