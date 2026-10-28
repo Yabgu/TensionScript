@@ -13,7 +13,12 @@
 //           unmanaged layout, so that half-fix fails here.
 //   fixed:   the same layout as `@unmanaged class`, identical to the byte.
 
-struct Record_ {
+// `@unmanaged`, spelled out. This fixture is about the *borrowed* record: a
+// wire type reached through a pointer, which is what `changetype<Record_>(ptr)`
+// below needs. Since the struct-default flip a bare `struct` is a value with no
+// address, so the storage model is written down — and the `.wat` is then
+// byte-identical to the pre-flip snapshot, which is the migration's proof.
+@unmanaged struct Record_ {
   a: i32;   // 0
   b: f64;   // 8 (8-aligned, so 4 bytes of interior padding after `a`)
   c: i32;   // 16 -> 20, rounded to the record's alignment (8) -> 24

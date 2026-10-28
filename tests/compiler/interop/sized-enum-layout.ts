@@ -106,7 +106,12 @@ assert(sizeof<GcRec>() == 1);
   assert(load<u8>(changetype<usize>(r) + 3) == 1);
 }
 
-// --- SROA: an `@inline` struct with an enum field is a narrow local -------
+// --- SROA: a plain `struct` with an enum field is a narrow local ----------
+// This block used to be labelled SROA while measuring `struct Value`, which was
+// a *pointer* record — it allocated and read through accessors. Since the
+// struct-default flip a plain `struct` is the value type, so the label is now
+// what the code does: `new Value()` emits no allocation, the five `Value#…`
+// symbols are gone from the `.wat`, and the two fields are locals.
 {
   let v: Value = new Value();
   v.tag = 7;

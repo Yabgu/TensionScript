@@ -1,6 +1,14 @@
 # The default flip — plain `struct` becomes a value
 
-Today `struct Foo { … }` is `@unmanaged class Foo { … }`, exactly: the parser
+> **Landed.** Implemented in PR #38 (`feat/struct-default-flip`, commits
+> `06240fa1` and `335c3936`): `src/parser.ts` prepends `@inline` to the injected
+> `@unmanaged`, and the nine plain-struct declarations are migrated. This
+> document is the measurement *before* the change, kept as the record of what it
+> cost: its "under the flip" columns are predictions, and the two that were wrong
+> are noted in §0's corrections. The closure-capture work it defers is still
+> deferred (`closure-capture-of-value`).
+
+Before the flip, `struct Foo { … }` was `@unmanaged class Foo { … }`, exactly: the parser
 injects the decorator (`parser.ts:531`, `withUnmanaged` at `:2098`) so the
 resolver and every layout rule see one form. The ratified design makes plain
 `struct` an **inline value** instead, and demotes the explicit spellings to

@@ -1,3 +1,4 @@
+@inline
 @unmanaged
 class Borrowed {
   x: f32;
