@@ -459,6 +459,16 @@ hole breaks nothing.
 
 ## 5. The default question (item 5)
 
+> **Historical (pre-flip).** This section describes the state before the
+> struct-default flip. After
+> the struct-default flip ([`struct-default-scope.md`](struct-default-scope.md),
+> landed in #38) a plain `struct` is **inline by default** — a value with SROA
+> locals and copy semantics — and `@unmanaged struct` is the explicit pointer
+> opt-in. The measurements below are kept because they are what the question was
+> decided on, not because they still hold: `struct Plain { … }` now emits **no**
+> allocation, and the `tlsf/__alloc` in the trace below is the pointer path a
+> bare `struct` no longer takes.
+
 ### 5.1 Measured: plain `struct` is `@unmanaged`
 
 The measurement, not the reading:

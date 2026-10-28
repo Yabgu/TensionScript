@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased — breaking: plain `struct` is inline by default
+
+**Breaking: a bare `struct` is now a value.** `struct Foo { … }` declares a
+C-layout record whose bytes live **inline** — SROA locals, copy on assignment,
+passed by value, no address. Before this change it was `@unmanaged class Foo`,
+i.e. a 4-byte pointer. The parser prepends `@inline` to the `@unmanaged` it was
+already injecting, so the two decorators still describe one node and no second
+code path appears.
+
+- **`@unmanaged struct`** is the explicit pointer opt-in: 4 bytes, aliasing on
+  assignment, addressable through `changetype`. Unchanged.
+- **`@managed struct`** is the GC-owned reference. Unchanged.
+- **`@inline struct`** is a **silent synonym** for a bare `struct` — the same two
+  injected decorators, so the same declaration. No deprecation warning: this tree
+  deleted TS6385 when its own flip was cancelled rather than keep a warning about
+  a redundant spelling.
+
+**Migration.** Any declaration relying on a plain `struct`'s pointer semantics adds
+`@unmanaged`, and its `.wat` is then **byte-identical** to the pre-flip version —
+measured on `interop/struct.ts`, whose three `changetype<Record_>` entry points
+are exactly that case. `changetype<PlainStruct>` refuses by name when the record is
+a value, and the message names `@unmanaged` as the intended tool.
+
+**What this costs, stated plainly.** Capturing a plain struct in a closure used to
+compile and *silently alias* — the environment class held the 4-byte pointer, so a
+write after the capture was visible through the closure (measured: `997` where a
+copy gives `57`). It is now **refused**: the environment would have to hold the
+value inline in the heap, which is the deferred inline-in-heap case
+(`closure-capture-of-value`). A compile error replaces a silently wrong value.
+`@unmanaged` capture still works and still aliases, because that is what a pointer
+means.
+
+**The engine does not move.** All 37 struct declarations in the Tension engine's
+guest sources are explicit (35 `@unmanaged`, 2 `@managed`, 0 plain), and the whole
+200,098-byte framework guest compiles **byte-identical** — `.wasm` and `.wat`,
+`cmp` clean. `layout_hash` is engine-side and not verifiable from this repository;
+what is verified is the premise it depends on.
+
+Scoping and measurements: [`docs/struct-default-scope.md`](docs/struct-default-scope.md).
+Fixtures: `interop/struct-default-flip` (the four cells, including copy and
+by-value) and `interop/struct-default-refusals` (`changetype`, closure capture).
+
 ## Unreleased — fork posture
 
 **`docs/fork-posture.md`** — the fork's philosophical close, in one page. Seven
