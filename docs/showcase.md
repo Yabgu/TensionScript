@@ -19,6 +19,12 @@ padding, `offsetof` reporting the field's byte offset. `@abi.alias` gives a fiel
 the *C* name it has on the wire while keeping the TensionScript name, and
 `abiNameOf` reads that name back.
 
+**Storage is explicit at every declaration.** A bare `struct` is a *value* — the
+bytes live in the variable, with copy-on-assignment and no address — so a record
+the host reaches through a pointer says `@unmanaged`, and a GC-owned record says
+`@managed`. `@inline struct` is the same declaration as a bare `struct` and exists
+as a synonym for code that reads better saying so.
+
 ```ts
 @unmanaged struct Vertex {
   @abi.alias("px") x: f32;
@@ -54,10 +60,14 @@ Semantics worth knowing:
 
 Refused / limitations:
 
-- **A struct-typed field is a reference, not inline.** `@unmanaged struct Outer {
-  tag: u8; inner: Inner; }` with a 16-byte `Inner` is **8** bytes
-  (`1 + 3 pad + 4 pointer`), measured. Inline nesting of a record inside another
-  is deferred (see §9).
+- **A `@unmanaged`-typed field is a reference, not inline.** `@unmanaged struct
+  Outer { tag: u8; inner: Inner; }` with a 16-byte `@unmanaged Inner` is **8**
+  bytes (`1 + 3 pad + 4 pointer`), measured.
+- **A plain-struct-typed field is inline**, since the default flip: the same
+  `Outer` with a plain 16-byte `Inner` is **20** bytes (`1 + 3 pad + 16`),
+  measured. The two spellings differ in the *field*, not the outer — which is why
+  storage is always written down at the field that matters. Inline nesting of an
+  `@inline` value inside an **`@inline`** value is still deferred (see §9).
 - `T[N]` of a *scalar* does inline (`u8[3]` is three bytes); `T[N]` of a record
   is deferred.
 
