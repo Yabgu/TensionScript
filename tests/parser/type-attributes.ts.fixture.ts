@@ -9,6 +9,7 @@ class NewLine {
   @belongsToSecond
   second: i32;
 }
+@inline
 @unmanaged
 class Mixed {
   withAlias: u64 @abi.alias("aligned");
