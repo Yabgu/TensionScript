@@ -491,13 +491,30 @@ export class Parser extends DiagnosticEmitter {
         break;
       }
       case Token.Struct: {
-        // `struct Name { … }` is `@unmanaged class Name { … }`, exactly:
-        // the keyword injects the same decorator the explicit spelling
-        // produces, so the resolver and every layout rule see one form.
-        // There is no second code path and no 0.8.0 semantic difference.
+        // `struct Name { … }` is a **value**: a C-layout record whose bytes are
+        // stored inline (`docs/struct-default-scope.md`). The keyword injects
+        // what the author would have written, so the resolver and every layout
+        // rule see one form and there is no second code path:
+        //
+        //   struct Name            -> `@inline @unmanaged class Name`
+        //   @unmanaged struct Name -> `@unmanaged class Name`   (a pointer)
+        //   @managed struct Name   -> `@managed class Name`     (a GC reference)
+        //   @inline struct Name    -> `@inline @unmanaged class Name` — identical
+        //                             to the plain form, and a silent synonym.
+        //
+        // **Both decorators, and the order matters.** `@unmanaged` is what gives
+        // the record its layout — `resolver.ts` selects the C layout, the
+        // `alignLog2` accumulation and the extent round-up on it, and
+        // `sizeof`/`alignof` read the result. `@inline` is what gives it value
+        // semantics. Injecting `@inline` *instead of* `@unmanaged` produces a
+        // type with value semantics and no record extent, which crashes the
+        // compiler in `module.ts` rather than diagnosing anything — measured
+        // while scoping (`docs/struct-default-scope.md` §0). So: prepend, never
+        // replace.
         let structStart = tn.tokenPos;
         let structRange = tn.range(structStart, tn.pos);
         let explicitUnmanaged = hasUnmanagedDecorator(decorators);
+        let explicitInline = hasInlineDecorator(decorators);
         // `@managed struct` is the GC-owned record: same parse, different
         // ownership. The decorator list is passed through untouched (no
         // `@unmanaged` injection), and the declaration is marked so the class
@@ -528,18 +545,23 @@ export class Parser extends DiagnosticEmitter {
         tn.next();
         let decl = this.parseClassOrInterface(
           tn, flags,
-          explicitManaged ? decorators : this.withUnmanaged(decorators, structRange),
+          explicitManaged
+            ? decorators
+            : this.withValueDefault(decorators, structRange, explicitUnmanaged || explicitInline),
           startPos
         );
         if (decl) {
           decl.declaredAsStruct = true;
           decl.declaredAsManagedStruct = explicitManaged;
-          // No deprecation warning. 0.8.x warned (TS6385) that a plain `struct`
-          // would become a managed type at 0.9.0; that change is cancelled.
-          // `struct` means `@unmanaged struct` permanently, so `@unmanaged` is
-          // redundant-but-valid and nothing about a plain declaration's meaning
-          // is pending. `declaredAsStruct` stays: the `@inline` value-type gate
-          // reads it (`src/program.ts`), and so does the AST round-trip.
+          // No deprecation warning, and none for either spelling. 0.8.x warned
+          // (TS6385) that a plain `struct` would become a managed type at 0.9.0;
+          // that change was cancelled and the warning deleted rather than kept,
+          // which is this tree's convention for a redundant spelling. The flip
+          // that did land points the same way: `@inline struct` and plain
+          // `struct` now produce the same two decorators, so they are the same
+          // declaration, and a warning would only restate that. `declaredAsStruct`
+          // stays: the `@inline` value-type gate reads it (`src/program.ts`), and
+          // so does the AST round-trip.
         }
         statement = decl;
         decorators = null;
@@ -2095,6 +2117,39 @@ export class Parser extends DiagnosticEmitter {
    * `checkDecorators`' duplicate check on a spelling that is simply the
    * redundant form of the same declaration.
    */
+  /**
+   * The decorator list for the `struct` keyword's **default** storage model:
+   * `@unmanaged` (the record layout) plus `@inline` (value semantics) for a bare
+   * declaration, and the author's own model left alone when they named one.
+   *
+   * `named` is true when the author wrote `@unmanaged` or `@inline`, i.e. when
+   * the declaration already says which storage it wants. `@managed` never
+   * reaches here (`initializeClass`'s caller passes its decorators untouched),
+   * because a GC-owned record is not a value and not a borrowed record either.
+   *
+   * The two additions are not symmetric and the order is not cosmetic:
+   * `@unmanaged` selects the C layout that gives the value its extent, `@inline`
+   * selects the storage that gives it no address. `withUnmanaged` runs first so a
+   * plain and an `@inline` declaration converge on one node.
+   */
+  private withValueDefault(
+    decorators: DecoratorNode[] | null,
+    range: Range,
+    named: bool
+  ): DecoratorNode[] {
+    let out = this.withUnmanaged(decorators, range);
+    if (named) return out;
+    let decorator = Node.createDecorator(
+      Node.createIdentifierExpression("inline", range),
+      null,
+      range
+    );
+    let merged = new Array<DecoratorNode>(out.length + 1);
+    merged[0] = decorator;
+    for (let i = 0, k = out.length; i < k; ++i) merged[i + 1] = out[i];
+    return merged;
+  }
+
   private withUnmanaged(
     decorators: DecoratorNode[] | null,
     range: Range
