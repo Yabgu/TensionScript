@@ -1,0 +1,8 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: changetype to an @inline struct (a value has no pointer representation; use @unmanaged struct for a view over bytes)",
+    "AS100: Not implemented: an @inline struct as a class field (a class field is a pointer slot; inline-in-heap is a separate, deferred case -- use an @unmanaged or @managed record field)",
+    "AS100: Not implemented: assigning a whole value to an @inline struct field (the value has no address, so there is nothing to store; assign the field's own fields, e.g. `w.inner.a = ...`)"
+  ]
+}

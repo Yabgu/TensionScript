@@ -1541,40 +1541,6 @@
   local.get $this
   i32.load8_u
  )
- (func $interop/sized-enum-layout/Value#set:tag (param $this i32) (param $tag i32)
-  local.get $this
-  local.get $tag
-  i32.store8
- )
- (func $interop/sized-enum-layout/Value#set:kind (param $this i32) (param $kind i32)
-  local.get $this
-  local.get $kind
-  i32.store8 offset=1
- )
- (func $interop/sized-enum-layout/Value#constructor (param $this i32) (result i32)
-  local.get $this
-  i32.eqz
-  if
-   i32.const 2
-   call $~lib/rt/tlsf/__alloc
-   local.set $this
-  end
-  local.get $this
-  i32.const 0
-  call $interop/sized-enum-layout/Value#set:tag
-  local.get $this
-  i32.const 0
-  call $interop/sized-enum-layout/Value#set:kind
-  local.get $this
- )
- (func $interop/sized-enum-layout/Value#get:tag (param $this i32) (result i32)
-  local.get $this
-  i32.load8_u
- )
- (func $interop/sized-enum-layout/Value#get:kind (param $this i32) (result i32)
-  local.get $this
-  i32.load8_u offset=1
- )
  (func $interop/sized-enum-layout/classify (param $k i32) (result i32)
   (local $1 i32)
   block $case3|0
@@ -1917,6 +1883,7 @@
   (local $3 i32)
   (local $4 i32)
   (local $5 i32)
+  (local $6 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 4
   i32.sub
@@ -2193,17 +2160,11 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 0
-  call $interop/sized-enum-layout/Value#constructor
-  local.set $2
-  local.get $2
   i32.const 7
-  call $interop/sized-enum-layout/Value#set:tag
-  local.get $2
+  local.set $2
   global.get $interop/sized-enum-layout/Small.C
-  call $interop/sized-enum-layout/Value#set:kind
+  local.set $3
   local.get $2
-  call $interop/sized-enum-layout/Value#get:tag
   i32.const 255
   i32.and
   i32.const 7
@@ -2212,13 +2173,12 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 114
+   i32.const 119
    i32.const 3
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $2
-  call $interop/sized-enum-layout/Value#get:kind
+  local.get $3
   i32.const 255
   i32.and
   i32.const 2
@@ -2227,7 +2187,7 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 115
+   i32.const 120
    i32.const 3
    call $~lib/builtins/abort
    unreachable
@@ -2240,7 +2200,7 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 129
+   i32.const 134
    i32.const 1
    call $~lib/builtins/abort
    unreachable
@@ -2253,7 +2213,7 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 130
+   i32.const 135
    i32.const 1
    call $~lib/builtins/abort
    unreachable
@@ -2266,7 +2226,7 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 131
+   i32.const 136
    i32.const 1
    call $~lib/builtins/abort
    unreachable
@@ -2279,7 +2239,7 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 132
+   i32.const 137
    i32.const 1
    call $~lib/builtins/abort
    unreachable
@@ -2292,7 +2252,7 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 138
+   i32.const 143
    i32.const 1
    call $~lib/builtins/abort
    unreachable
@@ -2307,7 +2267,7 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 139
+   i32.const 144
    i32.const 1
    call $~lib/builtins/abort
    unreachable
@@ -2320,23 +2280,23 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 140
+   i32.const 145
    i32.const 1
    call $~lib/builtins/abort
    unreachable
   end
   global.get $interop/sized-enum-layout/Small.B
-  local.set $3
-  local.get $3
   local.set $4
   local.get $4
+  local.set $5
+  local.get $5
   i32.const 1
   i32.eq
   i32.eqz
   if
    i32.const 0
    i32.const 160
-   i32.const 146
+   i32.const 151
    i32.const 3
    call $~lib/builtins/abort
    unreachable
@@ -2348,7 +2308,7 @@
   if
    i32.const 0
    i32.const 160
-   i32.const 155
+   i32.const 160
    i32.const 1
    call $~lib/builtins/abort
    unreachable
@@ -2371,36 +2331,36 @@
   drop
   global.get $interop/sized-enum-layout/Small.B
   call $interop/sized-enum-layout/Small#__enum_to_string
-  local.set $5
+  local.set $6
   global.get $~lib/memory/__stack_pointer
-  local.get $5
+  local.get $6
   i32.store
-  local.get $5
+  local.get $6
   i32.const 272
   call $~lib/string/String.__eq
   i32.eqz
   if
    i32.const 0
    i32.const 160
-   i32.const 167
+   i32.const 172
    i32.const 1
    call $~lib/builtins/abort
    unreachable
   end
   global.get $interop/sized-enum-layout/Plain.B
   call $interop/sized-enum-layout/Plain#__enum_to_string
-  local.set $5
+  local.set $6
   global.get $~lib/memory/__stack_pointer
-  local.get $5
+  local.get $6
   i32.store
-  local.get $5
+  local.get $6
   i32.const 272
   call $~lib/string/String.__eq
   i32.eqz
   if
    i32.const 0
    i32.const 160
-   i32.const 168
+   i32.const 173
    i32.const 1
    call $~lib/builtins/abort
    unreachable

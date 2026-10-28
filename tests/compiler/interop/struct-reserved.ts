@@ -5,12 +5,22 @@
 //                      refuse by name, never parse-and-ignore (the @fieldOffset
 //                      lesson).
 //
-//   plain struct    -> no diagnostic, as of 0.9.0. 0.8.x warned (TS6385) that
-//                      `struct` would become a managed type at 0.9.0; that
-//                      change is cancelled, so the warning is gone and plain
-//                      `struct` means `@unmanaged struct` permanently. The
-//                      assertions below still pin the borrowed layout, which is
-//                      the part that must not change.
+//   plain struct    -> no diagnostic, and none since the struct-default flip
+//                      either. 0.8.x warned (TS6385) that `struct` would become
+//                      a *managed* type at 0.9.0; that change was cancelled and
+//                      the warning deleted. The flip that did land points the
+//                      same way: a bare `struct` injects `@unmanaged` (the
+//                      record layout) **and** `@inline` (value semantics), so
+//                      `@inline struct` is the same declaration and neither
+//                      spelling warns.
+//
+//                      This fixture is therefore unchanged in code and its
+//                      `.wat` is byte-identical — which is the backward-compat
+//                      evidence: the flip adds no codegen to a record used only
+//                      through `sizeof`. It also means the two assertions below
+//                      no longer distinguish the spellings (both are 4 bytes);
+//                      the *storage* difference is pinned by
+//                      `interop/struct-default-flip.ts`.
 //
 // The positive cases are the compile-visible ones, so they are here:
 //   @unmanaged struct -> no diagnostic (the explicit spelling; now redundant,
