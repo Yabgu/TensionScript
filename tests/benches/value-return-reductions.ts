@@ -19,10 +19,14 @@
 //       at Compiler.doCompileForStatement (src/compiler.ts:3059)
 //
 // **The name is what matters, not the shape.** Renaming the second local makes
-// the identical program compile (A5 is the control). That points at the SROA
-// local being named without its scope, so two scopes mint the same name and
-// `addLocal` refuses the second. Plain shadowing — legal TypeScript, ordinary in
-// a loop — is enough to trigger it.
+// the identical program compile (A5 is the control). Plain shadowing — legal
+// TypeScript, ordinary in a loop — is enough to trigger it.
+//
+// **Hypothesis, not diagnosis:** the SROA local is named without its scope, so
+// two sibling scopes mint the same name and `addLocal` refuses the second at
+// `compiler.ts:12259`. That is the reading the evidence supports — the trigger
+// tracks the name, and the failing frame is `compileSroaLocal` — but the naming
+// code has not been read, so it is an inference from behaviour.
 //
 // ── Defect B: a value return that corrupts memory under sustained load ────
 //
@@ -150,3 +154,7 @@ export function control(n: i32): f64 {
 //     connects them, and B has no reduction below the engine's call graph.
 //   * That B is sret-related. "sret/SROA" in the engine's commit describes the
 //     shape, not a diagnosis.
+//
+// **Related to but not the same as** the sret/SROA value-return corruption (the
+// engine's Phase 3 blocker): both touch SROA local handling, and a common cause
+// is unproven.
