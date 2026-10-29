@@ -1,10 +1,9 @@
 # Fork posture
 
 What this fork is, what it shares, what it diverges on, and how it stays
-current. This is the decision, not a history; the measurements are in
-[`fork-arc-scope.md`](fork-arc-scope.md). Every number carries the commit it was
-read at, because these counts move — a stale one is how the README came to claim
-it tracked upstream.
+current. This is the decision, not a history. Every number carries the commit it
+was read at, because these counts move — a stale one is how the README came to
+claim it tracked upstream.
 
 ---
 
@@ -45,8 +44,7 @@ The user-facing reference for each is [`showcase.md`](showcase.md).
   transform. See [showcase §5](showcase.md), [§6](showcase.md).
 - **The bootstrap self-compile.** `npm run bootstrap:debug` compiles `src/` with
   this compiler, twice, and requires the two `.wast` outputs to be byte-identical:
-  **229 ordering errors → 0**
-  ([`bootstrap-ordering-scope.md`](bootstrap-ordering-scope.md)). It is the only
+  **229 ordering errors → 0**. It is the only
   gate that enforces this language's typing rules on this compiler's source —
   `tsc` and `esbuild` have both accepted code the self-compile refused.
 
@@ -76,9 +74,8 @@ The sharing is a decision, not a residue, and it is bounded:
   `b6bda05c` (measured at `ef18ae56`, 2026-10-27). A merge of that shape is a
   rewrite wearing a merge's name.
 - **Not the count, as a constant.** **154 commits ahead of the base** at
-  `ef18ae56` (2026-10-27); [`fork-arc-scope.md`](fork-arc-scope.md) §5 recorded
-  **117** at `c3be16fc`. Both are right for their commit, which is why the number
-  is never quoted as a standing fact.
+  `ef18ae56` (2026-10-27), against **117** recorded at `c3be16fc`. Both are right
+  for their commit, which is why the number is never quoted as a standing fact.
 - **Not the compatibility claim.** The fork does not claim AssemblyScript
   compatibility. It claims fork-internal compatibility: a program that compiles
   on 0.9.0 compiles unchanged on 0.10.0.
@@ -105,7 +102,7 @@ The sharing is a decision, not a residue, and it is bounded:
 ## 6. Deferred items and their frame
 
 Nothing is deferred without a reason, and nothing is claimed without a citation.
-The audit is [`session-findings.md`](session-findings.md); the user-facing list is
+The list is [`roadmap.md`](roadmap.md); the user-facing view is
 [showcase §9](showcase.md).
 
 - **Inline nesting** — a field of a value type has no address of its own.

@@ -109,7 +109,7 @@ the record layout builds on AS's `Type` machinery, and std gains
 
 The fork is a fork. The divergence is deliberate, it is bounded, and each change
 lands with fixtures — see *What this fork adds* above for the list, and
-[`docs/fork-arc-scope.md`](docs/fork-arc-scope.md) for the measurement that
+[`docs/fork-posture.md`](docs/fork-posture.md) for the measurement that
 established the posture. Features AssemblyScript cannot express — memory-model
 overrides, the scheduler contract — are in scope here; a feature is not rejected
 for lacking an AS equivalent.
@@ -120,9 +120,8 @@ for lacking an AS equivalent.
 what it deliberately shares with AssemblyScript, what it diverges on, and the
 quarterly sync cadence. [`docs/showcase.md`](docs/showcase.md) is the
 per-capability reference — examples, semantics, and what each feature refuses.
-[`docs/fork-arc-scope.md`](docs/fork-arc-scope.md) sequences the remaining work.
-Deferred and named, each with its reason in
-[`docs/session-findings.md`](docs/session-findings.md):
+[`docs/roadmap.md`](docs/roadmap.md) carries the deferred items and the durable
+findings. Deferred and named, each with its reason there:
 
 - **Inline nesting** — an `@inline struct` as a field of another record.
 - **`T[N]` fields in `@inline struct`** — deep SROA, one local per element.
@@ -135,7 +134,7 @@ Deferred and named, each with its reason in
   requirement (`TS6399`).
 
 The full deferred list, with the reason for each, is
-[showcase §9](docs/showcase.md) and [posture §6](docs/fork-posture.md).
+[showcase §9](docs/showcase.md) and [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Links
 
@@ -143,10 +142,8 @@ The full deferred list, with the reason for each, is
 - TensionScript (this compiler): https://github.com/Yabgu/TensionScript
 - Fork posture — what the fork is, what it shares, how it stays current:
   [`docs/fork-posture.md`](docs/fork-posture.md)
-- Fork arc and phase sequencing:
-  [`docs/fork-arc-scope.md`](docs/fork-arc-scope.md)
-- Session findings — what each measurement found, and the traps:
-  [`docs/session-findings.md`](docs/session-findings.md)
+- Roadmap — deferred features and durable findings, one line each:
+  [`docs/roadmap.md`](docs/roadmap.md)
 - Scheduler contract: [`docs/scheduler-contract.md`](docs/scheduler-contract.md)
 - Changelog: [`CHANGELOG.md`](CHANGELOG.md)
 

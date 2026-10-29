@@ -1,4 +1,4 @@
-// The struct default: plain `struct` is a **value**. `docs/struct-default-scope.md`.
+// The struct default: plain `struct` is a **value**.
 //
 // The flip's four cells, each asserted, and this is the only fixture that pins
 // them together — the migration of the nine existing fixtures moves declarations

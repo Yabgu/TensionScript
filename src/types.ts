@@ -1184,8 +1184,9 @@ export class Signature {
    * own model is still on the `Type`
    * (`type.classReference.hasDecorator(...)`). The boundary emitters want both —
    * the override decides *how the parameter crosses*, the type decides what may
-   * be done with it. See `docs/memconv-signature-scope.md` §5.2 for why rooting
-   * deliberately reads only the second.
+   * be done with it. Rooting deliberately reads only the second: the override
+   * says how the parameter crosses, while the type says what may be done with
+   * it.
    */
   memoryModelOf(sourceIndex: i32): i32 {
     let memoryModels = this.memoryModels;

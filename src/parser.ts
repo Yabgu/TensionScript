@@ -506,7 +506,7 @@ export class Parser extends DiagnosticEmitter {
       }
       case Token.Struct: {
         // `struct Name { … }` is a **value**: a C-layout record whose bytes are
-        // stored inline (`docs/struct-default-scope.md`). The keyword injects
+        // stored inline. The keyword injects
         // what the author would have written, so the resolver and every layout
         // rule see one form and there is no second code path:
         //
@@ -523,7 +523,7 @@ export class Parser extends DiagnosticEmitter {
         // semantics. Injecting `@inline` *instead of* `@unmanaged` produces a
         // type with value semantics and no record extent, which crashes the
         // compiler in `module.ts` rather than diagnosing anything — measured
-        // while scoping (`docs/struct-default-scope.md` §0). So: prepend, never
+        // while scoping. So: prepend, never
         // replace.
         let structStart = tn.tokenPos;
         let structRange = tn.range(structStart, tn.pos);

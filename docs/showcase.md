@@ -511,9 +511,9 @@ here.
 
 ## 9. What's deferred
 
-Each item names what blocks it. TensionScript-side reasons are from
-[`session-findings.md`](session-findings.md); engine-side items are marked and
-live in the Tension repository.
+Each item names what blocks it. The full list, with the reason for each, is
+[`roadmap.md`](roadmap.md); engine-side items are marked and live in the Tension
+repository.
 
 | Item | Why it is deferred |
 |---|---|
@@ -534,20 +534,12 @@ live in the Tension repository.
 
 ## 10. Where to go next
 
-- **[`fork-arc-scope.md`](fork-arc-scope.md)** — the posture (the fork does not
-  aim for upstream merge), the four phases, and the measurement behind each.
-- **[`sized-enums-scope.md`](sized-enums-scope.md)** — §8's implementation
-  surface: the change sites, the type repoint, the refusal rules.
-- **[`concurrent-await-scope.md`](concurrent-await-scope.md)** — the lazy-expression
-  design and the measurements it rests on.
-- **[`session-findings.md`](session-findings.md)** — the audit: what each
-  measurement found, the traps, and the deferred list with reasons.
+- **[`roadmap.md`](roadmap.md)** — deferred features and durable findings, one
+  line each, with the reason it is not built yet.
+- **[`fork-posture.md`](fork-posture.md)** — what this fork is, what it
+  deliberately shares with AssemblyScript, and the sync cadence.
 - **[`scheduler-contract.md`](scheduler-contract.md)** — the async contract §5
   implements against.
-- Interop scoping: [`interop-inline-struct-scope.md`](interop-inline-struct-scope.md),
-  [`interop-struct-keyword-scope.md`](interop-struct-keyword-scope.md),
-  [`interop-managed-struct-scope.md`](interop-managed-struct-scope.md),
-  [`interop-memory-conversions-scope.md`](interop-memory-conversions-scope.md),
-  [`interop-sret-design.md`](interop-sret-design.md),
-  [`memconv-signature-scope.md`](memconv-signature-scope.md).
+- **[`async-phase1.md`](async-phase1.md)** — the phase-1 async record, kept
+  because it documents the shape the later phases were built on.
 - **[`../CHANGELOG.md`](../CHANGELOG.md)** — what shipped in which release.

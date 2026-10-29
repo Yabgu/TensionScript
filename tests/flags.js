@@ -1,6 +1,6 @@
 // `DecoratorFlags` — distinct bits, and what a `@managed struct` does with them.
 //
-// Why this exists (`docs/session-findings.md`, Gap 1). `ManagedStruct` and
+// Why this exists (Gap 1). `ManagedStruct` and
 // `Unsafe` were both `1 << 11` from 0.9.0 until PR #9 moved `Unsafe` to
 // `1 << 13` and reserved `InlineStruct` at `1 << 12`. The collision was
 // **latent** — no observable misbehaviour — and that is exactly why nothing

@@ -62,7 +62,6 @@ guest sources are explicit (35 `@unmanaged`, 2 `@managed`, 0 plain), and the who
 `cmp` clean. `layout_hash` is engine-side and not verifiable from this repository;
 what is verified is the premise it depends on.
 
-Scoping and measurements: [`docs/struct-default-scope.md`](docs/struct-default-scope.md).
 Fixtures: `interop/struct-default-flip` (the four cells, including copy and
 by-value) and `interop/struct-default-refusals` (`changetype`, closure capture).
 
@@ -79,7 +78,7 @@ unit of sync; the deferred items with their frame; and the posture itself.
 
 **Every number carries its SHA and date**, because the numbers move: the fork is
 **154 commits ahead of its base** at `ef18ae56`, where
-[`fork-arc-scope.md`](docs/fork-arc-scope.md) §5 recorded **117** at `c3be16fc`.
+**117** was recorded at `c3be16fc`.
 Both are right for their commit — which is exactly why `README.md`'s "117 commits
 ahead" was stale by 37 and is now stated with its measurement point.
 
@@ -93,8 +92,7 @@ same claim:
   "What's next" list too.
 - **The commit count is dated rather than asserted** (154 at `ef18ae56`).
 - **"What's next" opens with the posture doc**, which is the permanent frame;
-  `fork-arc-scope.md` keeps the phase sequencing, and the full deferred list
-  points at both showcase §9 and posture §6.
+  the full deferred list points at showcase §9 and `docs/roadmap.md`.
 
 ## Unreleased — sized enums (fork-arc Phase 3)
 
@@ -182,7 +180,7 @@ section number cannot rot.
 **README rewritten.** Three statements in it were contradicted by the tree, and had
 been since the binary rename: `async/await — pending` and `closures — pending`
 (both shipped), and *"Everything else tracks the upstream project it was forked
-from"* (the fork is 117 commits ahead of its AS base — `docs/fork-arc-scope.md` §5).
+from"* (the fork is 117 commits ahead of its AS base).
 The Status section is now a feature list with a one-line description per
 capability, the current version is stated, and what the fork **deliberately
 shares** with AssemblyScript — parser structure, std core, Binaryen backend — is
@@ -287,7 +285,7 @@ distinguishes them — a `Global` wears a flag, an expression wears a
 - **`lazy-captured-binding-deferred`** — a captured `@lazy` binding takes the eager
   path with `TS6398`. Small.
 
-See `docs/session-findings.md` for each with its size and what would unblock it.
+See [`docs/roadmap.md`](docs/roadmap.md) for each with the reason it is not built yet.
 
 ---
 
@@ -1081,7 +1079,7 @@ release. A managed class is unaffected: `sizeof<managed T>` is still 4.
 `load<T>` / `store<T>` are **reference operations**, not struct copies: they
 read and write one word at a `@unmanaged` reference, which is what the
 allocator's block links want. The originally planned refusals for them were
-dropped (`docs/interop-scope.md` §6.3, `tlsf.ts`'s six sites); `COPY_STRUCT` is
+dropped (`tlsf.ts`'s six sites); `COPY_STRUCT` is
 the struct-copy path.
 
 ### `struct`

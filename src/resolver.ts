@@ -3988,10 +3988,9 @@ export class Resolver extends DiagnosticEmitter {
                 if (needsLayout) {
                   // === Inline nesting, sub-phase A ==========================
                   // A field whose **type** is an `@inline struct` stores the
-                  // value's bytes inline instead of a 4-byte pointer
-                  // (`docs/inline-nesting-scope.md` §2.2). The decorator at the
-                  // field position (`inner: @inline Inner`) does *not* decide
-                  // this: `checkMemoryModelOverride` returns the type unchanged
+                  // value's bytes inline instead of a 4-byte pointer. The
+                  // decorator at the field position (`inner: @inline Inner`) does
+                  // *not* decide this: `checkMemoryModelOverride` returns the type unchanged
                   // when the request matches the declaration or the declaration
                   // has no model (`:248`), so it is an assertion, not a gate.
                   // What decides it is the type, and this is the one place the
