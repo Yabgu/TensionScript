@@ -21,6 +21,9 @@ export default defineConfig([
     "tests/parser/**",
     "tests/compiler/**",
     "tests/asconfig/**",
+    // AS sources too: `struct`/`@unmanaged` are not TypeScript, and the
+    // reductions bench is deliberately not compilable by this compiler.
+    "tests/benches/**",
     "lib/loader/tests/**",
 
     // FIXME: Tagged template literal tests with invalid escapes
