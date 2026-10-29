@@ -1,6 +1,30 @@
 # Changelog
 
-## Unreleased — breaking: plain `struct` is inline by default
+## 0.11.0 — `@abi.align(N)`
+
+A field-position attribute forces the field's alignment. Written on the field
+**declaration** (`@abi.align(16) b: u32`), not after the type — the post-type
+spelling is refused by name (TS6410), because a type attribute travels into
+parameters, locals and return types, where there is no slot to align.
+
+- **Power of two only** (TS6407), **at least 1** (TS6406), and **at least the
+  field type's natural alignment** (TS6408) — asking for less is a lie, so it is
+  refused rather than silently accepted. The argument must be an integer
+  literal (TS6405): the layout is decided at resolve time, before constants are
+  evaluated.
+- **The outer struct inherits the alignment** — the record's alignment is the
+  maximum over its fields, and the extent is rounded to it. `@unmanaged struct
+  { a: u8; @abi.align(16) b: u32; c: u8 }` is 32 bytes with `b` at 16 and `c` at
+  20.
+- **An `@inline` (value) struct carries it too**: a value type's alignment is
+  what a pointer-layout record consumes when it nests the value inline, so an
+  `@inline struct { @abi.align(16) x: f32 }` places at 16 inside its container
+  and makes that container align-16.
+- **Additive; no existing layout moves.** The 463 committed `.wat` fixtures are
+  byte-identical, every existing `alignof`/`sizeof`/`offsetof` is unchanged, and
+  nothing renames or reorders a field.
+
+## 0.10.0 — breaking: plain `struct` is inline by default
 
 **Breaking: a bare `struct` is now a value.** `struct Foo { … }` declares a
 C-layout record whose bytes live **inline** — SROA locals, copy on assignment,

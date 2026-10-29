@@ -11,7 +11,7 @@ and the package are its own: it does not collide with `asc` (AssemblyScript's
 compiler) or `tsc` (TypeScript's), so a project that installs both compilers
 always resolves the one it named.
 
-**Current version: 0.10.0.** The [feature showcase](docs/showcase.md) has one
+**Current version: 0.11.0.** The [feature showcase](docs/showcase.md) has one
 section per capability, with runnable examples and the refused forms; the scoping
 notes it draws from are in [`docs/`](docs/).
 
