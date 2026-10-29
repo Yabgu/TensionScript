@@ -1,14 +1,37 @@
 # Roadmap
 
-Deferred features and durable findings — one line each, with the reason it is
-not built yet. What shipped is in [`../CHANGELOG.md`](../CHANGELOG.md); what each
-feature does is in [`showcase.md`](showcase.md).
+Deferred features, durable findings, and the workflow this repository now uses
+— one line each, with the reason it is not built yet. What shipped is in
+[`../CHANGELOG.md`](../CHANGELOG.md); what each feature does is in
+[`showcase.md`](showcase.md).
 
 This page replaces the per-phase scoping documents (`*-scope.md`,
 `session-findings.md`). Those recorded the measurements a phase rested on; this
 keeps the conclusions and drops the working papers. Where a reason names a
 number, the number is a measurement, and the fixture that pins it is in
 `tests/`.
+
+## Workflow
+
+TensionScript work uses the **PR pattern**:
+
+- Branch per phase, commit locally.
+- Push the branch — do **not** push `main` directly.
+- Open a PR. The `pull_request` trigger runs CI, and the PR view shows it.
+- Merge only when the PR's checks are green.
+
+The direct-to-main push at `ecafc016` was a one-time policy deviation and is the
+**last** direct push. From that point, every TensionScript change goes through a
+PR.
+
+**Why.** The `pull_request` trigger surfaces the checks in the PR view directly,
+so CI is verifiable without `gh api commits/<sha>/check-runs` — which returned
+404 for both repositories in this environment even while git over SSH worked and
+the token was valid, i.e. an SSO authorization gap rather than a workflow fault.
+The PR view is the review surface, the CI status surface, and the durable link
+for the change.
+
+The engine adoption in the Tension repository already uses PRs — unchanged.
 
 ## Deferred language features
 

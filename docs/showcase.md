@@ -535,7 +535,7 @@ repository.
 ## 10. Where to go next
 
 - **[`roadmap.md`](roadmap.md)** — deferred features and durable findings, one
-  line each, with the reason it is not built yet.
+  line each with the reason it is not built yet, and the repository's workflow.
 - **[`fork-posture.md`](fork-posture.md)** — what this fork is, what it
   deliberately shares with AssemblyScript, and the sync cadence.
 - **[`scheduler-contract.md`](scheduler-contract.md)** — the async contract §5

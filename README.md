@@ -120,8 +120,9 @@ for lacking an AS equivalent.
 what it deliberately shares with AssemblyScript, what it diverges on, and the
 quarterly sync cadence. [`docs/showcase.md`](docs/showcase.md) is the
 per-capability reference — examples, semantics, and what each feature refuses.
-[`docs/roadmap.md`](docs/roadmap.md) carries the deferred items and the durable
-findings. Deferred and named, each with its reason there:
+[`docs/roadmap.md`](docs/roadmap.md) carries the deferred items, the durable
+findings, and the workflow this repository uses. Deferred and named, each with
+its reason there:
 
 - **Inline nesting** — an `@inline struct` as a field of another record.
 - **`T[N]` fields in `@inline struct`** — deep SROA, one local per element.
@@ -142,7 +143,7 @@ The full deferred list, with the reason for each, is
 - TensionScript (this compiler): https://github.com/Yabgu/TensionScript
 - Fork posture — what the fork is, what it shares, how it stays current:
   [`docs/fork-posture.md`](docs/fork-posture.md)
-- Roadmap — deferred features and durable findings, one line each:
+- Roadmap — deferred features, durable findings, and the workflow:
   [`docs/roadmap.md`](docs/roadmap.md)
 - Scheduler contract: [`docs/scheduler-contract.md`](docs/scheduler-contract.md)
 - Changelog: [`CHANGELOG.md`](CHANGELOG.md)
