@@ -180,6 +180,44 @@ export class Resolver extends DiagnosticEmitter {
   /** Whether a new override has been discovered. */
   discoveredOverride: bool = false;
 
+  /**
+   * Whether a use-site `@unmanaged` over an `@inline` declaration is being
+   * resolved as the **type argument of `changetype`**.
+   *
+   * That position is the one where the operand can supply the address the value
+   * itself does not have, so the refusal's premise does not hold there (see
+   * `checkMemoryModelOverride`). Every other position — a parameter, a local, a
+   * field, a return type — still refuses with `TS6395`, which is what keeps the
+   * function-parameter form (`Phase 2`) out of this change.
+   *
+   * The compiler sets this around the one `resolveTypeArguments` call it makes
+   * for a `changetype` builtin (`Compiler#compileCallExpressionBuiltin`), and
+   * resets it immediately: the flag is a scope, not a mode.
+   */
+  allowInlineView: bool = false;
+
+  /**
+   * Call expressions that are **views of caller bytes**: an inline-typed
+   * `changetype<@unmanaged T>(ptr)`.
+   *
+   * Marked here, at resolution, because the compiler asks this question while
+   * compiling the *field access* — which happens before the `changetype` it
+   * wraps is ever compiled. Recording it at codegen time (the first attempt)
+   * produced a field read that never saw the mark and compiled to
+   * `unreachable`.
+   *
+   * Keyed on the AST node rather than on the type, because the type is the
+   * declaration's (`T` is still an `@inline struct`) and the model is the
+   * *use's*: there is one `Type` per class, shared by every use.
+   */
+  private viewCalls: Set<Expression> | null = null;
+
+  /** Whether `node` is an inline-typed `changetype<@unmanaged T>(...)`. */
+  isViewCall(node: Expression): bool {
+    let calls = this.viewCalls;
+    return calls != null && calls.has(node);
+  }
+
   /** Constructs the resolver for the specified program. */
   constructor(
     /** The program to construct a resolver for. */
@@ -289,6 +327,12 @@ export class Resolver extends DiagnosticEmitter {
       (asked == MemoryModel.Unmanaged || asked == MemoryModel.Managed) &&
       declared == MemoryModel.Inline
     ) {
+      // `@unmanaged` as `changetype`'s type argument is the one position where
+      // the operand can lend an address — `changetype<@unmanaged T>(ptr)` views
+      // the caller's bytes. The operand is checked by the builtin itself, which
+      // is the only place it exists; a non-pointer operand still reports this
+      // diagnostic. `@managed` has no such cell at any position.
+      if (asked == MemoryModel.Unmanaged && this.allowInlineView) return type;
       if (reportMode == ReportMode.Report) {
         this.error(
           DiagnosticCode.Type_0_is_a_value_with_no_address_so_a_use_cannot_view_it_as_1_use_the_value_or_keep_it_inline,
@@ -842,7 +886,25 @@ export class Resolver extends DiagnosticEmitter {
         }
         return null;
       }
-      return this.resolveFunctionInclTypeArguments(
+      // `changetype`'s type argument is the one position where `@unmanaged`
+      // over an inline declaration is legal, because the operand supplies the
+      // address the value lacks. Set for the duration of this resolution only,
+      // so a parameter, local, field or return type still refuses (`TS6395`).
+      let isChangeType = prototype.internalName == BuiltinNames.changetype;
+      // A view is `changetype` whose type argument named `@unmanaged` over an
+      // inline declaration. Recorded on the call expression so the compiler can
+      // see it while compiling a field access on the result.
+      if (
+        isChangeType &&
+        typeArguments.length == 1 &&
+        typeArguments[0].memoryModel == MemoryModel.Unmanaged
+      ) {
+        let calls = this.viewCalls;
+        if (calls == null) this.viewCalls = calls = new Set<Expression>();
+        calls.add(node);
+      }
+      if (isChangeType) this.allowInlineView = true;
+      let resolved = this.resolveFunctionInclTypeArguments(
         prototype,
         typeArguments,
         ctxFlow.sourceFunction,
@@ -850,6 +912,8 @@ export class Resolver extends DiagnosticEmitter {
         node,
         reportMode
       );
+      if (isChangeType) this.allowInlineView = false;
+      return resolved;
     }
 
     // infer generic call if type arguments have been omitted

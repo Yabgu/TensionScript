@@ -3752,18 +3752,49 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   let toType = typeArguments[0];
   // `changetype` is a pointer reinterpretation. A value type has no pointer
   // representation -- SROA keeps it in locals, so there is no address to
-  // reinterpret -- and treating one as "a view over these bytes" is exactly
-  // `@unmanaged struct`'s job.
-  if (
-    toType.classReference != null &&
-    assert(toType.classReference).hasDecorator(DecoratorFlags.InlineStruct)
-  ) {
-    compiler.error(
-      DiagnosticCode.Not_implemented_0,
-      ctx.reportNode.range,
-      "changetype to an @inline struct (a value has no pointer representation; use @unmanaged struct for a view over bytes)"
-    );
-    return module.unreachable();
+  // reinterpret. But the **operand** is what supplies an address: when the
+  // target is inline-typed and the operand is a pointer, the result is a view
+  // over the caller's bytes, and field access on it is a load at the field's
+  // offset. When the operand is itself an inline value there is nothing to
+  // lend, and the refusal stands.
+  //
+  // The resolver accepted this position as `changetype`'s type argument
+  // (`Resolver#allowInlineView`); the operand check lives here because this is
+  // the only place the operand exists.
+  let targetIsInline = toType.classReference != null &&
+    assert(toType.classReference).hasDecorator(DecoratorFlags.InlineStruct);
+  if (targetIsInline) {
+    // Only the spelling that named the model is a view. `changetype<T>(ptr)`
+    // with no use-site model keeps the refusal it always had: the use did not
+    // say which it meant, and the declaration says *value*, so compiling it as
+    // a pointer view would be the silent reinterpretation this cell exists to
+    // make explicit.
+    if (!compiler.resolver.isViewCall(ctx.reportNode)) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        "changetype to an @inline struct (a value has no pointer representation; use @unmanaged struct for a view over bytes)"
+      );
+      return module.unreachable();
+    }
+    // The operand's type decides, and it is resolved *before* compiling: an
+    // inline value has no address, and compiling it first reported two errors
+    // for one mistake (the operand's own "reading ... as a whole", then this).
+    let operandType = compiler.resolver.resolveExpression(operands[0], compiler.currentFlow);
+    let fromClass = operandType != null ? operandType.classReference : null;
+    if (fromClass != null && fromClass.hasDecorator(DecoratorFlags.InlineStruct)) {
+      compiler.error(
+        DiagnosticCode.Type_0_is_a_value_with_no_address_so_a_use_cannot_view_it_as_1_use_the_value_or_keep_it_inline,
+        ctx.reportNode.range, assert(operandType).toString(), "@unmanaged"
+      );
+      return module.unreachable();
+    }
+    let fromInline = compiler.compileExpression(operands[0], Type.auto);
+    // A view over caller-owned bytes: no allocation, no GC header, no rooting.
+    // Recorded by the resolver on the call expression (`Resolver#isViewCall`),
+    // which is where the type argument was resolved.
+    compiler.currentType = toType;
+    return fromInline;
   }
   let arg0 = compiler.compileExpression(operands[0], Type.auto);
   let fromType = compiler.currentType;

@@ -6983,6 +6983,12 @@ export class Compiler extends DiagnosticEmitter {
           expression.range, prototype.internalName
         );
       }
+      // `changetype`'s type argument is the one position where `@unmanaged`
+      // over an inline declaration is legal: the operand supplies the address.
+      // The resolver refuses it everywhere else, so the flag is set only here
+      // and only for this builtin.
+      let isChangeType = prototype.internalName == BuiltinNames.changetype;
+      if (isChangeType) this.resolver.allowInlineView = true;
       typeArguments = this.resolver.resolveTypeArguments(
         assert(typeParameterNodes),
         typeArgumentNodes,
@@ -6991,6 +6997,7 @@ export class Compiler extends DiagnosticEmitter {
         cloneMap(this.currentFlow.contextualTypeArguments), // don't update
         expression
       );
+      if (isChangeType) this.resolver.allowInlineView = false;
     }
     let callee = expression.expression;
     let ctx = new BuiltinFunctionContext(
@@ -10580,6 +10587,37 @@ export class Compiler extends DiagnosticEmitter {
           let fieldLocal = assert(fieldLocals.get(propertyInstance.name));
           this.currentType = propertyInstance.type;
           return module.local_get(fieldLocal.index, fieldLocal.type.toRef());
+        }
+        // A **view**: `changetype<@unmanaged T>(ptr)` with `T` inline-typed.
+        // The expression is an address typed as the record, so a field read is
+        // a load at the field's offset — the same shape the record's own getter
+        // emits (`module.load(bytes, signed, ptr, type, offset)`).
+        //
+        // This must come before the sret branch below, which keys on
+        // "receiver is a Call returning an inline struct" and would otherwise
+        // treat a `changetype` as a call that filled a destination slot.
+        // (Measured: without this branch the field read flattened into that
+        // path and the module trapped.)
+        if (
+          thisExpression != null &&
+          propertyInstance.isField &&
+          this.resolver.isViewCall(thisExpression)
+        ) {
+          let fieldType = propertyInstance.type;
+          // `Type.auto`: the receiver is an inline-typed expression whose value
+          // *is* the address. Asking for `usize` here made the assignability
+          // check reject it (`MyStruct` -> `usize`), which is the type system
+          // being right about what the type says and wrong about what the use
+          // means — which is exactly the gap this feature fills.
+          let ptr = this.compileExpression(thisExpression, Type.auto);
+          this.currentType = fieldType;
+          return module.load(
+            fieldType.byteSize,
+            fieldType.isSignedIntegerValue,
+            ptr,
+            fieldType.toRef(),
+            propertyInstance.memoryOffset
+          );
         }
         // Sret: `f().x` where `f` returns an `@inline struct`. There is no value
         // to read a field from — the call wrote the fields into a slot the
