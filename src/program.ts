@@ -3865,6 +3865,18 @@ export class Local extends VariableLikeElement {
    */
   fieldLocals: Map<string, Local> | null = null;
 
+  /**
+   * Whether this local is a **view parameter**: `a: @unmanaged T` where `T` is
+   * an inline type.
+   *
+   * Its `type` is still the inline record, because that is what makes `a.field`
+   * resolve — every use of `T` shares one `Type`. Its *storage* is the one `i32`
+   * WASM parameter holding the caller's address, which is why a field read goes
+   * through `load` at the field's offset rather than through `fieldLocals`
+   * (there are none: a view has no per-field locals to copy into).
+   */
+  isViewParam: bool = false;
+
   /** Constructs a new local variable. */
   constructor(
     /** Simple name. */
@@ -4152,6 +4164,22 @@ export class Function extends TypedElement {
           unchecked(byValFields[byValFields.length] = new ByValFieldBinding(
             i, parameterName, parameterType, new Map<string, Local>()
           ));
+          continue;
+        }
+        // A **view parameter** (`a: @unmanaged T`, `T` inline): one pointer
+        // local and no field locals. The export-byval branch above is the same
+        // shape with one difference — it also allocates per-field locals for the
+        // prologue's copy, because the host's value has to be read *into* the
+        // frame. A view is already the caller's bytes, so there is nothing to
+        // copy and no field local to copy into.
+        if (signature.isViewParam(i)) {
+          let scopedLocals = this.flow.scopedLocals;
+          if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
+          let local = new Local(parameterName, localIndex++, parameterType, this);
+          local.isViewParam = true;
+          this.localsByIndex[local.index] = local;
+          flow.setLocalFlag(local.index, LocalFlags.Initialized);
+          scopedLocals.set(parameterName, local);
           continue;
         }
         // **Keyed on the type**, not on `wasmParamCountOf > 1`: a one-field

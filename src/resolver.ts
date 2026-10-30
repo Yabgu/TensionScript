@@ -197,6 +197,22 @@ export class Resolver extends DiagnosticEmitter {
   allowInlineView: bool = false;
 
   /**
+   * Whether a use-site `@unmanaged` over an `@inline` declaration is being
+   * resolved in a **parameter position** — the cell where the caller supplies
+   * the address, so `f(a: @unmanaged T)` with an inline `T` is a view parameter.
+   *
+   * Distinct from {@link allowInlineView} (Phase 1, `changetype`'s type
+   * argument, where the operand supplies the address at the point of use).
+   *
+   * **Saved and restored, never blindly cleared.** Resolving one parameter's
+   * type can resolve another function (a default value's call, a nested
+   * signature), and a nested window that reset the flag to `false` on the way
+   * out closed the outer window — measured: the owner's pattern reported TS6395
+   * with both flags reading `false` while inside `resolveFunction`'s own loop.
+   */
+  allowInlineViewParam: bool = false;
+
+  /**
    * Call expressions that are **views of caller bytes**: an inline-typed
    * `changetype<@unmanaged T>(ptr)`.
    *
@@ -211,6 +227,18 @@ export class Resolver extends DiagnosticEmitter {
    * *use's*: there is one `Type` per class, shared by every use.
    */
   private viewCalls: Set<Expression> | null = null;
+
+  /**
+   * Records `node` as a view call. The resolver marks the ones it resolves;
+   * `Compiler#compileCallExpressionBuiltin` marks the ones it resolves itself,
+   * because a builtin's type arguments are resolved on the *codegen* path and
+   * never pass through `maybeInferCall`.
+   */
+  markViewCall(node: Expression): void {
+    let calls = this.viewCalls;
+    if (calls == null) this.viewCalls = calls = new Set<Expression>();
+    calls.add(node);
+  }
 
   /** Whether `node` is an inline-typed `changetype<@unmanaged T>(...)`. */
   isViewCall(node: Expression): bool {
@@ -294,10 +322,14 @@ export class Resolver extends DiagnosticEmitter {
    * - **`@managed` over an `@unmanaged` declaration** — the collector traces a
    *   reference through a header the record does not have. No emitter can
    *   invent the header, so a use cannot confer provenance. (`TS6394`.)
-   * - **`@unmanaged`/`@managed` over an `@inline` declaration** — a value is
-   *   stored as one local per field and has **no address** at all, so there is
-   *   nothing to lend as a pointer and nothing a header could sit in front of.
-   *   (`TS6395`.)
+   * - **`@managed` over an `@inline` declaration** — a value has neither a
+   *   header nor an address, at any position. (`TS6395`.)
+   * - **`@unmanaged` over an `@inline` declaration**, *except* where the use
+   *   supplies an address: `changetype`'s type argument (the operand supplies
+   *   it) and a parameter (the caller supplies it). Those two windows are
+   *   `allowInlineView` and `allowInlineViewParam`, and they are the whole
+   *   difference between a view and a claim. Every other position — a return
+   *   type, a local, a field — still has nothing to lend. (`TS6395`.)
    *
    * Everything else is left to the emitters: `@unmanaged` over `@managed` is
    * the identity cell (10.0a), `@inline` over a pointer declaration is the
@@ -327,12 +359,16 @@ export class Resolver extends DiagnosticEmitter {
       (asked == MemoryModel.Unmanaged || asked == MemoryModel.Managed) &&
       declared == MemoryModel.Inline
     ) {
-      // `@unmanaged` as `changetype`'s type argument is the one position where
-      // the operand can lend an address — `changetype<@unmanaged T>(ptr)` views
-      // the caller's bytes. The operand is checked by the builtin itself, which
-      // is the only place it exists; a non-pointer operand still reports this
-      // diagnostic. `@managed` has no such cell at any position.
-      if (asked == MemoryModel.Unmanaged && this.allowInlineView) return type;
+      // Two positions can supply the address a value does not have:
+      //   - `changetype<@unmanaged T>(ptr)` — the operand supplies it, checked
+      //     by the builtin, which is the only place the operand exists;
+      //   - a parameter `a: @unmanaged T` — the caller supplies it, so the
+      //     callee holds a view of the caller's bytes for the call.
+      // Everywhere else (a return type, a local, a field) the value really has
+      // no address and this diagnostic stands. `@managed` has no such cell at
+      // any position: a view is not GC-owned.
+      if (asked == MemoryModel.Unmanaged &&
+          (this.allowInlineView || this.allowInlineViewParam)) return type;
       if (reportMode == ReportMode.Report) {
         this.error(
           DiagnosticCode.Type_0_is_a_value_with_no_address_so_a_use_cannot_view_it_as_1_use_the_value_or_keep_it_inline,
@@ -604,6 +640,11 @@ export class Resolver extends DiagnosticEmitter {
     let parameterTypes = new Array<Type>(numParameters);
     let requiredParameters = 0;
     let hasRest = false;
+    // This is the **first** place a parameter's type node is resolved — the
+    // prototype's function type is built before any call or signature — so the
+    // window has to be open here as well as in `resolveFunction`.
+    let savedViewParam = this.allowInlineViewParam;
+    this.allowInlineViewParam = true;
     for (let i = 0; i < numParameters; ++i) {
       let parameterNode = parameterNodes[i];
       switch (parameterNode.parameterKind) {
@@ -646,6 +687,7 @@ export class Resolver extends DiagnosticEmitter {
       }
       parameterTypes[i] = parameterType;
     }
+    this.allowInlineViewParam = savedViewParam;
     let returnTypeNode = node.returnType;
     let returnType: Type | null;
     if (isTypeOmitted(returnTypeNode)) {
@@ -3337,6 +3379,11 @@ export class Resolver extends DiagnosticEmitter {
     let memoryModels: i32[] | null = null;
     let requiredParameters = 0;
     let hasRest = false;
+    // A parameter is the one declaration position where `@unmanaged` over an
+    // inline type is legal: the caller supplies the address. Scoped to this
+    // loop, so the return type resolved below it keeps the refusal.
+    let savedViewParamFn = this.allowInlineViewParam;
+    this.allowInlineViewParam = true;
     for (let i = 0; i < numSignatureParameters; ++i) {
       let parameterDeclaration = signatureParameters[i];
       if (parameterDeclaration.parameterKind == ParameterKind.Default) {
@@ -3383,6 +3430,7 @@ export class Resolver extends DiagnosticEmitter {
         unchecked(memoryModels[i] = typeNodeModel);
       }
     }
+    this.allowInlineViewParam = savedViewParamFn;
 
     // resolve return type
     let returnType: Type;
@@ -3442,6 +3490,58 @@ export class Resolver extends DiagnosticEmitter {
     let exportByValParams = prototype.is(CommonFlags.ModuleExport) &&
       !prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) &&
       signatureHasMultiFieldByValParam(parameterTypes, memoryModels);
+    // A view parameter in a host-visible signature is refused (6411). The
+    // boundary emitters materialise a value for the host; a view is an address
+    // this compiler never made, so the host would be handed a pointer whose
+    // provenance and lifetime are the guest's. Checked here, where both the
+    // parameter models and the boundary decorators are known.
+    if (
+      memoryModels != null &&
+      (prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) ||
+       prototype.is(CommonFlags.ModuleExport))
+    ) {
+      for (let i = 0; i < numSignatureParameters; ++i) {
+        if (
+          unchecked(memoryModels[i]) == MemoryModel.Unmanaged &&
+          Signature.isInlineStructRef(unchecked(parameterTypes[i]))
+        ) {
+          if (reportMode == ReportMode.Report) {
+            this.error(
+              DiagnosticCode.A_view_parameter_unmanaged_0_over_an_inline_type_cannot_appear_in_a_host_visible_signature_an_external_or_exported_parameter_is_supplied_by_the_host_and_a_view_is_an_address_this_compiler_did_not_materialise,
+              signatureParameters[i].type.range,
+              unchecked(parameterTypes[i]).toString()
+            );
+          }
+          return null;
+        }
+      }
+    }
+
+    // A view parameter in a host-visible signature is refused (6411): the
+    // boundary emitters materialise a value for the host, and a view is an
+    // address this compiler never made.
+    if (
+      memoryModels != null &&
+      (prototype.hasAnyDecorator(DecoratorFlags.External | DecoratorFlags.ExternalJs) ||
+       prototype.is(CommonFlags.ModuleExport))
+    ) {
+      for (let i = 0; i < numSignatureParameters; ++i) {
+        if (
+          unchecked(memoryModels[i]) == MemoryModel.Unmanaged &&
+          Signature.isInlineStructRef(unchecked(parameterTypes[i]))
+        ) {
+          if (reportMode == ReportMode.Report) {
+            this.error(
+              DiagnosticCode.A_view_parameter_unmanaged_0_over_an_inline_type_cannot_appear_in_a_host_visible_signature_an_external_or_exported_parameter_is_supplied_by_the_host_and_a_view_is_an_address_this_compiler_did_not_materialise,
+              signatureParameters[i].type.range,
+              unchecked(parameterTypes[i]).toString()
+            );
+          }
+          return null;
+        }
+      }
+    }
+
     let signature = Signature.create(
       this.program,
       parameterTypes,

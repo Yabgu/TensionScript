@@ -1243,8 +1243,25 @@ export class Signature {
    * the same source parameter.
    */
   wasmParamSlotCountOf(sourceIndex: i32): i32 {
+    if (this.isViewParam(sourceIndex)) return 1;
     if (this.isByValPointerParam(sourceIndex)) return 1;
     return Signature.wasmParamCountOf(unchecked(this.parameterTypes[sourceIndex]));
+  }
+
+  /**
+   * Whether source parameter `sourceIndex` is a **view**: `@unmanaged` at the
+   * declaration over a type that is an `@inline struct`.
+   *
+   * The type still says *value* — every use of `MyStruct` shares one `Type`, and
+   * that is what makes a member lookup work on the parameter — while the model
+   * says this use is an address. One `i32` slot, no field locals, a load at the
+   * field's offset: the same crossing an `@unmanaged struct` parameter already
+   * takes, with the model recorded at the declaration instead of on a pointer
+   * type.
+   */
+  isViewParam(sourceIndex: i32): bool {
+    return this.memoryModelOf(sourceIndex) == MemoryModelCode.Unmanaged &&
+      Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]));
   }
 
   /**
@@ -1260,10 +1277,17 @@ export class Signature {
    *   address, and the override asks for a copy of what is there — the same
    *   copy, read from memory instead of from SROA locals.
    *
-   * The reverse is not a thing: `@unmanaged`/`@managed` over an `@inline`
-   * declaration is refused (`TS6395`), because a value has no address to lend.
+   * The reverse is partly a thing now. `@unmanaged` over an `@inline`
+   * declaration is legal where the use supplies an address — a parameter (a
+   * view parameter, `isViewParam`) or `changetype`'s type argument — and a view
+   * parameter crosses as a pointer, so it is asked before this predicate. Every
+   * other cell still refuses (`TS6395`), and `@managed` over `@inline` refuses
+   * at every position: a value has no GC header and no address to lend.
    */
   crossesByValueParam(sourceIndex: i32): bool {
+    // A view crosses as a pointer, so there is no value to copy in and no temp
+    // to materialise. Asked before the type, which still says `@inline struct`.
+    if (this.isViewParam(sourceIndex)) return false;
     if (Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]))) return true;
     return this.memoryModelOf(sourceIndex) == MemoryModelCode.Inline;
   }
@@ -1413,7 +1437,10 @@ export class Signature {
     if (hasHiddenDest) unchecked(typeRefs[at++] = TypeRef.I32);
     for (let i = 0; i < numParameterTypes; ++i) {
       let parameterType = unchecked(parameterTypes[i]);
-      if (this.isByValPointerParam(i)) {
+      if (this.isViewParam(i)) {
+        // One plain pointer, the same slot an `@unmanaged` parameter crosses in.
+        unchecked(typeRefs[at++] = TypeRef.I32);
+      } else if (this.isByValPointerParam(i)) {
         // A host boundary: the caller materialises the value and passes its
         // address. Not `toRef()` — an `@inline struct`'s ref is a GC heap type
         // (`ensureType`), a different ABI that would need the GC feature. The

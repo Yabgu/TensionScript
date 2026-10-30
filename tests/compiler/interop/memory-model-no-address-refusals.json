@@ -1,12 +1,13 @@
 {
   "asc_flags": [],
   "stderr": [
-    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
+    "TS6411: A view parameter ('@unmanaged interop/memory-model-no-address-refusals/V' over an inline type) cannot appear in a host-visible signature: an '@external' or exported parameter is supplied by the host, and a view is an address this compiler did not materialise.",
     "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
     "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'.",
     "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'.",
-    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
-    "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
+    "TS2304: Cannot find name 'm'.",
+    "TS6411: A view parameter ('@unmanaged interop/memory-model-no-address-refusals/V' over an inline type) cannot appear in a host-visible signature: an '@external' or exported parameter is supplied by the host, and a view is an address this compiler did not materialise.",
+    "AS100: Not implemented: reading an @inline struct value as a whole (a value has no address; read a field, or copy it with `let q: P = p`)",
     "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'.",
     "TS6395: Type 'interop/memory-model-no-address-refusals/V' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'."
   ]

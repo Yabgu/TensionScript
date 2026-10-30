@@ -1,5 +1,12 @@
-// `@unmanaged` / `@managed` over an `@inline` declaration — **refused everywhere**
-// (`TS6395`).
+// `@unmanaged` / `@managed` over an `@inline` declaration — the cells that still
+// refuse.
+//
+// **Updated when the parameter form landed.** Every cell below still refuses, but
+// two of them refuse for a new reason: a parameter is now a legal *view*, so an
+// `@external` or exported one is refused by the ABI guard (`TS6411`) rather than
+// as a no-address claim, and the guest-parameter cell now refuses because the
+// argument is a local *value* with no address to lend (`AS100`), not because the
+// parameter is illegal. The other six cells are unchanged (`TS6395`).
 //
 // An `@inline` struct is a **value**: it has no WASM local of its own, its fields
 // live in one local each (SROA), and there is therefore no address to hand out.

@@ -191,7 +191,8 @@ import {
   isTypeOmitted,
   Source,
   TypeDeclaration,
-  ParameterKind
+  ParameterKind,
+  MemoryModel
 } from "./ast";
 
 import {
@@ -6997,7 +6998,23 @@ export class Compiler extends DiagnosticEmitter {
         cloneMap(this.currentFlow.contextualTypeArguments), // don't update
         expression
       );
-      if (isChangeType) this.resolver.allowInlineView = false;
+      if (isChangeType) {
+        this.resolver.allowInlineView = false;
+        // A builtin's type arguments are resolved here, not through
+        // `maybeInferCall`, so the view mark has to be recorded here or the
+        // field-access branch never sees it (measured: the owner's pattern
+        // compiled the parameter but the `changetype` argument was refused with
+        // AS100).
+        if (
+          typeArguments != null &&
+          typeArguments.length == 1 &&
+          typeArgumentNodes != null &&
+          typeArgumentNodes.length == 1 &&
+          typeArgumentNodes[0].memoryModel == MemoryModel.Unmanaged
+        ) {
+          this.resolver.markViewCall(expression);
+        }
+      }
     }
     let callee = expression.expression;
     let ctx = new BuiltinFunctionContext(
@@ -7280,6 +7297,14 @@ export class Compiler extends DiagnosticEmitter {
           externalBase, assert(externalMark), externalOffset
         );
         externalOffset += this.sretSizeOf(parameterType);
+      } else if (signature.isViewParam(i)) {
+        // A view argument is **one pointer operand**: the callee reads through
+        // it. Expanding it field-wise would hand the call three operands where
+        // the signature declares one, and copying it to a temp would give the
+        // callee a view of the temp rather than of the caller's bytes.
+        unchecked(operands[index++] =
+          this.compileExpression(unchecked(argumentExpressions[i]), parameterType, Constraints.ConvImplicit)
+        );
       } else {
         index += this.expandSroaArgument(
           unchecked(argumentExpressions[i]), parameterType, operands, index
@@ -8762,7 +8787,7 @@ export class Compiler extends DiagnosticEmitter {
         // address, so there is nothing to `local.get`. Refused by name, not
         // asserted: this is the *point* of the representation — no address, no
         // alias — and a compiler crash is the wrong way to say so.
-        if (local.fieldLocals != null || localIndex < 0) {
+        if (local.fieldLocals != null || local.isViewParam || localIndex < 0) {
           this.error(
             DiagnosticCode.Not_implemented_0,
             expression.range,
@@ -10618,6 +10643,32 @@ export class Compiler extends DiagnosticEmitter {
             fieldType.toRef(),
             propertyInstance.memoryOffset
           );
+        }
+        // A view **local**: `a: @unmanaged T` with `T` inline. The local holds
+        // the caller's address in its one `i32` slot, so a field read is a load
+        // at the field's offset — the same shape as the view-call branch above,
+        // with the address coming from a parameter instead of a `changetype`.
+        //
+        // Deliberately after `resolveSroaReceiver` above: a view has no
+        // `fieldLocals` (S6 gives it none), so that path returns null for it and
+        // the read falls through to here.
+        if (
+          thisExpression != null &&
+          thisExpression.kind == NodeKind.Identifier &&
+          propertyInstance.isField
+        ) {
+          let viewLocal = flow.lookupLocal((<IdentifierExpression>thisExpression).text);
+          if (viewLocal != null && viewLocal.isViewParam) {
+            let fieldType = propertyInstance.type;
+            this.currentType = fieldType;
+            return module.load(
+              fieldType.byteSize,
+              fieldType.isSignedIntegerValue,
+              module.local_get(viewLocal.index, TypeRef.I32),
+              fieldType.toRef(),
+              propertyInstance.memoryOffset
+            );
+          }
         }
         // Sret: `f().x` where `f` returns an `@inline struct`. There is no value
         // to read a field from — the call wrote the fields into a slot the
