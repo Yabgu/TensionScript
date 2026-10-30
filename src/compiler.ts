@@ -6298,27 +6298,29 @@ export class Compiler extends DiagnosticEmitter {
     // asserts on one), and if it *did* compile it would be a pointer, so the
     // assignment would alias. Both halves matter; this is the copy that makes
     // value semantics real.
-    if (
-      expression.kind == NodeKind.Identifier &&
-      valueExpression.kind == NodeKind.Identifier
-    ) {
-      let targetLocal = flow.lookupLocal((<IdentifierExpression>expression).text);
-      let sourceLocal = flow.lookupLocal((<IdentifierExpression>valueExpression).text);
-      if (targetLocal != null && targetLocal.fieldLocals != null && sourceLocal != null) {
-        let targetFields = assert(targetLocal.fieldLocals);
-        let sourceFields = sourceLocal.fieldLocals;
-        if (sourceFields == null) {
+    //
+    // **Either side may be a path**, not just a bare identifier: `b.inner =
+    // a.inner` copies the leaves behind `a.inner` into the leaves behind
+    // `b.inner`, with no value expression evaluated in between. Both trees come
+    // from this compiler's own maps, so the leaves are distinct locals by
+    // construction and the copy cannot alias — `a.inner = a.inner` degenerates
+    // to reading and writing the same local, which is harmless.
+    {
+      let targetLocal = this.resolveSroaReceiver(expression);
+      let sourceLocal = this.resolveSroaReceiver(valueExpression);
+      if (targetLocal != null && sourceLocal != null) {
+        if (!assert(targetLocal.type).equals(assert(sourceLocal.type))) {
           this.error(
             DiagnosticCode.Type_0_is_not_assignable_to_type_1,
             valueExpression.range,
-            "a non-@inline-struct value", assert(targetLocal.type).toString()
+            sourceLocal.type.toString(), targetLocal.type.toString()
           );
           return this.module.unreachable();
         }
         // One `local.set` per **leaf**, so a nested field is descended into
         // rather than assigned as a value it has no representation for.
         let copies = new Array<ExpressionRef>();
-        this.copySroaValue(sourceFields, targetFields, copies);
+        this.copySroaValue(assert(sourceLocal.fieldLocals), assert(targetLocal.fieldLocals), copies);
         this.currentType = Type.void;
         return this.module.flatten(copies);
       }
@@ -12474,6 +12476,62 @@ export class Compiler extends DiagnosticEmitter {
       stmts.push(
         module.local_set(toField.index, module.local_get(fromField.index, fromField.type.toRef()), false)
       );
+    }
+  }
+
+  /**
+   * The `fieldLocals` tree behind an SROA-tracked expression, or `null`.
+   *
+   * The public face of {@link resolveSroaReceiver} for code outside this class —
+   * today only the `copyInto` builtin, which needs the *tree* (to store its
+   * leaves) rather than a single receiver.
+   */
+  sroaTreeOf(expression: Expression): Map<string, Local> | null {
+    let local = this.resolveSroaReceiver(expression);
+    return local != null ? local.fieldLocals : null;
+  }
+
+  /**
+   * Stores an inline value's leaves at `dest + offset`.
+   *
+   * The third leaf consumer, beside `copySroaValue` (local-to-local) and the
+   * read path (local-to-stack): same tree, same recursion, an expression
+   * reference instead of a destination map. The offsets come from the **type**
+   * (`property.memoryOffset`, the layout the C side sees), so what lands in
+   * memory is the wire layout, not a packing of the locals.
+   *
+   * Leaves whose local is missing are skipped rather than stored as `-1`: a
+   * field refused at declaration was never part of the value (`isSroaFieldType`
+   * has already reported why), and the caller has been told.
+   */
+  emitSroaStores(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    dest: ExpressionRef,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      if (entry == null) continue;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitSroaStores(field.type, nested, dest, baseOffset + field.memoryOffset, stmts);
+        }
+        continue;
+      }
+      stmts.push(module.store(
+        field.type.byteSize,
+        dest,
+        module.local_get(entry.index, entry.type.toRef()),
+        field.type.toRef(),
+        baseOffset + field.memoryOffset
+      ));
     }
   }
 

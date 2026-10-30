@@ -14,6 +14,11 @@
 //     existing guard, and depth is what is being shown: it fires for the inner
 //     field, not only for a flat one.
 //
+//   - `changetype<usize>(value)` — **a design decision, not a deferral.** The
+//     address it would return belongs to a temp whose lifetime nothing tracks,
+//     so it would be dangling by construction. `copyInto(dest, value)` is the
+//     explicit alternative and is what the engine uses (`inline-nesting-copyout.ts`).
+//
 // Every declaration below has a user so it actually resolves.
 
 class C {
@@ -50,4 +55,10 @@ export function bareRead(): f32 {
 export function gcLeaf(): i32 {
   const o = new BadOuter();
   return 0;
+}
+
+// (4) An inline value's address. Stays refused by design: see the note above.
+export function valueAddress(): usize {
+  const o = new Outer1();
+  return changetype<usize>(o);
 }

@@ -2,6 +2,7 @@
   "asc_flags": [],
   "stderr": [
     "AS100: Not implemented: reading a nested @inline struct value as a whole (the field is several leaves, not one value; read one of its fields)",
-    "AS100: Not implemented: an @inline struct field 's' of 'BadInner' is a GC reference, and an inline field's GC pointer is invisible to the collector -- the field looks safe but is not; the escape hatch is a hand-written byte layout, not an @inline field"
+    "AS100: Not implemented: an @inline struct field 's' of 'BadInner' is a GC reference, and an inline field's GC pointer is invisible to the collector -- the field looks safe but is not; the escape hatch is a hand-written byte layout, not an @inline field",
+    "AS100: Not implemented: reading an @inline struct value as a whole (a value has no address; read a field, or copy it with `let q: P = p`)"
   ]
 }

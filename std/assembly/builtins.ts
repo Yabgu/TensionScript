@@ -175,6 +175,21 @@ export declare function alignof<T>(): usize; // | u32 / u64
 export declare function offsetof<T>(fieldName?: string): usize; // | u32 / u64
 
 /**
+ * Copies an `@inline struct` value's leaves into memory at `dest`, one store
+ * per leaf at `dest + offsetof(leaf)`.
+ *
+ * The value must be **SROA-tracked**: a local of the value, or a path into one
+ * (`copyInto(at, outer.inner)`). There is no value expression to evaluate — an
+ * inline value has no representation and no address — which is why
+ * `changetype<usize>(value)` stays refused: the address it would return belongs
+ * to a temp nobody tracks. `copyInto` names the destination instead, so the
+ * copy is explicit and the bytes land where the caller chose.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function copyInto(dest: usize, value: any): void;
+
+/**
  * The ABI name of a field: its `@abi.alias("…")` if the declaration has one,
  * else the field's TypeScript name. Compile-time, like `offsetof`.
  *
