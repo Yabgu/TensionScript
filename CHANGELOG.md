@@ -7,8 +7,18 @@
   view routes through the record-load path (`i32.load`/`f32.load` at the field's
   offset) instead of the SROA local path. Only the pointer-operand cell is
   accepted: a local or value-returning operand still refuses (`TS6395`), and a
-  `changetype<T>(ptr)` that names no model keeps its old `AS100` refusal. Phase
-  1; the function-parameter form is Phase 2.
+  `changetype<T>(ptr)` that names no model keeps its old `AS100` refusal.
+
+- **Add: the parameter form of use-site `@unmanaged` over inline types.**
+  `f(a: @unmanaged T)` with an inline `T` is legal: the parameter crosses as one
+  `i32` pointer, binds as one local (no per-field locals), and each `a.field` is
+  a load at the field's offset. The address comes from the caller, normally
+  `changetype<@unmanaged T>(ptr)`. Still refused: the **return** form (the view
+  would outlive the callee's frame), a **local operand** (no address to lend),
+  and `@managed` over inline at any position (`TS6395`). An `@external` or
+  exported signature with a view parameter is refused by a new ABI guard
+  (`TS6411`): the boundary materialises a value for the host, and a view is an
+  address this compiler did not make.
 
 ## 0.11.0 — `@abi.align(N)`
 

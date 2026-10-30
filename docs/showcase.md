@@ -262,10 +262,30 @@ The two reasons are different and both structural: provenance (an `@unmanaged`
 record has no GC header to trace, and a use cannot invent one) and no-address (an
 `@inline` value lives in locals, so there is nothing to lend as a pointer).
 
-The one cell where the use *does* supply an address is
-`changetype<@unmanaged T>(ptr)` with `T` inline-typed; the result is a
-call-scoped view over those bytes. Field access on the view is the Phase 1 form;
-the function-parameter form lands in Phase 2.
+**A use cannot invent an address.** The cells where the use *supplies* one are
+legal, and they yield a call-scoped view over those bytes:
+
+- `changetype<@unmanaged T>(ptr)` with `T` inline-typed — the operand supplies
+  the address;
+- a parameter `a: @unmanaged T` with `T` inline-typed — the caller supplies it.
+  The callee holds one `i32` and reads fields at their offsets:
+
+  ```ts
+  struct Vec3 { x: f32; y: f32; z: f32; }
+  function lengthSq(v: @unmanaged Vec3): f32 { return v.x * v.x + v.y * v.y + v.z * v.z; }
+  export function at(ptr: usize): f32 { return lengthSq(changetype<@unmanaged Vec3>(ptr)); }
+  ```
+
+  `lengthSq` compiles to `(param i32)` — one pointer, not one operand per field —
+  and each `v.<field>` is a load at the field's offset.
+
+The cells where the use does *not* supply an address stay refused with `TS6395`:
+a **local** operand (a value has no address), a **return** type (the callee's
+frame is gone when the caller reads, so the view would dangle), and `@managed`
+over `@inline` at any position (a view is not GC-owned). A host-visible
+signature is refused separately with `TS6411`: an `@external` or exported
+parameter is materialised for the host, and a view is an address this compiler
+never made.
 
 ---
 
