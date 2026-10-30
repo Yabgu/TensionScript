@@ -262,6 +262,11 @@ The two reasons are different and both structural: provenance (an `@unmanaged`
 record has no GC header to trace, and a use cannot invent one) and no-address (an
 `@inline` value lives in locals, so there is nothing to lend as a pointer).
 
+The one cell where the use *does* supply an address is
+`changetype<@unmanaged T>(ptr)` with `T` inline-typed; the result is a
+call-scoped view over those bytes. Field access on the view is the Phase 1 form;
+the function-parameter form lands in Phase 2.
+
 ---
 
 ## 5. Async/await

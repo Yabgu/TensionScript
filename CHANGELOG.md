@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Add: `changetype<@unmanaged T>(ptr)` with `T` inline-typed** is now legal;
+  the result is a call-scoped view over the caller's bytes. Field access on the
+  view routes through the record-load path (`i32.load`/`f32.load` at the field's
+  offset) instead of the SROA local path. Only the pointer-operand cell is
+  accepted: a local or value-returning operand still refuses (`TS6395`), and a
+  `changetype<T>(ptr)` that names no model keeps its old `AS100` refusal. Phase
+  1; the function-parameter form is Phase 2.
+
 ## 0.11.0 — `@abi.align(N)`
 
 A field-position attribute forces the field's alignment. Written on the field
