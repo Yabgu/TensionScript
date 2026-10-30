@@ -19,7 +19,9 @@
 //   - ...but **not** a return type any more: an `@inline struct` return is
 //     sret (the caller passes a hidden destination pointer) — see
 //     `inline-struct-sret.ts`.
-//   - a field of an `@inline` value (SROA flattening, sub-phase B)
+//   - ~~a field of an `@inline` value~~ **now accepted** (deep SROA Phase A:
+//     the nesting is flattened one local per leaf — see
+//     `inline-nesting-nested.ts`)
 //   - a field of a plain class (inline-in-heap; deferred)
 //   - `T[N]` of an `@inline struct`
 //   - `Array<T>` (a type argument is a pointer slot)

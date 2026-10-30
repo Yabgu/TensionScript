@@ -4385,11 +4385,17 @@ export class Resolver extends DiagnosticEmitter {
                     declaredMemoryModelOf(fieldType) == MemoryModel.Inline
                   ) {
                     if (instance.hasDecorator(DecoratorFlags.InlineStruct)) {
-                      this.error(
-                        DiagnosticCode.Not_implemented_0,
-                        typeNode.range,
-                        "an @inline struct nested inside an @inline value (the outer is one WASM local per field, so the inner would have to be flattened into the outer's leaves -- that is SROA flattening, sub-phase B)"
-                      );
+                      // Accepted: an inline value nested in an inline value is
+                      // flattened, one WASM local per **leaf**. The outer's SROA
+                      // local creation recurses through the nesting
+                      // (`Compiler#compileSroaLocal`), and a field read walks the
+                      // access chain to the leaf (`#resolveSroaReceiver`).
+                      //
+                      // The two hazards the flat case guards still apply and are
+                      // checked above this branch: a cycle would have no finite
+                      // extent, and a GC-reference leaf has no write barrier under
+                      // a bare `local.set`. Both are refused there, for the inner
+                      // as for the outer.
                     } else if (
                       !instance.hasDecorator(DecoratorFlags.Unmanaged) &&
                       !instance.hasDecorator(DecoratorFlags.ManagedStruct)
