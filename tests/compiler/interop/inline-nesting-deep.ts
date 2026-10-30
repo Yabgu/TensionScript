@@ -22,3 +22,19 @@ export function read_deep(): f32 {
   o.b.c.x = 4.25;
   return o.b.c.x;
 }
+
+// Phase B: a three-level chain copies leaf by leaf, both forms.
+export function copy_deep(): f32 {
+  const o = new L1();
+  o.b.c.x = 2.5;
+  const p = o;
+  return p.b.c.x;
+}
+
+export function assign_deep(): f32 {
+  const o = new L1();
+  o.b.c.x = 1.5;
+  let q = new L1();
+  q = o;
+  return q.b.c.x;
+}

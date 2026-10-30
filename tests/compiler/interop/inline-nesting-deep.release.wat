@@ -6,8 +6,16 @@
  (data $1 (i32.const 1100) "<")
  (data $1.1 (i32.const 1112) "\02\00\00\00(\00\00\00A\00l\00l\00o\00c\00a\00t\00i\00o\00n\00 \00t\00o\00o\00 \00l\00a\00r\00g\00e")
  (export "read_deep" (func $interop/inline-nesting-deep/read_deep))
+ (export "copy_deep" (func $interop/inline-nesting-deep/copy_deep))
+ (export "assign_deep" (func $interop/inline-nesting-deep/assign_deep))
  (export "memory" (memory $0))
  (func $interop/inline-nesting-deep/read_deep (result f32)
   f32.const 4.25
+ )
+ (func $interop/inline-nesting-deep/copy_deep (result f32)
+  f32.const 2.5
+ )
+ (func $interop/inline-nesting-deep/assign_deep (result f32)
+  f32.const 1.5
  )
 )

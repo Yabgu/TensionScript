@@ -1,8 +1,8 @@
 (module
  (type $0 (func (param i32) (result i32)))
  (type $1 (func (param i32 i32)))
- (type $2 (func (param i32 i32) (result i32)))
- (type $3 (func (result f32)))
+ (type $2 (func (result f32)))
+ (type $3 (func (param i32 i32) (result i32)))
  (type $4 (func (param i32 i32 i32 i32)))
  (type $5 (func (param i32 i32 i64) (result i32)))
  (type $6 (func))
@@ -20,6 +20,7 @@
  (elem $0 (i32.const 1))
  (export "only_x" (func $interop/inline-nesting-nested/only_x))
  (export "only_y" (func $interop/inline-nesting-nested/only_y))
+ (export "copy_leaf" (func $interop/inline-nesting-nested/copy_leaf))
  (export "memory" (memory $0))
  (func $~lib/rt/tlsf/Root#set:flMap (param $this i32) (param $flMap i32)
   local.get $this
@@ -1535,6 +1536,30 @@
   f32.const 9.5
   local.set $o$inner$y
   local.get $o$inner$y
+  return
+ )
+ (func $interop/inline-nesting-nested/copy_leaf (result f32)
+  (local $a$a i32)
+  (local $a$inner$x f32)
+  (local $a$inner$y f32)
+  (local $b$a i32)
+  (local $b$inner$x f32)
+  (local $b$inner$y f32)
+  f32.const 3.140000104904175
+  local.set $a$inner$x
+  local.get $a$a
+  local.set $b$a
+  local.get $a$inner$x
+  local.set $b$inner$x
+  local.get $a$inner$y
+  local.set $b$inner$y
+  f32.const 7
+  local.set $b$inner$x
+  local.get $a$inner$x
+  f32.const 10
+  f32.mul
+  local.get $b$inner$x
+  f32.add
   return
  )
 )

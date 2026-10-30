@@ -39,3 +39,13 @@ export function only_y(): f32 {
   o.inner.y = 9.5;
   return o.inner.y;
 }
+
+// Phase B: the copy is a **copy**, not an alias. Writes to the copy's leaf are
+// invisible through the original, which is what one `local.set` per leaf buys.
+export function copy_leaf(): f32 {
+  const a = new Outer1();
+  a.inner.x = 3.14;
+  const b = a;
+  b.inner.x = 7.0;
+  return a.inner.x * 10 + b.inner.x; // 31.4 + 7.0 = 38.4
+}

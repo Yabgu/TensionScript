@@ -6,8 +6,9 @@
 //
 //   - reading the nested **value as a whole** — it is several leaves, so there
 //     is no single local to read (`AS100`).
-//   - copying a value that **contains** a nested field — a per-leaf copy, which
-//     is the copy-out phase (`AS100`).
+//   - ~~copying a value that contains a nested field~~ **now accepted** (Phase B:
+//     one `local.set` per leaf, so the copy cannot alias — see
+//     `inline-nesting-nested.ts`).
 //   - a **GC-reference leaf** at any depth — a bare `local.set` skips the write
 //     barrier, so the field would look safe and not be (`AS100`). This is the
 //     existing guard, and depth is what is being shown: it fires for the inner
@@ -43,13 +44,6 @@ export function bareRead(): f32 {
   const o = new Outer1();
   const i = o.inner;
   return 0;
-}
-
-// (2) A copy of a value that has a nested field.
-export function copyValue(): f32 {
-  const o = new Outer1();
-  const q = o;
-  return q.inner.x;
 }
 
 // (3) A GC-reference leaf, one level down inside an inline value.

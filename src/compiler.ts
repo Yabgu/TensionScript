@@ -6315,16 +6315,10 @@ export class Compiler extends DiagnosticEmitter {
           );
           return this.module.unreachable();
         }
+        // One `local.set` per **leaf**, so a nested field is descended into
+        // rather than assigned as a value it has no representation for.
         let copies = new Array<ExpressionRef>();
-        for (let _keys = Map_keys(targetFields), i = 0, k = _keys.length; i < k; ++i) {
-          let fieldName = unchecked(_keys[i]);
-          if (!sourceFields.has(fieldName)) continue;
-          let to = assert(targetFields.get(fieldName));
-          let from = assert(sourceFields.get(fieldName));
-          copies.push(
-            this.module.local_set(to.index, this.module.local_get(from.index, from.type.toRef()), false)
-          );
-        }
+        this.copySroaValue(sourceFields, targetFields, copies);
         this.currentType = Type.void;
         return this.module.flatten(copies);
       }
@@ -12445,6 +12439,44 @@ export class Compiler extends DiagnosticEmitter {
     return !refused;
   }
 
+  /**
+   * Copies one SROA value's leaves into another's, following the tree.
+   *
+   * `from` and `to` are the two `fieldLocals` maps — the same shape
+   * `fillSroaFieldLocals` builds, so a nested field is a placeholder on both
+   * sides and the recursion descends through it rather than trying to move a
+   * value that has no single representation.
+   *
+   * This is what makes `let q = p` and `q = p` **copies** rather than aliases:
+   * one `local.set` per leaf, so a later write to `q` cannot be seen through
+   * `p`. Both sides come from this compiler's own maps, so there is no aliasing
+   * question to answer — the leaves are distinct locals by construction.
+   */
+  private copySroaValue(
+    from: Map<string, Local>,
+    to: Map<string, Local>,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    for (let _keys = Map_keys(to), i = 0, k = _keys.length; i < k; ++i) {
+      let fieldName = unchecked(_keys[i]);
+      let fromField = getMapEntry(from, fieldName);
+      if (fromField == null) continue;
+      let toField = assert(getMapEntry(to, fieldName));
+      if (toField.index < 0 || fromField.index < 0) {
+        let toNested = toField.fieldLocals;
+        let fromNested = fromField.fieldLocals;
+        if (toNested != null && fromNested != null) {
+          this.copySroaValue(fromNested, toNested, stmts);
+        }
+        continue;
+      }
+      stmts.push(
+        module.local_set(toField.index, module.local_get(fromField.index, fromField.type.toRef()), false)
+      );
+    }
+  }
+
   private compileSroaLocal(
     declaration: VariableLikeDeclarationStatement,
     type: Type,
@@ -12532,24 +12564,9 @@ export class Compiler extends DiagnosticEmitter {
     if (initializerNode.kind == NodeKind.Identifier) {
       let source = flow.lookupLocal((<IdentifierExpression>initializerNode).text);
       if (source && source.fieldLocals) {
-        for (let i = 0, k = fields.length; i < k; ++i) {
-          let fieldName = unchecked(fields[i]).name;
-          let from = assert(assert(source.fieldLocals).get(fieldName));
-          let to = assert(fieldLocals.get(fieldName));
-          // A nested field is several leaves on each side: copying it needs one
-          // store per leaf, which is the copy-out phase, not a `local.set`.
-          if (from.index < 0 || to.index < 0) {
-            this.error(
-              DiagnosticCode.Not_implemented_0,
-              initializerNode.range,
-              "copying an @inline struct value that has a nested @inline field (the nested field is several leaves, so this is a per-leaf copy; deferred)"
-            );
-            return true;
-          }
-          initializers.push(
-            module.local_set(to.index, module.local_get(from.index, from.type.toRef()), false)
-          );
-        }
+        // One `local.set` per **leaf**, through the nesting. `q` has fresh
+        // locals from `fillSroaFieldLocals`, so the copy cannot alias.
+        this.copySroaValue(assert(source.fieldLocals), fieldLocals, initializers);
         return true;
       }
     }

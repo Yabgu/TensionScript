@@ -1,12 +1,12 @@
 (module
  (type $0 (func (param i32) (result i32)))
  (type $1 (func (param i32 i32)))
- (type $2 (func (param i32 i32) (result i32)))
- (type $3 (func (param i32 i32 i32 i32)))
- (type $4 (func (param i32 i32 i64) (result i32)))
- (type $5 (func))
- (type $6 (func (param i32 i32 i32)))
- (type $7 (func (result f32)))
+ (type $2 (func (result f32)))
+ (type $3 (func (param i32 i32) (result i32)))
+ (type $4 (func (param i32 i32 i32 i32)))
+ (type $5 (func (param i32 i32 i64) (result i32)))
+ (type $6 (func))
+ (type $7 (func (param i32 i32 i32)))
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
  (global $~lib/native/ASC_LOW_MEMORY_LIMIT i32 (i32.const 0))
@@ -19,6 +19,8 @@
  (table $0 1 1 funcref)
  (elem $0 (i32.const 1))
  (export "read_deep" (func $interop/inline-nesting-deep/read_deep))
+ (export "copy_deep" (func $interop/inline-nesting-deep/copy_deep))
+ (export "assign_deep" (func $interop/inline-nesting-deep/assign_deep))
  (export "memory" (memory $0))
  (func $~lib/rt/tlsf/Root#set:flMap (param $this i32) (param $flMap i32)
   local.get $this
@@ -1509,6 +1511,26 @@
   f32.const 4.25
   local.set $o$b$c$x
   local.get $o$b$c$x
+  return
+ )
+ (func $interop/inline-nesting-deep/copy_deep (result f32)
+  (local $o$b$c$x f32)
+  (local $p$b$c$x f32)
+  f32.const 2.5
+  local.set $o$b$c$x
+  local.get $o$b$c$x
+  local.set $p$b$c$x
+  local.get $p$b$c$x
+  return
+ )
+ (func $interop/inline-nesting-deep/assign_deep (result f32)
+  (local $o$b$c$x f32)
+  (local $q$b$c$x f32)
+  f32.const 1.5
+  local.set $o$b$c$x
+  local.get $o$b$c$x
+  local.set $q$b$c$x
+  local.get $q$b$c$x
   return
  )
 )

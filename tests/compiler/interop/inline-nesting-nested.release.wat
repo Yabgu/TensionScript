@@ -7,11 +7,15 @@
  (data $1.1 (i32.const 1112) "\02\00\00\00(\00\00\00A\00l\00l\00o\00c\00a\00t\00i\00o\00n\00 \00t\00o\00o\00 \00l\00a\00r\00g\00e")
  (export "only_x" (func $interop/inline-nesting-nested/only_x))
  (export "only_y" (func $interop/inline-nesting-nested/only_y))
+ (export "copy_leaf" (func $interop/inline-nesting-nested/copy_leaf))
  (export "memory" (memory $0))
  (func $interop/inline-nesting-nested/only_y (result f32)
   f32.const 9.5
  )
  (func $interop/inline-nesting-nested/only_x (result f32)
   f32.const 1.5
+ )
+ (func $interop/inline-nesting-nested/copy_leaf (result f32)
+  f32.const 38.400001525878906
  )
 )
