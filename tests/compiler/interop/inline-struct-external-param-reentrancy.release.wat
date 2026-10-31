@@ -16,15 +16,15 @@
  (export "memory" (memory $0))
  (func $interop/inline-struct-external-param-reentrancy/outer (result f32)
   (local $0 i32)
-  (local $1 f32)
-  (local $2 i32)
+  (local $1 i32)
+  (local $2 f32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
   i32.add
-  local.tee $2
+  local.tee $1
   global.set $~sretStackPointer
-  local.get $2
+  local.get $1
   i32.const 5120
   i32.gt_s
   if
@@ -36,30 +36,27 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   f32.const 1
   f32.store
-  local.get $2
+  local.get $0
   f32.const 2
   f32.store offset=4
-  local.get $2
+  local.get $0
   call $interop/inline-struct-external-param-reentrancy/host_cb
   local.get $0
   global.set $~sretStackPointer
  )
  (func $interop/inline-struct-external-param-reentrancy/callback (result f32)
   (local $0 i32)
-  (local $1 f32)
-  (local $2 i32)
+  (local $1 i32)
+  (local $2 f32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
   i32.add
-  local.tee $2
+  local.tee $1
   global.set $~sretStackPointer
-  local.get $2
+  local.get $1
   i32.const 5120
   i32.gt_s
   if
@@ -71,15 +68,12 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   f32.const 100
   f32.store
-  local.get $2
+  local.get $0
   f32.const 1
   f32.store offset=4
-  local.get $2
+  local.get $0
   call $interop/inline-struct-external-param-reentrancy/host_sum
   local.get $0
   global.set $~sretStackPointer

@@ -34,21 +34,18 @@
    unreachable
   end
   local.get $3
-  i32.const 1024
-  i32.add
-  local.tee $4
   local.get $0
   local.get $2
   i32.add
   i32.store
-  local.get $4
+  local.get $3
   local.get $1
   i32.const 1
   i32.shl
   i32.store offset=4
-  local.get $4
+  local.get $3
   i32.load
-  local.get $4
+  local.get $3
   i32.load offset=4
   local.set $1
   local.get $3
@@ -80,12 +77,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 5
   i32.store
-  local.get $1
+  local.get $0
   i32.const 8
   i32.store offset=4
   local.get $0
@@ -108,15 +102,12 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 8
   i32.store
-  local.get $1
+  local.get $0
   i32.const 8
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load
   local.set $1
   local.get $0
@@ -145,15 +136,12 @@
    unreachable
   end
   local.get $1
-  i32.const 1024
-  i32.add
-  local.tee $2
   i32.const 8
   i32.store
-  local.get $2
+  local.get $1
   i32.const 8
   i32.store offset=4
-  local.get $2
+  local.get $1
   i32.load offset=4
   local.get $1
   global.set $~sretStackPointer

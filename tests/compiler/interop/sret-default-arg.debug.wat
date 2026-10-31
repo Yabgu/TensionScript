@@ -1596,20 +1596,14 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $3
-  i32.add
   f32.const 2
   f32.const 1
   call $interop/sret-default-arg/make
-  i32.const 16
   local.get $3
-  i32.add
   f32.load
   local.set $m$a
-  i32.const 16
   local.get $3
-  i32.add
   f32.load offset=4
   local.set $m$b
   local.get $3
@@ -1643,20 +1637,14 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $3
-  i32.add
   f32.const 2
   f32.const 5
   call $interop/sret-default-arg/make
-  i32.const 16
   local.get $3
-  i32.add
   f32.load
   local.set $m$a
-  i32.const 16
   local.get $3
-  i32.add
   f32.load offset=4
   local.set $m$b
   local.get $3
@@ -1707,21 +1695,15 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $3
-  i32.add
   f32.const 10
   f32.const 1
   f32.const 2
   call $interop/sret-default-arg/make2
-  i32.const 16
   local.get $3
-  i32.add
   f32.load
   local.set $m$a
-  i32.const 16
   local.get $3
-  i32.add
   f32.load offset=4
   local.set $m$b
   local.get $3
@@ -2698,20 +2680,14 @@
   local.get $5
   i32.store offset=4
   local.get $5
-  i32.const 16
   local.get $4
-  i32.add
   f32.const 2
   f32.const 1
   call $interop/sret-default-arg/Box#combine
-  i32.const 16
   local.get $4
-  i32.add
   f32.load
   local.set $m$a
-  i32.const 16
   local.get $4
-  i32.add
   f32.load offset=4
   local.set $m$b
   local.get $4

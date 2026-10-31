@@ -17,7 +17,6 @@
   (local $0 i32)
   (local $1 f32)
   (local $2 i32)
-  (local $3 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 32
@@ -36,26 +35,23 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   f32.const 1
   f32.store
-  local.get $2
+  local.get $0
   f32.const 2
   f32.store offset=4
-  local.get $2
+  local.get $0
   i32.const 16
   i32.add
-  local.tee $3
+  local.tee $2
   i32.const 10
   i32.store
-  local.get $3
+  local.get $2
   i32.const 20
   i32.store offset=4
-  local.get $2
+  local.get $0
   i32.const 5
-  local.get $3
+  local.get $2
   call $interop/inline-struct-external-param-multi/host_two
   local.get $0
   global.set $~sretStackPointer
@@ -65,7 +61,6 @@
   (local $1 f32)
   (local $2 f32)
   (local $3 i32)
-  (local $4 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 32
@@ -84,26 +79,23 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $3
   f32.const 1
   f32.store
-  local.get $3
+  local.get $0
   f32.const 2
   f32.store offset=4
-  local.get $3
+  local.get $0
   i32.const 16
   i32.add
-  local.tee $4
+  local.tee $3
   i32.const 10
   i32.store
-  local.get $4
+  local.get $3
   i32.const 20
   i32.store offset=4
-  local.get $3
+  local.get $0
   i32.const 5
-  local.get $4
+  local.get $3
   call $interop/inline-struct-external-param-multi/host_two
   local.get $0
   global.set $~sretStackPointer
@@ -125,26 +117,23 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $3
   f32.const 1
   f32.store
-  local.get $3
+  local.get $0
   f32.const 2
   f32.store offset=4
-  local.get $3
+  local.get $0
   i32.const 16
   i32.add
-  local.tee $4
+  local.tee $3
   i32.const 10
   i32.store
-  local.get $4
+  local.get $3
   i32.const 20
   i32.store offset=4
-  local.get $3
+  local.get $0
   i32.const 5
-  local.get $4
+  local.get $3
   call $interop/inline-struct-external-param-multi/host_two
   local.get $0
   global.set $~sretStackPointer

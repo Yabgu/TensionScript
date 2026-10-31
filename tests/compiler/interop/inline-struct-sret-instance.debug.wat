@@ -2570,14 +2570,10 @@
   local.get $5
   i32.store offset=4
   local.get $5
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  i32.const 16
   local.get $1
-  i32.add
   f32.load
   local.set $2
   local.get $1
@@ -2610,14 +2606,10 @@
   local.get $5
   i32.store offset=4
   local.get $5
-  i32.const 16
   local.get $3
-  i32.add
   i32.const 4
   call $interop/inline-struct-sret-instance/Maker#make
-  i32.const 16
   local.get $3
-  i32.add
   f32.load offset=4
   local.set $4
   local.get $3
@@ -2689,19 +2681,13 @@
   local.get $12
   i32.store offset=4
   local.get $12
-  i32.const 16
   local.get $4
-  i32.add
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  i32.const 16
   local.get $4
-  i32.add
   f32.load
   local.set $v$a
-  i32.const 16
   local.get $4
-  i32.add
   f32.load offset=4
   local.set $v$b
   local.get $4
@@ -2744,16 +2730,12 @@
   local.get $12
   i32.store offset=4
   local.get $12
-  i32.const 16
   local.get $8
-  i32.add
   local.get $p$a
   local.get $p$b
   i32.const 3
   call $interop/inline-struct-sret-instance/Calc#scale
-  i32.const 16
   local.get $8
-  i32.add
   f32.load
   local.set $9
   local.get $8
@@ -2785,16 +2767,12 @@
   local.get $12
   i32.store offset=4
   local.get $12
-  i32.const 16
   local.get $10
-  i32.add
   local.get $p$a
   local.get $p$b
   i32.const 3
   call $interop/inline-struct-sret-instance/Calc#scale
-  i32.const 16
   local.get $10
-  i32.add
   f32.load offset=4
   local.set $11
   local.get $10
@@ -2879,14 +2857,10 @@
   local.get $14
   i32.store
   local.get $14
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  i32.const 16
   local.get $0
-  i32.add
   f32.load
   local.set $1
   local.get $0
@@ -2930,14 +2904,10 @@
   local.get $14
   i32.store
   local.get $14
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  i32.const 16
   local.get $2
-  i32.add
   f32.load offset=4
   local.set $3
   local.get $2
@@ -2981,14 +2951,10 @@
   local.get $14
   i32.store
   local.get $14
-  i32.const 16
   local.get $4
-  i32.add
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  i32.const 16
   local.get $4
-  i32.add
   f32.load
   local.set $5
   local.get $4
@@ -3021,14 +2987,10 @@
   local.get $14
   i32.store
   local.get $14
-  i32.const 16
   local.get $6
-  i32.add
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  i32.const 16
   local.get $6
-  i32.add
   f32.load
   local.set $7
   local.get $6
@@ -3075,16 +3037,12 @@
   local.get $14
   i32.store
   local.get $14
-  i32.const 16
   local.get $10
-  i32.add
   local.get $8
   local.get $9
   i32.const 3
   call $interop/inline-struct-sret-instance/Calc#scale
-  i32.const 16
   local.get $10
-  i32.add
   f32.load
   local.set $11
   local.get $10
@@ -3128,16 +3086,12 @@
   local.get $14
   i32.store
   local.get $14
-  i32.const 16
   local.get $12
-  i32.add
   local.get $8
   local.get $9
   i32.const 3
   call $interop/inline-struct-sret-instance/Calc#scale
-  i32.const 16
   local.get $12
-  i32.add
   f32.load offset=4
   local.set $13
   local.get $12

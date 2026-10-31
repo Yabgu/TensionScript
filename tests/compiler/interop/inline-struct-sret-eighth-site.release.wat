@@ -167,21 +167,18 @@
    i32.load
    local.set $2
    local.get $0
-   i32.const 1440
-   i32.add
-   local.tee $3
    local.get $1
    i32.store
-   local.get $3
+   local.get $0
    local.get $2
    i32.store offset=4
    global.get $~lib/memory/__stack_pointer
    i32.const 4
    i32.add
    global.set $~lib/memory/__stack_pointer
-   local.get $3
+   local.get $0
    i32.load
-   local.get $3
+   local.get $0
    i32.load offset=4
    local.set $2
    local.get $0

@@ -2528,9 +2528,7 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 416
   local.get $5
-  i32.add
   local.get $b
   local.set $6
   global.get $~lib/memory/__stack_pointer
@@ -2539,14 +2537,10 @@
   local.get $6
   local.get $n
   call $interop/inline-struct-sret-eighth-site/fromBox
-  i32.const 416
   local.get $5
-  i32.add
   i32.load
   local.set $out$x
-  i32.const 416
   local.get $5
-  i32.add
   i32.load offset=4
   local.set $out$y
   local.get $5

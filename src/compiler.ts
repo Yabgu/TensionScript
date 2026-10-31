@@ -7236,14 +7236,10 @@ export class Compiler extends DiagnosticEmitter {
     // `sretDestSlot`, so that the read can happen while the slot is live.
     this.sretDiscardMark = null;
     if (hasHiddenDest && sretDest == 0) {
-      let base = this.ensureSretStack();
+      this.ensureSretStack(); // the region and its bump global
       let sretMarkLocal = this.currentFlow.getTempLocal(Type.u32);
       this.sretDiscardMark = sretMarkLocal;
-      sretDest = this.module.binary(
-        BinaryOp.AddI32,
-        this.module.i32(base),
-        this.module.local_get(sretMarkLocal.index, TypeRef.I32)
-      );
+      sretDest = this.makeSretAddress(sretMarkLocal);
     }
     let numOperands = numArgumentsInclThis + (hasHiddenDest ? 1 : 0);
     let operands = new Array<ExpressionRef>(numOperands);
@@ -7271,7 +7267,6 @@ export class Compiler extends DiagnosticEmitter {
     // call is missing, leaving them to write through an uninitialised offset.
     this.externalTempMark = null;
     this.externalTempSize = 0;
-    let externalBase = 0;
     let externalMark: Local | null = null;
     let externalOffset = 0;
     let externalTotal = 0;
@@ -7288,7 +7283,7 @@ export class Compiler extends DiagnosticEmitter {
         }
       }
       if (total > 0) {
-        externalBase = this.ensureSretStack();
+        this.ensureSretStack(); // the region and its bump global
         externalMark = this.currentFlow.getTempLocal(Type.u32);
         externalTotal = total;
       }
@@ -7302,7 +7297,7 @@ export class Compiler extends DiagnosticEmitter {
       if (externalMark != null && signature.isByValPointerParam(i)) {
         operands[index++] = this.makeExternalTempArgument(
           unchecked(argumentExpressions[i]), parameterType,
-          externalBase, assert(externalMark), externalOffset
+          assert(externalMark), externalOffset
         );
         externalOffset += this.sretSizeOf(parameterType);
       } else if (signature.isViewParam(i)) {
@@ -12033,14 +12028,16 @@ export class Compiler extends DiagnosticEmitter {
     return (classReference.nextMemoryOffset + 15) & ~15;
   }
 
-  /** `base + mark`, freshly built. Callers must not share the node: Binaryen
-   *  passes assume a single parent per expression. */
-  private makeSretAddress(base: i32, markLocal: Local): ExpressionRef {
-    return this.module.binary(
-      BinaryOp.AddI32,
-      this.module.i32(base),
-      this.module.local_get(markLocal.index, TypeRef.I32)
-    );
+  /** The call-temp slot address: the mark alone, freshly built so callers never
+   *  share a node (Binaryen's passes assume a single parent per expression).
+   *
+   *  **Not `base + mark`.** `ensureSretStack` initialises the bump global to
+   *  `base`, so a mark saved from it is already absolute — which is also what
+   *  `makeSretGuard` assumes when it tests `mark + size > base + SIZE`. Adding
+   *  `base` a second time yields `2 * base + ...`; measured, that produced a
+   *  fault at exactly `0x1002a60 = 2 * 0x801418`. */
+  private makeSretAddress(markLocal: Local): ExpressionRef {
+    return this.module.local_get(markLocal.index, TypeRef.I32);
   }
 
   /** A load of one field of an `@inline struct` at a slot address. */
@@ -12125,13 +12122,13 @@ export class Compiler extends DiagnosticEmitter {
     }
   }
 
-  /** `base + mark + extra`, freshly built. Callers must not share the node:
+  /** `mark + extra`, freshly built. Callers must not share the node:
    *  Binaryen's passes assume a single parent per expression. */
-  private makeSretAddressPlus(base: i32, markLocal: Local, extra: i32): ExpressionRef {
+  private makeSretAddressPlus(markLocal: Local, extra: i32): ExpressionRef {
     let module = this.module;
     return module.binary(
       BinaryOp.AddI32,
-      this.makeSretAddress(base, markLocal),
+      this.makeSretAddress(markLocal),
       module.i32(extra)
     );
   }
@@ -12147,7 +12144,6 @@ export class Compiler extends DiagnosticEmitter {
   emitTempArgumentLeaves(
     type: Type,
     fieldLocals: Map<string, Local>,
-    base: i32,
     markLocal: Local,
     baseOffset: i32,
     stmts: ExpressionRef[]
@@ -12165,7 +12161,7 @@ export class Compiler extends DiagnosticEmitter {
         let nested = entry.fieldLocals;
         if (nested != null) {
           this.emitTempArgumentLeaves(
-            field.type, nested, base, markLocal, baseOffset + field.memoryOffset, stmts
+            field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
           );
         }
         continue;
@@ -12177,7 +12173,7 @@ export class Compiler extends DiagnosticEmitter {
         // immediate — the shape this path always emitted, so a flat record's
         // bytes do not move; `baseOffset` is 0 for the top level and the nested
         // field's offset for anything below it.
-        this.makeSretAddressPlus(base, markLocal, baseOffset),
+        this.makeSretAddressPlus(markLocal, baseOffset),
         module.local_get(entry.index, entry.type.toRef()),
         field.type.toRef(),
         field.memoryOffset
@@ -12203,7 +12199,6 @@ export class Compiler extends DiagnosticEmitter {
   private makeExternalTempArgument(
     argumentExpression: Expression,
     type: Type,
-    base: i32,
     markLocal: Local,
     offset: i32
   ): ExpressionRef {
@@ -12230,7 +12225,7 @@ export class Compiler extends DiagnosticEmitter {
       // offsets the type gives them. A nested inline field is a placeholder with
       // its own map, so the walk descends — the same recursion `copyInto` uses,
       // with a stack address instead of a caller-supplied one.
-      this.emitTempArgumentLeaves(type, fieldLocals, base, markLocal, offset, stmts);
+      this.emitTempArgumentLeaves(type, fieldLocals, markLocal, offset, stmts);
     } else if (Signature.isInlineStructRef(type)) {
       // An `@inline struct` **value** with no local behind it: a call result, a
       // `new`, a field access. There is no address to copy from and no SROA shape
@@ -12260,7 +12255,7 @@ export class Compiler extends DiagnosticEmitter {
         let field = unchecked(fields[i]);
         stmts.push(module.store(
           field.type.byteSize,
-          this.makeSretAddressPlus(base, markLocal, offset),
+          this.makeSretAddressPlus(markLocal, offset),
           // A fresh address node and a fresh load per store (one parent per
           // node). The load reads the *record* at the field's own offset; the
           // store writes the temp at the same offset.
@@ -12276,7 +12271,7 @@ export class Compiler extends DiagnosticEmitter {
         ));
       }
     }
-    stmts.push(this.makeSretAddressPlus(base, markLocal, offset));
+    stmts.push(this.makeSretAddressPlus(markLocal, offset));
     return module.block(null, stmts, TypeRef.I32);
   }
 
@@ -12371,7 +12366,7 @@ export class Compiler extends DiagnosticEmitter {
     readTarget: Map<string, Local> | null
   ): ExpressionRef {
     let module = this.module;
-    let base = this.ensureSretStack();
+    this.ensureSretStack(); // the region and its bump global
     let global = assert(this.sretStackGlobal);
     let size = this.sretSizeOf(returnType);
     let flow = this.currentFlow;
@@ -12382,11 +12377,7 @@ export class Compiler extends DiagnosticEmitter {
       module.binary(BinaryOp.AddI32, module.local_get(markLocal.index, TypeRef.I32), module.i32(size))
     ));
     stmts.push(this.makeSretGuard(markLocal, size, callExpression));
-    this.sretDestSlot = module.binary(
-      BinaryOp.AddI32,
-      module.i32(base),
-      module.local_get(markLocal.index, TypeRef.I32)
-    );
+    this.sretDestSlot = this.makeSretAddress(markLocal);
     let callExpr = this.compileCallExpression(callExpression, Type.auto, Constraints.None);
     if (this.sretDestSlot != 0) {
       // The call did not consume its destination: it was refused before
@@ -12408,13 +12399,13 @@ export class Compiler extends DiagnosticEmitter {
     if (readField != null) {
       stmts.push(module.local_set(
         assert(resultLocal).index,
-        this.makeSretFieldLoad(this.makeSretAddress(base, markLocal), readField),
+        this.makeSretFieldLoad(this.makeSretAddress(markLocal), readField),
         false
       ));
     } else if (readTarget != null) {
       // One load per **leaf**: a nested inline field is several leaves on both
       // sides, so the slot is read back a leaf at a time into the target's tree.
-      this.emitSretLoadsInto(returnType, readTarget, base, markLocal, 0, stmts);
+      this.emitSretLoadsInto(returnType, readTarget, markLocal, 0, stmts);
     }
     stmts.push(module.global_set(global, module.local_get(markLocal.index, TypeRef.I32)));
     if (resultLocal != null) {
@@ -12699,7 +12690,6 @@ export class Compiler extends DiagnosticEmitter {
   emitSretLoadsInto(
     type: Type,
     fieldLocals: Map<string, Local>,
-    base: i32,
     markLocal: Local,
     baseOffset: i32,
     stmts: ExpressionRef[]
@@ -12714,7 +12704,7 @@ export class Compiler extends DiagnosticEmitter {
         let nested = entry.fieldLocals;
         if (nested != null) {
           this.emitSretLoadsInto(
-            field.type, nested, base, markLocal, baseOffset + field.memoryOffset, stmts
+            field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
           );
         }
         continue;
@@ -12724,7 +12714,7 @@ export class Compiler extends DiagnosticEmitter {
         this.module.load(
           field.type.byteSize,
           false,
-          this.makeSretAddress(base, markLocal),
+          this.makeSretAddress(markLocal),
           field.type.toRef(),
           baseOffset + field.memoryOffset
         ),

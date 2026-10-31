@@ -46,23 +46,17 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 0
   i32.add
   local.get $w$a
   f32.store
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 0
   i32.add
   local.get $w$b
   f32.store offset=4
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 0
   i32.add
   call $interop/inline-struct-external-param-reentrancy/host_sum
@@ -100,23 +94,17 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 0
   i32.add
   local.get $v$a
   f32.store
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 0
   i32.add
   local.get $v$b
   f32.store offset=4
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 0
   i32.add
   call $interop/inline-struct-external-param-reentrancy/host_cb

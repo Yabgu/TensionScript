@@ -66,14 +66,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $1
-  i32.add
   local.get $n
   call $interop/inline-struct-sret/make
-  i32.const 16
   local.get $1
-  i32.add
   i32.load
   local.set $2
   local.get $1
@@ -104,19 +100,13 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $3
-  i32.add
   local.get $n
   call $interop/inline-struct-sret/make
-  i32.const 16
   local.get $3
-  i32.add
   i32.load
   local.set $q$x
-  i32.const 16
   local.get $3
-  i32.add
   i32.load offset=4
   local.set $q$y
   local.get $3
@@ -151,9 +141,7 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $1
-  i32.add
   local.get $n
   call $interop/inline-struct-sret/make
   local.get $1
@@ -177,14 +165,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $2
-  i32.add
   local.get $n
   call $interop/inline-struct-sret/make
-  i32.const 16
   local.get $2
-  i32.add
   i32.load offset=4
   local.set $3
   local.get $2
@@ -1741,19 +1725,13 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $4
-  i32.add
   local.get $n
   call $interop/inline-struct-sret/make
-  i32.const 16
   local.get $4
-  i32.add
   i32.load
   local.set $q$x
-  i32.const 16
   local.get $4
-  i32.add
   i32.load offset=4
   local.set $q$y
   local.get $4
@@ -1812,19 +1790,13 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $3
-  i32.add
   i32.const 6
   call $interop/inline-struct-sret/counted
-  i32.const 16
   local.get $3
-  i32.add
   i32.load
   local.set $q$x
-  i32.const 16
   local.get $3
-  i32.add
   i32.load offset=4
   local.set $q$y
   local.get $3
@@ -1953,13 +1925,9 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $0
-  i32.add
   call $interop/inline-struct-sret/zero
-  i32.const 16
   local.get $0
-  i32.add
   i32.load
   local.set $1
   local.get $0
@@ -1995,13 +1963,9 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $2
-  i32.add
   call $interop/inline-struct-sret/zero
-  i32.const 16
   local.get $2
-  i32.add
   i32.load offset=4
   local.set $3
   local.get $2
@@ -2088,14 +2052,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $4
-  i32.add
   i32.const 5
   call $interop/inline-struct-sret/make
-  i32.const 16
   local.get $4
-  i32.add
   i32.load offset=4
   local.set $5
   local.get $4
@@ -2157,13 +2117,9 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $1
-  i32.add
   call $interop/inline-struct-sret/zero
-  i32.const 16
   local.get $1
-  i32.add
   i32.load
   local.set $2
   local.get $1
@@ -2188,13 +2144,9 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $3
-  i32.add
   call $interop/inline-struct-sret/zero
-  i32.const 16
   local.get $3
-  i32.add
   i32.load offset=4
   local.set $4
   local.get $3

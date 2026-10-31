@@ -80,14 +80,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $3
-  i32.add
   i32.const 9
   call $interop/inline-struct-single-field/make
-  i32.const 16
   local.get $3
-  i32.add
   i32.load
   local.set $4
   local.get $3
@@ -124,14 +120,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 5
   call $interop/inline-struct-single-field/make
-  i32.const 16
   local.get $2
-  i32.add
   i32.load
   local.set $five$a
   local.get $2
@@ -189,14 +181,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $6
-  i32.add
   i32.const 9
   call $interop/inline-struct-single-field/make
-  i32.const 16
   local.get $6
-  i32.add
   i32.load
   local.set $7
   local.get $6

@@ -16,7 +16,6 @@
  (func $interop/inline-struct-sret-recursion/sum (param $0 i32) (param $1 i32)
   (local $2 i32)
   (local $3 i32)
-  (local $4 i32)
   local.get $1
   i32.eqz
   if
@@ -46,24 +45,21 @@
    unreachable
   end
   local.get $2
-  i32.const 1024
-  i32.add
-  local.tee $3
   local.get $1
   i32.const 1
   i32.sub
   call $interop/inline-struct-sret-recursion/sum
-  local.get $3
+  local.get $2
   i32.load
-  local.set $4
-  local.get $3
+  local.set $3
+  local.get $2
   i32.load offset=4
   drop
   local.get $2
   global.set $~sretStackPointer
   local.get $0
   local.get $1
-  local.get $4
+  local.get $3
   i32.add
   i32.store
   local.get $0
@@ -95,12 +91,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 5
   call $interop/inline-struct-sret-recursion/sum
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
@@ -132,12 +125,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 0
   call $interop/inline-struct-sret-recursion/sum
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
@@ -167,12 +157,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 1
   call $interop/inline-struct-sret-recursion/sum
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
@@ -204,12 +191,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 10
   call $interop/inline-struct-sret-recursion/sum
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
@@ -258,23 +242,17 @@
    unreachable
   end
   local.get $1
-  i32.const 1024
-  i32.add
-  local.tee $2
   i32.const 3
   call $interop/inline-struct-sret-recursion/sum
-  local.get $2
+  local.get $1
   i32.load
   local.set $2
   local.get $1
   global.set $~sretStackPointer
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   local.get $2
   call $interop/inline-struct-sret-recursion/sum
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
@@ -310,12 +288,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 5
   call $interop/inline-struct-sret-recursion/sum
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
