@@ -23,6 +23,7 @@ import {
 import {
   Range,
   DiagnosticCode,
+  DiagnosticCategory,
   DiagnosticEmitter
 } from "./diagnostics";
 
@@ -7830,6 +7831,44 @@ export class Compiler extends DiagnosticEmitter {
     }
   }
 
+  /**
+   * Checks that the operands about to be passed match the WASM arity the callee
+   * declares, and reports a clean diagnostic when they do not.
+   *
+   * The invariant is maintained by the default-argument filling in
+   * `makeCallDirect`; this guard exists because when that filling misses — as it
+   * did for an sret callee with an omitted optional argument — the mismatch
+   * reached the WASM validator as `call* param number must match`, which names a
+   * binaryen rule and never mentions the call that broke it. A wrong arity is a
+   * compiler bug, so it should say so at the call site.
+   */
+  private checkCallArity(
+    instance: Function,
+    operands: ExpressionRef[] | null,
+    reportNode: Node
+  ): bool {
+    let signature = instance.signature;
+    let declared = signature.wasmParamCount() + (signature.thisType ? 1 : 0);
+    let actual = operands ? operands.length : 0;
+    if (actual == declared) return true;
+    // A refused argument reports its own error and returns `unreachable()`
+    // without claiming its operand slots, so a short count is the expected
+    // consequence of a compile that has already failed. Calling that a compiler
+    // bug would send the reader after the wrong thing.
+    let diagnostics = this.diagnostics;
+    for (let i = 0, k = diagnostics.length; i < k; ++i) {
+      if (diagnostics[i].category == DiagnosticCategory.Error) return true;
+    }
+    this.error(
+      DiagnosticCode.Call_to_0_emits_1_operands_but_its_signature_declares_2,
+      reportNode.range,
+      instance.internalName,
+      actual.toString(),
+      declared.toString()
+    );
+    return false;
+  }
+
   /** Creates a direct call to the specified function. */
   makeCallDirect(
     instance: Function,
@@ -7883,6 +7922,17 @@ export class Compiler extends DiagnosticEmitter {
     let maxArguments = parameterTypes.length;
     let maxOperands = maxArguments;
     if (instance.is(CommonFlags.Instance)) {
+      ++minOperands;
+      ++maxOperands;
+      --numArguments;
+    }
+    // The hidden sret destination is an operand but not an argument, exactly like
+    // `this`: it stands for no source parameter, so it must not count towards the
+    // argument arity. Counting it made a call that omits an optional parameter
+    // look complete (`sret + the required args` already reach `maxOperands`), so
+    // the defaults were never filled and the call went out with too few operands
+    // — caught only by the WASM validator, as `call* param number must match`.
+    if (instance.signature.hasHiddenDestParam) {
       ++minOperands;
       ++maxOperands;
       --numArguments;
@@ -7941,6 +7991,7 @@ export class Compiler extends DiagnosticEmitter {
           module.global_set(this.ensureArgumentsLength(), module.i32(numArguments)),
           lastOperand
         ], lastOperandType.toRef());
+        if (!this.checkCallArity(instance, operands, reportNode)) return module.unreachable();
         this.operandsTostack(instance.signature, operands);
         let expr = module.call(instance.internalName, operands, returnTypeRef);
         if (returnTypeRef != TypeRef.None && immediatelyDropped) {
@@ -7965,6 +8016,7 @@ export class Compiler extends DiagnosticEmitter {
       instance = this.ensureOverrideStub(instance);
     }
 
+    if (!this.checkCallArity(instance, operands, reportNode)) return module.unreachable();
     if (operands) this.operandsTostack(instance.signature, operands);
     // `resultRefs`, not `returnType.toRef()`: an `@inline struct` return has no
     // WASM result (the value goes to the caller's slot), and calling the
