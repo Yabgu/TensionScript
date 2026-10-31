@@ -428,6 +428,14 @@ export namespace OperatorKind {
 }
 
 /** Represents an AssemblyScript program. */
+/** How many WASM slots a parameter binding consumed — see
+ *  `Program#bindSroaParameterLeaves`. A one-field wrapper because this compiler
+ *  reports the count and the caller advances past it; a bare `i32` return would
+ *  be the same information with no name at the call site. */
+export class BindResult {
+  constructor(public leafCount: i32) {}
+}
+
 export class Program extends DiagnosticEmitter {
 
   /** Constructs a new program, optionally inheriting parser diagnostics. */
@@ -4070,6 +4078,59 @@ export class Function extends TypedElement {
   /** Counting id of anonymous inner functions. */
   nextAnonymousId: i32 = 0;
 
+  /**
+   * Binds an `@inline struct` parameter's **leaves** to the WASM parameters that
+   * carry them, building the `fieldLocals` tree a read path walks.
+   *
+   * `localIndex` is the index of the parameter's first WASM slot; the walk
+   * consumes one slot per leaf in the same depth-first order
+   * `Signature.leafTypesOf` declares and the caller pushes operands in. Returns
+   * how many slots were consumed, so the caller advances past them.
+   *
+   * A nested field gets a placeholder `Local` (index `-1`) carrying its own map,
+   * exactly as `fillSroaFieldLocals` builds one for a local — the tree shape is
+   * one structure regardless of where the leaves' storage came from.
+   */
+  bindSroaParameterLeaves(
+    type: Type,
+    path: string,
+    into: Map<string, Local>,
+    localIndex: i32,
+    flow: Flow
+  ): BindResult {
+    let classReference = assert(type.classReference);
+    let members = assert(classReference.members);
+    let consumed = 0;
+    for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
+      let member = unchecked(_values[j]);
+      if (member.kind != ElementKind.PropertyPrototype) continue;
+      let property = (<PropertyPrototype>member).instance;
+      if (property == null || !property.isField) continue;
+      let fieldPath = path + "$" + property.name;
+      let fieldType = property.type;
+      if (Signature.isInlineStructRef(fieldType)) {
+        let nested = new Map<string, Local>();
+        let inner = this.bindSroaParameterLeaves(
+          fieldType, fieldPath, nested, localIndex + consumed, flow
+        );
+        consumed += inner.leafCount;
+        let placeholder = new Local(fieldPath, -1, fieldType, flow.sourceFunction);
+        placeholder.fieldLocals = nested;
+        into.set(property.name, placeholder);
+        continue;
+      }
+      // Named after the parameter and field, matching `compileSroaLocal`, so a
+      // debug read of the WAT says which is which.
+      let local = new Local(fieldPath, localIndex + consumed, fieldType, flow.sourceFunction);
+      this.localsByIndex[local.index] = local;
+      flow.setLocalFlag(local.index, LocalFlags.Initialized);
+      into.set(property.name, local);
+      ++consumed;
+    }
+    return new BindResult(consumed);
+  }
+
+
   /** Constructs a new concrete function. */
   constructor(
     /** Name incl. type parameters, i.e. `foo<i32>`. */
@@ -4190,26 +4251,17 @@ export class Function extends TypedElement {
         if (Signature.isInlineStructRef(parameterType)) {
           let scopedLocals = this.flow.scopedLocals;
           if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
+          // One leaf per WASM parameter, depth first — the order
+          // `Signature.leafTypesOf` declares and the caller pushes. The tree
+          // shape is `fillSroaFieldLocals`' shape (a nested field is a
+          // placeholder carrying its own map), so a read path walks it a hop at
+          // a time; what differs is where the leaves' indices come from — the
+          // incoming parameters here, fresh locals there.
           let fieldLocals = new Map<string, Local>();
-          let classReference = assert(parameterType.classReference);
-          let members = assert(classReference.members);
-          for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
-            let member = unchecked(_values[j]);
-            if (member.kind != ElementKind.PropertyPrototype) continue;
-            let property = (<PropertyPrototype>member).instance;
-            if (property == null || !property.isField) continue;
-            // Name the field locals after the parameter and field, matching
-            // `compileSroaLocal`, so a debug read of the WAT says which is which.
-            let fieldLocal = new Local(
-              parameterName + "$" + property.name,
-              localIndex++,
-              property.type,
-              this
-            );
-            fieldLocals.set(property.name, fieldLocal);
-            this.localsByIndex[fieldLocal.index] = fieldLocal;
-            flow.setLocalFlag(fieldLocal.index, LocalFlags.Initialized);
-          }
+          let bound = this.bindSroaParameterLeaves(
+            parameterType, parameterName, fieldLocals, localIndex, flow
+          );
+          localIndex += bound.leafCount;
           let parent = new Local(parameterName, -1, parameterType, this);
           parent.fieldLocals = fieldLocals;
           scopedLocals.set(parameterName, parent);

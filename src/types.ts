@@ -1213,18 +1213,48 @@ export class Signature {
       classReference == null ||
       !classReference.hasDecorator(DecoratorFlags.InlineStruct)
     ) return 1;
+    let count = Signature.leafCountOf(type);
+    return count > 0 ? count : 1;
+  }
+
+  /**
+   * Appends the **leaf** types of an `@inline struct`, in declaration order,
+   * depth first.
+   *
+   * A leaf is a field that occupies one WASM local: a scalar or a reference. A
+   * field whose type is itself an `@inline struct` is not a leaf — it is several
+   * locals behind a map — so the walk recurses into it. This is the type-level
+   * twin of the `fieldLocals` tree the compiler builds
+   * (`Compiler#fillSroaFieldLocals`), and the two must agree in **order** as
+   * well as count: the callee binds WASM parameter *k* to the *k*th leaf, and
+   * the caller pushes operands in the same walk.
+   */
+  static leafTypesOf(type: Type, out: Type[]): void {
+    let classReference = type.classReference;
+    if (classReference == null) return;
     let members = classReference.members;
-    if (!members) return 1;
-    let count = 0;
+    if (!members) return;
     for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
       let member = unchecked(_values[i]);
       // A resolved `Class`'s members are prototypes; the bound `Property` that
       // carries `isField` hangs off `prototype.instance`.
       if (member.kind != ElementKind.PropertyPrototype) continue;
       let property = (<PropertyPrototype>member).instance;
-      if (property != null && property.isField) ++count;
+      if (property == null || !property.isField) continue;
+      let fieldType = property.type;
+      if (Signature.isInlineStructRef(fieldType)) {
+        Signature.leafTypesOf(fieldType, out);
+      } else {
+        out.push(fieldType);
+      }
     }
-    return count > 0 ? count : 1;
+  }
+
+  /** The number of leaf locals an `@inline struct` occupies. */
+  static leafCountOf(type: Type): i32 {
+    let out = new Array<Type>();
+    Signature.leafTypesOf(type, out);
+    return out.length;
   }
 
   /**
@@ -1331,22 +1361,20 @@ export class Signature {
       classReference.hasDecorator(DecoratorFlags.InlineStruct);
   }
 
-  /** The number of fields an `@inline struct` has (0 for a record with none).
-   *  Distinct from `wasmParamCountOf`, which cannot express "one field" and
-   *  "one operand" differently. */
+  /**
+   * How many **WASM slots** an `@inline struct` spends — its leaf count.
+   *
+   * Leaf count, not direct-field count: a nested inline field is several locals,
+   * so `Outer1 { a: u32; inner: Inner{x,y} }` is 3, not 2. A record with no
+   * members is 0.
+   *
+   * Callers that made sense of "direct fields" are listed in the Phase C audit
+   * (`docs`); the one place that genuinely needs the direct count is layout, and
+   * layout reads `members` itself rather than asking this.
+   */
   static fieldCountOf(type: Type): i32 {
-    let classReference = type.classReference;
-    if (classReference == null) return 0;
-    let members = classReference.members;
-    if (!members) return 0;
-    let count = 0;
-    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-      let member = unchecked(_values[i]);
-      if (member.kind != ElementKind.PropertyPrototype) continue;
-      let property = (<PropertyPrototype>member).instance;
-      if (property != null && property.isField) ++count;
-    }
-    return count;
+    if (type.classReference == null) return 0;
+    return Signature.leafCountOf(type);
   }
 
   /**
@@ -1457,14 +1485,14 @@ export class Signature {
         // taking that branch gave the parameter `toRef()` (a GC heap type) and
         // the callee a plain local instead of an SROA field, which made every
         // one-field value-type parameter unusable.
-        let classReference = assert(parameterType.classReference);
-        let members = assert(classReference.members);
-        for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
-          let member = unchecked(_values[j]);
-          if (member.kind != ElementKind.PropertyPrototype) continue;
-          let property = (<PropertyPrototype>member).instance;
-          if (property == null || !property.isField) continue;
-          unchecked(typeRefs[at++] = property.type.toRef());
+        // One ref per **leaf**, in declaration order depth first — the same walk
+        // `leafTypesOf` does and the binder indexes into. A nested inline field
+        // contributes its leaves' refs, not one ref for itself: it has no value
+        // representation the WASM stack could carry.
+        let leafTypes = new Array<Type>();
+        Signature.leafTypesOf(parameterType, leafTypes);
+        for (let j = 0, n = leafTypes.length; j < n; ++j) {
+          unchecked(typeRefs[at++] = unchecked(leafTypes[j]).toRef());
         }
       } else {
         // Scalar or reference: one ref, exactly as before.
