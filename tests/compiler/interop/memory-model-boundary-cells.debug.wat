@@ -90,25 +90,19 @@
   end
   local.get $u
   local.set $2
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   local.get $2
   i32.load
   i32.store
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   local.get $2
   i32.load offset=4
   i32.store offset=4
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   call $interop/memory-model-boundary-cells/takeCopyOfU
@@ -148,25 +142,19 @@
   end
   local.get $m
   local.set $2
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   local.get $2
   i32.load
   i32.store
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   local.get $2
   i32.load offset=4
   i32.store offset=4
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   call $interop/memory-model-boundary-cells/takeCopyOfM
@@ -266,25 +254,19 @@
   end
   local.get $u
   local.set $2
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   local.get $2
   i32.load
   i32.store
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   local.get $2
   i32.load offset=4
   i32.store offset=4
-  i32.const 16
   local.get $1
-  i32.add
   i32.const 0
   i32.add
   call $interop/memory-model-boundary-cells/exportCopyU
@@ -2532,25 +2514,19 @@
   end
   call $interop/memory-model-boundary-cells/makeM
   local.set $1
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   local.get $1
   i32.load
   i32.store
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   local.get $1
   i32.load offset=4
   i32.store offset=4
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   call $interop/memory-model-boundary-cells/exportCopyU
@@ -2585,25 +2561,19 @@
   end
   call $interop/memory-model-boundary-cells/makeM
   local.set $1
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   local.get $1
   i32.load
   i32.store
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   local.get $1
   i32.load offset=4
   i32.store offset=4
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   call $interop/memory-model-boundary-cells/exportCopyM
@@ -2638,25 +2608,19 @@
   end
   call $interop/memory-model-boundary-cells/makeM
   local.set $1
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   local.get $1
   i32.load
   i32.store
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   local.get $1
   i32.load offset=4
   i32.store offset=4
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 0
   i32.add
   call $interop/memory-model-boundary-cells/takeCopyOfU

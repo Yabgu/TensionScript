@@ -1376,12 +1376,9 @@
   i32.store offset=4
   local.get $0
   local.get $3
-  i32.const 1024
-  i32.add
-  local.tee $4
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  local.get $4
+  local.get $3
   f32.load
   local.get $3
   global.set $~sretStackPointer
@@ -1407,12 +1404,9 @@
   i32.store offset=4
   local.get $0
   local.get $3
-  i32.const 1024
-  i32.add
-  local.tee $0
   i32.const 4
   call $interop/inline-struct-sret-instance/Maker#make
-  local.get $0
+  local.get $3
   f32.load offset=4
   local.set $2
   local.get $3
@@ -1481,14 +1475,11 @@
   i32.store offset=4
   local.get $0
   local.get $4
-  i32.const 1024
-  i32.add
-  local.tee $0
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  local.get $0
+  local.get $4
   f32.load
-  local.get $0
+  local.get $4
   f32.load offset=4
   local.get $4
   global.set $~sretStackPointer
@@ -1518,11 +1509,8 @@
   i32.store offset=4
   local.get $0
   local.get $4
-  i32.const 1024
-  i32.add
-  local.tee $5
   call $interop/inline-struct-sret-instance/Calc#scale
-  local.get $5
+  local.get $4
   f32.load
   local.set $1
   local.get $4
@@ -1549,11 +1537,8 @@
   i32.store offset=4
   local.get $0
   local.get $4
-  i32.const 1024
-  i32.add
-  local.tee $0
   call $interop/inline-struct-sret-instance/Calc#scale
-  local.get $0
+  local.get $4
   f32.load offset=4
   local.set $2
   local.get $4
@@ -1912,12 +1897,9 @@
   i32.store
   local.get $2
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  local.get $2
+  local.get $0
   f32.load
   local.get $0
   global.set $~sretStackPointer
@@ -1955,12 +1937,9 @@
   i32.store
   local.get $2
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  local.get $2
+  local.get $0
   f32.load offset=4
   local.get $0
   global.set $~sretStackPointer
@@ -1998,12 +1977,9 @@
   i32.store
   local.get $2
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  local.get $2
+  local.get $0
   f32.load
   local.get $0
   global.set $~sretStackPointer
@@ -2031,12 +2007,9 @@
   i32.store
   local.get $2
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   i32.const 3
   call $interop/inline-struct-sret-instance/Maker#make
-  local.get $2
+  local.get $0
   f32.load
   local.get $0
   global.set $~sretStackPointer
@@ -2073,11 +2046,8 @@
   i32.store
   local.get $2
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   call $interop/inline-struct-sret-instance/Calc#scale
-  local.get $2
+  local.get $0
   f32.load
   local.get $0
   global.set $~sretStackPointer
@@ -2115,11 +2085,8 @@
   i32.store
   local.get $2
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   call $interop/inline-struct-sret-instance/Calc#scale
-  local.get $2
+  local.get $0
   f32.load offset=4
   local.get $0
   global.set $~sretStackPointer

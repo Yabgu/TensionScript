@@ -1570,18 +1570,12 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $3
-  i32.add
   call $interop/inline-nesting-sret/make_flat
-  i32.const 16
   local.get $3
-  i32.add
   i32.load
   local.set $f$a
-  i32.const 16
   local.get $3
-  i32.add
   f32.load offset=4
   local.set $f$b
   local.get $3
@@ -1656,23 +1650,15 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $4
-  i32.add
   call $interop/inline-nesting-sret/make_nested
-  i32.const 16
   local.get $4
-  i32.add
   i32.load
   local.set $o$a
-  i32.const 16
   local.get $4
-  i32.add
   f32.load offset=4
   local.set $o$inner$x
-  i32.const 16
   local.get $4
-  i32.add
   f32.load offset=8
   local.set $o$inner$y
   local.get $4
@@ -1722,23 +1708,15 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $4
-  i32.add
   call $interop/inline-nesting-sret/make_zero
-  i32.const 16
   local.get $4
-  i32.add
   i32.load
   local.set $o$a
-  i32.const 16
   local.get $4
-  i32.add
   f32.load offset=4
   local.set $o$inner$x
-  i32.const 16
   local.get $4
-  i32.add
   f32.load offset=8
   local.set $o$inner$y
   local.get $4
@@ -1793,13 +1771,9 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $2
-  i32.add
   call $interop/inline-nesting-sret/make_deep
-  i32.const 16
   local.get $2
-  i32.add
   f32.load
   local.set $v$b$c$x
   local.get $2
@@ -1853,26 +1827,18 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $7
-  i32.add
   local.get $x$a
   local.get $x$inner$x
   local.get $x$inner$y
   call $interop/inline-nesting-sret/roundtrip
-  i32.const 16
   local.get $7
-  i32.add
   i32.load
   local.set $y$a
-  i32.const 16
   local.get $7
-  i32.add
   f32.load offset=4
   local.set $y$inner$x
-  i32.const 16
   local.get $7
-  i32.add
   f32.load offset=8
   local.set $y$inner$y
   local.get $7

@@ -1710,24 +1710,21 @@
    local.get $0
    i32.store
    local.get $3
-   i32.const 1024
-   i32.add
-   local.tee $4
    local.get $0
    f32.load
    f32.const 2
    f32.add
    f32.store
-   local.get $4
+   local.get $3
    f32.const 1
    f32.store offset=4
    global.get $~lib/memory/__stack_pointer
    i32.const 4
    i32.add
    global.set $~lib/memory/__stack_pointer
-   local.get $4
+   local.get $3
    f32.load
-   local.get $4
+   local.get $3
    f32.load offset=4
    local.get $3
    global.set $~sretStackPointer
@@ -1747,16 +1744,16 @@
  )
  (func $interop/sret-default-arg/make_omitted (result f32)
   (local $0 i32)
-  (local $1 f32)
+  (local $1 i32)
   (local $2 f32)
-  (local $3 i32)
+  (local $3 f32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
   i32.add
-  local.tee $3
+  local.tee $1
   global.set $~sretStackPointer
-  local.get $3
+  local.get $1
   i32.const 5120
   i32.gt_s
   if
@@ -1768,17 +1765,14 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $3
   f32.const 2
   f32.store
-  local.get $3
+  local.get $0
   f32.const 1
   f32.store offset=4
-  local.get $3
+  local.get $0
   f32.load
-  local.get $3
+  local.get $0
   f32.load offset=4
   local.get $0
   global.set $~sretStackPointer
@@ -1786,16 +1780,16 @@
  )
  (func $interop/sret-default-arg/make_explicit (result f32)
   (local $0 i32)
-  (local $1 f32)
+  (local $1 i32)
   (local $2 f32)
-  (local $3 i32)
+  (local $3 f32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
   i32.add
-  local.tee $3
+  local.tee $1
   global.set $~sretStackPointer
-  local.get $3
+  local.get $1
   i32.const 5120
   i32.gt_s
   if
@@ -1807,17 +1801,14 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $3
   f32.const 2
   f32.store
-  local.get $3
+  local.get $0
   f32.const 5
   f32.store offset=4
-  local.get $3
+  local.get $0
   f32.load
-  local.get $3
+  local.get $0
   f32.load offset=4
   local.get $0
   global.set $~sretStackPointer
@@ -1825,16 +1816,16 @@
  )
  (func $interop/sret-default-arg/make2_omitted (result f32)
   (local $0 i32)
-  (local $1 f32)
+  (local $1 i32)
   (local $2 f32)
-  (local $3 i32)
+  (local $3 f32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
   i32.add
-  local.tee $3
+  local.tee $1
   global.set $~sretStackPointer
-  local.get $3
+  local.get $1
   i32.const 5120
   i32.gt_s
   if
@@ -1846,17 +1837,14 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $3
   f32.const 11
   f32.store
-  local.get $3
+  local.get $0
   f32.const 2
   f32.store offset=4
-  local.get $3
+  local.get $0
   f32.load
-  local.get $3
+  local.get $0
   f32.load offset=4
   local.get $0
   global.set $~sretStackPointer

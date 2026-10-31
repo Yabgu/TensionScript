@@ -1799,17 +1799,14 @@
    unreachable
   end
   local.get $1
-  i32.const 1024
-  i32.add
-  local.tee $2
   local.get $0
   i32.load
   i32.store
-  local.get $2
+  local.get $1
   local.get $0
   i32.load offset=4
   i32.store offset=4
-  local.get $2
+  local.get $1
   call $interop/memory-model-boundary-cells/takeCopyOfU
   local.get $1
   global.set $~sretStackPointer
@@ -1828,7 +1825,6 @@
  (func $interop/memory-model-boundary-cells/callImportCopyUFromTemporary (result i32)
   (local $0 i32)
   (local $1 i32)
-  (local $2 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
@@ -1847,18 +1843,15 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   call $interop/memory-model-boundary-cells/makeM
-  local.tee $2
+  local.tee $1
   i32.load
   i32.store
+  local.get $0
   local.get $1
-  local.get $2
   i32.load offset=4
   i32.store offset=4
-  local.get $1
+  local.get $0
   call $interop/memory-model-boundary-cells/takeCopyOfU
   local.get $0
   global.set $~sretStackPointer
@@ -1866,7 +1859,6 @@
  (func $interop/memory-model-boundary-cells/callExportCopyUFromTemporary (result i32)
   (local $0 i32)
   (local $1 i32)
-  (local $2 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
@@ -1885,20 +1877,17 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   call $interop/memory-model-boundary-cells/makeM
-  local.tee $2
+  local.tee $1
   i32.load
   i32.store
+  local.get $0
   local.get $1
-  local.get $2
   i32.load offset=4
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load
-  local.get $1
+  local.get $0
   i32.load offset=4
   i32.add
   local.get $0
@@ -1925,19 +1914,16 @@
    unreachable
   end
   local.get $1
-  i32.const 1024
-  i32.add
-  local.tee $2
   local.get $0
   i32.load
   i32.store
-  local.get $2
+  local.get $1
   local.get $0
   i32.load offset=4
   i32.store offset=4
-  local.get $2
+  local.get $1
   i32.load
-  local.get $2
+  local.get $1
   i32.load offset=4
   i32.add
   local.get $1
@@ -1946,7 +1932,6 @@
  (func $interop/memory-model-boundary-cells/callExportCopyMFromTemporary (result i32)
   (local $0 i32)
   (local $1 i32)
-  (local $2 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
@@ -1965,20 +1950,17 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   call $interop/memory-model-boundary-cells/makeM
-  local.tee $2
+  local.tee $1
   i32.load
   i32.store
+  local.get $0
   local.get $1
-  local.get $2
   i32.load offset=4
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load
-  local.get $1
+  local.get $0
   i32.load offset=4
   i32.add
   local.get $0
@@ -2023,17 +2005,14 @@
    unreachable
   end
   local.get $1
-  i32.const 1024
-  i32.add
-  local.tee $2
   local.get $0
   i32.load
   i32.store
-  local.get $2
+  local.get $1
   local.get $0
   i32.load offset=4
   i32.store offset=4
-  local.get $2
+  local.get $1
   call $interop/memory-model-boundary-cells/takeCopyOfM
   local.get $1
   global.set $~sretStackPointer

@@ -54,21 +54,15 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $4
-  i32.add
   local.get $n
   i32.const 1
   i32.sub
   call $interop/inline-struct-sret-recursion/sum
-  i32.const 16
   local.get $4
-  i32.add
   i32.load
   local.set $r$x
-  i32.const 16
   local.get $4
-  i32.add
   i32.load offset=4
   local.set $r$y
   local.get $4
@@ -119,14 +113,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 5
   call $interop/inline-struct-sret-recursion/sum
-  i32.const 16
   local.get $0
-  i32.add
   i32.load
   local.set $1
   local.get $0
@@ -162,14 +152,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $2
-  i32.add
   i32.const 0
   call $interop/inline-struct-sret-recursion/sum
-  i32.const 16
   local.get $2
-  i32.add
   i32.load
   local.set $3
   local.get $2
@@ -205,14 +191,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $4
-  i32.add
   i32.const 1
   call $interop/inline-struct-sret-recursion/sum
-  i32.const 16
   local.get $4
-  i32.add
   i32.load
   local.set $5
   local.get $4
@@ -248,14 +230,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $6
-  i32.add
   i32.const 10
   call $interop/inline-struct-sret-recursion/sum
-  i32.const 16
   local.get $6
-  i32.add
   i32.load
   local.set $7
   local.get $6
@@ -291,9 +269,7 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $8
-  i32.add
   global.get $~sretStackPointer
   local.set $9
   local.get $9
@@ -313,23 +289,17 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $9
-  i32.add
   i32.const 3
   call $interop/inline-struct-sret-recursion/sum
-  i32.const 16
   local.get $9
-  i32.add
   i32.load
   local.set $10
   local.get $9
   global.set $~sretStackPointer
   local.get $10
   call $interop/inline-struct-sret-recursion/sum
-  i32.const 16
   local.get $8
-  i32.add
   i32.load
   local.set $11
   local.get $8
@@ -369,14 +339,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  i32.const 16
   local.get $0
-  i32.add
   i32.const 5
   call $interop/inline-struct-sret-recursion/sum
-  i32.const 16
   local.get $0
-  i32.add
   i32.load
   local.set $1
   local.get $0

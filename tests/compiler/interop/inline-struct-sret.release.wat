@@ -39,17 +39,14 @@
    unreachable
   end
   local.get $1
-  i32.const 1024
-  i32.add
-  local.tee $2
   local.get $0
   i32.store
-  local.get $2
+  local.get $1
   local.get $0
   i32.const 1
   i32.add
   i32.store offset=4
-  local.get $2
+  local.get $1
   i32.load
   local.get $1
   global.set $~sretStackPointer
@@ -75,12 +72,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 10
   i32.store
-  local.get $1
+  local.get $0
   i32.const 11
   i32.store offset=4
   local.get $0
@@ -103,15 +97,12 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 10
   i32.store
-  local.get $1
+  local.get $0
   i32.const 11
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load offset=4
   local.get $0
   global.set $~sretStackPointer
@@ -138,24 +129,21 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 4
   i32.store
-  local.get $1
+  local.get $0
   i32.const 5
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load
-  local.get $1
+  local.get $0
   i32.load offset=4
-  local.set $1
+  local.set $2
   local.get $0
   global.set $~sretStackPointer
   i32.const 10
   i32.mul
-  local.get $1
+  local.get $2
   i32.add
  )
  (func $interop/inline-struct-sret/copyOut (result i32)
@@ -180,24 +168,21 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 7
   i32.store
-  local.get $1
+  local.get $0
   i32.const 8
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load
-  local.get $1
+  local.get $0
   i32.load offset=4
-  local.set $1
+  local.set $2
   local.get $0
   global.set $~sretStackPointer
   i32.const 100
   i32.mul
-  local.get $1
+  local.get $2
   i32.add
  )
  (func $~start
@@ -280,15 +265,12 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 0
   i32.store
-  local.get $1
+  local.get $0
   i32.const 0
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
@@ -318,15 +300,12 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 0
   i32.store
-  local.get $1
+  local.get $0
   i32.const 0
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load offset=4
   local.get $0
   global.set $~sretStackPointer
@@ -352,12 +331,12 @@
   i32.const 0
   global.set $interop/inline-struct-sret/callCount
   global.get $~sretStackPointer
-  local.tee $0
+  local.tee $1
   i32.const 16
   i32.add
-  local.tee $1
+  local.tee $0
   global.set $~sretStackPointer
-  local.get $1
+  local.get $0
   i32.const 5120
   i32.gt_s
   if
@@ -372,10 +351,7 @@
   i32.const 1
   i32.add
   global.set $interop/inline-struct-sret/callCount
-  local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
+  local.get $1
   i32.const 6
   i32.store
   local.get $1
@@ -383,20 +359,20 @@
   i32.store offset=4
   local.get $1
   i32.load
-  local.set $2
+  local.set $0
   local.get $1
   i32.load offset=4
-  local.set $1
-  local.get $0
+  local.set $2
+  local.get $1
   global.set $~sretStackPointer
   global.get $interop/inline-struct-sret/callCount
   i32.const 1000
   i32.mul
-  local.get $2
+  local.get $0
   i32.const 10
   i32.mul
   i32.add
-  local.get $1
+  local.get $2
   i32.add
   i32.const 1067
   i32.ne
@@ -426,15 +402,12 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 5
   i32.store
-  local.get $1
+  local.get $0
   i32.const 6
   i32.store offset=4
-  local.get $1
+  local.get $0
   i32.load offset=4
   local.get $0
   global.set $~sretStackPointer
@@ -480,15 +453,12 @@
    unreachable
   end
   local.get $1
-  i32.const 1024
-  i32.add
-  local.tee $2
   i32.const 0
   i32.store
-  local.get $2
+  local.get $1
   i32.const 0
   i32.store offset=4
-  local.get $2
+  local.get $1
   i32.load
   local.set $2
   local.get $1
@@ -511,15 +481,12 @@
    unreachable
   end
   local.get $1
-  i32.const 1024
-  i32.add
-  local.tee $3
   i32.const 0
   i32.store
-  local.get $3
+  local.get $1
   i32.const 0
   i32.store offset=4
-  local.get $3
+  local.get $1
   i32.load offset=4
   local.set $3
   local.get $1

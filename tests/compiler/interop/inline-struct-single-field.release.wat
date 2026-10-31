@@ -33,12 +33,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 9
   i32.store
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
@@ -66,12 +63,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 5
   i32.store
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer
@@ -103,12 +97,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $1
   i32.const 9
   i32.store
-  local.get $1
+  local.get $0
   i32.load
   local.get $0
   global.set $~sretStackPointer

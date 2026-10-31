@@ -23,7 +23,6 @@
   (local $1 f32)
   (local $2 f32)
   (local $3 i32)
-  (local $4 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
@@ -42,23 +41,20 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $3
   i32.const 1
   i32.store
-  local.get $3
+  local.get $0
   f32.const 2
   f32.store offset=4
-  local.get $3
+  local.get $0
   f32.const 3
   f32.store offset=8
-  local.get $3
+  local.get $0
   i32.load
-  local.get $3
+  local.get $0
   f32.load offset=4
   local.set $1
-  local.get $3
+  local.get $0
   f32.load offset=8
   local.set $2
   local.get $0
@@ -74,7 +70,6 @@
   (local $1 f32)
   (local $2 f32)
   (local $3 i32)
-  (local $4 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
@@ -93,23 +88,20 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $3
   i32.const 0
   i32.store
-  local.get $3
+  local.get $0
   f32.const 0
   f32.store offset=4
-  local.get $3
+  local.get $0
   f32.const 0
   f32.store offset=8
-  local.get $3
+  local.get $0
   i32.load
-  local.get $3
+  local.get $0
   f32.load offset=4
   local.set $1
-  local.get $3
+  local.get $0
   f32.load offset=8
   local.set $2
   local.get $0
@@ -125,7 +117,6 @@
   (local $1 f32)
   (local $2 f32)
   (local $3 i32)
-  (local $4 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
@@ -144,23 +135,20 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $3
   i32.const 7
   i32.store
-  local.get $3
+  local.get $0
   f32.const 1.5
   f32.store offset=4
-  local.get $3
+  local.get $0
   f32.const 2.5
   f32.store offset=8
-  local.get $3
+  local.get $0
   i32.load
-  local.get $3
+  local.get $0
   f32.load offset=4
   local.set $1
-  local.get $3
+  local.get $0
   f32.load offset=8
   local.set $2
   local.get $0
@@ -175,7 +163,6 @@
   (local $0 i32)
   (local $1 f32)
   (local $2 i32)
-  (local $3 i32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
@@ -194,17 +181,14 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   i32.const 7
   i32.store
-  local.get $2
+  local.get $0
   f32.const 1.5
   f32.store offset=4
-  local.get $2
+  local.get $0
   i32.load
-  local.get $2
+  local.get $0
   f32.load offset=4
   local.set $1
   local.get $0
@@ -215,15 +199,15 @@
  )
  (func $interop/inline-nesting-sret/read_deep (result f32)
   (local $0 i32)
-  (local $1 f32)
-  (local $2 i32)
+  (local $1 i32)
+  (local $2 f32)
   global.get $~sretStackPointer
   local.tee $0
   i32.const 16
   i32.add
-  local.tee $2
+  local.tee $1
   global.set $~sretStackPointer
-  local.get $2
+  local.get $1
   i32.const 5120
   i32.gt_s
   if
@@ -235,12 +219,9 @@
    unreachable
   end
   local.get $0
-  i32.const 1024
-  i32.add
-  local.tee $2
   f32.const 3.140000104904175
   f32.store
-  local.get $2
+  local.get $0
   f32.load
   local.get $0
   global.set $~sretStackPointer
