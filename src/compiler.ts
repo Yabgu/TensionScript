@@ -12790,6 +12790,32 @@ export class Compiler extends DiagnosticEmitter {
       return true;
     }
 
+    // `let p = changetype<@unmanaged P>(ptr)` where `P` is a **plain** struct:
+    // the initialiser is an *address* and this local is an `@inline` value with
+    // one WASM local per field and no address of its own. The two
+    // representations are disjoint, and the `NodeKind.Call` branch below would
+    // otherwise take the `changetype` for an sret call and fill nothing —
+    // measured: the whole function body was emitted as `unreachable`, with no
+    // diagnostic, so every call through it trapped at run time.
+    //
+    // Refused by name, like the bare-read guard it mirrors (`compileIdentifier`
+    // on a `fieldLocals` local). The read path already excludes a view before
+    // its own sret branch (`compilePropertyAccess`); this is the same exclusion
+    // for the initialiser, which was missing.
+    //
+    // A view is read and written where it is named —
+    // `changetype<@unmanaged P>(ptr).x` — or `P` is declared `@unmanaged`, in
+    // which case the binding is an ordinary pointer local and `p.x` loads
+    // through it.
+    if (initializerNode != null && this.resolver.isViewCall(initializerNode)) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        initializerNode.range,
+        "binding an @unmanaged view to a local of an @inline struct type (the view is an address, the value has none; read or write the fields where the view is named, or declare the struct @unmanaged)"
+      );
+      return true;
+    }
+
     // `let q: P = f()`: the callee fills a caller-allocated slot, and each field
     // is copied out of it into q's own locals while the slot is live — the same
     // field-wise copy the local-to-local case makes, with the source being a
