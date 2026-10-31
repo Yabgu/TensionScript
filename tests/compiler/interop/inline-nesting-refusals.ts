@@ -62,3 +62,27 @@ export function valueAddress(): usize {
   const o = new Outer1();
   return changetype<usize>(o);
 }
+
+// NOTE — `changetype<usize>(f())` where `f` returns an inline struct is **not**
+// pinned here. Measured: it fails validation ("return value should be a subtype
+// of the function result type") because the call result is materialised as a
+// temp for a type that has no representation. The **local** form above is
+// refused by a named diagnostic; the call form is a separate, pre-existing hole
+// (it behaved identically before the sret work) and is reported for a follow-up
+// rather than smuggled into a copy-out change.
+
+// (6) Returning a temporary. A `return` needs a local to read the leaves from;
+// a call result has none, and materialising it would need a slot nobody
+// allocated. (The flat case refuses identically — this is not about nesting.)
+function makeFlat(): Outer1 {
+  return new Outer1();
+}
+
+function retTemporary(): Outer1 {
+  return makeFlat();
+}
+
+export function useRetTemporary(): f32 {
+  const v = retTemporary();
+  return v.inner.x;
+}

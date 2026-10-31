@@ -12298,28 +12298,9 @@ export class Compiler extends DiagnosticEmitter {
         false
       ));
     } else if (readTarget != null) {
-      let fields = assert(this.inlineStructFieldsOf(returnType));
-      for (let i = 0, k = fields.length; i < k; ++i) {
-        let field = unchecked(fields[i]);
-        let to = getMapEntry(readTarget, field.name);
-        if (!to) continue;
-        // A nested inline field is several leaves; writing it into the slot needs
-        // one store per leaf (the copy-out phase). Refused by name rather than
-        // emitted as a store to local -1.
-        if (to.index < 0) {
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            callExpression.range,
-            "copying out an @inline struct value that has a nested @inline field (the nested field is several leaves; deferred)"
-          );
-          continue;
-        }
-        stmts.push(module.local_set(
-          to.index,
-          this.makeSretFieldLoad(this.makeSretAddress(base, markLocal), field),
-          false
-        ));
-      }
+      // One load per **leaf**: a nested inline field is several leaves on both
+      // sides, so the slot is read back a leaf at a time into the target's tree.
+      this.emitSretLoadsInto(returnType, readTarget, base, markLocal, 0, stmts);
     }
     stmts.push(module.global_set(global, module.local_get(markLocal.index, TypeRef.I32)));
     if (resultLocal != null) {
@@ -12347,7 +12328,6 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let flow = this.currentFlow;
     let valueExpression = assert(statement.value);
-    let fields = assert(this.inlineStructFieldsOf(returnType));
     // `return new P()` with no arguments: every field is zero, which is what a
     // fresh record holds — the stores still go to the slot, because the slot is
     // the value's home, not a local that happens to start at zero.
@@ -12357,17 +12337,9 @@ export class Compiler extends DiagnosticEmitter {
       let module2 = this.module;
       let destIndex = flow.sourceFunction.signature.thisType ? 1 : 0;
       let zeroStmts = new Array<ExpressionRef>();
-      for (let i = 0, k = fields.length; i < k; ++i) {
-        let field = unchecked(fields[i]);
-        if (!this.isSroaFieldType(field.type)) continue;
-        zeroStmts.push(module2.store(
-          field.type.byteSize,
-          module2.local_get(destIndex, TypeRef.I32),
-          this.makeZero(field.type),
-          field.type.toRef(),
-          field.memoryOffset
-        ));
-      }
+      // Every **leaf**, nested ones included: the slot is stack space a previous
+      // sret call may have filled, so "all zeroes" still has to be written.
+      this.emitSroaZerosToLocal(returnType, destIndex, 0, zeroStmts);
       zeroStmts.push(module2.return());
       flow.set(FlowFlags.Returns | FlowFlags.Terminates);
       this.currentType = returnType;
@@ -12391,23 +12363,11 @@ export class Compiler extends DiagnosticEmitter {
     let destIndex = signature.thisType ? 1 : 0;
     let fieldLocals = assert(local.fieldLocals);
     let stmts = new Array<ExpressionRef>();
-    for (let i = 0, k = fields.length; i < k; ++i) {
-      let field = unchecked(fields[i]);
-      let fieldLocal = getMapEntry(fieldLocals, field.name);
-      // A field refused at declaration (a T[N] field, a GC reference) has no
-      // local: it was never part of the value, and a store here would need the
-      // representation the refusal withheld.
-      if (!fieldLocal) continue;
-      stmts.push(module.store(
-        field.type.byteSize,
-        // A fresh node per store: Binaryen's passes assume each child has one
-        // parent, so the address expression must not be shared between stores.
-        module.local_get(destIndex, TypeRef.I32),
-        module.local_get(fieldLocal.index, fieldLocal.type.toRef()),
-        field.type.toRef(),
-        field.memoryOffset
-      ));
-    }
+    // One store per **leaf**, through the nesting — the same recursion as
+    // `copyInto`, with the slot as the destination. A nested field was a
+    // placeholder (index -1), which is why the flat walk emitted `local.get(-1)`
+    // and failed validation.
+    this.emitSroaStoresToLocal(returnType, fieldLocals, destIndex, 0, stmts);
     stmts.push(module.return());
     flow.set(FlowFlags.Returns | FlowFlags.Terminates);
     this.currentType = returnType;
@@ -12533,6 +12493,129 @@ export class Compiler extends DiagnosticEmitter {
       stmts.push(
         module.local_set(toField.index, module.local_get(fromField.index, fromField.type.toRef()), false)
       );
+    }
+  }
+
+  /**
+   * Stores a `fieldLocals` tree's leaves into the hidden destination slot at
+   * `destIndex`, one store per leaf.
+   *
+   * The third destination shape for the same recursion: `emitSroaStores` writes
+   * to a compiled `usize`, `emitTempArgumentLeaves` to a call-temp address, and
+   * this one to a **parameter** — the sret slot a `return p` fills. The address
+   * is a fresh `local.get` per store, because Binaryen's passes assume one
+   * parent per node.
+   */
+  emitSroaStoresToLocal(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    destIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      // A field refused at declaration was never part of the value; there is
+      // nothing to store and no representation to store it as.
+      if (entry == null) continue;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitSroaStoresToLocal(
+            field.type, nested, destIndex, baseOffset + field.memoryOffset, stmts
+          );
+        }
+        continue;
+      }
+      stmts.push(module.store(
+        field.type.byteSize,
+        module.local_get(destIndex, TypeRef.I32),
+        module.local_get(entry.index, entry.type.toRef()),
+        field.type.toRef(),
+        baseOffset + field.memoryOffset
+      ));
+    }
+  }
+
+  /**
+   * Zeroes every **leaf** of an `@inline struct` in the destination slot.
+   *
+   * `return new P()` has no local to copy from — the value is all zeroes — but
+   * the slot is stack space that a previous sret call may have filled, so the
+   * bytes still have to be written. Walking the type rather than the direct
+   * fields is what zeroes a nested field's leaves: measured before this,
+   * `return new Outer1()` with `Inner{x,y}` stored only offset 0 and left
+   * offsets 4 and 8 holding whatever was there.
+   */
+  emitSroaZerosToLocal(type: Type, destIndex: i32, baseOffset: i32, stmts: ExpressionRef[]): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      if (Signature.isInlineStructRef(field.type)) {
+        this.emitSroaZerosToLocal(
+          field.type, destIndex, baseOffset + field.memoryOffset, stmts
+        );
+        continue;
+      }
+      if (!this.isSroaFieldType(field.type)) continue;
+      stmts.push(module.store(
+        field.type.byteSize,
+        module.local_get(destIndex, TypeRef.I32),
+        this.makeZero(field.type),
+        field.type.toRef(),
+        baseOffset + field.memoryOffset
+      ));
+    }
+  }
+
+  /**
+   * Loads an `@inline struct`'s leaves out of the sret slot into a target's
+   * field locals, one load per leaf.
+   *
+   * The mirror of {@link emitSroaStoresToLocal}: `let q = make()` reads the slot
+   * back into the leaf locals a read path walks. A fresh slot address per load,
+   * for the same one-parent-per-node reason.
+   */
+  emitSretLoadsInto(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    base: i32,
+    markLocal: Local,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      if (entry == null) continue;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitSretLoadsInto(
+            field.type, nested, base, markLocal, baseOffset + field.memoryOffset, stmts
+          );
+        }
+        continue;
+      }
+      stmts.push(this.module.local_set(
+        entry.index,
+        this.module.load(
+          field.type.byteSize,
+          false,
+          this.makeSretAddress(base, markLocal),
+          field.type.toRef(),
+          baseOffset + field.memoryOffset
+        ),
+        false
+      ));
     }
   }
 
