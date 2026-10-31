@@ -3885,6 +3885,17 @@ export class Local extends VariableLikeElement {
    */
   isViewParam: bool = false;
 
+  /**
+   * Whether this local is a **view local**: `const p = changetype<@unmanaged T>(ptr)`
+   * where `T` is an inline type.
+   *
+   * The same idea as {@link isViewParam} — the local holds an address, not a
+   * value — but a body local rather than a parameter. `type` stays the record
+   * type, because that is what makes `p.field` resolve; `getNonParameterLocalTypes`
+   * is what gives it one `i32` slot instead of the record's reference type.
+   */
+  isViewLocal: bool = false;
+
   /** Constructs a new local variable. */
   constructor(
     /** Simple name. */
@@ -4344,7 +4355,13 @@ export class Function extends TypedElement {
     let numAdditional = numTotal - numFixed;
     let types = new Array<Type>(numAdditional);
     for (let i = 0; i < numAdditional; ++i) {
-      types[i] = localsByIndex[numFixed + i].type;
+      let local = localsByIndex[numFixed + i];
+      // A **view local** holds an address in an `i32` slot. Its `type` is the
+      // record (so `p.field` resolves), but the slot must be the pointer, not
+      // the record's reference type — the same distinction `isViewParam` makes
+      // for parameters, done here because this is the one place a body local's
+      // WASM type is decided.
+      types[i] = local.isViewLocal ? this.program.options.usizeType : local.type;
     }
     return types;
   }

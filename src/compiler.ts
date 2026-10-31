@@ -8842,6 +8842,17 @@ export class Compiler extends DiagnosticEmitter {
             expression.range, local.name
           );
         }
+        // A **view local** (`isViewLocal`) is the one inline-typed local that
+        // *does* have something to `local.get`: its `i32` slot holds the
+        // address. Reading it yields that address typed as the record, which is
+        // what a chained accessor (`p.pos.x`) and a setter call (`call P#set:x`)
+        // both take as `this`. Its WASM slot is forced to `usize` by
+        // `getNonParameterLocalTypes`. Placed before the value guard below,
+        // which is about locals with no address at all.
+        if (local.isViewLocal) {
+          this.currentType = localType;
+          return module.local_get(localIndex, TypeRef.I32);
+        }
         // An `@inline struct` value has no WASM local of its own and no
         // address, so there is nothing to `local.get`. Refused by name, not
         // asserted: this is the *point* of the representation — no address, no
@@ -10709,13 +10720,7 @@ export class Compiler extends DiagnosticEmitter {
           // means — which is exactly the gap this feature fills.
           let ptr = this.compileExpression(thisExpression, Type.auto);
           this.currentType = fieldType;
-          return module.load(
-            fieldType.byteSize,
-            fieldType.isSignedIntegerValue,
-            ptr,
-            fieldType.toRef(),
-            propertyInstance.memoryOffset
-          );
+          return this.viewFieldAccess(ptr, propertyInstance, fieldType);
         }
         // A view **local**: `a: @unmanaged T` with `T` inline. The local holds
         // the caller's address in its one `i32` slot, so a field read is a load
@@ -10731,15 +10736,11 @@ export class Compiler extends DiagnosticEmitter {
           propertyInstance.isField
         ) {
           let viewLocal = flow.lookupLocal((<IdentifierExpression>thisExpression).text);
-          if (viewLocal != null && viewLocal.isViewParam) {
+          if (viewLocal != null && (viewLocal.isViewParam || viewLocal.isViewLocal)) {
             let fieldType = propertyInstance.type;
             this.currentType = fieldType;
-            return module.load(
-              fieldType.byteSize,
-              fieldType.isSignedIntegerValue,
-              module.local_get(viewLocal.index, TypeRef.I32),
-              fieldType.toRef(),
-              propertyInstance.memoryOffset
+            return this.viewFieldAccess(
+              module.local_get(viewLocal.index, TypeRef.I32), propertyInstance, fieldType
             );
           }
         }
@@ -11724,9 +11725,70 @@ export class Compiler extends DiagnosticEmitter {
 
   /** Is `type` an `@inline struct`: a value carried as its fields, never as a
    *  pointer? */
+  /**
+   * Whether `node` is syntactically `changetype<@unmanaged T>(...)`.
+   *
+   * The resolver's `isViewCall` is authoritative once the call has been
+   * compiled, but `compileSroaLocal` decides *before* compiling the initialiser,
+   * so it has to read the shape off the AST. The two agree: the mark is set
+   * from exactly this test (`compileCallExpressionBuiltin`).
+   */
+  private isUnmanagedChangetype(node: Expression): bool {
+    if (node.kind != NodeKind.Call) return false;
+    let call = <CallExpression>node;
+    let callee = call.expression;
+    if (callee.kind != NodeKind.Identifier) return false;
+    if ((<IdentifierExpression>callee).text != "changetype") return false;
+    let typeArguments = call.typeArguments;
+    if (typeArguments == null || typeArguments.length != 1) return false;
+    return unchecked(typeArguments[0]).memoryModel == MemoryModel.Unmanaged;
+  }
+
   private isInlineStructType(type: Type): bool {
     let classReference = type.classReference;
     return classReference != null && classReference.hasDecorator(DecoratorFlags.InlineStruct);
+  }
+
+  /**
+   * Reads `field` through a view of the record's bytes at `basePtr`.
+   *
+   * A scalar field is a load at its offset. A field whose type is itself an
+   * `@inline struct` is **not** a load: the field is bytes inside the viewed
+   * record, so what the caller needs is their *address* — `basePtr + offset` —
+   * the same shape the declared-`@unmanaged` path produces through the
+   * inline-field branch of `compilePropertyAccess`, and the same `i32` a
+   * record accessor takes as `this`.
+   *
+   * Loading it instead was a silent miscompile: a 4-byte load of the field's
+   * first bytes was handed to the inner setter as if it were a pointer.
+   * Measured — `changetype<@unmanaged R>(ptr).pos.x = v` read a float's bit
+   * pattern as an address and trapped with `memory access out of bounds`.
+   *
+   * A fixed-array field is storage for the same reason, so it takes the address
+   * branch too.
+   */
+  private viewFieldAccess(
+    basePtr: ExpressionRef,
+    field: Property,
+    fieldType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let offset = field.memoryOffset;
+    if (fieldType.kind == TypeKind.FixedArray || this.isInlineStructType(fieldType)) {
+      if (!offset) return basePtr;
+      return module.binary(
+        BinaryOp.AddSize,
+        basePtr,
+        this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+      );
+    }
+    return module.load(
+      fieldType.byteSize,
+      fieldType.isSignedIntegerValue,
+      basePtr,
+      fieldType.toRef(),
+      offset
+    );
   }
 
   /** The WASM result type of a value of `type`: `None` for an `@inline struct`,
@@ -12737,6 +12799,57 @@ export class Compiler extends DiagnosticEmitter {
   ): bool {
     let module = this.module;
     let name = declaration.name.text;
+
+    // The `changetype` mark is recorded when the call is *compiled*
+    // (`compileCallExpressionBuiltin`), and this decision runs before the
+    // initialiser is compiled — so read the shape off the AST instead of
+    // asking the resolver, which does not know yet.
+    if (initializerNode != null && this.isUnmanagedChangetype(initializerNode)) {
+      // A **view local**: `const p = changetype<@unmanaged T>(ptr)` where `T` is
+      // a plain (inline) struct. The two representations are disjoint — the view
+      // is an address, the value has none — so this local is *not* an SROA tree:
+      // it is one `i32` slot holding the address (`isViewLocal`), and every
+      // `p.field` is a load or store at that address plus the field's offset.
+      //
+      // Without this branch the initialiser fell into the `NodeKind.Call` sret
+      // branch below, which fills nothing, and the whole body was emitted as
+      // `unreachable` with no diagnostic.
+      let scopedLocals = flow.scopedLocals;
+      if (!scopedLocals) flow.scopedLocals = scopedLocals = new Map();
+      // The name may already be bound to a **pending dummy**: an inferred
+      // declaration registers one before its initialiser's type is known, and
+      // this branch runs after that (the initialiser is what told us it was a
+      // view). A dummy has no WASM slot yet, so replacing it is exactly right;
+      // any other existing binding is a real duplicate.
+      let existing = scopedLocals.has(name) ? assert(scopedLocals.get(name)) : null;
+      let local: Local;
+      if (existing != null && existing.index >= 0) {
+        // Already bound to a real slot (the declaration path allocates one
+        // before this decision runs). Reuse it rather than shadowing it.
+        local = existing;
+        local.type = type;
+      } else {
+        let targetFunction = flow.targetFunction;
+        local = new Local(name, targetFunction.localsByIndex.length, type, targetFunction, declaration);
+        targetFunction.localsByIndex[local.index] = local;
+        scopedLocals.set(name, local);
+      }
+      local.isViewLocal = true;
+      flow.setLocalFlag(local.index, LocalFlags.Initialized);
+      if (declaration.is(CommonFlags.Const)) {
+        flow.setLocalFlag(local.index, LocalFlags.Constant);
+      }
+      // `Type.auto`: the view's value *is* the address. Asking for `usize` makes
+      // the assignability check reject it (`MyStruct` -> `usize`) — the same
+      // reason the read path passes `Type.auto`.
+      initializers.push(module.local_set(
+        local.index,
+        this.compileExpression(initializerNode, Type.auto),
+        false
+      ));
+      return true;
+    }
+
     let fieldLocals = new Map<string, Local>();
     if (!this.fillSroaFieldLocals(fields, name, declaration, flow, fieldLocals)) return true;
 
@@ -12807,14 +12920,6 @@ export class Compiler extends DiagnosticEmitter {
     // `changetype<@unmanaged P>(ptr).x` — or `P` is declared `@unmanaged`, in
     // which case the binding is an ordinary pointer local and `p.x` loads
     // through it.
-    if (initializerNode != null && this.resolver.isViewCall(initializerNode)) {
-      this.error(
-        DiagnosticCode.Not_implemented_0,
-        initializerNode.range,
-        "binding an @unmanaged view to a local of an @inline struct type (the view is an address, the value has none; read or write the fields where the view is named, or declare the struct @unmanaged)"
-      );
-      return true;
-    }
 
     // `let q: P = f()`: the callee fills a caller-allocated slot, and each field
     // is copied out of it into q's own locals while the slot is live — the same
