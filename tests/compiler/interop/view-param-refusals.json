@@ -1,0 +1,9 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "TS6395: Type 'interop/view-param-refusals/View' is a value with no address, so a use cannot view it as '@unmanaged'; use the value, or keep it '@inline'.",
+    "TS6395: Type 'interop/view-param-refusals/View' is a value with no address, so a use cannot view it as '@managed'; use the value, or keep it '@inline'.",
+    "AS100: Not implemented: reading an @inline struct value as a whole (a value has no address; read a field, or copy it with `let q: P = p`)",
+    "TS6411: A view parameter ('@unmanaged interop/view-param-refusals/View' over an inline type) cannot appear in a host-visible signature: an '@external' or exported parameter is supplied by the host, and a view is an address this compiler did not materialise."
+  ]
+}

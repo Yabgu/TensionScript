@@ -191,7 +191,8 @@ import {
   isTypeOmitted,
   Source,
   TypeDeclaration,
-  ParameterKind
+  ParameterKind,
+  MemoryModel
 } from "./ast";
 
 import {
@@ -6297,33 +6298,29 @@ export class Compiler extends DiagnosticEmitter {
     // asserts on one), and if it *did* compile it would be a pointer, so the
     // assignment would alias. Both halves matter; this is the copy that makes
     // value semantics real.
-    if (
-      expression.kind == NodeKind.Identifier &&
-      valueExpression.kind == NodeKind.Identifier
-    ) {
-      let targetLocal = flow.lookupLocal((<IdentifierExpression>expression).text);
-      let sourceLocal = flow.lookupLocal((<IdentifierExpression>valueExpression).text);
-      if (targetLocal != null && targetLocal.fieldLocals != null && sourceLocal != null) {
-        let targetFields = assert(targetLocal.fieldLocals);
-        let sourceFields = sourceLocal.fieldLocals;
-        if (sourceFields == null) {
+    //
+    // **Either side may be a path**, not just a bare identifier: `b.inner =
+    // a.inner` copies the leaves behind `a.inner` into the leaves behind
+    // `b.inner`, with no value expression evaluated in between. Both trees come
+    // from this compiler's own maps, so the leaves are distinct locals by
+    // construction and the copy cannot alias — `a.inner = a.inner` degenerates
+    // to reading and writing the same local, which is harmless.
+    {
+      let targetLocal = this.resolveSroaReceiver(expression);
+      let sourceLocal = this.resolveSroaReceiver(valueExpression);
+      if (targetLocal != null && sourceLocal != null) {
+        if (!assert(targetLocal.type).equals(assert(sourceLocal.type))) {
           this.error(
             DiagnosticCode.Type_0_is_not_assignable_to_type_1,
             valueExpression.range,
-            "a non-@inline-struct value", assert(targetLocal.type).toString()
+            sourceLocal.type.toString(), targetLocal.type.toString()
           );
           return this.module.unreachable();
         }
+        // One `local.set` per **leaf**, so a nested field is descended into
+        // rather than assigned as a value it has no representation for.
         let copies = new Array<ExpressionRef>();
-        for (let _keys = Map_keys(targetFields), i = 0, k = _keys.length; i < k; ++i) {
-          let fieldName = unchecked(_keys[i]);
-          if (!sourceFields.has(fieldName)) continue;
-          let to = assert(targetFields.get(fieldName));
-          let from = assert(sourceFields.get(fieldName));
-          copies.push(
-            this.module.local_set(to.index, this.module.local_get(from.index, from.type.toRef()), false)
-          );
-        }
+        this.copySroaValue(assert(sourceLocal.fieldLocals), assert(targetLocal.fieldLocals), copies);
         this.currentType = Type.void;
         return this.module.flatten(copies);
       }
@@ -6529,6 +6526,17 @@ export class Compiler extends DiagnosticEmitter {
               return module.unreachable();
             }
             let fieldLocal = assert(fieldLocals.get(propertyInstance.name));
+            // A placeholder is several leaves, so `o.inner = v` would need one
+            // store per leaf — the per-leaf copy, which is the copy-out phase.
+            // Refused by name here so it cannot emit a store to local -1.
+            if (fieldLocal.index < 0) {
+              this.error(
+                DiagnosticCode.Not_implemented_0,
+                valueExpression.range,
+                "assigning a nested @inline struct value as a whole (the field is several leaves, not one value; assign one of its fields)"
+              );
+              return module.unreachable();
+            }
             let stored = module.local_set(fieldLocal.index, valueExpr, false);
             this.currentType = tee ? fieldLocal.type : Type.void;
             return stored;
@@ -6983,6 +6991,12 @@ export class Compiler extends DiagnosticEmitter {
           expression.range, prototype.internalName
         );
       }
+      // `changetype`'s type argument is the one position where `@unmanaged`
+      // over an inline declaration is legal: the operand supplies the address.
+      // The resolver refuses it everywhere else, so the flag is set only here
+      // and only for this builtin.
+      let isChangeType = prototype.internalName == BuiltinNames.changetype;
+      if (isChangeType) this.resolver.allowInlineView = true;
       typeArguments = this.resolver.resolveTypeArguments(
         assert(typeParameterNodes),
         typeArgumentNodes,
@@ -6991,6 +7005,23 @@ export class Compiler extends DiagnosticEmitter {
         cloneMap(this.currentFlow.contextualTypeArguments), // don't update
         expression
       );
+      if (isChangeType) {
+        this.resolver.allowInlineView = false;
+        // A builtin's type arguments are resolved here, not through
+        // `maybeInferCall`, so the view mark has to be recorded here or the
+        // field-access branch never sees it (measured: the owner's pattern
+        // compiled the parameter but the `changetype` argument was refused with
+        // AS100).
+        if (
+          typeArguments != null &&
+          typeArguments.length == 1 &&
+          typeArgumentNodes != null &&
+          typeArgumentNodes.length == 1 &&
+          typeArgumentNodes[0].memoryModel == MemoryModel.Unmanaged
+        ) {
+          this.resolver.markViewCall(expression);
+        }
+      }
     }
     let callee = expression.expression;
     let ctx = new BuiltinFunctionContext(
@@ -7273,6 +7304,14 @@ export class Compiler extends DiagnosticEmitter {
           externalBase, assert(externalMark), externalOffset
         );
         externalOffset += this.sretSizeOf(parameterType);
+      } else if (signature.isViewParam(i)) {
+        // A view argument is **one pointer operand**: the callee reads through
+        // it. Expanding it field-wise would hand the call three operands where
+        // the signature declares one, and copying it to a temp would give the
+        // callee a view of the temp rather than of the caller's bytes.
+        unchecked(operands[index++] =
+          this.compileExpression(unchecked(argumentExpressions[i]), parameterType, Constraints.ConvImplicit)
+        );
       } else {
         index += this.expandSroaArgument(
           unchecked(argumentExpressions[i]), parameterType, operands, index
@@ -8755,7 +8794,7 @@ export class Compiler extends DiagnosticEmitter {
         // address, so there is nothing to `local.get`. Refused by name, not
         // asserted: this is the *point* of the representation — no address, no
         // alias — and a compiler crash is the wrong way to say so.
-        if (local.fieldLocals != null || localIndex < 0) {
+        if (local.fieldLocals != null || local.isViewParam || localIndex < 0) {
           this.error(
             DiagnosticCode.Not_implemented_0,
             expression.range,
@@ -10578,8 +10617,79 @@ export class Compiler extends DiagnosticEmitter {
             return module.unreachable();
           }
           let fieldLocal = assert(fieldLocals.get(propertyInstance.name));
+          // A nested inline field's entry is a **placeholder**: it stands for a
+          // whole sub-value, which is several leaves, so there is no single
+          // local a read could return. Reading the value as a whole is refused
+          // (the same principle as the bare-read guard: a value has no address),
+          // and reading one of its leaves goes through this branch again, one
+          // hop lower.
+          if (fieldLocal.index < 0) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              expression.range,
+              "reading a nested @inline struct value as a whole (the field is several leaves, not one value; read one of its fields)"
+            );
+            return module.unreachable();
+          }
           this.currentType = propertyInstance.type;
           return module.local_get(fieldLocal.index, fieldLocal.type.toRef());
+        }
+        // A **view**: `changetype<@unmanaged T>(ptr)` with `T` inline-typed.
+        // The expression is an address typed as the record, so a field read is
+        // a load at the field's offset — the same shape the record's own getter
+        // emits (`module.load(bytes, signed, ptr, type, offset)`).
+        //
+        // This must come before the sret branch below, which keys on
+        // "receiver is a Call returning an inline struct" and would otherwise
+        // treat a `changetype` as a call that filled a destination slot.
+        // (Measured: without this branch the field read flattened into that
+        // path and the module trapped.)
+        if (
+          thisExpression != null &&
+          propertyInstance.isField &&
+          this.resolver.isViewCall(thisExpression)
+        ) {
+          let fieldType = propertyInstance.type;
+          // `Type.auto`: the receiver is an inline-typed expression whose value
+          // *is* the address. Asking for `usize` here made the assignability
+          // check reject it (`MyStruct` -> `usize`), which is the type system
+          // being right about what the type says and wrong about what the use
+          // means — which is exactly the gap this feature fills.
+          let ptr = this.compileExpression(thisExpression, Type.auto);
+          this.currentType = fieldType;
+          return module.load(
+            fieldType.byteSize,
+            fieldType.isSignedIntegerValue,
+            ptr,
+            fieldType.toRef(),
+            propertyInstance.memoryOffset
+          );
+        }
+        // A view **local**: `a: @unmanaged T` with `T` inline. The local holds
+        // the caller's address in its one `i32` slot, so a field read is a load
+        // at the field's offset — the same shape as the view-call branch above,
+        // with the address coming from a parameter instead of a `changetype`.
+        //
+        // Deliberately after `resolveSroaReceiver` above: a view has no
+        // `fieldLocals` (S6 gives it none), so that path returns null for it and
+        // the read falls through to here.
+        if (
+          thisExpression != null &&
+          thisExpression.kind == NodeKind.Identifier &&
+          propertyInstance.isField
+        ) {
+          let viewLocal = flow.lookupLocal((<IdentifierExpression>thisExpression).text);
+          if (viewLocal != null && viewLocal.isViewParam) {
+            let fieldType = propertyInstance.type;
+            this.currentType = fieldType;
+            return module.load(
+              fieldType.byteSize,
+              fieldType.isSignedIntegerValue,
+              module.local_get(viewLocal.index, TypeRef.I32),
+              fieldType.toRef(),
+              propertyInstance.memoryOffset
+            );
+          }
         }
         // Sret: `f().x` where `f` returns an `@inline struct`. There is no value
         // to read a field from — the call wrote the fields into a slot the
@@ -11638,35 +11748,86 @@ export class Compiler extends DiagnosticEmitter {
       for (let k = 0; k < count; ++k) unchecked(operands[at + k] = this.module.unreachable());
       return count;
     }
-    let fieldLocals = assert(local.fieldLocals);
-    let classReference = assert(paramType.classReference);
-    let members = assert(classReference.members);
-    let pushed = 0;
-    for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
-      let member = unchecked(_values[j]);
-      if (member.kind != ElementKind.PropertyPrototype) continue;
-      let property = (<PropertyPrototype>member).instance;
-      if (property == null || !property.isField) continue;
-      let fieldLocal = getMapEntry(fieldLocals, property.name);
-      if (fieldLocal == null) continue;
-      unchecked(operands[at + pushed] = this.module.local_get(fieldLocal.index, fieldLocal.type.toRef()));
-      ++pushed;
-    }
+    // One operand per **leaf**, depth first — the same order `paramRefs`
+    // declares and the binder indexes into. A nested inline field contributes
+    // its leaves' locals rather than a local for itself, because it does not
+    // have one (`fillSroaFieldLocals` gives it a placeholder, index -1).
+    let pushed = this.pushSroaLeafOperands(assert(local.fieldLocals), operands, at);
     return pushed;
   }
 
   /**
    * The SROA local an expression names, or `null`.
    *
-   * Only a bare identifier can be one: `p.x.y` where `x` is itself an inline
-   * struct cannot happen this phase (a nested field is refused at declaration),
-   * so the receiver of a field access is either an SROA local or an ordinary
-   * expression that has an address.
+   * The receiver is either an SROA local (base identifier) or a chain of field
+   * accesses into one (`o.inner` in `o.inner.x`). The chain is walked from the
+   * base outward, one hop per `fieldLocals` lookup: a nested inline field is
+   * entered through the placeholder `Local` its creation installed
+   * (`fillSroaFieldLocals`), so the walk and the tree are one structure rather
+   * than two that could disagree.
+   *
+   * Returns the `Local` the final hop resolved to, or `null` when any step does
+   * not hold — a non-local base, a field with no entry, or a leaf reached before
+   * the chain ends. `null` is not an error here: the caller falls through to the
+   * ordinary address paths, which refuse a value with no address.
    */
+  /**
+   * Pushes one operand per **leaf** of a `fieldLocals` tree, depth first.
+   *
+   * Shared by the call site (`expandSroaArgument`) so the operand order is the
+   * one `Signature.leafTypesOf` declares and the binder indexes into — three
+   * walks, one order. A nested field's entry is a placeholder (index `-1`)
+   * carrying its own map, so the walk descends through it.
+   */
+  private pushSroaLeafOperands(
+    fieldLocals: Map<string, Local>,
+    operands: ExpressionRef[],
+    at: i32
+  ): i32 {
+    let pushed = 0;
+    for (let _keys = Map_keys(fieldLocals), i = 0, k = _keys.length; i < k; ++i) {
+      let entry = assert(getMapEntry(fieldLocals, unchecked(_keys[i])));
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) pushed += this.pushSroaLeafOperands(nested, operands, at + pushed);
+        continue;
+      }
+      unchecked(operands[at + pushed] =
+        this.module.local_get(entry.index, entry.type.toRef()));
+      ++pushed;
+    }
+    return pushed;
+  }
+
   private resolveSroaReceiver(expression: Expression): Local | null {
-    if (expression.kind != NodeKind.Identifier) return null;
-    let local = this.currentFlow.lookupLocal((<IdentifierExpression>expression).text);
-    return local != null && local.fieldLocals != null ? local : null;
+    // Collect the hops from the outermost access inward, then walk them in
+    // source order from the base.
+    let chain = new Array<PropertyAccessExpression>();
+    let at: Expression = expression;
+    while (at.kind == NodeKind.PropertyAccess) {
+      let access = <PropertyAccessExpression>at;
+      chain.push(access);
+      at = access.expression;
+    }
+    if (at.kind != NodeKind.Identifier) return null;
+    let base = this.currentFlow.lookupLocal((<IdentifierExpression>at).text);
+    if (base == null || base.fieldLocals == null) return null;
+    let current = base;
+    for (let i = chain.length - 1; i >= 0; --i) {
+      let fieldLocals = current.fieldLocals;
+      if (fieldLocals == null) return null;
+      let name = (<IdentifierExpression>chain[i].property).text;
+      let next = getMapEntry(fieldLocals, name);
+      if (next == null) return null;
+      current = next;
+    }
+    // A receiver must be a **value** — several leaves behind a map — because the
+    // caller reads one of its fields. A leaf that happens to be a pointer (an
+    // `@unmanaged` field, say) is not one: `a.p.v` reads *through* the pointer,
+    // and that is the ordinary address path's job. Returning the leaf here would
+    // hand the caller a local with no `fieldLocals` and trip its assert —
+    // measured on `interop/inline-struct-sroa`.
+    return current.fieldLocals != null ? current : null;
   }
 
   // === Sret: `@inline struct` returns ===========================================================
@@ -11862,6 +12023,55 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * Stores a by-value argument's leaves into the static call-temp region.
+   *
+   * The same tree walk as `copyInto` (`emitSroaStores`) and `copySroaValue`:
+   * leaves become stores at `tempAddress + field offset`, a nested field is
+   * descended into. Keeping one recursion is what makes a nested value cross a
+   * host boundary at the layout the C side expects.
+   */
+  emitTempArgumentLeaves(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    base: i32,
+    markLocal: Local,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.recordFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      // A field refused at declaration was never part of the value; there is
+      // nothing to store and no representation to store it as.
+      if (entry == null) continue;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitTempArgumentLeaves(
+            field.type, nested, base, markLocal, baseOffset + field.memoryOffset, stmts
+          );
+        }
+        continue;
+      }
+      stmts.push(module.store(
+        field.type.byteSize,
+        // A fresh address node per store (one parent per node). The argument's
+        // own region offset stays in the address and the leaf's offset stays an
+        // immediate — the shape this path always emitted, so a flat record's
+        // bytes do not move; `baseOffset` is 0 for the top level and the nested
+        // field's offset for anything below it.
+        this.makeSretAddressPlus(base, markLocal, baseOffset),
+        module.local_get(entry.index, entry.type.toRef()),
+        field.type.toRef(),
+        field.memoryOffset
+      ));
+    }
+  }
+
+  /**
    * Materialises one `@inline struct` argument of an `@external` call on the
    * static call-temp stack and returns the address to pass.
    *
@@ -11901,23 +12111,12 @@ export class Compiler extends DiagnosticEmitter {
     }
     let stmts = new Array<ExpressionRef>();
     if (fieldLocals != null) {
-      // **Value source.** The argument is an SROA local: one local per field and
-      // no address, so the fields are copied out of those locals.
-      for (let i = 0, k = fields.length; i < k; ++i) {
-        let field = unchecked(fields[i]);
-        let fieldLocal = getMapEntry(fieldLocals, field.name);
-        // A field refused at declaration was never part of the value; there is
-        // nothing to store and no representation to store it as.
-        if (!fieldLocal) continue;
-        stmts.push(module.store(
-          field.type.byteSize,
-          // A fresh address node per store (one parent per node).
-          this.makeSretAddressPlus(base, markLocal, offset),
-          module.local_get(fieldLocal.index, fieldLocal.type.toRef()),
-          field.type.toRef(),
-          field.memoryOffset
-        ));
-      }
+      // **Value source.** The argument is an SROA local: one local per **leaf**
+      // and no address, so the leaves are copied out of those locals, at the
+      // offsets the type gives them. A nested inline field is a placeholder with
+      // its own map, so the walk descends — the same recursion `copyInto` uses,
+      // with a stack address instead of a caller-supplied one.
+      this.emitTempArgumentLeaves(type, fieldLocals, base, markLocal, offset, stmts);
     } else if (Signature.isInlineStructRef(type)) {
       // An `@inline struct` **value** with no local behind it: a call result, a
       // `new`, a field access. There is no address to copy from and no SROA shape
@@ -12099,17 +12298,9 @@ export class Compiler extends DiagnosticEmitter {
         false
       ));
     } else if (readTarget != null) {
-      let fields = assert(this.inlineStructFieldsOf(returnType));
-      for (let i = 0, k = fields.length; i < k; ++i) {
-        let field = unchecked(fields[i]);
-        let to = getMapEntry(readTarget, field.name);
-        if (!to) continue;
-        stmts.push(module.local_set(
-          to.index,
-          this.makeSretFieldLoad(this.makeSretAddress(base, markLocal), field),
-          false
-        ));
-      }
+      // One load per **leaf**: a nested inline field is several leaves on both
+      // sides, so the slot is read back a leaf at a time into the target's tree.
+      this.emitSretLoadsInto(returnType, readTarget, base, markLocal, 0, stmts);
     }
     stmts.push(module.global_set(global, module.local_get(markLocal.index, TypeRef.I32)));
     if (resultLocal != null) {
@@ -12137,7 +12328,6 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let flow = this.currentFlow;
     let valueExpression = assert(statement.value);
-    let fields = assert(this.inlineStructFieldsOf(returnType));
     // `return new P()` with no arguments: every field is zero, which is what a
     // fresh record holds — the stores still go to the slot, because the slot is
     // the value's home, not a local that happens to start at zero.
@@ -12147,17 +12337,9 @@ export class Compiler extends DiagnosticEmitter {
       let module2 = this.module;
       let destIndex = flow.sourceFunction.signature.thisType ? 1 : 0;
       let zeroStmts = new Array<ExpressionRef>();
-      for (let i = 0, k = fields.length; i < k; ++i) {
-        let field = unchecked(fields[i]);
-        if (!this.isSroaFieldType(field.type)) continue;
-        zeroStmts.push(module2.store(
-          field.type.byteSize,
-          module2.local_get(destIndex, TypeRef.I32),
-          this.makeZero(field.type),
-          field.type.toRef(),
-          field.memoryOffset
-        ));
-      }
+      // Every **leaf**, nested ones included: the slot is stack space a previous
+      // sret call may have filled, so "all zeroes" still has to be written.
+      this.emitSroaZerosToLocal(returnType, destIndex, 0, zeroStmts);
       zeroStmts.push(module2.return());
       flow.set(FlowFlags.Returns | FlowFlags.Terminates);
       this.currentType = returnType;
@@ -12181,23 +12363,11 @@ export class Compiler extends DiagnosticEmitter {
     let destIndex = signature.thisType ? 1 : 0;
     let fieldLocals = assert(local.fieldLocals);
     let stmts = new Array<ExpressionRef>();
-    for (let i = 0, k = fields.length; i < k; ++i) {
-      let field = unchecked(fields[i]);
-      let fieldLocal = getMapEntry(fieldLocals, field.name);
-      // A field refused at declaration (a T[N] field, a GC reference) has no
-      // local: it was never part of the value, and a store here would need the
-      // representation the refusal withheld.
-      if (!fieldLocal) continue;
-      stmts.push(module.store(
-        field.type.byteSize,
-        // A fresh node per store: Binaryen's passes assume each child has one
-        // parent, so the address expression must not be shared between stores.
-        module.local_get(destIndex, TypeRef.I32),
-        module.local_get(fieldLocal.index, fieldLocal.type.toRef()),
-        field.type.toRef(),
-        field.memoryOffset
-      ));
-    }
+    // One store per **leaf**, through the nesting — the same recursion as
+    // `copyInto`, with the slot as the destination. A nested field was a
+    // placeholder (index -1), which is why the flat walk emitted `local.get(-1)`
+    // and failed validation.
+    this.emitSroaStoresToLocal(returnType, fieldLocals, destIndex, 0, stmts);
     stmts.push(module.return());
     flow.set(FlowFlags.Returns | FlowFlags.Terminates);
     this.currentType = returnType;
@@ -12224,6 +12394,287 @@ export class Compiler extends DiagnosticEmitter {
    * Returns true when the declaration was handled here (the caller must not fall
    * through to the ordinary local path).
    */
+  /**
+   * Fills `into` with one entry per field of an `@inline struct` value.
+   *
+   * A **leaf** field (scalar, or a reference) gets one WASM local, named
+   * `<path>$<field>` — a synthetic name keeps it out of user scope, so nothing
+   * can look one up by accident.
+   *
+   * A field whose type is itself an `@inline struct` is **not a leaf**: it is
+   * recursed into, and its entry is a placeholder `Local` (index `-1`) carrying
+   * its own map. That makes `fieldLocals` a **tree** whose shape is the value's
+   * nesting, which is what lets a read path walk `o.inner.x` a hop at a time
+   * without a second representation. The placeholder is never `local.get`-ed:
+   * the bare-read guard refuses a value read and the receiver walk descends to
+   * a leaf before emitting anything.
+   *
+   * Returns `false` when a field was refused, having reported why. The refusal
+   * is per **leaf**, so a nested value inherits exactly the rules the flat one
+   * has — a `T[N]` field or a GC-reference field is refused at any depth.
+   */
+  private fillSroaFieldLocals(
+    fields: Property[],
+    path: string,
+    declaration: VariableLikeDeclarationStatement,
+    flow: Flow,
+    into: Map<string, Local>
+  ): bool {
+    let refused = false;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let fieldPath = path + "$" + field.name;
+      let fieldType = field.type;
+      if (!this.isSroaFieldType(fieldType)) {
+        if (Signature.isInlineStructRef(fieldType)) {
+          // Nested inline value: recurse, and stand in for it with a map-carrying
+          // placeholder so `resolveSroaReceiver` can descend one hop at a time.
+          let nested = new Map<string, Local>();
+          if (!this.fillSroaFieldLocals(this.inlineStructFieldsOf(fieldType)!, fieldPath, declaration, flow, nested)) {
+            refused = true;
+            continue;
+          }
+          let placeholder = new Local(fieldPath, -1, fieldType, flow.targetFunction, declaration);
+          placeholder.fieldLocals = nested;
+          into.set(field.name, placeholder);
+          continue;
+        }
+        let fieldDeclaration = assert(field.prototype.fieldDeclaration);
+        let fieldTypeNode = fieldDeclaration.type;
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          fieldTypeNode
+            ? fieldTypeNode.range
+            : fieldDeclaration.name.range,
+          fieldType.kind == TypeKind.FixedArray
+            ? "a T[N] field in an @inline struct (SROA keeps one WASM local per field; array fields are the deep-SROA phase)"
+            : "a GC-reference field in an @inline struct (a bare local.set skips the write barrier; deferred)"
+        );
+        refused = true;
+        continue;
+      }
+      into.set(field.name, flow.targetFunction.addLocal(fieldType, fieldPath, declaration));
+    }
+    return !refused;
+  }
+
+  /**
+   * Copies one SROA value's leaves into another's, following the tree.
+   *
+   * `from` and `to` are the two `fieldLocals` maps — the same shape
+   * `fillSroaFieldLocals` builds, so a nested field is a placeholder on both
+   * sides and the recursion descends through it rather than trying to move a
+   * value that has no single representation.
+   *
+   * This is what makes `let q = p` and `q = p` **copies** rather than aliases:
+   * one `local.set` per leaf, so a later write to `q` cannot be seen through
+   * `p`. Both sides come from this compiler's own maps, so there is no aliasing
+   * question to answer — the leaves are distinct locals by construction.
+   */
+  private copySroaValue(
+    from: Map<string, Local>,
+    to: Map<string, Local>,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    for (let _keys = Map_keys(to), i = 0, k = _keys.length; i < k; ++i) {
+      let fieldName = unchecked(_keys[i]);
+      let fromField = getMapEntry(from, fieldName);
+      if (fromField == null) continue;
+      let toField = assert(getMapEntry(to, fieldName));
+      if (toField.index < 0 || fromField.index < 0) {
+        let toNested = toField.fieldLocals;
+        let fromNested = fromField.fieldLocals;
+        if (toNested != null && fromNested != null) {
+          this.copySroaValue(fromNested, toNested, stmts);
+        }
+        continue;
+      }
+      stmts.push(
+        module.local_set(toField.index, module.local_get(fromField.index, fromField.type.toRef()), false)
+      );
+    }
+  }
+
+  /**
+   * Stores a `fieldLocals` tree's leaves into the hidden destination slot at
+   * `destIndex`, one store per leaf.
+   *
+   * The third destination shape for the same recursion: `emitSroaStores` writes
+   * to a compiled `usize`, `emitTempArgumentLeaves` to a call-temp address, and
+   * this one to a **parameter** — the sret slot a `return p` fills. The address
+   * is a fresh `local.get` per store, because Binaryen's passes assume one
+   * parent per node.
+   */
+  emitSroaStoresToLocal(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    destIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      // A field refused at declaration was never part of the value; there is
+      // nothing to store and no representation to store it as.
+      if (entry == null) continue;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitSroaStoresToLocal(
+            field.type, nested, destIndex, baseOffset + field.memoryOffset, stmts
+          );
+        }
+        continue;
+      }
+      stmts.push(module.store(
+        field.type.byteSize,
+        module.local_get(destIndex, TypeRef.I32),
+        module.local_get(entry.index, entry.type.toRef()),
+        field.type.toRef(),
+        baseOffset + field.memoryOffset
+      ));
+    }
+  }
+
+  /**
+   * Zeroes every **leaf** of an `@inline struct` in the destination slot.
+   *
+   * `return new P()` has no local to copy from — the value is all zeroes — but
+   * the slot is stack space that a previous sret call may have filled, so the
+   * bytes still have to be written. Walking the type rather than the direct
+   * fields is what zeroes a nested field's leaves: measured before this,
+   * `return new Outer1()` with `Inner{x,y}` stored only offset 0 and left
+   * offsets 4 and 8 holding whatever was there.
+   */
+  emitSroaZerosToLocal(type: Type, destIndex: i32, baseOffset: i32, stmts: ExpressionRef[]): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      if (Signature.isInlineStructRef(field.type)) {
+        this.emitSroaZerosToLocal(
+          field.type, destIndex, baseOffset + field.memoryOffset, stmts
+        );
+        continue;
+      }
+      if (!this.isSroaFieldType(field.type)) continue;
+      stmts.push(module.store(
+        field.type.byteSize,
+        module.local_get(destIndex, TypeRef.I32),
+        this.makeZero(field.type),
+        field.type.toRef(),
+        baseOffset + field.memoryOffset
+      ));
+    }
+  }
+
+  /**
+   * Loads an `@inline struct`'s leaves out of the sret slot into a target's
+   * field locals, one load per leaf.
+   *
+   * The mirror of {@link emitSroaStoresToLocal}: `let q = make()` reads the slot
+   * back into the leaf locals a read path walks. A fresh slot address per load,
+   * for the same one-parent-per-node reason.
+   */
+  emitSretLoadsInto(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    base: i32,
+    markLocal: Local,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      if (entry == null) continue;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitSretLoadsInto(
+            field.type, nested, base, markLocal, baseOffset + field.memoryOffset, stmts
+          );
+        }
+        continue;
+      }
+      stmts.push(this.module.local_set(
+        entry.index,
+        this.module.load(
+          field.type.byteSize,
+          false,
+          this.makeSretAddress(base, markLocal),
+          field.type.toRef(),
+          baseOffset + field.memoryOffset
+        ),
+        false
+      ));
+    }
+  }
+
+  /**
+   * The `fieldLocals` tree behind an SROA-tracked expression, or `null`.
+   *
+   * The public face of {@link resolveSroaReceiver} for code outside this class —
+   * today only the `copyInto` builtin, which needs the *tree* (to store its
+   * leaves) rather than a single receiver.
+   */
+  sroaTreeOf(expression: Expression): Map<string, Local> | null {
+    let local = this.resolveSroaReceiver(expression);
+    return local != null ? local.fieldLocals : null;
+  }
+
+  /**
+   * Stores an inline value's leaves at `dest + offset`.
+   *
+   * The third leaf consumer, beside `copySroaValue` (local-to-local) and the
+   * read path (local-to-stack): same tree, same recursion, an expression
+   * reference instead of a destination map. The offsets come from the **type**
+   * (`property.memoryOffset`, the layout the C side sees), so what lands in
+   * memory is the wire layout, not a packing of the locals.
+   *
+   * Leaves whose local is missing are skipped rather than stored as `-1`: a
+   * field refused at declaration was never part of the value (`isSroaFieldType`
+   * has already reported why), and the caller has been told.
+   */
+  emitSroaStores(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    dest: ExpressionRef,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      if (entry == null) continue;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitSroaStores(field.type, nested, dest, baseOffset + field.memoryOffset, stmts);
+        }
+        continue;
+      }
+      stmts.push(module.store(
+        field.type.byteSize,
+        dest,
+        module.local_get(entry.index, entry.type.toRef()),
+        field.type.toRef(),
+        baseOffset + field.memoryOffset
+      ));
+    }
+  }
+
   private compileSroaLocal(
     declaration: VariableLikeDeclarationStatement,
     type: Type,
@@ -12235,33 +12686,7 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let name = declaration.name.text;
     let fieldLocals = new Map<string, Local>();
-    let refused = false;
-
-    for (let i = 0, k = fields.length; i < k; ++i) {
-      let field = unchecked(fields[i]);
-      if (!this.isSroaFieldType(field.type)) {
-        let fieldDeclaration = assert(field.prototype.fieldDeclaration);
-        let fieldTypeNode = fieldDeclaration.type;
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          fieldTypeNode
-            ? fieldTypeNode.range
-            : fieldDeclaration.name.range,
-          field.type.kind == TypeKind.FixedArray
-            ? "a T[N] field in an @inline struct (SROA keeps one WASM local per field; array fields are the deep-SROA phase)"
-            : "a GC-reference field in an @inline struct (a bare local.set skips the write barrier; deferred)"
-        );
-        refused = true;
-        continue;
-      }
-      // A synthetic name keeps the per-field locals out of user scope: `p.x` is
-      // not a legal name, so nothing can look one up by accident.
-      let fieldLocal = flow.targetFunction.addLocal(
-        field.type, name + "$" + field.name, declaration
-      );
-      fieldLocals.set(field.name, fieldLocal);
-    }
-    if (refused) return true;
+    if (!this.fillSroaFieldLocals(fields, name, declaration, flow, fieldLocals)) return true;
 
     let local = new Local(name, -1, type, flow.targetFunction, declaration);
     local.fieldLocals = fieldLocals;
@@ -12296,6 +12721,17 @@ export class Compiler extends DiagnosticEmitter {
       for (let i = 0, k = args.length; i < k; ++i) {
         let field = unchecked(fields[i]);
         let fieldLocal = assert(fieldLocals.get(field.name));
+        // A nested inline field stands in for a whole sub-value: several leaves,
+        // so there is no single local this store could target. Constructing one
+        // value from another is the copy-out phase.
+        if (fieldLocal.index < 0) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            initializerNode.range,
+            "constructing an @inline struct with an argument for a nested @inline field (the field is several leaves, not one value; assign its own fields instead)"
+          );
+          return true;
+        }
         let value = this.compileExpression(args[i], field.type, Constraints.ConvImplicit);
         initializers.push(module.local_set(fieldLocal.index, value, false));
       }
@@ -12326,14 +12762,9 @@ export class Compiler extends DiagnosticEmitter {
     if (initializerNode.kind == NodeKind.Identifier) {
       let source = flow.lookupLocal((<IdentifierExpression>initializerNode).text);
       if (source && source.fieldLocals) {
-        for (let i = 0, k = fields.length; i < k; ++i) {
-          let fieldName = unchecked(fields[i]).name;
-          let from = assert(assert(source.fieldLocals).get(fieldName));
-          let to = assert(fieldLocals.get(fieldName));
-          initializers.push(
-            module.local_set(to.index, module.local_get(from.index, from.type.toRef()), false)
-          );
-        }
+        // One `local.set` per **leaf**, through the nesting. `q` has fresh
+        // locals from `fillSroaFieldLocals`, so the copy cannot alias.
+        this.copySroaValue(assert(source.fieldLocals), fieldLocals, initializers);
         return true;
       }
     }
@@ -12409,6 +12840,12 @@ export class Compiler extends DiagnosticEmitter {
    */
   isSroaFieldType(type: Type): bool {
     if (type.kind == TypeKind.FixedArray) return false;
+    // An `@inline struct` field is **not a leaf**: it is itself a value, stored
+    // as one local per field, so the local creation recurses into it instead of
+    // allocating one local for the whole thing. Allocating one would give the
+    // field a single slot whose value is a pointer that was never formed —
+    // measured before this change: the read dereferenced address 0.
+    if (Signature.isInlineStructRef(type)) return false;
     // A field that holds a *GC reference* would need the write barrier
     // (`link`) on every assignment, which a bare `local.set` skips — so a
     // collected object could be written into a local the collector has no

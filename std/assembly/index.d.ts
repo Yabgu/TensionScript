@@ -214,6 +214,8 @@ declare function offsetof<T>(): usize;
 declare function offsetof<T>(fieldName: keyof T | string): usize;
 /** Determines the offset of the specified field within the given class type. Returns the class type's end offset if field name has been omitted. Compiles to a constant. */
 declare function offsetof<T>(fieldName?: string): usize;
+/** Copies an `@inline struct` value's leaves into memory at `dest`, one store per leaf at `dest + offsetof(leaf)`. The value must be held in a local (or a path into one); an inline value has no address to lend, which is why `changetype<usize>(value)` stays refused. */
+declare function copyInto(dest: usize, value: any): void;
 /** Determines the ABI name of the specified field: its `@abi.alias` if declared, else the field's TypeScript name. Compiles to a constant. */
 declare function abiNameOf<T>(fieldName: string): string;
 /** Determines the name of a given type. */

@@ -1213,18 +1213,48 @@ export class Signature {
       classReference == null ||
       !classReference.hasDecorator(DecoratorFlags.InlineStruct)
     ) return 1;
+    let count = Signature.leafCountOf(type);
+    return count > 0 ? count : 1;
+  }
+
+  /**
+   * Appends the **leaf** types of an `@inline struct`, in declaration order,
+   * depth first.
+   *
+   * A leaf is a field that occupies one WASM local: a scalar or a reference. A
+   * field whose type is itself an `@inline struct` is not a leaf — it is several
+   * locals behind a map — so the walk recurses into it. This is the type-level
+   * twin of the `fieldLocals` tree the compiler builds
+   * (`Compiler#fillSroaFieldLocals`), and the two must agree in **order** as
+   * well as count: the callee binds WASM parameter *k* to the *k*th leaf, and
+   * the caller pushes operands in the same walk.
+   */
+  static leafTypesOf(type: Type, out: Type[]): void {
+    let classReference = type.classReference;
+    if (classReference == null) return;
     let members = classReference.members;
-    if (!members) return 1;
-    let count = 0;
+    if (!members) return;
     for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
       let member = unchecked(_values[i]);
       // A resolved `Class`'s members are prototypes; the bound `Property` that
       // carries `isField` hangs off `prototype.instance`.
       if (member.kind != ElementKind.PropertyPrototype) continue;
       let property = (<PropertyPrototype>member).instance;
-      if (property != null && property.isField) ++count;
+      if (property == null || !property.isField) continue;
+      let fieldType = property.type;
+      if (Signature.isInlineStructRef(fieldType)) {
+        Signature.leafTypesOf(fieldType, out);
+      } else {
+        out.push(fieldType);
+      }
     }
-    return count > 0 ? count : 1;
+  }
+
+  /** The number of leaf locals an `@inline struct` occupies. */
+  static leafCountOf(type: Type): i32 {
+    let out = new Array<Type>();
+    Signature.leafTypesOf(type, out);
+    return out.length;
   }
 
   /**
@@ -1243,8 +1273,25 @@ export class Signature {
    * the same source parameter.
    */
   wasmParamSlotCountOf(sourceIndex: i32): i32 {
+    if (this.isViewParam(sourceIndex)) return 1;
     if (this.isByValPointerParam(sourceIndex)) return 1;
     return Signature.wasmParamCountOf(unchecked(this.parameterTypes[sourceIndex]));
+  }
+
+  /**
+   * Whether source parameter `sourceIndex` is a **view**: `@unmanaged` at the
+   * declaration over a type that is an `@inline struct`.
+   *
+   * The type still says *value* — every use of `MyStruct` shares one `Type`, and
+   * that is what makes a member lookup work on the parameter — while the model
+   * says this use is an address. One `i32` slot, no field locals, a load at the
+   * field's offset: the same crossing an `@unmanaged struct` parameter already
+   * takes, with the model recorded at the declaration instead of on a pointer
+   * type.
+   */
+  isViewParam(sourceIndex: i32): bool {
+    return this.memoryModelOf(sourceIndex) == MemoryModelCode.Unmanaged &&
+      Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]));
   }
 
   /**
@@ -1260,10 +1307,17 @@ export class Signature {
    *   address, and the override asks for a copy of what is there — the same
    *   copy, read from memory instead of from SROA locals.
    *
-   * The reverse is not a thing: `@unmanaged`/`@managed` over an `@inline`
-   * declaration is refused (`TS6395`), because a value has no address to lend.
+   * The reverse is partly a thing now. `@unmanaged` over an `@inline`
+   * declaration is legal where the use supplies an address — a parameter (a
+   * view parameter, `isViewParam`) or `changetype`'s type argument — and a view
+   * parameter crosses as a pointer, so it is asked before this predicate. Every
+   * other cell still refuses (`TS6395`), and `@managed` over `@inline` refuses
+   * at every position: a value has no GC header and no address to lend.
    */
   crossesByValueParam(sourceIndex: i32): bool {
+    // A view crosses as a pointer, so there is no value to copy in and no temp
+    // to materialise. Asked before the type, which still says `@inline struct`.
+    if (this.isViewParam(sourceIndex)) return false;
     if (Signature.isInlineStructRef(unchecked(this.parameterTypes[sourceIndex]))) return true;
     return this.memoryModelOf(sourceIndex) == MemoryModelCode.Inline;
   }
@@ -1307,22 +1361,20 @@ export class Signature {
       classReference.hasDecorator(DecoratorFlags.InlineStruct);
   }
 
-  /** The number of fields an `@inline struct` has (0 for a record with none).
-   *  Distinct from `wasmParamCountOf`, which cannot express "one field" and
-   *  "one operand" differently. */
+  /**
+   * How many **WASM slots** an `@inline struct` spends — its leaf count.
+   *
+   * Leaf count, not direct-field count: a nested inline field is several locals,
+   * so `Outer1 { a: u32; inner: Inner{x,y} }` is 3, not 2. A record with no
+   * members is 0.
+   *
+   * Callers that made sense of "direct fields" are listed in the Phase C audit
+   * (`docs`); the one place that genuinely needs the direct count is layout, and
+   * layout reads `members` itself rather than asking this.
+   */
   static fieldCountOf(type: Type): i32 {
-    let classReference = type.classReference;
-    if (classReference == null) return 0;
-    let members = classReference.members;
-    if (!members) return 0;
-    let count = 0;
-    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-      let member = unchecked(_values[i]);
-      if (member.kind != ElementKind.PropertyPrototype) continue;
-      let property = (<PropertyPrototype>member).instance;
-      if (property != null && property.isField) ++count;
-    }
-    return count;
+    if (type.classReference == null) return 0;
+    return Signature.leafCountOf(type);
   }
 
   /**
@@ -1413,7 +1465,10 @@ export class Signature {
     if (hasHiddenDest) unchecked(typeRefs[at++] = TypeRef.I32);
     for (let i = 0; i < numParameterTypes; ++i) {
       let parameterType = unchecked(parameterTypes[i]);
-      if (this.isByValPointerParam(i)) {
+      if (this.isViewParam(i)) {
+        // One plain pointer, the same slot an `@unmanaged` parameter crosses in.
+        unchecked(typeRefs[at++] = TypeRef.I32);
+      } else if (this.isByValPointerParam(i)) {
         // A host boundary: the caller materialises the value and passes its
         // address. Not `toRef()` — an `@inline struct`'s ref is a GC heap type
         // (`ensureType`), a different ABI that would need the GC feature. The
@@ -1430,14 +1485,14 @@ export class Signature {
         // taking that branch gave the parameter `toRef()` (a GC heap type) and
         // the callee a plain local instead of an SROA field, which made every
         // one-field value-type parameter unusable.
-        let classReference = assert(parameterType.classReference);
-        let members = assert(classReference.members);
-        for (let _values = Map_values(members), j = 0, n = _values.length; j < n; ++j) {
-          let member = unchecked(_values[j]);
-          if (member.kind != ElementKind.PropertyPrototype) continue;
-          let property = (<PropertyPrototype>member).instance;
-          if (property == null || !property.isField) continue;
-          unchecked(typeRefs[at++] = property.type.toRef());
+        // One ref per **leaf**, in declaration order depth first — the same walk
+        // `leafTypesOf` does and the binder indexes into. A nested inline field
+        // contributes its leaves' refs, not one ref for itself: it has no value
+        // representation the WASM stack could carry.
+        let leafTypes = new Array<Type>();
+        Signature.leafTypesOf(parameterType, leafTypes);
+        for (let j = 0, n = leafTypes.length; j < n; ++j) {
+          unchecked(typeRefs[at++] = unchecked(leafTypes[j]).toRef());
         }
       } else {
         // Scalar or reference: one ref, exactly as before.

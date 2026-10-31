@@ -197,6 +197,7 @@ export namespace BuiltinNames {
   export const select = "~lib/builtins/select";
   export const unreachable = "~lib/builtins/unreachable";
   export const changetype = "~lib/builtins/changetype";
+  export const copyInto = "~lib/builtins/copyInto";
   export const assert = "~lib/builtins/assert";
   export const call_indirect = "~lib/builtins/call_indirect";
   export const unchecked = "~lib/builtins/unchecked";
@@ -3752,18 +3753,49 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   let toType = typeArguments[0];
   // `changetype` is a pointer reinterpretation. A value type has no pointer
   // representation -- SROA keeps it in locals, so there is no address to
-  // reinterpret -- and treating one as "a view over these bytes" is exactly
-  // `@unmanaged struct`'s job.
-  if (
-    toType.classReference != null &&
-    assert(toType.classReference).hasDecorator(DecoratorFlags.InlineStruct)
-  ) {
-    compiler.error(
-      DiagnosticCode.Not_implemented_0,
-      ctx.reportNode.range,
-      "changetype to an @inline struct (a value has no pointer representation; use @unmanaged struct for a view over bytes)"
-    );
-    return module.unreachable();
+  // reinterpret. But the **operand** is what supplies an address: when the
+  // target is inline-typed and the operand is a pointer, the result is a view
+  // over the caller's bytes, and field access on it is a load at the field's
+  // offset. When the operand is itself an inline value there is nothing to
+  // lend, and the refusal stands.
+  //
+  // The resolver accepted this position as `changetype`'s type argument
+  // (`Resolver#allowInlineView`); the operand check lives here because this is
+  // the only place the operand exists.
+  let targetIsInline = toType.classReference != null &&
+    assert(toType.classReference).hasDecorator(DecoratorFlags.InlineStruct);
+  if (targetIsInline) {
+    // Only the spelling that named the model is a view. `changetype<T>(ptr)`
+    // with no use-site model keeps the refusal it always had: the use did not
+    // say which it meant, and the declaration says *value*, so compiling it as
+    // a pointer view would be the silent reinterpretation this cell exists to
+    // make explicit.
+    if (!compiler.resolver.isViewCall(ctx.reportNode)) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        "changetype to an @inline struct (a value has no pointer representation; use @unmanaged struct for a view over bytes)"
+      );
+      return module.unreachable();
+    }
+    // The operand's type decides, and it is resolved *before* compiling: an
+    // inline value has no address, and compiling it first reported two errors
+    // for one mistake (the operand's own "reading ... as a whole", then this).
+    let operandType = compiler.resolver.resolveExpression(operands[0], compiler.currentFlow);
+    let fromClass = operandType != null ? operandType.classReference : null;
+    if (fromClass != null && fromClass.hasDecorator(DecoratorFlags.InlineStruct)) {
+      compiler.error(
+        DiagnosticCode.Type_0_is_a_value_with_no_address_so_a_use_cannot_view_it_as_1_use_the_value_or_keep_it_inline,
+        ctx.reportNode.range, assert(operandType).toString(), "@unmanaged"
+      );
+      return module.unreachable();
+    }
+    let fromInline = compiler.compileExpression(operands[0], Type.auto);
+    // A view over caller-owned bytes: no allocation, no GC header, no rooting.
+    // Recorded by the resolver on the call expression (`Resolver#isViewCall`),
+    // which is where the type argument was resolved.
+    compiler.currentType = toType;
+    return fromInline;
   }
   let arg0 = compiler.compileExpression(operands[0], Type.auto);
   let fromType = compiler.currentType;
@@ -3803,6 +3835,67 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   return arg0;
 }
 builtinFunctions.set(BuiltinNames.changetype, builtin_changetype);
+
+// copyInto<T>(dest: usize, value: T) -> void
+//
+// Materialises an `@inline struct` value's leaves into memory, one store per
+// leaf at `dest + offsetof(leaf)`. This is the **only** way an inline value
+// reaches memory: `changetype<usize>(value)` stays refused, because the address
+// it would return belongs to a temp whose lifetime the type system does not
+// track. `copyInto` names the destination, so the copy is explicit and the
+// value's bytes end up somewhere the caller chose and owns.
+//
+// The source must be SROA-tracked — a local of the value, or a path into one
+// (`copyInto(at, outer.inner)`). There is no value expression to evaluate: an
+// inline value has no representation to compile.
+function builtin_copyInto(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.void;
+  // No `checkTypeRequired`: the type comes from the value, not from a type
+  // argument. Requiring one would make `copyInto(at, record)` — the form the
+  // engine writes — fail with "expected 1 type arguments".
+  if (checkArgsRequired(ctx, 2)) return module.unreachable();
+  // The type comes from the **value**, not from a type argument: the caller
+  // writes `copyInto(at, record)`, and the record's type is what says which
+  // leaves to store. Resolved without compiling the operand — an inline value
+  // has no representation to compile.
+  let operands = ctx.operands;
+  let type = compiler.resolver.resolveExpression(operands[1], compiler.currentFlow);
+  if (type == null) return module.unreachable();
+  let classReference = type.classReference;
+  if (classReference == null || !classReference.hasDecorator(DecoratorFlags.InlineStruct)) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.typeArgumentsRange,
+      "copyInto needs an @inline struct value: '" + type.toString() + "' is not a value type"
+    );
+    return module.unreachable();
+  }
+  let dest = compiler.compileExpression(operands[0], compiler.options.usizeType, Constraints.ConvImplicit);
+  let sourceTree = compiler.sroaTreeOf(operands[1]);
+  if (sourceTree == null) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      operands[1].range,
+      "copyInto needs an @inline struct value held in a local (a value has no address, so only a tracked value can be copied out)"
+    );
+    return module.unreachable();
+  }
+  let stmts = new Array<ExpressionRef>();
+  compiler.emitSroaStores(type, sourceTree, dest, 0, stmts);
+  // Compiling `dest` left `currentType` as `usize`; the builtin produces
+  // nothing, so say so before returning. Without this the call site drops the
+  // block (measured: "can only drop a valid value").
+  compiler.currentType = Type.void;
+  // `TypeRef.None`: the sequence produces no value. A plain `flatten` types the
+  // block by its last child, which is a store — and a store has no value, so a
+  // caller that drops the expression fails validation ("can only drop a valid
+  // value", measured).
+  return module.flatten(stmts, TypeRef.None);
+}
+builtinFunctions.set(BuiltinNames.copyInto, builtin_copyInto);
+
 
 // assert<T?>(isTrueish: T, message?: string) -> T{!= null}
 function builtin_assert(ctx: BuiltinFunctionContext): ExpressionRef {

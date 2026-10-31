@@ -1,17 +1,9 @@
 {
   "asc_flags": [],
   "stderr": [
-    "AS100: Not implemented: a recursive @inline struct: 'SelfRef' would have an infinite size (it contains itself, directly or through another @inline struct, by value)",
-    "AS100: Not implemented: a recursive @inline struct: 'Ping' would have an infinite size (it contains itself, directly or through another @inline struct, by value)",
-    "AS100: Not implemented: an @inline struct nested inside an @inline value (the outer is one WASM local per field, so the inner would have to be flattened into the outer's leaves -- that is SROA flattening, sub-phase B)",
-    "AS100: Not implemented: an @inline struct field 'r' of 'Bad' is a GC reference, and the __visit pass walks the outer's fields -- an inline field's GC pointer is invisible to it, so the collector would not trace it",
-    "AS100: Not implemented: an @inline struct field 'r' of 'Bad' is a GC reference, and an inline field's GC pointer is invisible to the collector -- the field looks safe but is not; the escape hatch is a hand-written byte layout, not an @inline field",
-    "AS100: Not implemented: an @inline struct field 'r' of 'Bad' is a GC reference, and an inline field's GC pointer is invisible to the collector -- the field looks safe but is not; the escape hatch is a hand-written byte layout, not an @inline field",
-    "AS100: Not implemented: an @inline struct nested inside an @inline value (the outer is one WASM local per field, so the inner would have to be flattened into the outer's leaves -- that is SROA flattening, sub-phase B)",
-    "AS100: Not implemented: an initializer on an @inline struct field (the value is stored inline and has no address to copy into; the allocation is already zero, so `= {}` is allowed -- assign the field's own fields after construction)",
-    "AS100: Not implemented: passing this expression as an @inline struct argument (only a local value can be passed: a value has no address, so there is nothing to hand over)",
+    "AS100: Not implemented: reading a nested @inline struct value as a whole (the field is several leaves, not one value; read one of its fields)",
+    "AS100: Not implemented: an @inline struct field 's' of 'BadInner' is a GC reference, and an inline field's GC pointer is invisible to the collector -- the field looks safe but is not; the escape hatch is a hand-written byte layout, not an @inline field",
     "AS100: Not implemented: reading an @inline struct value as a whole (a value has no address; read a field, or copy it with `let q: P = p`)",
-    "AS100: Not implemented: assigning a whole value to an @inline struct field (the value has no address, so there is nothing to store; assign the field's own fields, e.g. `w.inner.a = ...`)",
-    "AS100: Not implemented: initialising an @inline struct local from this expression (only `new P(\u2026)`, another @inline struct value, or no initialiser)"
+    "AS100: Not implemented: returning this expression from an @inline struct function (only a local value can be returned: a value has no address, so there is nowhere to write it)"
   ]
 }
