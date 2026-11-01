@@ -756,6 +756,33 @@ export class Parser extends DiagnosticEmitter {
     return first;
   }
 
+  /**
+   * Whether a `[` at the start of a type begins the unmanaged-array family
+   * (`[T *]`, `[T * N]`) rather than a tuple.
+   *
+   * The discriminator is one token after the element type: `*` commits, and
+   * anything else (`]`, `,`, `:`, `|`) belongs to the tuple arm. The lookahead
+   * speculates with errors suppressed and rewinds either way -- the same shape
+   * as `tryParseFunctionType` / `tryParseSignatureIsSignature`, and the reason
+   * the tuple arm's body needs no change: it is entered with the tokenizer
+   * exactly where its own `tn.skip(Token.CloseBracket)` expects it.
+   *
+   * A pre-type decorator is excluded before speculating. `parseType`'s decorator
+   * arm reports `AS212` ("Decorator '@x' is not valid here") *before*
+   * `suppressErrors` is consulted, so speculating into `[@unmanaged T *]` would
+   * emit a diagnostic for a form this family does not accept anyway -- and then
+   * emit the tuple/`Type expected` error on the rewind, giving two errors for
+   * one mistake.
+   */
+  startsUnmanagedArrayType(tn: Tokenizer): bool {
+    if (tn.peek() == Token.At) return false;
+    let state = tn.mark();
+    let elementType = this.parseType(tn, true, true);
+    let matched = elementType != null && tn.peek() == Token.Asterisk;
+    tn.reset(state);
+    return matched;
+  }
+
   /** Parses a type. */
   parseType(
     tn: Tokenizer,
@@ -866,6 +893,61 @@ export class Parser extends DiagnosticEmitter {
       if (!innerType) return null;
       type = innerType;
       type.range.start = startPos;
+
+    // '[' Type '*' (']' | IntegerLiteral ']') — the unmanaged-array family.
+    //
+    //   [T *]      -> `UnmanagedArrayTypeNode`: a pointer to T, no length
+    //   [T * N]    -> `FixedArrayTypeNode`: N elements inline. The **same** node
+    //                 the `T[N]` postfix arm builds (`parser.ts`, `... [] or
+    //                 [N]` below), so the two spellings cannot drift apart
+    //   [T * N     -> `']' expected`
+    //   [T * n     -> `']' expected`: a runtime length is not a type argument,
+    //                 and `@dynamic` is a later landing
+    //   [T * ,     -> `']' expected`
+    //
+    // Ordered **before** the tuple arm: both start with `[`, and the token after
+    // the element type is what tells them apart -- `*` here, `]`/`,`/`:` there.
+    // `startsUnmanagedArrayType` does that lookahead and rewinds, so the tuple
+    // arm below is reached with the tokenizer in exactly the state it expects
+    // and its body is unchanged.
+    } else if (token == Token.OpenBracket && this.startsUnmanagedArrayType(tn)) {
+      let elementType = this.parseType(tn, true, suppressErrors);
+      if (!elementType) return null;
+      assert(tn.skip(Token.Asterisk)); // established by `startsUnmanagedArrayType`
+      if (tn.skip(Token.CloseBracket)) {
+        type = Node.createUnmanagedArrayType(elementType, tn.range(startPos, tn.pos));
+      } else if (tn.peek() == Token.IntegerLiteral) {
+        // `[T * N]`: the const-N desugar. Same bounds and the same diagnostic as
+        // the postfix arm, so `[u32 * 0]` and `u32[0]` fail alike.
+        tn.next();                    // leaves `pos` at the literal's first digit
+        let literalStart = tn.tokenPos;
+        let value = tn.readInteger();
+        let literalRange = tn.range(literalStart, tn.pos);
+        if (
+          !tn.skip(Token.CloseBracket) ||
+          i64_lt(value, i64_new(1)) ||
+          i64_gt(value, i64_new(i32.MAX_VALUE))
+        ) {
+          if (!suppressErrors) {
+            this.error(
+              DiagnosticCode._0_expected,
+              literalRange, "]"
+            );
+          }
+          return null;
+        }
+        type = Node.createFixedArrayType(
+          elementType, <i32>i64_low(value), tn.range(startPos, tn.pos)
+        );
+      } else {
+        if (!suppressErrors) {
+          this.error(
+            DiagnosticCode._0_expected,
+            tn.range(), "]"
+          );
+        }
+        return null;
+      }
 
     // '[' ((Identifier ':')? Type (',' (Identifier ':')? Type)*)? ']'
     } else if (token == Token.OpenBracket && this.options && this.options!.hasFeature(Feature.MultiValue)) {

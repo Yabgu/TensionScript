@@ -125,7 +125,18 @@ export const enum NodeKind {
   ExportMember,
   SwitchCase,
   IndexSignature,
-  Comment
+  Comment,
+
+  /**
+   * `[T *]` — a pointer to T with unknown length.
+   *
+   * Appended at the end rather than beside {@link FixedArrayType}. `NodeKind`
+   * is a `const enum` with implicit numbering, so an insert would renumber every
+   * node kind after it; the compiler is self-hosted, so a partial rebuild could
+   * then disagree with `dist/` about what `NodeKind.Comment` means -- silently.
+   * The position carries no meaning.
+   */
+  UnmanagedArrayType
 }
 
 /** Base class of all nodes. */
@@ -180,6 +191,13 @@ export abstract class Node {
     range: Range
   ): FixedArrayTypeNode {
     return new FixedArrayTypeNode(elementType, length, range);
+  }
+
+  static createUnmanagedArrayType(
+    elementType: TypeNode,
+    range: Range
+  ): UnmanagedArrayTypeNode {
+    return new UnmanagedArrayTypeNode(elementType, range);
   }
 
   static createOmittedType(
@@ -1073,6 +1091,30 @@ export class FixedArrayTypeNode extends TypeNode {
     range: Range
   ) {
     super(NodeKind.FixedArrayType, false, range);
+  }
+}
+
+/**
+ * Represents an unmanaged array type, `[T *]` — a pointer to `T` with no length.
+ *
+ * The difference from {@link FixedArrayTypeNode} is the missing `length`, and it
+ * is the whole difference: a fixed array *contains* its elements, so it has an
+ * extent the layout can size; this one *addresses* them, so its own size is the
+ * pointer's. That is why `[T *]` binds as one `i32` slot where `T[N]` has no
+ * reference representation at all (`Type#toRef` asserts on a fixed array).
+ *
+ * Not a reference: the collector owns nothing here, the address is the caller's.
+ * Not a value either: there is nothing to inline. `changetype` and a parameter
+ * are the two ways one comes into being.
+ */
+export class UnmanagedArrayTypeNode extends TypeNode {
+  constructor(
+    /** Element type. */
+    public elementType: TypeNode,
+    /** Source range. */
+    range: Range
+  ) {
+    super(NodeKind.UnmanagedArrayType, false, range);
   }
 }
 

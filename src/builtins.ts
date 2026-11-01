@@ -1262,6 +1262,18 @@ function builtin_sizeof(ctx: BuiltinFunctionContext): ExpressionRef {
     checkArgsRequired(ctx, 0)
   ) return module.unreachable();
   let type = ctx.typeArguments![0];
+  // A `[T *]` is a pointer with no length, so there is no extent to report.
+  // Answering the pointer's own byte size (4) would read as a count, which is the
+  // one number a caller is most likely to mistake it for -- so it is refused by
+  // name, with the two halves of the real answer spelled out.
+  if (type.kind == TypeKind.UnmanagedArray) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.typeArgumentsRange,
+      "sizeof of an unmanaged array ([T *]) — it is a pointer with no length, so it has no extent; use sizeof<T>() for the element and carry the count separately"
+    );
+    return module.unreachable();
+  }
   let byteSize = type.byteSize;
   if (!byteSize) {
     compiler.error(

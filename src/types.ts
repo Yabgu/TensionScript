@@ -110,7 +110,23 @@ export const enum TypeKind {
   // other
 
   /** No return type. */
-  Void
+  Void,
+
+  /**
+   * A pointer to `T` with unknown length, `[T *]`.
+   *
+   * **Appended at the end**, not beside {@link FixedArray}, on purpose. This is
+   * a `const enum` with implicit numbering, so an insert would renumber the
+   * twelve kinds between `FixedArray` and `Void`; the compiler is self-hosted, so
+   * a partial rebuild could then disagree with `dist/` about what
+   * `TypeKind.Extern` means -- silently. The order here carries no meaning.
+   *
+   * One slot holding an address: not a value (no extent to inline), not a
+   * reference (the collector owns nothing). `toRef` answers the pointer type,
+   * which is what lets a `[T *]` parameter, local, global and return bind as one
+   * slot where `T[N]` reaches `Type#toRef`'s `assert(false)`.
+   */
+  UnmanagedArray
 }
 
 /** Indicates capabilities of a type. */
@@ -163,6 +179,17 @@ export class Type {
   fixedElementType: Type | null = null;
   /** Element count of a {@link TypeKind.FixedArray}, else `0`. */
   fixedLength: i32 = 0;
+  /**
+   * Element type of a {@link TypeKind.UnmanagedArray}, else `null`.
+   *
+   * Kept apart from {@link fixedElementType} rather than shared. The two kinds
+   * say different things -- an extent versus an address -- and a shared field
+   * would force every `kind == FixedArray` test in the compiler to become a
+   * three-way test, with the risk that one of them silently starts treating an
+   * address as an extent. `size` differs for the same reason: this kind's size is
+   * the pointer's, not the element's replicated.
+   */
+  unmanagedElementType: Type | null = null;
   /**
    * Alignment (log2) of a {@link TypeKind.FixedArray}: its element's.
    *
@@ -223,7 +250,15 @@ export class Type {
     return this.size + 7 >>> 3;
   }
 
-  /** Gets this type's logarithmic alignment in memory. */
+  /**
+   * Gets this type's logarithmic alignment in memory.
+   *
+   * An `UnmanagedArray` deliberately does **not** take the {@link fixedAlignLog2}
+   * branch. It is one pointer, so its alignment is the pointer's -- which is what
+   * the `byteSize` fallback already yields, since this kind's `size` is the
+   * pointer's and not the element's replicated. There is no element alignment to
+   * borrow here; the element is not stored in this type.
+   */
   get alignLog2(): i32 {
     if (this.kind == TypeKind.FixedArray) return this.fixedAlignLog2;
     return 31 - clz<i32>(this.byteSize);
@@ -477,6 +512,16 @@ export class Type {
         && elementType.equals(otherElementType)
       );
     }
+    if (this.kind == TypeKind.UnmanagedArray) {
+      // The element decides, and there is no length to compare: `[u32 *]` is the
+      // same type however many elements the caller says are there.
+      let elementType = this.unmanagedElementType;
+      let otherElementType = other.unmanagedElementType;
+      return (
+        elementType != null && otherElementType != null
+        && elementType.equals(otherElementType)
+      );
+    }
     if (this.isReference) {
       let selfSignatureReference = this.signatureReference;
       let otherSignatureReference = other.signatureReference;
@@ -542,6 +587,20 @@ export class Type {
         }
       }
     }
+    // `TypeKind.UnmanagedArray` and `TypeKind.FixedArray` are deliberately absent
+    // above. Their assignability is decided by
+    // {@link isStrictlyAssignableTo}'s `this.kind == target.kind`, which is what
+    // every other non-scalar, non-reference type already relies on. Adding an
+    // arm here would make the two predicates disagree -- this one element-aware,
+    // that one element-blind -- and the permissive one wins wherever a strict
+    // check runs first.
+    //
+    // Measured, not assumed: with such an arm present, `const q: [f64 *] = p`
+    // over a `[u32 *]` p still compiled, because the assignment path asks the
+    // strict predicate. So the arm was dead for same-type assignment and
+    // unenforceable for cross-type. Element-blind assignment is therefore a real
+    // (small) gap, shared with `T[N]`; closing it means changing both predicates
+    // together, which is not this landing.
     return false;
   }
 
@@ -569,6 +628,20 @@ export class Type {
 
   /** Tests if a value of this type can be changed to the target type using `changetype`. */
   isChangeableTo(target: Type): bool {
+    // A `[T *]` is an address, so the ways in are an address -- `usize`, `isize`,
+    // any integer -- or another `[T *]`. This is the cell
+    // `changetype<[T *]>(ptr)` needs. It is not the *only* way in (a parameter
+    // is the other), but without it the form could not be produced from an
+    // address the caller already holds, which is the shape every caller of the
+    // engine's collision solver has.
+    //
+    // Measured before this arm: `changetype<[u32 *]>(p)` over a `usize` p was
+    // `AS202: Type 'usize' cannot be changed to type '[u32 *]'` -- the general
+    // `this.kind == target.kind` below answers false across kinds, so the
+    // scoping's prediction that no change was needed here was wrong.
+    if (target.kind == TypeKind.UnmanagedArray) {
+      return this.is(TypeFlags.Integer) || this.kind == TypeKind.UnmanagedArray;
+    }
     // special in that it allows integer references as well
     if (this.is(TypeFlags.Integer) && target.is(TypeFlags.Integer)) {
       let size = this.size;
@@ -669,6 +742,12 @@ export class Type {
         return (elementType ? elementType.toString() : "?")
           + "[" + this.fixedLength.toString() + "]";
       }
+      case TypeKind.UnmanagedArray: {
+        // Spelled the way the source spells it, so a diagnostic that quotes the
+        // type is readable back in: `[u32 *]`, not `u32*` or `UnmanagedArray`.
+        let elementType = this.unmanagedElementType;
+        return "[" + (elementType ? elementType.toString() : "?") + " *]";
+      }
       default: assert(false);
       case TypeKind.Void: return CommonNames.void_;
     }
@@ -715,7 +794,12 @@ export class Type {
       case TypeKind.U16:
       case TypeKind.U32: return TypeRef.I32;
       case TypeKind.Isize:
-      case TypeKind.Usize: if (this.size != 64) return TypeRef.I32;
+      case TypeKind.Usize:
+      // A `[T *]` is an address, so it crosses the value stack at the pointer
+      // width: `i32` on wasm32, `i64` on memory64. This is the case that retires
+      // `TypeKind.FixedArray`'s `assert(false)` below for the new kind -- a
+      // `[T *]` parameter, local, global and return each bind as one slot.
+      case TypeKind.UnmanagedArray: if (this.size != 64) return TypeRef.I32;
       case TypeKind.I64:
       case TypeKind.U64:  return TypeRef.I64;
       case TypeKind.F32:  return TypeRef.F32;
@@ -904,6 +988,48 @@ export class Type {
   /** Gets the element type of a {@link TypeKind.FixedArray}. */
   get fixedArrayElementType(): Type {
     return assert(this.fixedElementType);
+  }
+
+  /** Interned unmanaged-array types, keyed by element type and pointer width. */
+  private static _unmanagedArrays: Map<string, Type> | null = null;
+
+  /**
+   * Gets the {@link TypeKind.UnmanagedArray} of `elementType`: a pointer to a run
+   * of `elementType`, with no length.
+   *
+   * `pointerSize` is `options.usizeType.size` -- 32 or 64 bits. It is a
+   * parameter rather than a constant because a `Type` carries its own size, and
+   * `size` here must be the **pointer's**, not the element's: there is no extent
+   * to measure. It is part of the cache key for the same reason -- `equals`
+   * compares element types only, so two types differing solely in pointer width
+   * must not be the same object.
+   *
+   * Unlike {@link Type.fixedArray} this consults nothing about the element but
+   * its identity: the count is unknown, which is the entire point of the kind.
+   */
+  static unmanagedArray(elementType: Type, pointerSize: i32): Type {
+    let key = elementType.toString() + "*" + pointerSize.toString();
+    let cache = Type._unmanagedArrays;
+    if (!cache) {
+      let fresh = new Map<string, Type>();
+      Type._unmanagedArrays = fresh;
+      cache = fresh;
+    }
+    let cached = getMapEntry(cache, key);
+    if (cached) return cached;
+    let arrayType = new Type(
+      TypeKind.UnmanagedArray,
+      TypeFlags.None,
+      pointerSize
+    );
+    arrayType.unmanagedElementType = elementType;
+    cache.set(key, arrayType);
+    return arrayType;
+  }
+
+  /** Gets the element type of a {@link TypeKind.UnmanagedArray}. */
+  get unmanagedArrayElementType(): Type {
+    return assert(this.unmanagedElementType);
   }
 
   static readonly f64: Type = new Type(TypeKind.F64,
