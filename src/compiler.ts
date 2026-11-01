@@ -4219,6 +4219,30 @@ export class Compiler extends DiagnosticEmitter {
 
     // Early return if we have same types
     if (toType.kind == fromType.kind) {
+      // ...but for an array, the **kind** is not the type. `[u32 *]` and
+      // `[f64 *]` share `TypeKind.UnmanagedArray` and differ in the only thing
+      // that matters, so an early return here would hand the callee a pointer
+      // whose elements are a different width from the ones it will index. Same
+      // for `u32[4]` against `f64[4]`.
+      //
+      // This is the site that actually let the element-blind assignment through
+      // in the measured case (`const q: [f64 *] = p` over a `[u32 *]` p
+      // compiled): the declaration path converts through here, and the return
+      // below fires before any assignability predicate is asked, so making
+      // `isStrictlyAssignableTo` element-aware was not sufficient on its own.
+      // Equal element types still take the fast path.
+      if (
+        (toType.kind == TypeKind.FixedArray ||
+         toType.kind == TypeKind.UnmanagedArray) &&
+        !toType.equals(fromType)
+      ) {
+        this.error(
+          DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+          reportNode.range, fromType.toString(), toType.toString()
+        );
+        this.currentType = toType;
+        return module.unreachable();
+      }
       this.currentType = toType;
       return expr;
     }
