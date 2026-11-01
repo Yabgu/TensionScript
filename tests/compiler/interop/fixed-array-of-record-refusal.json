@@ -1,0 +1,8 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: an inline array (T[N]) of a record — the wire records are pointers in this position, not values; use a length + a view base, or wrap the array in an @unmanaged struct with explicit fields",
+    "AS100: Not implemented: an inline array (T[N]) of a record — the wire records are pointers in this position, not values; use a length + a view base, or wrap the array in an @unmanaged struct with explicit fields",
+    "2 compile error(s)"
+  ]
+}
