@@ -745,6 +745,37 @@ export class Resolver extends DiagnosticEmitter {
       }
       return null;
     }
+    // A record element is the same claim one step further out, and it used to
+    // reach `Type.fixedArray` because nothing between here and there asked
+    // what the element *is*: a class type's kind is `TypeKind.Usize`
+    // ("also the base of class types", `types.ts:53-58`) and `isMemory`
+    // answers true for `Usize` (`types.ts:400`), so the gate below waved both
+    // records and ordinary classes through. For a record that claim is false:
+    // `S[N]` would size the *bytes* of N records, while the element that
+    // actually fits is the 4-byte reference. Measured before this branch: the
+    // `sizeof` of `@unmanaged struct B { xs: S[4] }` over a 16-byte `S` was
+    // 16, and `xs[i].r` loaded four bytes at `i * 4` and dereferenced them as
+    // an address — no diagnostic. Refused by name, as this function's own doc
+    // comment and `docs/showcase.md:71-72` already say the shape is.
+    //
+    // An ordinary class element is deliberately **not** refused here: there
+    // the 4-byte element is what the source means (an inline array of
+    // pointers), so the same layout is coherent rather than a surprise.
+    let elementClass = elementType.classReference;
+    if (
+      elementClass != null &&
+      (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
+       elementClass.hasDecorator(DecoratorFlags.ManagedStruct))
+    ) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          node.elementType.range,
+          "an inline array (T[N]) of a record — the wire records are pointers in this position, not values; use a length + a view base, or wrap the array in an @unmanaged struct with explicit fields"
+        );
+      }
+      return null;
+    }
     if (!elementType.isMemory) {
       if (reportMode == ReportMode.Report) {
         this.error(
