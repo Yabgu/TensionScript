@@ -597,7 +597,14 @@ export class Flow {
           // is initialized as a ctor parameter
           property.prototype.parameterIndex != -1 ||
           // is safe to initialize with zero
-          property.type.isAny(TypeFlags.Value | TypeFlags.Nullable)
+          property.type.isAny(TypeFlags.Value | TypeFlags.Nullable) ||
+          // A `[T *]` is an address, and its zero is the null pointer -- the
+          // same claim `Compiler#makeZero` answers with a zero constant. The
+          // flag test above is about *values* (`TypeFlags.Value`) and nullable
+          // references, and a pointer is neither, so without this clause a
+          // record with such a field reported `TS2564` on `new` while having a
+          // perfectly defined zero.
+          property.type.kind == TypeKind.UnmanagedArray
         ) {
           this.setThisFieldFlag(property, FieldFlags.Initialized);
         }

@@ -13039,7 +13039,12 @@ export class Compiler extends DiagnosticEmitter {
       case TypeKind.U16:
       case TypeKind.U32: return module.i32(0);
       case TypeKind.Isize:
-      case TypeKind.Usize: if (type.size != 64) return module.i32(0);
+      case TypeKind.Usize:
+      // A `[T *]` is an address, so its zero is the null pointer at the pointer
+      // width. Without this arm `makeZero`'s `default: assert(false)` fires for
+      // any record with a `[T *]` field constructed by `new` -- a crash where
+      // the answer is a zero constant.
+      case TypeKind.UnmanagedArray: if (type.size != 64) return module.i32(0);
       case TypeKind.I64:
       case TypeKind.U64: return module.i64(0);
       case TypeKind.F32: return module.f32(0);

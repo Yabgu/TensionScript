@@ -50,6 +50,7 @@ import {
   FunctionTypeNode,
   TupleTypeNode,
   FixedArrayTypeNode,
+  UnmanagedArrayTypeNode,
   ParameterKind,
   TypeNode,
   NodeKind,
@@ -294,6 +295,10 @@ export class Resolver extends DiagnosticEmitter {
       }
       case NodeKind.FixedArrayType: {
         resolved = this.resolveFixedArrayType(<FixedArrayTypeNode>node, flow, ctxElement, ctxTypes, reportMode);
+        break;
+      }
+      case NodeKind.UnmanagedArrayType: {
+        resolved = this.resolveUnmanagedArrayType(<UnmanagedArrayTypeNode>node, flow, ctxElement, ctxTypes, reportMode);
         break;
       }
       default: assert(false);
@@ -786,6 +791,49 @@ export class Resolver extends DiagnosticEmitter {
       return null;
     }
     return Type.fixedArray(elementType, node.length);
+  }
+
+  /**
+   * Resolves an {@link UnmanagedArrayTypeNode} to a
+   * {@link TypeKind.UnmanagedArray}.
+   *
+   * Deliberately **not** a copy of {@link resolveFixedArrayType}: none of that
+   * function's refusals belong here, and copying them would refuse the form's
+   * whole purpose.
+   *
+   * A fixed array *contains* its elements, so a record element would claim `N`
+   * records sit inline -- refused by name (`resolver.ts`, the `AS100` record
+   * arm). An unmanaged array contains one address, so a record element is the
+   * ordinary case: `[BodyState *]` is a pointer to a run of records, which is
+   * exactly what the collision solver needs and what `BodyState[N]` cannot say.
+   *
+   * What *is* refused is an element with no bytes to point at, which is the same
+   * `byteSize` question `sizeof` asks. An `@inline` element is admitted here on
+   * purpose: it is a value type with a layout, and a pointer to it is a pointer
+   * to those bytes -- the refusal that applies to it is the *field* form's, not
+   * the pointer's.
+   */
+  private resolveUnmanagedArrayType(
+    node: UnmanagedArrayTypeNode,
+    flow: Flow | null,
+    ctxElement: Element,
+    ctxTypes: Map<string,Type> | null = null,
+    reportMode: ReportMode = ReportMode.Report
+  ): Type | null {
+    let elementType = this.resolveType(
+      node.elementType, flow, ctxElement, ctxTypes, reportMode
+    );
+    if (!elementType) return null;
+    if (!elementType.byteSize) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+          node.elementType.range, "an unmanaged array of", elementType.toString()
+        );
+      }
+      return null;
+    }
+    return Type.unmanagedArray(elementType, this.program.options.usizeType.size);
   }
 
   private resolveTupleType(
