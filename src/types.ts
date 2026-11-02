@@ -1034,6 +1034,20 @@ export class Type {
    *
    * Unlike {@link Type.fixedArray} this consults nothing about the element but
    * its identity: the count is unknown, which is the entire point of the kind.
+   *
+   * The cache is validated by **identity** of the element, not just by the key.
+   * This is what keeps interning a per-program property rather than a
+   * per-process one: the map is a static that outlives a `Program`, so a second
+   * `asc.main` in the same process (which is exactly what the compiler test
+   * harness does -- debug then release) would otherwise be handed the first
+   * program's `Type`, whose `unmanagedElementType` carries the first program's
+   * `Class`. A property read through that class then emitted a call to a getter
+   * the new module never compiled, and the module failed to validate:
+   * `wasm-validator error ... call target must exist`.
+   *
+   * So a cached entry is returned only when its element is the *same object* the
+   * current program just resolved. Within one program that is always true --
+   * `resolveType` interns a record's `Type` -- so interning still holds there.
    */
   static unmanagedArray(elementType: Type, pointerSize: i32): Type {
     let key = elementType.toString() + "*" + pointerSize.toString();
@@ -1044,7 +1058,7 @@ export class Type {
       cache = fresh;
     }
     let cached = getMapEntry(cache, key);
-    if (cached) return cached;
+    if (cached && cached.unmanagedElementType == elementType) return cached;
     let arrayType = new Type(
       TypeKind.UnmanagedArray,
       TypeFlags.None,

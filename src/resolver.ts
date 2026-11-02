@@ -2027,6 +2027,26 @@ export class Resolver extends DiagnosticEmitter {
         classReference = classReference.base;
       } while(classReference);
     }
+    // `y[i]` where `y` is `[T *]`, asked as an *element* rather than as a type.
+    //
+    // Only one caller needs an element: `lookupPropertyAccessExpression`, which
+    // peels `y[i].field` by looking up the receiver and then the property on
+    // whatever class that yields. Returning the element's class is exactly the
+    // answer it wants -- the switch there already turns a class into the property
+    // that follows -- and it is the *address* semantics of an `@unmanaged` record
+    // that make the property access compile to a load at `offsetof`, with no
+    // extra machinery here.
+    //
+    // A scalar element has no properties to offer, so it falls through to the
+    // ordinary refusal below.
+    if (targetType.kind == TypeKind.UnmanagedArray) {
+      let elementClass = targetType.unmanagedArrayElementType.getClassOrWrapper(this.program);
+      if (elementClass != null) {
+        this.currentThisExpression = targetExpression;
+        this.currentElementExpression = node.elementExpression;
+        return elementClass;
+      }
+    }
     if (reportMode == ReportMode.Report) {
       this.error(
         DiagnosticCode.Index_signature_is_missing_in_type_0,
@@ -2047,6 +2067,31 @@ export class Resolver extends DiagnosticEmitter {
     /** How to proceed with eventual diagnostics. */
     reportMode: ReportMode = ReportMode.Report
   ): Type | null {
+    // `y[i]` where `y` is `[T *]`: the element type is the pointer's own.
+    //
+    // There is no program element to look up and no index signature to find --
+    // the array kind carries the element, which is the whole reason it is a
+    // type and not a `usize`. So this is answered here rather than by returning
+    // something from `lookupElementAccessExpression`: that function's contract is
+    // `Element`, and no existing `ElementKind` means "an expression of type T".
+    // Minting one would put a new member in an implicit-numbering `const enum`
+    // and force `isTypedElement` plus every `switch` over `ElementKind` to grow a
+    // case, for a value that is only ever read as `getTypeOfElement(...)`.
+    //
+    // The base is resolved a second time below on the non-array path, because
+    // `lookupElementAccessExpression` resolves it itself. That is a type
+    // resolution, not a compilation -- no code is emitted, and the
+    // `resolvingExpressions` cycle guard makes re-entry safe.
+    let targetType = this.resolveExpression(
+      node.expression, ctxFlow, ctxType, ReportMode.Swallow
+    );
+    if (targetType != null && targetType.kind == TypeKind.UnmanagedArray) {
+      // No bounds check and no writeability gate: `*` means the length is
+      // unknown, so a read is unchecked by contract. A write is refused at the
+      // assignment site instead (`compiler.ts`, the element-access intercept),
+      // which is where the "requires Landing 3" message belongs.
+      return targetType.unmanagedArrayElementType;
+    }
     let element = this.lookupElementAccessExpression(node, ctxFlow, ctxType, reportMode);
     if (!element) return null;
     let type = this.getTypeOfElement(element);

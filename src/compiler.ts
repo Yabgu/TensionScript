@@ -5396,6 +5396,10 @@ export class Compiler extends DiagnosticEmitter {
     // before `lookupExpression`, which reports an index signature that an inline
     // array cannot have -- and this path never reaches `compileAssignment`, so
     // the intercept there does not cover it.
+    {
+      let unmanagedRoot = this.unmanagedArrayElementWriteRoot(left);
+      if (unmanagedRoot != null) return this.refuseUnmanagedArrayWrite(unmanagedRoot);
+    }
     if (left.kind == NodeKind.ElementAccess) {
       let elementAccess = <ElementAccessExpression>left;
       let arrayType = resolver.resolveExpression(elementAccess.expression, this.currentFlow);
@@ -6305,6 +6309,10 @@ export class Compiler extends DiagnosticEmitter {
     // a `T[N]` is inline storage and has no class to hang an operator on -- the
     // lookup below would report "index signature missing" for a target that is
     // perfectly writable.
+    {
+      let unmanagedRoot = this.unmanagedArrayElementWriteRoot(expression);
+      if (unmanagedRoot != null) return this.refuseUnmanagedArrayWrite(unmanagedRoot);
+    }
     if (expression.kind == NodeKind.ElementAccess) {
       let elementAccess = <ElementAccessExpression>expression;
       let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
@@ -8241,6 +8249,157 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * Whether `node` is a write path rooted at a `[T *]` element access, and if so
+   * which access that is.
+   *
+   * A write can address the element directly (`y[i] = v`) or a field of it
+   * (`y[i].x = v`), so the search peels property accesses down to the element
+   * access underneath. Returning the access lets the refusal point at the part of
+   * the expression that has no store this landing, rather than at the field.
+   */
+  private unmanagedArrayElementWriteRoot(
+    node: Expression
+  ): ElementAccessExpression | null {
+    let current = node;
+    while (current.kind == NodeKind.PropertyAccess) {
+      current = (<PropertyAccessExpression>current).expression;
+    }
+    if (current.kind != NodeKind.ElementAccess) return null;
+    let elementAccess = <ElementAccessExpression>current;
+    let arrayType = this.resolver.resolveExpression(elementAccess.expression, this.currentFlow);
+    return arrayType != null && arrayType.kind == TypeKind.UnmanagedArray
+      ? elementAccess
+      : null;
+  }
+
+  /**
+   * The byte extent of one element of a `[T *]` — the stride `y[i]` walks by.
+   *
+   * For a scalar this is `Type.byteSize`. For a record it is **not**: a record's
+   * `Type` is reference-like, so its `byteSize` is the 4-byte address, and the
+   * extent lives on the `Class` that laid the fields out. `builtin_sizeof`
+   * already answers this way for the same reason (`builtins.ts`, the
+   * `Unmanaged | ManagedStruct` branch answers `nextMemoryOffset`), so the two
+   * cannot disagree about how big a record is.
+   *
+   * Measured, and the reason this helper exists: using `byteSize` directly gave
+   * a stride of 4 for a two-`f64` record of 16 bytes — the same "alignment or
+   * reference size instead of the extent" mistake the fixed-array arm avoids
+   * only because it refuses records outright.
+   */
+  private unmanagedArrayElementSize(type: Type): i32 {
+    let classReference = type.classReference;
+    if (
+      classReference != null && (
+        classReference.hasDecorator(DecoratorFlags.Unmanaged) ||
+        classReference.hasDecorator(DecoratorFlags.ManagedStruct)
+      )
+    ) {
+      return classReference.nextMemoryOffset;
+    }
+    return type.byteSize;
+  }
+
+  /**
+   * Refuses an indexed **write** to a `[T *]`, naming the landing that lifts it.
+   *
+   * Reads are supported this landing, so the old answer — the resolver's
+   * `TS2329 Index signature is missing in type '[u32 *]'` — would now be
+   * actively misleading: the type has no index signature by design, and that is
+   * an answer about *reading* a type that does read. Three paths reach here and
+   * none of them goes through `compileAssignment`: the compound-assignment
+   * intercept, the plain-assignment intercept, and the `++`/`--` intercept.
+   */
+  private refuseUnmanagedArrayWrite(
+    expression: ElementAccessExpression
+  ): ExpressionRef {
+    this.error(
+      DiagnosticCode.Not_implemented_0,
+      expression.range,
+      "writing to a `[T *]` element — indexed writes are Landing 3; reads (`y[i]`, `y[i].field`) are supported"
+    );
+    this.currentType = Type.void;
+    return this.module.unreachable();
+  }
+
+  /**
+   * Compiles `y[i]` for an unmanaged array, `[T *]` — read only, this landing.
+   *
+   * The address is `base + index * sizeof(T)`. Two things separate this from
+   * {@link compileFixedArrayElementAccess} just below, and both are load-bearing:
+   *
+   * - **The stride is a multiply, not a shift.** The fixed-array arm scales by
+   *   `1 << alignof(T)`, which is right for every element *it* admits (a record
+   *   there is refused, so the element is always a scalar, where size and
+   *   alignment coincide). A record element is the ordinary case here -- the
+   *   reason the kind exists -- and for a record the two disagree: two `f64`s
+   *   give `sizeof` 16 and `alignof` 8, so a shift would walk the second element
+   *   at the first element's midpoint.
+   *
+   * - **A record element compiles to an address, not a load.** `@unmanaged`,
+   *   `@managed` and `@inline` records are all *layout*, and their `toRef` is the
+   *   4-byte reference -- loading there would read the record's first four bytes
+   *   and call them a pointer. So the address is yielded typed as the element,
+   *   and `.field` on it resolves through the record's own accessor, which is
+   *   already a load at `addr + offsetof`. A scalar or a class reference is a
+   *   real value and is loaded at its own width.
+   *
+   * No bounds check. `*` says the length is unknown, so there is nothing to check
+   * against; that is the contract for this spelling, and `@dynamic` is where a
+   * checked form lives.
+   */
+  private compileUnmanagedArrayElementAccess(
+    expression: ElementAccessExpression,
+    arrayType: Type,
+    contextualType: Type,
+    constraints: Constraints
+  ): ExpressionRef {
+    let module = this.module;
+    let elementType = arrayType.unmanagedArrayElementType;
+    let elementSize = this.unmanagedArrayElementSize(elementType);
+    let base = this.compileExpression(
+      expression.expression, arrayType, Constraints.ConvImplicit
+    );
+    let index = this.compileExpression(
+      expression.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+    // Extend before the multiply so a wasm64 build indexes past 4 GiB: the index
+    // is i32 at the source level, the address is pointer-wide.
+    let scaledIndex = module.binary(
+      BinaryOp.MulSize,
+      this.options.isWasm64
+        ? module.unary(UnaryOp.ExtendU32ToU64, index)
+        : index,
+      this.options.isWasm64
+        ? module.i64(elementSize)
+        : module.i32(elementSize)
+    );
+    let address = module.binary(BinaryOp.AddSize, base, scaledIndex);
+    this.currentType = elementType;
+    let elementClass = elementType.classReference;
+    if (
+      elementClass != null && (
+        elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
+        elementClass.hasDecorator(DecoratorFlags.ManagedStruct) ||
+        elementClass.hasDecorator(DecoratorFlags.InlineStruct)
+      )
+    ) {
+      // A record element: the address *is* the view. `y[i].x` then compiles as
+      // the record's own getter on this address, which is `f64.load
+      // offset=offsetof(T, x)`.
+      return address;
+    }
+    return module.load(
+      elementSize,
+      elementType.isSignedIntegerValue,
+      address,
+      elementType.toRef(),
+      0,
+      elementSize
+    );
+  }
+
+  /**
    * Compiles `array[index]` for a `T[N]` inline array: read and write.
    *
    * The address is `base + (index << alignof(T))` and the width is the
@@ -8366,6 +8525,15 @@ export class Compiler extends DiagnosticEmitter {
       if (targetType.kind == TypeKind.FixedArray) {
         return this.compileFixedArrayElementAccess(
           expression, targetType, false, contextualType, constraints
+        );
+      }
+      // `[T *]` indexed: `base + i * sizeof(T)`, a load for a scalar element and
+      // the address itself for a record element. See the compiler's own doc
+      // comment on `compileUnmanagedArrayElementAccess` for why the stride is a
+      // multiply here and a shift in the arm above.
+      if (targetType.kind == TypeKind.UnmanagedArray) {
+        return this.compileUnmanagedArrayElementAccess(
+          expression, targetType, contextualType, constraints
         );
       }
       let classReference = targetType.getClassOrWrapper(this.program);
@@ -11148,6 +11316,10 @@ export class Compiler extends DiagnosticEmitter {
     // incremented value. Intercepted before `lookupExpression` for the same
     // reason as the binary compound operators -- an inline array has no index
     // signature to find, and this path does not go through `compileAssignment`.
+    {
+      let unmanagedRoot = this.unmanagedArrayElementWriteRoot(expression.operand);
+      if (unmanagedRoot != null) return this.refuseUnmanagedArrayWrite(unmanagedRoot);
+    }
     if (expression.operand.kind == NodeKind.ElementAccess) {
       let elementAccess = <ElementAccessExpression>expression.operand;
       let arrayType = resolver.resolveExpression(elementAccess.expression, flow);

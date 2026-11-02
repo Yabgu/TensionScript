@@ -2,9 +2,7 @@
   "asc_flags": [
   ],
   "stderr": [
-    "TS2329: Index signature is missing in type '[u32 *]'.",
-    "TS2329: Index signature is missing in type '[interop/array-star-parse/BodyState *]'.",
     "AS100: Not implemented: sizeof of an unmanaged array ([T *]) — it is a pointer with no length, so it has no extent; use sizeof<T>() for the element and carry the count separately",
-    "3 compile error(s)"
+    "1 compile error(s)"
   ]
 }
