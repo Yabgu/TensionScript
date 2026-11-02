@@ -52,7 +52,9 @@ shares, and how it stays current: [`docs/fork-posture.md`](docs/fork-posture.md)
   TensionScript name), `COPY_STRUCT`, and a C-compatible `sizeof` that includes
   trailing padding. A `layout_hash` computed against the engine catches layout
   drift when a session opens. See [showcase §1](docs/showcase.md) and
-  §2 for `@managed struct`.
+  §2 for `@managed struct`. The external contract for the dynamic-array form —
+  `include/`, and [`docs/interop-c-abi.md`](docs/interop-c-abi.md) — is what a C
+  consumer includes; it is checked by `npm run check:headers`.
 - **Value types.** `@inline struct` gives a record value semantics: SROA locals,
   copy on assignment, flattened (SROA) parameters, sret returns through a hidden
   destination parameter, an `@external` argument temp, and an export-side byval
