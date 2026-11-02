@@ -201,6 +201,7 @@ import {
   Type,
   TypeKind,
   TypeFlags,
+  MemoryModelCode,
   Signature,
   typesToRefs
 } from "./types";
@@ -1309,6 +1310,17 @@ export class Compiler extends DiagnosticEmitter {
         global.setType(resolvedType);
         this.program.checkTypeSupported(resolvedType, typeNode);
         this.program.checkInlineStructValue(resolvedType, typeNode, "a global");
+        // A `[T * N]` global has storage only in its view form: one `i32` slot
+        // holding an address, exactly like a `@unmanaged T` global. The value
+        // form is inline bytes and a module-scope one has nowhere to live until
+        // Landing 5b, so it is refused here rather than at `makeZero`, which
+        // would answer the null pointer and leave a global that traps at
+        // address 0 on first use.
+        if (!this.checkFixedArrayStoragePosition(resolvedType, typeNode, "a global")) {
+          global.set(CommonFlags.Errored);
+          pendingElements.delete(global);
+          return false;
+        }
 
       // Otherwise infer type from initializer
       } else if (initializerNode) {
@@ -1818,6 +1830,15 @@ export class Compiler extends DiagnosticEmitter {
     let declarationNode = instance.declaration;
     assert(declarationNode.kind == NodeKind.FunctionDeclaration || declarationNode.kind == NodeKind.MethodDeclaration);
     this.checkSignatureSupported(instance.signature, (<FunctionDeclaration>declarationNode).signature);
+    // A value-form `[T * N]` parameter or return has no slot, so this one stops
+    // the function instead of being reported and compiled on — see the method's
+    // own note. A view-form one is an address and passes through.
+    if (!this.checkFixedArrayStorageInSignature(instance.signature, (<FunctionDeclaration>declarationNode).signature)) {
+      instance.set(CommonFlags.Errored);
+      pendingElements.delete(instance);
+      this.currentType = previousType;
+      return false;
+    }
     // A virtual method returning an `@inline struct` is refused: the override
     // stub forwards `this` and the source parameters to the concrete override,
     // and it has no destination pointer to forward — its own signature would
@@ -3829,6 +3850,14 @@ export class Compiler extends DiagnosticEmitter {
         let sroaFields = this.inlineStructFieldsOf(type);
         if (sroaFields != null) {
           this.compileSroaLocal(declaration, type, sroaFields, initializerNode, flow, initializers);
+          continue;
+        }
+        // A `[T * N]` local has storage only in its **view** form: the pointer
+        // form is one `i32` slot. The value form is inline bytes, and a local
+        // has no inline storage until Landing 5b, so it is refused here —
+        // checked at the same place as the SROA case, after the type is known,
+        // so an inferred `const a = changetype<[T * N]>(p)` is covered too.
+        if (!this.checkFixedArrayStoragePosition(type, declaration.name, "a local")) {
           continue;
         }
         let local: Local;
@@ -9002,8 +9031,31 @@ export class Compiler extends DiagnosticEmitter {
   ): ExpressionRef {
     let module = this.module;
     let elementType = arrayType.fixedArrayElementType;
+    // A record element is only reachable in the **view** form: the value form
+    // refuses one at resolution (it would have to lay N records out inline,
+    // Landing 5b). In the view form `y[i]` is the *address* of a record, exactly
+    // as it is for `[T *]`, so the load below must not happen — loading a
+    // record's first four bytes and calling them the record is the mistake that
+    // arm's own comment describes. Same rule, same shape, keyed on the model
+    // here because only this kind has two forms.
+    let isViewForm = arrayType.fixedMemoryModel == MemoryModelCode.Unmanaged ||
+      arrayType.fixedMemoryModel == MemoryModelCode.Managed;
+    let isRecordElement = isViewForm && this.isRecordValueType(elementType);
+    if (isWrite && isRecordElement) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "whole-record assignment to a `@unmanaged [T * N]` element — `y[i]` of a record is an address, not a value slot; use copyInto(y + i*sizeof(T), v), or write one field with `y[i].field = v`"
+      );
+      this.currentType = Type.void;
+      return module.unreachable();
+    }
     let elementSize = elementType.byteSize;
     let address = this.compileFixedArrayElementAddress(expression, arrayType);
+    if (isRecordElement) {
+      this.currentType = elementType;
+      return address;
+    }
     if (isWrite) {
       // `valueRef` is a value already compiled by the caller -- the result of a
       // compound operator, which must not be recomputed here.
@@ -9063,18 +9115,50 @@ export class Compiler extends DiagnosticEmitter {
     let index = this.compileExpression(
       expression.elementExpression, Type.i32, Constraints.ConvImplicit
     );
-    // `index` is i32; extend to the pointer width before the shift so a wasm64
+    // `index` is i32; extend to the pointer width before scaling so a wasm64
     // build indexes past 4 GiB correctly, which is what `<usize>index << n`
     // means in std.
-    let scaledIndex = module.binary(
-      BinaryOp.ShlSize,
-      this.options.isWasm64
-        ? module.unary(UnaryOp.ExtendU32ToU64, index)
-        : index,
-      this.options.isWasm64
-        ? module.i64(elementType.alignLog2)
-        : module.i32(elementType.alignLog2)
-    );
+    //
+    // **The stride is `sizeof`, and a shift only happens to be one.** Landing 1
+    // emitted `index << alignLog2`, which is right for a scalar element (a
+    // `u32`'s size and alignment are both 4) and wrong for a record: `Pair{a,b}`
+    // is 8 bytes but 4-aligned, so `<< 2` indexed every second element. That was
+    // unreachable while a record element was refused outright; Landing 5a.5's
+    // view form (`@unmanaged [Pair * 2]`) makes it ordinary, so the general form
+    // is used whenever the two disagree. Scalar elements keep the shift, which is
+    // why Landing 1's wat does not move.
+    let elementSize = elementType.byteSize;
+    // `byteSize` is a *reference* size (4) for a record, exactly as it is
+    // everywhere else in the type system — `sizeof<Pair>()` reads
+    // `nextMemoryOffset` instead (`builtins.ts`, `builtin_sizeof`). The stride
+    // has to be the extent, so the extent is what is read here.
+    let elementClass = elementType.classReference;
+    if (
+      elementClass != null &&
+      (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
+       elementClass.hasDecorator(DecoratorFlags.ManagedStruct))
+    ) {
+      elementSize = <i32>elementClass.nextMemoryOffset;
+    }
+    let shifts = elementSize == (1 << elementType.alignLog2);
+    let extendedIndex = this.options.isWasm64
+      ? module.unary(UnaryOp.ExtendU32ToU64, index)
+      : index;
+    let scaledIndex = shifts
+      ? module.binary(
+          BinaryOp.ShlSize,
+          extendedIndex,
+          this.options.isWasm64
+            ? module.i64(elementType.alignLog2)
+            : module.i32(elementType.alignLog2)
+        )
+      : module.binary(
+          BinaryOp.MulSize,
+          extendedIndex,
+          this.options.isWasm64
+            ? module.i64(elementSize)
+            : module.i32(elementSize)
+        );
     return module.binary(BinaryOp.AddSize, base, scaledIndex);
   }
 
@@ -12620,6 +12704,91 @@ export class Compiler extends DiagnosticEmitter {
       supported = false;
     }
     return supported;
+  }
+
+  /**
+   * The `[T * N]` half of signature support, kept separate so that a refusal
+   * can **stop** the function rather than merely be reported.
+   *
+   * `checkSignatureSupported` reports and compilation carries on — the right
+   * shape for a feature gate, whose codegen path can still produce a module.
+   * Not for this one: a value-form `[T * N]` parameter or return has no slot, so
+   * continuing reaches `Signature#paramRefs` / `#resultRefs`, which call
+   * `toRef`, which asserts for the value form by design. Measured before this
+   * split: `export function f(a: [u32 * 4]): u32` and
+   * `export function f(p: usize): [u32 * 4]` both crashed the compiler inside
+   * `toRef` instead of reporting.
+   */
+  private checkFixedArrayStorageInSignature(signature: Signature, reportNode: FunctionTypeNode): bool {
+    let supported = true;
+    let parameterTypes = signature.parameterTypes;
+    let parameterNodes = reportNode.parameters;
+    for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+      let parameterReportNode: Node = parameterNodes.length > i ? parameterNodes[i] : reportNode;
+      if (!this.checkFixedArrayStoragePosition(parameterTypes[i], parameterReportNode, "a parameter")) {
+        supported = false;
+      }
+    }
+    let returnType = signature.returnType;
+    if (returnType.kind == TypeKind.Void) return supported;
+    if (!this.checkFixedArrayStoragePosition(returnType, reportNode.returnType, "a return type")) {
+      supported = false;
+    }
+    return supported;
+  }
+
+  /**
+   * Refuses a `[T * N]` that has no storage in the position it was written in.
+   *
+   * Landing 5a.5 made the memory model part of the Type, which splits the kind
+   * into three: the **view** (`@unmanaged [T * N]`, one address — works
+   * everywhere `@unmanaged T` works), the **heap** form (`@managed [T * N]`,
+   * Landing 5c) and the **value** form (`[T * N]`, `u32[N]`, `@inline [T * N]`
+   * — N inline elements, no address of its own).
+   *
+   * The value form exists and is laid out correctly: it is a record field's
+   * type, `sizeof` counts N × sizeof(T), and Landing 1's fixtures assert all of
+   * that. What it does not have is a **slot**. `toRef` asserts for it by design,
+   * so every position that needs a WASM local, parameter or result must be
+   * refused *before* that assert is reached — otherwise the compiler crashes
+   * where the answer is a diagnostic. Landing 5b gives the form inline storage
+   * (stack slot, copy at the ABI, sret) and these refusals come out.
+   *
+   * This mirrors `Program.checkInlineStructValue`, which refuses the same class
+   * of position for the same reason (a value with no address where one is
+   * needed). `position` names the site so the message says which case was hit.
+   */
+  private checkFixedArrayStoragePosition(type: Type, reportNode: Node, position: string): bool {
+    if (type.kind != TypeKind.FixedArray) return true;
+    if (type.fixedMemoryModel == MemoryModelCode.Managed) {
+      // Not a storage question but a "does this exist yet" one, and the answer
+      // is the same in every position — so it is asked here rather than six
+      // times. `sizeof<@managed [T * N]>()` still answers the reference size,
+      // because the Type is built before any position asks.
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        reportNode.range,
+        "heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)"
+      );
+      return false;
+    }
+    if (type.fixedMemoryModel == MemoryModelCode.Unmanaged) {
+      // A pointer. Exactly `@unmanaged T` semantics: nothing to refuse here.
+      return true;
+    }
+    // Value form: inline bytes, no address.
+    this.error(
+      DiagnosticCode.Not_implemented_0,
+      reportNode.range,
+      position == "a return type"
+        ? "cannot return `[T * N]` by value yet — Landing 5b (the value form is inline bytes and a return needs caller-allocated storage). Use `@unmanaged [T * N]` for a pointer view"
+        : position == "a parameter"
+          ? "cannot pass `[T * N]` by value yet — Landing 5b (inline bytes have no value-stack representation). Use `@unmanaged [T * N]` for a pointer view"
+          : position == "a local"
+            ? "cannot declare `[T * N]` as a local value yet — Landing 5b (inline bytes have no local slot). Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view"
+            : "cannot declare `[T * N]` at module scope yet — Landing 5b. Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view"
+    );
+    return false;
   }
 
   /** Is `type` an `@inline struct`: a value carried as its fields, never as a

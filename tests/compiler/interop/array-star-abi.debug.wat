@@ -61,6 +61,26 @@
   i32.const 20
   i32.eq
   drop
+  i32.const 4
+  i32.const 4
+  i32.eq
+  drop
+  i32.const 4
+  i32.const 16
+  i32.ne
+  drop
+  i32.const 4
+  i32.const 4
+  i32.eq
+  drop
+  i32.const 8
+  i32.const 8
+  i32.eq
+  drop
+  i32.const 8
+  i32.const 20
+  i32.ne
+  drop
  )
  (func $interop/array-star-abi/pass (param $y i32) (result i32)
   i32.const 0
@@ -1573,9 +1593,9 @@
   return
  )
  (func $interop/array-star-abi/run (result i32)
+  i32.const 8
   i32.const 20
-  i32.const 20
-  i32.eq
+  i32.ne
   return
  )
  (func $~start

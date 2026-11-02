@@ -1,63 +1,94 @@
-// `[T * N]` — Landing 5a: the positions that still refuse.
+// `[T * N]` — Landing 5a.5: the positions that still refuse.
 //
-// The landing gives a fixed array a *value representation* (one `i32` address)
-// and nothing else. That is enough for every position whose storage the caller
-// supplies, which is why the parameter, local, return and initialised-global
-// cases moved into `fixed-array-changetype` and are not refused here.
+// 5a.5 splits the kind by memory model, so three forms exist and only one of
+// them is fully implemented:
 //
-// Three positions need something this landing does not have, and each is
-// refused by name instead of being compiled:
+//   value  `[T * N]` / `u32[N]` / `@inline [T * N]`   inline bytes, no address
+//   view   `@unmanaged [T * N]`                       a pointer (works — see
+//                                                     `fixed-array-unmanaged-view`)
+//   heap   `@managed [T * N]`                         Landing 5c
 //
-//   1. **A record element.** `[T * N]` where `T` is a record would need a stride
-//      of `log2(extent)` rather than `log2(alignof(T))` — the shift element
-//      access emits. Refused by the kind check; `[T *]` accepts record elements
-//      because its stride is computed through `sizeof` instead.
+// The **value form** is real and correctly laid out: it is a record field's
+// type, `sizeof` counts N × sizeof(T), and Landing 1's fixture asserts all of
+// that. What it has no representation for is a *slot* — a WASM local,
+// parameter or result. `toRef` asserts for it by design, so every such position
+// is refused by name here rather than left to reach that assert.
 //
-//   2. **A global with no initializer.** `makeZero` answers the null pointer for
-//      the kind (as it does for `[T *]`), so the zero would *persist* and the
-//      first `g[i]` would read address 0.
+// **The value form's refusals:**
 //
-//   3. **A record field constructed by `new`.** The field is inline storage —
-//      `sizeof<H>()` counts its bytes and `offsetof<H>("arr")` finds them inside
-//      the parent — while the value representation is one pointer. Constructing
-//      the record needs an allocation strategy for those bytes; zeroing the slot
-//      instead stores a null pointer where 16 bytes of elements belong, and the
-//      setter emits an `i32.store` of the field's extent, which the wasm
-//      validator rejects.
+//   1. `changetype<[T * N]>(p)` — it would put an address into a thing that is
+//      inline bytes. This is the one compile-time bug Landing 5a introduced:
+//      one `toRef` arm answered `I32` for every form, so this compiled and a
+//      value-typed thing came to carry an address. Use `@unmanaged [T * N]`.
+//   2. a parameter, 3. a return, 4. a local, 5. a global — inline bytes have no
+//      slot in any of them until Landing 5b.
 //
-// None of these may assert: before Landing 5a each one aborted the compiler
-// inside `toRef`, inside `makeZero`, or in the wasm validator.
+// **The heap form** is refused in every position (Landing 5c).
+//
+// A **record element** is refused for the value form — it would have to lay N
+// records out inline, which is Landing 5b — and accepted for the view form,
+// which is the pointer-to-a-run-of-records that `[T *]` already gives.
+//
+// Each probe below is written to produce exactly one diagnostic: no probe reads
+// a binding whose declaration was refused, so the fixture pins causes rather
+// than cascades.
 
-// --- 1. record element -----------------------------------------------------
+// --- 1. the value form cannot be constructed from an address ---------------
 
-struct RecordElement {
+export function valueChangetype(p: usize): u32 {
+  return changetype<[u32 * 4]>(p)[0];
+}
+
+// --- 2-5. the value form has no slot --------------------------------------
+
+export function valueParam(a: [u32 * 4]): u32 {
+  return a[0];
+}
+
+export function valueReturn(p: usize): [u32 * 4] {
+  return changetype<@unmanaged [u32 * 4]>(p);
+}
+
+export function valueLocal(): u32 {
+  let a: [u32 * 4];
+  return 0;
+}
+
+const valueGlobal: [u32 * 4] = unreachable();
+
+export function valueGlobalRead(): u32 {
+  return 0;
+}
+
+// --- the heap form, refused in a parameter and in a field -----------------
+
+export function heapParam(a: @managed [u32 * 4]): u32 {
+  return a[0];
+}
+
+@unmanaged struct HeapField {
+  xs: @managed [u32 * 4];
+}
+
+// Touching the record is what resolves its fields, so the field refusal needs a
+// use even though the field is what is being refused.
+export function heapField(o: usize): u32 {
+  const h = changetype<HeapField>(o);
+  return 0;
+}
+
+// --- a record element, value form only ------------------------------------
+
+@unmanaged struct RecordElement {
   a: u32;
   b: u32;
 }
 
-export function recordElement(p: usize): u32 {
-  const a = changetype<[RecordElement * 2]>(p);
-  return a[0].a;
+@unmanaged struct RecordFieldHolder {
+  xs: [RecordElement * 2];
 }
 
-// --- 2. global with no initializer ----------------------------------------
-
-let zeroGlobal: [u32 * 4];
-
-export function globalNoInit(): u32 {
-  return zeroGlobal[0];
-}
-
-// --- 3. record field constructed by `new` ---------------------------------
-
-class NewHolder {
-  arr: [u32 * 4];
-  constructor(p: usize) {
-    this.arr = changetype<[u32 * 4]>(p);
-  }
-}
-
-export function newField(p: usize): u32 {
-  const h = new NewHolder(p);
-  return h.arr[0];
+export function recordFieldHolder(o: usize): u32 {
+  const h = changetype<RecordFieldHolder>(o);
+  return 0;
 }

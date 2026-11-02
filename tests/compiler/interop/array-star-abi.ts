@@ -89,14 +89,25 @@ export function make(): u32 {
   return 0;
 }
 
-// --- the const-N desugar shares the postfix AST ----------------------------
+// --- two spellings of one model agree; two models do not -------------------
 //
 // `[T * N]` is not a new node: the parser builds the same `FixedArrayTypeNode`
-// `T[N]` builds, so the two spellings cannot drift. The assertions below are the
-// observable form of that -- both produce the same extent and the same offset.
-// (Only the declaration is exercised: in a local, parameter or return position a
-// fixed array reaches `Type#toRef`'s assert, which is Landing 5's crash and is
-// reported there, not here.)
+// `T[N]` builds. After Landing 5a.5 the memory model is a second axis, so the
+// claim splits in two and both halves are asserted here:
+//
+//   1. **Same model, two spellings → the same type.** `u32[4]` and `[u32 * 4]`
+//      are both the value form: 16 inline bytes, `xs` at 4, record 20.
+//      Unchanged from Landing 1, and the reason the desugar is safe.
+//
+//   2. **Different model, same element and count → different types.**
+//      `@unmanaged [u32 * 4]` is a pointer: 4 bytes, `xs` at 4, record 8.
+//      Before 5a.5 the prefix was parsed and dropped (`Type.fixedArray`
+//      interned one object per element+length), so all four spellings produced
+//      one Type and this fixture could only assert equality. That equality
+//      *was* the bug: a `[T * N]` is inline bytes with no address, and an
+//      `@unmanaged [T * N]` is an address. They are not the same thing, and a
+//      `changetype<[T * N]>(p)` that compiled was evidence of the confusion,
+//      not of the feature.
 
 @unmanaged struct Postfix {
   a: u32;
@@ -108,12 +119,29 @@ export function make(): u32 {
   xs: [u32 * 4];
 }
 
+@unmanaged struct View {
+  a: u32;
+  xs: @unmanaged [u32 * 4];
+}
+
+// 1. Same model, two spellings.
 assert(sizeof<Postfix>() == sizeof<Prefix>());
 assert(offsetof<Postfix>("xs") == 4);
 assert(offsetof<Prefix>("xs") == 4);
 assert(offsetof<Postfix>() == 20);
 assert(offsetof<Prefix>() == 20);
 
+// 2. Different model: the pointer slot, not the extent.
+assert(sizeof<@unmanaged [u32 * 4]>() == sizeof<usize>());
+assert(sizeof<@unmanaged [u32 * 4]>() != sizeof<[u32 * 4]>());
+assert(offsetof<View>("xs") == 4);
+assert(sizeof<View>() == 8);
+assert(sizeof<View>() != sizeof<Prefix>());
+
 export function run(): i32 {
-  return i32(sizeof<Postfix>() == sizeof<Prefix>());
+  // Value form still equals its postfix spelling; the view form does not.
+  return i32(
+    sizeof<Postfix>() == sizeof<Prefix>() &&
+    sizeof<View>() != sizeof<Prefix>()
+  );
 }

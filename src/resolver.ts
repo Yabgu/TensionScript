@@ -740,53 +740,79 @@ export class Resolver extends DiagnosticEmitter {
     ctxTypes: Map<string,Type> | null = null,
     reportMode: ReportMode = ReportMode.Report
   ): Type | null {
+    // The memory model decides what the form *is*, and it is the first thing
+    // this function has to decide, because the two honourable forms accept
+    // different elements and produce different sizes.
+    //
+    // Before Landing 5a.5 the model was read here by nobody: it lives on the
+    // AST (`TypeNode.memoryModel`, set by the parser), and `Type.fixedArray`
+    // interned one object per `(element, length)`, so all four spellings
+    // produced the same Type and emitted identical code. The prefix was
+    // decorative. It is not any more:
+    //
+    //   value  `[T * N]` / `[T * N]` postfix / `@inline [T * N]`
+    //            N inline elements, no address of its own
+    //   view   `@unmanaged [T * N]`
+    //            a pointer to N elements, exactly like `@unmanaged T`
+    //   heap   `@managed [T * N]`
+    //            one GC reference; the form is refused downstream (Landing 5c)
+    let model = node.memoryModel;
+    let isValueForm = model == MemoryModel.Any || model == MemoryModel.Inline;
     let elementType = this.resolveType(
       node.elementType, flow, ctxElement, ctxTypes, reportMode
     );
     if (!elementType) return null;
-    if (
-      elementType.classReference != null &&
-      assert(elementType.classReference).hasDecorator(DecoratorFlags.InlineStruct)
-    ) {
-      if (reportMode == ReportMode.Report) {
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          node.elementType.range,
-          "an inline array (T[N]) of an @inline struct (elements by value are a later phase)"
-        );
+    if (isValueForm) {
+      if (
+        elementType.classReference != null &&
+        assert(elementType.classReference).hasDecorator(DecoratorFlags.InlineStruct)
+      ) {
+        if (reportMode == ReportMode.Report) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            node.elementType.range,
+            "an inline array (T[N]) of an @inline struct (elements by value are a later phase)"
+          );
+        }
+        return null;
       }
-      return null;
-    }
-    // A record element is the same claim one step further out, and it used to
-    // reach `Type.fixedArray` because nothing between here and there asked
-    // what the element *is*: a class type's kind is `TypeKind.Usize`
-    // ("also the base of class types", `types.ts:53-58`) and `isMemory`
-    // answers true for `Usize` (`types.ts:400`), so the gate below waved both
-    // records and ordinary classes through. For a record that claim is false:
-    // `S[N]` would size the *bytes* of N records, while the element that
-    // actually fits is the 4-byte reference. Measured before this branch: the
-    // `sizeof` of `@unmanaged struct B { xs: S[4] }` over a 16-byte `S` was
-    // 16, and `xs[i].r` loaded four bytes at `i * 4` and dereferenced them as
-    // an address — no diagnostic. Refused by name, as this function's own doc
-    // comment and `docs/showcase.md:71-72` already say the shape is.
-    //
-    // An ordinary class element is deliberately **not** refused here: there
-    // the 4-byte element is what the source means (an inline array of
-    // pointers), so the same layout is coherent rather than a surprise.
-    let elementClass = elementType.classReference;
-    if (
-      elementClass != null &&
-      (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
-       elementClass.hasDecorator(DecoratorFlags.ManagedStruct))
-    ) {
-      if (reportMode == ReportMode.Report) {
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          node.elementType.range,
-          "an inline array (T[N]) of a record — the wire records are pointers in this position, not values; use a length + a view base, or wrap the array in an @unmanaged struct with explicit fields"
-        );
+      // A record element is the same claim one step further out, and it used to
+      // reach `Type.fixedArray` because nothing between here and there asked
+      // what the element *is*: a class type's kind is `TypeKind.Usize`
+      // ("also the base of class types", `types.ts:53-58`) and `isMemory`
+      // answers true for `Usize` (`types.ts:400`), so the gate below waved both
+      // records and ordinary classes through. For a record that claim is false:
+      // `S[N]` would size the *bytes* of N records, while the element that
+      // actually fits is the 4-byte reference. Measured before this branch: the
+      // `sizeof` of `@unmanaged struct B { xs: S[4] }` over a 16-byte `S` was
+      // 16, and `xs[i].r` loaded four bytes at `i * 4` and dereferenced them as
+      // an address — no diagnostic. Refused by name, as this function's own doc
+      // comment and `docs/showcase.md:71-72` already say the shape is.
+      //
+      // An ordinary class element is deliberately **not** refused here: there
+      // the 4-byte element is what the source means (an inline array of
+      // pointers), so the same layout is coherent rather than a surprise.
+      //
+      // **Value form only.** `@unmanaged [T * N]` is a pointer to N elements,
+      // so a record element is the ordinary case there — it is `[BodyState *]`
+      // with a compile-time count, which is what the collision solver upgrade
+      // wants. The value form is the one that would have to lay the records out
+      // inline, and that is Landing 5b.
+      let elementClass = elementType.classReference;
+      if (
+        elementClass != null &&
+        (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
+         elementClass.hasDecorator(DecoratorFlags.ManagedStruct))
+      ) {
+        if (reportMode == ReportMode.Report) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            node.elementType.range,
+            "an inline array (T[N]) of a record — the wire records are pointers in this position, not values; use a length + a view base, or wrap the array in an @unmanaged struct with explicit fields"
+          );
+        }
+        return null;
       }
-      return null;
     }
     if (!elementType.isMemory) {
       if (reportMode == ReportMode.Report) {
@@ -797,7 +823,22 @@ export class Resolver extends DiagnosticEmitter {
       }
       return null;
     }
-    return Type.fixedArray(elementType, node.length);
+    // The model reaches the Type. `None` and `Inline` both mean the value form:
+    // `@inline [T * N]` is accepted as a synonym rather than refused as
+    // redundant — see the note in `Type.fixedArray`, and `array-star-abi`'s
+    // long-standing blessing of two spellings for one model (`[u32 * 4]` and
+    // `u32[4]`). What the split forbids is two **different** models sharing one
+    // type, not two spellings of the same one.
+    let memoryModel = model == MemoryModel.Any
+      ? MemoryModelCode.None
+      : model == MemoryModel.Inline
+        ? MemoryModelCode.Inline
+        : model == MemoryModel.Managed
+          ? MemoryModelCode.Managed
+          : MemoryModelCode.Unmanaged;
+    return Type.fixedArray(
+      elementType, node.length, memoryModel, this.program.options.usizeType.size
+    );
   }
 
   /**
@@ -2207,6 +2248,16 @@ export class Resolver extends DiagnosticEmitter {
     switch (type.kind) {
       case TypeKind.UnmanagedArray: return type.unmanagedArrayElementType;
       case TypeKind.DynamicArray: return type.dynamicElementType;
+      // `[T * N]`, both storage forms. The element is the same question either
+      // way -- an extent does not change what sits at `base + i * sizeof(T)` --
+      // and `arr[i].field` needs the element's *class* to peel the property, so
+      // without this arm a record-element view
+      // (`changetype<@unmanaged [T * 2]>(p)` then `arr[i].a`) answered
+      // `TS2329: Index signature is missing in type '@unmanaged [T * 2]'`
+      // instead of typing the element. Scalar elements were unaffected only
+      // because a scalar read is compiled without ever asking the resolver for
+      // the element's type.
+      case TypeKind.FixedArray: return type.fixedElementType;
     }
     let classReference = type.classReference;
     if (classReference != null && this.isManagedDynamicArrayClass(classReference)) {
@@ -4469,6 +4520,25 @@ export class Resolver extends DiagnosticEmitter {
               if (boundInstance) {
                 let fieldType = boundInstance.type;
                 if (fieldType == Type.void) break; // failed to resolve earlier
+                // `@managed [T * N]` has no representation yet: the heap form is
+                // Landing 5c (a GC block with N in the type and no length
+                // field). The Type exists — `sizeof` answers the reference size
+                // — but nothing can pick the block's payload address out of the
+                // reference, so a field of it would store a reference that
+                // element access then indexes as if it were a data pointer.
+                // Refused here, where the layout would otherwise accept the
+                // 4-byte slot, rather than left to misbehave at the first read.
+                if (
+                  fieldType.kind == TypeKind.FixedArray &&
+                  fieldType.fixedMemoryModel == MemoryModelCode.Managed
+                ) {
+                  this.error(
+                    DiagnosticCode.Not_implemented_0,
+                    assert(boundPrototype.typeNode).range,
+                    "heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)"
+                  );
+                  break;
+                }
                 if (fieldType.isExternalReference) {
                   this.error(
                     DiagnosticCode.Not_implemented_0,
