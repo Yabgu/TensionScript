@@ -1507,6 +1507,26 @@ export class Compiler extends DiagnosticEmitter {
 
     // Initialize to zero if there's no initializer
     } else {
+      // Refused by name rather than compiled as a null. A `[T * N]` is a view of
+      // N elements that someone else owns and `makeZero` answers the null
+      // pointer for it, so a module-scope one with no initializer would sit at
+      // address 0 until the first `g[i]` read it. There is no storage to
+      // allocate for it here -- an inline array in a global is Landing 5c -- so
+      // the position is refused instead.
+      //
+      // A global *with* an initializer is not affected: it is one i32 slot
+      // holding whatever address its initializer produced, which is exactly the
+      // `changetype<[T * N]>(ptr)` shape this landing delivers.
+      if (type.kind == TypeKind.FixedArray) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          (typeNode || initializerNode || global.declaration).range,
+          "a `[T * N]` global without an initializer (a fixed array is a view of storage someone else owns; Landing 5c). Give it a `changetype<[T * N]>(ptr)` initializer, or use `[T *]` for an unknown-length view"
+        );
+        global.set(CommonFlags.Errored);
+        pendingElements.delete(global);
+        return false;
+      }
       if (global.is(CommonFlags.Inlined)) {
         initExpr = this.compileInlineConstant(global, global.type, Constraints.PreferStatic);
       } else {
@@ -13929,6 +13949,15 @@ export class Compiler extends DiagnosticEmitter {
       // any record with a `[T *]` field constructed by `new` -- a crash where
       // the answer is a zero constant.
       case TypeKind.UnmanagedArray: if (type.size != 64) return module.i32(0);
+      // A `[T * N]` is a view, so its zero is the null pointer -- the same
+      // constant, for the same reason. Two callers depend on this arm: the
+      // transient placeholder a global is created with before `start` writes
+      // the real initializer, and any position that legitimately holds a null
+      // view. The positions where the zero would *persist* and then be indexed
+      // (a global with no initializer, a `new` record's inline array field) are
+      // refused by name at those sites, so this arm never produces a null that
+      // a later element access would dereference as address 0.
+      case TypeKind.FixedArray: return module.i32(0);
       case TypeKind.I64:
       case TypeKind.U64: return module.i64(0);
       case TypeKind.F32: return module.f32(0);
@@ -14334,6 +14363,25 @@ export class Compiler extends DiagnosticEmitter {
         let fieldPrototype = field.prototype;
         let initializerNode = fieldPrototype.initializerNode;
         assert(fieldPrototype.parameterIndex < 0);
+        // A `[T * N]` field of a `new`-constructed record is *inline storage* --
+        // `sizeof<H>()` counts its N × sizeof(T) bytes and `offsetof<H>("arr")`
+        // finds them inside the parent -- while the value representation this
+        // landing gives it is a single pointer slot (`toRef = I32`). Those two
+        // only agree when the field holds the address *of* that storage, which
+        // is the record-view case (`changetype<H>(p).arr[i]`). Constructing the
+        // record needs an allocation strategy for the inline bytes that does
+        // not exist yet, and zeroing the slot instead would store a null
+        // pointer where 16 bytes of elements belong. Refused by name before
+        // `makeZero` is reached, so the diagnostic says why rather than
+        // asserting.
+        if (!initializerNode && fieldType.kind == TypeKind.FixedArray) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            field.identifierNode.range,
+            "a record with a `[T * N]` field constructed by `new` (the field is inline storage, not a view, and there is no allocation strategy for its bytes yet; Landing 5b). Use an `@unmanaged struct` plus `changetype<H>(ptr)` to view the bytes instead"
+          );
+          continue;
+        }
         let setterInstance = assert(field.setterInstance);
         let expr = this.makeCallDirect(setterInstance, [
           module.local_get(thisLocalIndex, sizeTypeRef),
