@@ -3717,6 +3717,16 @@ export class Compiler extends DiagnosticEmitter {
           );
           continue;
         }
+        // The same ordering argument for a value-form `[T * N]`: the declaration
+        // must be handled before the initializer is compiled, because the
+        // initializer's *shape* (`[a, b, c]`, or a copy from another value) is
+        // what names the leaves. Compiling it with the array as contextual type
+        // would instead take `compileArrayLiteral`'s ordinary branch and produce
+        // a `~lib/array/Array<T>` — a heap array with a different representation.
+        if (this.isValueFormFixedArray(type)) {
+          this.compileSroaValueArrayLocal(declaration, type, initializerNode, flow, initializers);
+          continue;
+        }
 
         if (initializerNode) {
           let pendingElements = this.pendingElements;
@@ -3852,11 +3862,20 @@ export class Compiler extends DiagnosticEmitter {
           this.compileSroaLocal(declaration, type, sroaFields, initializerNode, flow, initializers);
           continue;
         }
-        // A `[T * N]` local has storage only in its **view** form: the pointer
-        // form is one `i32` slot. The value form is inline bytes, and a local
-        // has no inline storage until Landing 5b, so it is refused here —
-        // checked at the same place as the SROA case, after the type is known,
-        // so an inferred `const a = changetype<[T * N]>(p)` is covered too.
+        // A `[T * N]` local in its **value** form is a value, so it gets the
+        // value representation: one WASM local per element leaf, and no slot.
+        // This is the same resolution `@inline struct` gets one line above, and
+        // for the same reason — a value has no address, so there is nothing a
+        // pointer could point at. Landing 5b's first attempt tried a stack slot
+        // instead and STOPped on the collector: `visitStack` scans every word of
+        // `[__stack_pointer, __heap_base)` as a GC root and `__visit` has no
+        // validity check, so element bytes there are read as object headers.
+        if (this.isValueFormFixedArray(type)) {
+          this.compileSroaValueArrayLocal(declaration, type, initializerNode, flow, initializers);
+          continue;
+        }
+        // The view form is one `i32` slot; anything else (the heap form) is
+        // refused by position, as 5a.5 does.
         if (!this.checkFixedArrayStoragePosition(type, declaration.name, "a local")) {
           continue;
         }
@@ -9031,6 +9050,16 @@ export class Compiler extends DiagnosticEmitter {
   ): ExpressionRef {
     let module = this.module;
     let elementType = arrayType.fixedArrayElementType;
+    // A value-form array local has **no address**: its elements are separate WASM
+    // locals. So the address arithmetic below cannot apply to it, and the access
+    // is compiled from the leaves instead. Checked first because everything below
+    // assumes an address exists.
+    let sroaArray = this.resolveSroaValueArray(expression.expression);
+    if (sroaArray != null) {
+      return this.compileSroaValueArrayElementAccess(
+        expression, sroaArray, isWrite, contextualType, constraints, valueExpression, valueRef
+      );
+    }
     // A record element is only reachable in the **view** form: the value form
     // refuses one at resolution (it would have to lay N records out inline,
     // Landing 5b). In the view form `y[i]` is the *address* of a record, exactly
@@ -12777,16 +12806,22 @@ export class Compiler extends DiagnosticEmitter {
       return true;
     }
     // Value form: inline bytes, no address.
+    //
+    // `"a local"` is retained deliberately even though the local declaration
+    // path now handles this form itself (`compileSroaValueArrayLocal`, reached
+    // before this check in both declaration paths). If it is ever reached the
+    // SROA interception was skipped for a shape it does not cover, and the honest
+    // answer is the old refusal rather than a pointer local that would alias.
     this.error(
       DiagnosticCode.Not_implemented_0,
       reportNode.range,
       position == "a return type"
-        ? "cannot return `[T * N]` by value yet — Landing 5b (the value form is inline bytes and a return needs caller-allocated storage). Use `@unmanaged [T * N]` for a pointer view"
+        ? "cannot return `[T * N]` by value yet — Landing 5b.2 (the value form is inline bytes and a return needs caller-allocated storage). Use `@unmanaged [T * N]` for a pointer view"
         : position == "a parameter"
-          ? "cannot pass `[T * N]` by value yet — Landing 5b (inline bytes have no value-stack representation). Use `@unmanaged [T * N]` for a pointer view"
+          ? "cannot pass `[T * N]` by value yet — Landing 5b.2 (inline bytes have no value-stack representation). Use `@unmanaged [T * N]` for a pointer view"
           : position == "a local"
-            ? "cannot declare `[T * N]` as a local value yet — Landing 5b (inline bytes have no local slot). Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view"
-            : "cannot declare `[T * N]` at module scope yet — Landing 5b. Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view"
+            ? "cannot declare `[T * N]` as a local value in this position (a local is one WASM local per element leaf; this shape did not take that path). Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view"
+            : "cannot declare `[T * N]` at module scope yet — Landing 5b.2. Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view"
     );
     return false;
   }
@@ -12984,12 +13019,27 @@ export class Compiler extends DiagnosticEmitter {
   private resolveSroaReceiver(expression: Expression): Local | null {
     // Collect the hops from the outermost access inward, then walk them in
     // source order from the base.
-    let chain = new Array<PropertyAccessExpression>();
+    //
+    // A hop is either a field access (`p.inner`) or — since Landing 5b — a
+    // **constant** index into a value-form array (`arr[0]`). Both name one entry
+    // in a `fieldLocals` map: the field by its name, the element by its index as
+    // a string, which is how `fillSroaArrayLocals` keys them. A runtime index
+    // cannot be a hop, because there is no single entry to name; that shape is
+    // handled where the value is emitted (the property path's own `br_table`).
+    let chain = new Array<Expression>();
     let at: Expression = expression;
-    while (at.kind == NodeKind.PropertyAccess) {
-      let access = <PropertyAccessExpression>at;
-      chain.push(access);
-      at = access.expression;
+    while (true) {
+      if (at.kind == NodeKind.PropertyAccess) {
+        chain.push(at);
+        at = (<PropertyAccessExpression>at).expression;
+      } else if (at.kind == NodeKind.ElementAccess) {
+        let elementAccess = <ElementAccessExpression>at;
+        if (this.constantIndexValue(elementAccess.elementExpression) < 0) return null;
+        chain.push(at);
+        at = elementAccess.expression;
+      } else {
+        break;
+      }
     }
     if (at.kind != NodeKind.Identifier) return null;
     let base = this.currentFlow.lookupLocal((<IdentifierExpression>at).text);
@@ -12998,8 +13048,16 @@ export class Compiler extends DiagnosticEmitter {
     for (let i = chain.length - 1; i >= 0; --i) {
       let fieldLocals = current.fieldLocals;
       if (fieldLocals == null) return null;
-      let name = (<IdentifierExpression>chain[i].property).text;
-      let next = getMapEntry(fieldLocals, name);
+      let hop = chain[i];
+      let next: Local | null;
+      if (hop.kind == NodeKind.PropertyAccess) {
+        next = getMapEntry(fieldLocals, (<IdentifierExpression>(<PropertyAccessExpression>hop).property).text);
+      } else {
+        next = getMapEntry(
+          fieldLocals,
+          this.constantIndexValue((<ElementAccessExpression>hop).elementExpression).toString()
+        );
+      }
       if (next == null) return null;
       current = next;
     }
@@ -13850,6 +13908,447 @@ export class Compiler extends DiagnosticEmitter {
         baseOffset + field.memoryOffset
       ));
     }
+  }
+
+  /**
+   * Whether `type` is a fixed array in its **value** form — N inline elements,
+   * no address of its own — as opposed to the `@unmanaged` view (a pointer,
+   * Landing 5a.5) or the `@managed` heap form (Landing 5c).
+   */
+  isValueFormFixedArray(type: Type): bool {
+    if (type.kind != TypeKind.FixedArray) return false;
+    return type.fixedMemoryModel == MemoryModelCode.None ||
+      type.fixedMemoryModel == MemoryModelCode.Inline;
+  }
+
+  /**
+   * The largest `N` whose value-form array can be indexed with a **runtime**
+   * index.
+   *
+   * A runtime index on SROA leaves has no address to scale, so the element is
+   * selected with a `br_table` over one block per element. Past a handful of
+   * blocks that dispatch costs more than the thing it replaces: the caller who
+   * wants an arbitrary index over many elements wants a pointer, and
+   * `@unmanaged [T * N]` gives them one with no block at all. Eight is the
+   * boundary between the two. Landing 5d's spill strategy is what would lift it.
+   */
+  private static readonly VALUE_ARRAY_MAX_RUNTIME_INDEX: i32 = 8;
+
+  /** Per-emission counter for the runtime-index block labels, so two accesses in
+   *  one function cannot collide (Binaryen requires unique block names). */
+  private sroaSelectId: i32 = 0;
+
+  /**
+   * Fills `into` with one entry per **element** of a value-form `[T * N]`.
+   *
+   * The same shape `fillSroaFieldLocals` gives a record, with the index where
+   * the field name would be: the map is string-keyed and `"0"`, `"1"` are
+   * ordinary keys, so no new container is needed — only a new way to enumerate
+   * the entries.
+   *
+   * - A **scalar** element gets one WASM local, named `<path>$<index>`.
+   * - A **record** element is several leaves, so it gets the placeholder local
+   *   (`index -1`) carrying a nested map — exactly what a nested `@inline`
+   *   field gets, and for the same reason: `arr[i]` on a record names a whole
+   *   sub-value that no single local can hold, while `arr[i].x` descends one
+   *   hop to a leaf.
+   *
+   * Returns `false` when an element was refused, having reported why.
+   */
+  private fillSroaArrayLocals(
+    arrayType: Type,
+    path: string,
+    declaration: VariableLikeDeclarationStatement,
+    flow: Flow,
+    into: Map<string, Local>
+  ): bool {
+    let elementType = arrayType.fixedArrayElementType;
+    let length = arrayType.fixedLength;
+    let elementFields = this.recordFieldsOf(elementType);
+    let refused = false;
+    for (let i = 0; i < length; ++i) {
+      let elementPath = path + "$" + i.toString();
+      if (elementFields == null) {
+        if (!this.isSroaFieldType(elementType)) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            declaration.name.range,
+            "a `[T * N]` value with an element that cannot live in one WASM local (a GC reference needs a write barrier on every assignment; a nested array needs the deep-SROA phase). Use `@unmanaged [T * N]` for a pointer view"
+          );
+          return false;
+        }
+        into.set(i.toString(), flow.targetFunction.addLocal(elementType, elementPath, declaration));
+        continue;
+      }
+      // A record element: one placeholder standing for its field leaves, the
+      // same representation a nested `@inline` field gets.
+      let nested = new Map<string, Local>();
+      if (!this.fillSroaFieldLocals(elementFields, elementPath, declaration, flow, nested)) {
+        refused = true;
+        continue;
+      }
+      let placeholder = new Local(elementPath, -1, elementType, flow.targetFunction, declaration);
+      placeholder.fieldLocals = nested;
+      into.set(i.toString(), placeholder);
+    }
+    return !refused;
+  }
+
+  /**
+   * Compiles a value-form `[T * N]` local as SROA: one WASM local per element
+   * leaf, no local for the array itself, no store for the zero case.
+   *
+   * Returns `true` when the declaration was handled here (the caller must not
+   * fall through to the ordinary local path).
+   */
+  private compileSroaValueArrayLocal(
+    declaration: VariableLikeDeclarationStatement,
+    type: Type,
+    initializerNode: Expression | null,
+    flow: Flow,
+    initializers: ExpressionRef[]
+  ): bool {
+    let name = declaration.name.text;
+
+    let fieldLocals = new Map<string, Local>();
+    if (!this.fillSroaArrayLocals(type, name, declaration, flow, fieldLocals)) return true;
+
+    // The array is a **value**: no WASM local of its own, only the leaves. The
+    // `-1` index is what every read path tests to know it must descend rather
+    // than `local.get` (the same guard the `@inline struct` value uses).
+    let local = new Local(name, -1, type, flow.targetFunction, declaration);
+    local.fieldLocals = fieldLocals;
+
+    let scopedLocals = flow.scopedLocals;
+    if (!scopedLocals) flow.scopedLocals = scopedLocals = new Map();
+    if (scopedLocals.has(name)) {
+      this.error(
+        DiagnosticCode.Duplicate_identifier_0, declaration.name.range, name
+      );
+      return true;
+    }
+    scopedLocals.set(name, local);
+    if (declaration.is(CommonFlags.Const)) {
+      flow.setLocalFlag(local.index, LocalFlags.Constant);
+    }
+
+    // No initializer: a WASM local starts at zero, so the leaves are already the
+    // zero value and nothing is emitted — the same free zero-init an `@inline
+    // struct` value gets.
+    if (!initializerNode) return true;
+
+    // `[a, b, c, d]` — one store per element leaf.
+    if (
+      initializerNode.kind == NodeKind.Literal &&
+      (<LiteralExpression>initializerNode).literalKind == LiteralKind.Array
+    ) {
+      return this.fillSroaArrayFromLiteral(
+        type, fieldLocals, <ArrayLiteralExpression>initializerNode, flow, initializers
+      );
+    }
+
+    // `let b: [T * N] = a` — a **copy**, leaf by leaf. This is the whole point of
+    // the representation: `a` and `b` own separate leaves, so writing through one
+    // cannot be observed through the other. `copySroaValue` walks the map by key
+    // and recurses through placeholders, so it needs no array-specific arm — the
+    // keys here happen to be `"0"`, `"1"`, ... instead of field names.
+    if (initializerNode.kind == NodeKind.Identifier) {
+      let source = this.resolveSroaValueArray(initializerNode);
+      if (source != null && source.type.equals(type)) {
+        this.copySroaValue(assert(source.fieldLocals), fieldLocals, initializers);
+        return true;
+      }
+    }
+
+    this.error(
+      DiagnosticCode.Not_implemented_0,
+      initializerNode.range,
+      "initializing a `[T * N]` value from this expression (an array literal `[a, b, c]` and a copy from another `[T * N]` value are implemented; a caller's address is `@unmanaged [T * N]`)"
+    );
+    return true;
+  }
+
+  /**
+   * Stores an array literal's elements into a value-form array's leaves.
+   *
+   * A scalar element is compiled straight into its leaf. A **record** element is
+   * several leaves and a literal cannot name them one at a time, so it is
+   * refused by name here rather than compiled: the object-literal spelling
+   * (`{ x: 1.5, y: 2.5 }`) goes through the class path and *allocates* — measured,
+   * `const p: P = { x: 1.5 }` emitted `P#constructor` plus setters and needed
+   * `env.abort`, i.e. a heap record behind a pointer, which is not a value.
+   * Initialising the elements field by field (`arr[0].x = 10.5`) is the working
+   * route, and it is what the diagnostic says.
+   */
+  private fillSroaArrayFromLiteral(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    literal: ArrayLiteralExpression,
+    flow: Flow,
+    initializers: ExpressionRef[]
+  ): bool {
+    let module = this.module;
+    let elementType = type.fixedArrayElementType;
+    let length = type.fixedLength;
+    let expressions = literal.elementExpressions;
+    if (expressions.length > length) {
+      this.error(
+        DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+        literal.range, "too many elements", type.toString()
+      );
+      return true;
+    }
+    for (let i = 0, k = expressions.length; i < k; ++i) {
+      let entry = getMapEntry(fieldLocals, i.toString());
+      if (entry == null) continue;
+      if (entry.index < 0) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          unchecked(expressions[i]).range,
+          "constructing a record element of a `[T * N]` value inside an array literal (an element is several leaves, and no literal names them). Assign its fields instead: `arr[0].x = ...`"
+        );
+        return true;
+      }
+      initializers.push(module.local_set(
+        entry.index,
+        this.compileExpression(unchecked(expressions[i]), elementType, Constraints.ConvImplicit),
+        false
+      ));
+    }
+    return true;
+  }
+
+  /**
+   * The local behind `name`, when that local is a value-form `[T * N]` — i.e. a
+   * value stored as one WASM local per element leaf, with no slot of its own.
+   *
+   * Returns `null` for everything else, including the view form (which *is* an
+   * address and goes through the ordinary path).
+   */
+  private resolveSroaValueArray(expression: Expression): Local | null {
+    if (expression.kind != NodeKind.Identifier) return null;
+    let local = this.currentFlow.lookupLocal((<IdentifierExpression>expression).text);
+    if (local == null || local.fieldLocals == null) return null;
+    return this.isValueFormFixedArray(local.type) ? local : null;
+  }
+
+  /**
+   * The compile-time value of an index expression, or `-1` when it is not a
+   * non-negative integer literal.
+   *
+   * `-1` is the "not constant" answer rather than an error: a runtime index is a
+   * legitimate access, it just takes the `br_table` path.
+   */
+  private constantIndexValue(expression: Expression): i32 {
+    if (expression.kind != NodeKind.Literal) return -1;
+    let literal = <LiteralExpression>expression;
+    if (literal.literalKind != LiteralKind.Integer) return -1;
+    let value = (<IntegerLiteralExpression>literal).value;
+    // Negative literals arrive as a unary-prefix node, so `high != 0` is the only
+    // way an out-of-range value can appear here.
+    if (i64_high(value) != 0) return -1;
+    return i64_low(value);
+  }
+
+  /**
+   * Indexes a value-form `[T * N]` local, whose elements are separate WASM
+   * locals.
+   *
+   * A **constant** index needs no dispatch at all: it names one leaf, and the
+   * access is `local.get` / `local.set` on it. A **runtime** index has no address
+   * to scale, so it is selected with a `br_table` over one block per element —
+   * bounded by {@link VALUE_ARRAY_MAX_RUNTIME_INDEX}, past which the caller wants
+   * a pointer view instead.
+   */
+  private compileSroaValueArrayElementAccess(
+    expression: ElementAccessExpression,
+    local: Local,
+    isWrite: bool,
+    contextualType: Type,
+    constraints: Constraints,
+    valueExpression: Expression | null = null,
+    valueRef: ExpressionRef = 0
+  ): ExpressionRef {
+    let module = this.module;
+    let arrayType = local.type;
+    let elementType = arrayType.fixedArrayElementType;
+    let fieldLocals = assert(local.fieldLocals);
+    let indexValue = this.constantIndexValue(expression.elementExpression);
+
+    if (indexValue >= 0) {
+      let entry = getMapEntry(fieldLocals, indexValue.toString());
+      if (entry == null) {
+        // Compile-time out of range: the extent is known, so this is a bug in the
+        // source rather than something a runtime check could report better.
+        this.error(
+          DiagnosticCode.Index_signature_is_missing_in_type_0,
+          expression.elementExpression.range, arrayType.toString()
+        );
+        this.currentType = elementType;
+        return module.unreachable();
+      }
+      if (entry.index < 0) {
+        // A record element is several leaves; `arr[0]` names a whole sub-value
+        // that no local holds, and a value has no address to hand out.
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          expression.range,
+          "reading or writing a record element of a `[T * N]` value as a whole (an element is several leaves, not one value; read or write one of its fields, `arr[i].x`)"
+        );
+        this.currentType = elementType;
+        return module.unreachable();
+      }
+      if (isWrite) {
+        let value = valueRef || this.compileExpression(
+          assert(valueExpression), elementType, Constraints.ConvImplicit
+        );
+        if (contextualType == Type.void) {
+          this.currentType = Type.void;
+          return module.local_set(entry.index, value, false);
+        }
+        // The assignment is used as a value: store, then yield what was written.
+        this.currentType = elementType;
+        return module.block(null, [
+          module.local_set(entry.index, value, false),
+          module.local_get(entry.index, entry.type.toRef())
+        ], elementType.toRef());
+      }
+      this.currentType = elementType;
+      return module.local_get(entry.index, entry.type.toRef());
+    }
+
+    // --- runtime index ------------------------------------------------------
+    let length = arrayType.fixedLength;
+    if (length > Compiler.VALUE_ARRAY_MAX_RUNTIME_INDEX) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "a runtime index into a `[T * N]` value with N > 8 (the element is selected by a branch per element, which stops paying for itself past eight). Use a constant index, or `@unmanaged [T * N]` for a pointer view with unlimited runtime indexing"
+      );
+      this.currentType = elementType;
+      return module.unreachable();
+    }
+    if (elementType.getClass() != null) {
+      // A record element selected at runtime is several leaves per element, so a
+      // single-value `br_table` cannot express it — `arr[i]` alone has no value.
+      // Reading a field through the index is supported by the property path,
+      // which selects the *leaf* per block.
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "reading or writing a record element of a `[T * N]` value as a whole (an element is several leaves, not one value; read or write one of its fields, `arr[i].x`)"
+      );
+      this.currentType = elementType;
+      return module.unreachable();
+    }
+    return this.compileSroaValueArrayRuntimeIndex(
+      expression, local, isWrite, contextualType, constraints, valueExpression, valueRef
+    );
+  }
+
+  /**
+   * Selects one element leaf of a value-form array by a runtime index.
+   *
+   * The shape is one `br_table` with a block per element, each block yielding
+   * that element's leaf — the only way to choose between WASM locals at runtime,
+   * since they are not addressable. An index outside `[0, N)` is the caller's
+   * error, exactly as it is for `[T *]`: the extent is compile-time and there is
+   * no length on the value stack to check against.
+   */
+  private compileSroaValueArrayRuntimeIndex(
+    expression: ElementAccessExpression,
+    local: Local,
+    isWrite: bool,
+    contextualType: Type,
+    constraints: Constraints,
+    valueExpression: Expression | null,
+    valueRef: ExpressionRef
+  ): ExpressionRef {
+    let module = this.module;
+    let arrayType = local.type;
+    let elementType = arrayType.fixedArrayElementType;
+    let fieldLocals = assert(local.fieldLocals);
+    let length = arrayType.fixedLength;
+    let elementRef = elementType.toRef();
+    let indexLowered = this.compileExpression(
+      expression.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+    let value = isWrite
+      ? (valueRef || this.compileExpression(assert(valueExpression), elementType, Constraints.ConvImplicit))
+      : 0;
+
+    // One case block per element, named so the switch can target them by index.
+    // The names carry a per-emission id: a write compiles its target more than
+    // once (the assignment path reads the destination before storing), and
+    // Binaryen rejects repeated block names — measured as "names in Binaryen IR
+    // must be unique" on `arr[i] = v`.
+    let suffix = (++this.sroaSelectId).toString();
+    let names = new Array<string>(length);
+    for (let i = 0; i < length; ++i) {
+      unchecked(names[i] = "sroaSel" + i.toString() + "_" + suffix);
+    }
+    let outLabel = "sroaSelOut_" + suffix;
+
+    // The store case needs the value in **one** place: a WASM node has one
+    // parent, so N case bodies cannot each hold the same `value` subtree. It is
+    // materialised into a temp first and read back per case.
+    let valueTemp = -1;
+    if (isWrite) {
+      valueTemp = this.currentFlow.getTempLocal(elementType).index;
+    }
+
+    // One case body per element. A read's body **carries** the value, because
+    // `sroaSelOut` has the element's type and a bare `br` there is a validation
+    // error ("non-final block elements returning a value must be dropped").
+    // Built as an array rather than by a helper closure: the self-hosted
+    // compiler refuses a captured local without a declared type, measured as
+    // `AS100: a captured local without a declared type (closures lowering)` when
+    // bootstrapping this very file.
+    let bodies = new Array<ExpressionRef>(length);
+    for (let i = 0; i < length; ++i) {
+      let leaf = assert(fieldLocals.get(i.toString())).index;
+      unchecked(bodies[i] = isWrite
+        ? module.local_set(leaf, module.local_get(valueTemp, elementRef), false)
+        : module.br(outLabel, 0, module.local_get(leaf, elementRef)));
+    }
+
+    // The body of case `i` sits **after** block `i`'s `end`, one level out — that
+    // is where a `br_table` target lands. So the innermost block holds only the
+    // switch, and each enclosing block appends the *next* element's body: block
+    // `i`'s children are [block `i+1`, body `i+1`, branch]. Element 0's body is
+    // the fall-through after block 0, which is the out-block's value.
+    //
+    // Verified the wrong way round first: bodies inside their own block gave
+    // `i=0,1,2,3 -> 10,10,20,30` — every element one index early, and no
+    // diagnostic to say so.
+    let chain = module.drop(module.switch(
+      names, unchecked(names[length - 1]), indexLowered
+    ));
+    chain = module.block(unchecked(names[length - 1]), [ chain ]);
+    for (let i = length - 2; i >= 0; --i) {
+      chain = module.block(unchecked(names[i]), [
+        chain,
+        unchecked(bodies[i + 1]),
+        isWrite ? module.br(outLabel) : module.nop()
+      ]);
+    }
+    let fallThrough = unchecked(bodies[0]);
+    let dispatch = module.block(
+      outLabel, [ chain, fallThrough ], isWrite ? TypeRef.None : elementRef
+    );
+    if (!isWrite) {
+      this.currentType = elementType;
+      return dispatch;
+    }
+    this.currentType = contextualType == Type.void ? Type.void : elementType;
+    if (contextualType == Type.void) {
+      return module.block(null, [ module.local_set(valueTemp, value, false), dispatch ]);
+    }
+    return module.block(null, [
+      module.local_set(valueTemp, value, false),
+      dispatch,
+      module.local_get(valueTemp, elementRef)
+    ], elementRef);
   }
 
   private compileSroaLocal(

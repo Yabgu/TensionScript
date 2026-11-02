@@ -3303,6 +3303,25 @@ export class Resolver extends DiagnosticEmitter {
     /** How to proceed with eventual diagnostics. */
     reportMode: ReportMode = ReportMode.Report
   ): Type | null {
+    // A `[a, b, c]` literal in a position that asked for a value-form `[T * N]`
+    // **is** that array: the annotation supplies the element type and the
+    // extent, and the literal supplies the values. Without this the literal is
+    // typed as `~lib/array/Array<i32>` — a heap array, a different type and a
+    // different representation — and the declaration is refused as
+    // `Type '~lib/array/Array<i32>' is not assignable to type '[u32 * 4]'`.
+    //
+    // This is the contextual-type hook `compileArrayLiteral` already uses for
+    // `StaticArray` (`compiler.ts`, `compileArrayLiteral`'s first branch); here
+    // it resolves rather than compiles, because the *type* of the literal is
+    // what the assignability check reads.
+    if (
+      node.literalKind == LiteralKind.Array &&
+      ctxType.kind == TypeKind.FixedArray &&
+      (ctxType.fixedMemoryModel == MemoryModelCode.None ||
+       ctxType.fixedMemoryModel == MemoryModelCode.Inline)
+    ) {
+      return ctxType;
+    }
     let element = this.lookupLiteralExpression(node, ctxFlow, ctxType, reportMode);
     if (!element) return null;
     let type = this.getTypeOfElement(element);

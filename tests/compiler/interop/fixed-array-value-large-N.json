@@ -1,0 +1,7 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: a runtime index into a `[T * N]` value with N > 8 (the element is selected by a branch per element, which stops paying for itself past eight). Use a constant index, or `@unmanaged [T * N]` for a pointer view with unlimited runtime indexing",
+    "1 compile error(s)"
+  ]
+}
