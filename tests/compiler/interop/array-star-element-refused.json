@@ -1,0 +1,13 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "TS2322: Type '[u32 *]' is not assignable to type '[f64 *]'.",
+    "TS2322: Type '[u32 *]' is not assignable to type '[f64 *]'.",
+    "TS2322: Type '[u32 *]' is not assignable to type '[f64 *]'.",
+    "TS2322: Type '[f64 *]' is not assignable to type '[u32 *]'.",
+    "TS2322: Type 'f64[4]' is not assignable to type 'u32[4]'.",
+    "TS2322: Type '[f64 *]' is not assignable to type '[interop/array-star-element-refused/BodyState *]'.",
+    "6 compile error(s)"
+  ]
+}

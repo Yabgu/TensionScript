@@ -615,6 +615,27 @@ export class Type {
         this.isSignedIntegerValue == target.isSignedIntegerValue
       );
     }
+    // The array kinds compare their **element**, not just the kind. Without this
+    // arm `[u32 *]` was strictly assignable to `[f64 *]`, and `u32[4]` to
+    // `f64[4]`: for an array, kind equality is all that survived once the
+    // element was factored out, so every array of one kind was interchangeable
+    // with every other of the same kind.
+    //
+    // That was benign while no element access existed, and stops being benign
+    // the moment one does: `y[i]` types the element from the pointer, so a callee
+    // handed a `[u32 *]` as a `[f64 *]` reads f64s out of u32 bytes with no cast
+    // to mark the reinterpretation. Same-element assignment is unaffected, so
+    // nothing that was correct changes.
+    //
+    // The escape hatch is deliberately **not** here: `changetype` asks
+    // `isChangeableTo`, which still compares kinds only. Explicit
+    // reinterpretation stays possible, and stays visible at the call site.
+    if (
+      this.kind == TypeKind.FixedArray ||
+      this.kind == TypeKind.UnmanagedArray
+    ) {
+      return this.equals(target);
+    }
     return this.kind == target.kind;
   }
 
@@ -639,6 +660,13 @@ export class Type {
     // `AS202: Type 'usize' cannot be changed to type '[u32 *]'` -- the general
     // `this.kind == target.kind` below answers false across kinds, so the
     // scoping's prediction that no change was needed here was wrong.
+    //
+    // Element types need **not** match. That is the whole difference between
+    // this predicate and `isStrictlyAssignableTo`, which now compares elements
+    // (the arm above): assignment promises the bytes mean the same thing, while
+    // `changetype` promises only that the caller said so out loud. So
+    // `changetype<[f64 *]>(u32Ptr)` stays legal -- it is the explicit
+    // reinterpretation, the same cell `changetype<f64>(usizeValue)` occupies.
     if (target.kind == TypeKind.UnmanagedArray) {
       return this.is(TypeFlags.Integer) || this.kind == TypeKind.UnmanagedArray;
     }
@@ -1006,6 +1034,20 @@ export class Type {
    *
    * Unlike {@link Type.fixedArray} this consults nothing about the element but
    * its identity: the count is unknown, which is the entire point of the kind.
+   *
+   * The cache is validated by **identity** of the element, not just by the key.
+   * This is what keeps interning a per-program property rather than a
+   * per-process one: the map is a static that outlives a `Program`, so a second
+   * `asc.main` in the same process (which is exactly what the compiler test
+   * harness does -- debug then release) would otherwise be handed the first
+   * program's `Type`, whose `unmanagedElementType` carries the first program's
+   * `Class`. A property read through that class then emitted a call to a getter
+   * the new module never compiled, and the module failed to validate:
+   * `wasm-validator error ... call target must exist`.
+   *
+   * So a cached entry is returned only when its element is the *same object* the
+   * current program just resolved. Within one program that is always true --
+   * `resolveType` interns a record's `Type` -- so interning still holds there.
    */
   static unmanagedArray(elementType: Type, pointerSize: i32): Type {
     let key = elementType.toString() + "*" + pointerSize.toString();
@@ -1016,7 +1058,7 @@ export class Type {
       cache = fresh;
     }
     let cached = getMapEntry(cache, key);
-    if (cached) return cached;
+    if (cached && cached.unmanagedElementType == elementType) return cached;
     let arrayType = new Type(
       TypeKind.UnmanagedArray,
       TypeFlags.None,
