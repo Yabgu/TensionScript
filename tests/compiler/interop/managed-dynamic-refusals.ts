@@ -1,37 +1,34 @@
-// `@managed @dynamic [T * n]` — what refuses in Landing 4d.1, and why.
+// `@managed @dynamic [T * n]` — what still refuses, after Landing 4d.2.
 //
-// The type resolves and binds as a GC reference this landing. What does **not**
-// work yet is everything that needs the descriptor's offsets or a buffer whose
-// lifetime is arranged:
+// 4d.1 refused indexing, two-argument `changetype` and the return path; all
+// three work now and moved to `managed-dynamic-abi.ts`. What remains is about
+// the *shape* of the data, not about work not yet done:
 //
-//   1. `y[i]` — element access. The descriptor carries `dataPtr` and `length`,
-//      so the address is `dataPtr + i*sizeof(T)` with a bounds check against
-//      `length`; that is Landing 4d.2. Refused **by name** rather than by the
-//      generic "index signature is missing in type '~lib/dynamicarray/
-//      DynamicArray<T>'", which would name an internal class and read as a bug
-//      in the shape rather than as work not yet done.
+//   1. **1-argument `changetype`** — a descriptor cannot be conjured from a bare
+//      pointer: there is no length. Target-specific; every other
+//      `changetype<X>(ptr)` reinterpretation stays legal. It used to *compile*,
+//      through `isChangeableTo`'s integer arm (a class type is
+//      `TypeFlags.Integer`), and produce a class reference whose `length` was
+//      whatever the memory after the pointer happened to say — measured at
+//      1076166656 for a buffer whose first element was 10.5.
 //
-//   2. `changetype<@managed @dynamic [T * n]>(p, len)` — construction. The
-//      two-argument form is the designated way to build a descriptor, and it is
-//      Landing 4d.2. Refused before the arity checker, which would otherwise
-//      say `Expected 1 arguments, but got 2` and mention nothing about the
-//      feature.
+//   2. **Cross-model `changetype`** — `@managed` <-> `@unmanaged`, both
+//      directions. Both are one `i32` slot, so `isChangeableTo` waved them
+//      through, but the shapes are unrelated: a GC reference to a descriptor
+//      versus a pointer to a header-prefixed buffer. Measured before the
+//      refusal: the managed->unmanaged cast emitted `i32.load` of the
+//      descriptor's `dataPtr` field as if it were the buffer's length.
 //
-//   3. A **GC-managed element** — same rule as `[Foo *]` (Landing 3's CX1) and
-//      `@unmanaged @dynamic [Foo * n]`: the data buffer is not scanned, so a
-//      reference stored in it is not a root and would dangle.
+//   3. A **GC-managed element** — the data buffer is not scanned (Landing 3 CX1).
 //
-//   4. `sizeof` — the value is a class reference, so `byteSize` would answer 4
-//      and look like a legitimate pointer size. The extent is
-//      `length * sizeof<T>` with `length` a runtime field.
+//   4. `sizeof` — the extent is `length * sizeof<T>` with `length` a runtime
+//      field; answering the reference size would look like a legitimate
+//      pointer size.
 //
-//   5. A bare `struct` element — bare structs are `@inline`, and an `@inline`
-//      value cannot be a class type argument ("value types are not implemented
-//      here yet; a pointer would alias"). This is the same limitation
-//      `Array<BareStruct>` has, not something specific to this feature. The
-//      collision solver's actual declaration is `@unmanaged struct BodyState`,
-//      so the primary case is unaffected. Documented, not fixed — see
-//      `docs/interop-c-abi.md`.
+//   5. A **bare `struct` element** — bare structs are `@inline`, and an
+//      `@inline` value cannot be a class type argument. The same limitation
+//      `Array<BareStruct>` has; the collision solver declares `@unmanaged
+//      struct BodyState`, so the primary case is unaffected.
 
 class GcRef {
   x: i32 = 0;
@@ -47,14 +44,20 @@ struct InlineRecord {
   y: f64;
 }
 
-// 1. Indexing.
-export function index(y: @managed @dynamic [BodyState * n], i: i32): f64 {
-  return y[i].x;
+// 1. One argument is not enough to build a descriptor.
+export function oneArg(p: usize): void {
+  changetype<@managed @dynamic [BodyState * n]>(p);
 }
 
-// 2. Construction.
-export function construct(p: usize, len: i32): @managed @dynamic [BodyState * n] {
-  return changetype<@managed @dynamic [BodyState * n]>(p, len);
+// 2a. Managed -> unmanaged.
+export function managedToUnmanaged(y: @managed @dynamic [BodyState * ln]): usize {
+  const p = changetype<@unmanaged @dynamic [BodyState * m]>(y);
+  return <usize>p;
+}
+
+// 2b. Unmanaged -> managed, one argument.
+export function unmanagedToManaged(p: usize): void {
+  changetype<@managed @dynamic [BodyState * n]>(p);
 }
 
 // 3. A GC-managed element.

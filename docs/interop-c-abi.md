@@ -96,6 +96,43 @@ consumers use the macros, which are the common surface and carry no such
 caveat. The header-size assertions hold in both languages; the `offsetof` ones
 against the struct spelling are C-only.
 
+## Managed vs unmanaged dynamic arrays
+
+Two forms, one syntax family, and they differ in **where the length lives**:
+
+| | `@unmanaged @dynamic [T * n]` | `@managed @dynamic [T * n]` |
+|---|---|---|
+| Layout | header-prefixed buffer: `[u32 length][pad][data...]` | **bare** data buffer + a descriptor object |
+| Where length lives | in the buffer | in the descriptor (`DynamicArray<T>`) |
+| ABI | 1 slot, pointer to the buffer | 1 slot, GC reference to the descriptor |
+| Element address | `buffer + headerSize + i*sizeof(T)` | `descriptor.dataPtr + i*sizeof(T)` |
+| C-compatible | **yes** — self-describing | no — C cannot hold a GC reference |
+| Length bound | validated by the guest on entry | validated at construction |
+
+The asymmetry is deliberate, not an oversight. The unmanaged form is
+**self-describing** so that a C program can build one with nothing but this
+header and hand it over. The managed form is **described by an object**: the
+descriptor is a GC reference, so it is traced, rooted and nullable, and the
+length travels with it. Putting a header in front of the data *as well* would
+mean two sources of truth for one length.
+
+Indexing is identical from the source's point of view — `y[i]`,
+`y[i].field`, `y[i] = v`, `y += v`, `y[i]++` — and both bounds-check
+`(u32)i >= (u32)length`. Only the address arithmetic differs.
+
+### Crossing between them
+
+There is no `changetype` between the two. Both are one `i32` slot, which makes
+a cast look free, and it is not: one is a pointer to a self-describing buffer,
+the other a reference to a descriptor, and reinterpreting either as the other
+reads a field as a length. Construct the target model explicitly instead —
+`changetype<@unmanaged @dynamic [T * n]>(buffer)` from a buffer, or
+`changetype<@managed @dynamic [T * n]>(dataPtr, len)` for a descriptor.
+
+A one-argument `changetype` to the managed form is refused for the same reason:
+a descriptor needs a length, and there is nowhere to get one from a bare
+pointer.
+
 ## Adding a type
 
 Copy `include/tension/ogre/vec3f.h` and change the fields. Two assertions

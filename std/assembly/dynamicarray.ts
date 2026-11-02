@@ -16,6 +16,11 @@
  * `y[i]` is `dataPtr + i*sizeof(T)`, with no header offset — the opposite of the
  * unmanaged form, where the buffer describes itself so that C can build one.
  *
+ * Two layouts, one syntax family, differing only by memory model. That is
+ * deliberate: `@unmanaged` is the self-describing C-facing form, `@managed` is
+ * the GC-traced form whose length travels in this object. Putting a header in
+ * front of the data as well would give one length two sources of truth.
+ *
  * This class is not meant to be constructed by user code. Landing 4d.1 makes
  * `@managed @dynamic [T * n]` **resolve** to it; construction (the two-argument
  * `changetype`) and indexing are Landing 4d.2.
