@@ -5522,6 +5522,14 @@ export class Compiler extends DiagnosticEmitter {
           contextualType, Constraints.None, null, expr
         );
       }
+      // The managed form is a class reference, so it is a different kind — but
+      // the same access arm, which branches on the model internally.
+      if (arrayType && this.isManagedDynamicArrayType(arrayType)) {
+        return this.compileDynamicArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, null, expr
+        );
+      }
     }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
@@ -6442,6 +6450,12 @@ export class Compiler extends DiagnosticEmitter {
         );
       }
       if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        return this.compileDynamicArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, valueExpression
+        );
+      }
+      if (arrayType && this.isManagedDynamicArrayType(arrayType)) {
         return this.compileDynamicArrayElementAccess(
           elementAccess, arrayType, true,
           contextualType, Constraints.None, valueExpression
@@ -8500,6 +8514,27 @@ export class Compiler extends DiagnosticEmitter {
    * the redesign — `TypeKind.DynamicArray` carries `TypeFlags.None` and is not
    * traced, so a descriptor stored as one would not be rooted.
    */
+  /**
+   * The element type of either dynamic-array form.
+   *
+   * `@unmanaged @dynamic [T * n]` carries the element on its type;
+   * `@managed @dynamic [T * n]` is a `DynamicArray<T>` class reference, so the
+   * element is the class's type argument. One accessor for both, because every
+   * consumer below — access, compound, increment — would otherwise branch.
+   */
+  private dynamicArrayElementOf(type: Type): Type {
+    if (type.kind == TypeKind.DynamicArray) return type.dynamicElementType;
+    let classReference = type.classReference;
+    if (classReference != null && this.isManagedDynamicArrayType(type)) {
+      let typeArguments = classReference.typeArguments;
+      if (typeArguments != null && typeArguments.length > 0) {
+        return unchecked(typeArguments[0]);
+      }
+    }
+    assert(false);
+    return Type.void;
+  }
+
   private isManagedDynamicArrayType(type: Type): bool {
     let classReference = type.classReference;
     if (classReference == null) return false;
@@ -8544,7 +8579,7 @@ export class Compiler extends DiagnosticEmitter {
     arrayType: Type
   ): ExpressionRef {
     let module = this.module;
-    let elementType = arrayType.dynamicElementType;
+    let elementType = this.dynamicArrayElementOf(arrayType);
     let elementSize = this.unmanagedArrayElementSize(elementType);
     let headerSize = this.dynamicArrayHeaderSize(elementType);
     let scaledIndex = module.binary(
@@ -8771,7 +8806,7 @@ export class Compiler extends DiagnosticEmitter {
     valueRef: ExpressionRef = 0
   ): ExpressionRef {
     let module = this.module;
-    let elementType = arrayType.dynamicElementType;
+    let elementType = this.dynamicArrayElementOf(arrayType);
     let elementSize = this.unmanagedArrayElementSize(elementType);
     let isRecordElement = this.isRecordValueType(elementType);
     if (isWrite && isRecordElement) {
@@ -8789,29 +8824,95 @@ export class Compiler extends DiagnosticEmitter {
     // here twice (operator read, then store), evaluated them four times. For
     // `y[f()]` that called `f` more often than the source says. The temps make
     // the count match the source; see `compileCheckedDynamicAddress`'s note.
-    let baseExpr = this.compileExpression(
-      expression.expression, arrayType, Constraints.ConvImplicit
-    );
-    let indexExpr = this.compileExpression(
-      expression.elementExpression, Type.i32, Constraints.ConvImplicit
-    );
-    let baseTemp = this.currentFlow.getTempLocal(arrayType);
-    let indexTemp = this.currentFlow.getTempLocal(Type.i32);
-    let check = this.compileDynamicArrayBoundsCheck(
-      module.local_get(baseTemp.index, TypeRef.I32),
-      module.local_get(indexTemp.index, TypeRef.I32),
-      expression
-    );
-    let address = this.compileDynamicArrayElementAddress(
-      module.local_get(baseTemp.index, TypeRef.I32),
-      module.local_get(indexTemp.index, TypeRef.I32),
-      arrayType
-    );
-    let setup = module.block(null, [
-      module.local_set(baseTemp.index, baseExpr, false),
-      module.local_set(indexTemp.index, indexExpr, false),
-      check
-    ], TypeRef.None);
+    let setup: ExpressionRef;
+    let address: ExpressionRef;
+    if (this.isManagedDynamicArrayType(arrayType)) {
+      // --- managed: the descriptor is the source of both the base and the length
+      //
+      // `y[i]` over `@managed @dynamic [T * n]` reads `dataPtr` and `length` out
+      // of the GC object, then addresses `dataPtr + i*sizeof(T)`. There is **no
+      // header in the data buffer** — the descriptor owns the layout, which is
+      // the one structural difference from the unmanaged form. Everything after
+      // the address is shared: the same bounds comparison, the same load/store
+      // tails.
+      let descriptorExpr = this.compileExpression(
+        expression.expression, arrayType, Constraints.ConvImplicit
+      );
+      let indexExpr = this.compileExpression(
+        expression.elementExpression, Type.i32, Constraints.ConvImplicit
+      );
+      // Field offsets come from the class the resolver already laid out, not
+      // from literals: `DynamicArray<T>` is a std class like any other, and
+      // hard-coding 0 and 4 here would silently disagree with it the first time
+      // a field moves. The `has`-before-`get` shape is the 4c idiom — `Map#get`
+      // throws on a missing key rather than returning null.
+      let descriptorClass = assert(arrayType.classReference);
+      let descriptorMembers = descriptorClass.members;
+      assert(descriptorMembers != null);
+      assert(descriptorMembers!.has("dataPtr") && descriptorMembers!.has("length"));
+      let dataPtrOffset = (<PropertyPrototype>assert(descriptorMembers!.get("dataPtr")))
+        .instance!.memoryOffset;
+      let lengthOffset = (<PropertyPrototype>assert(descriptorMembers!.get("length")))
+        .instance!.memoryOffset;
+      let descriptorTemp = this.currentFlow.getTempLocal(arrayType);
+      let indexTemp = this.currentFlow.getTempLocal(Type.i32);
+      let descriptorRef = module.local_get(descriptorTemp.index, TypeRef.I32);
+      let indexRef = module.local_get(indexTemp.index, TypeRef.I32);
+      let managedBase = module.load(
+        4, false, descriptorRef, TypeRef.I32, dataPtrOffset, 4
+      );
+      let managedLength = module.load(
+        4, false, descriptorRef, TypeRef.I32, lengthOffset, 4
+      );
+      let scaled = module.binary(
+        BinaryOp.MulSize,
+        this.options.isWasm64
+          ? module.unary(UnaryOp.ExtendU32ToU64, indexRef)
+          : indexRef,
+        this.options.isWasm64 ? module.i64(elementSize) : module.i32(elementSize)
+      );
+      let abort = this.makeAbort(
+        Node.createStringLiteralExpression(
+          "dynamic array index out of bounds",
+          expression.range
+        ),
+        expression
+      );
+      address = module.binary(BinaryOp.AddSize, managedBase, scaled);
+      setup = module.block(null, [
+        module.local_set(descriptorTemp.index, descriptorExpr, false),
+        module.local_set(indexTemp.index, indexExpr, false),
+        module.if(
+          module.binary(BinaryOp.GeU32, module.local_get(indexTemp.index, TypeRef.I32), managedLength),
+          abort,
+          0
+        )
+      ], TypeRef.None);
+    } else {
+      let baseExpr = this.compileExpression(
+        expression.expression, arrayType, Constraints.ConvImplicit
+      );
+      let indexExpr = this.compileExpression(
+        expression.elementExpression, Type.i32, Constraints.ConvImplicit
+      );
+      let baseTemp = this.currentFlow.getTempLocal(arrayType);
+      let indexTemp = this.currentFlow.getTempLocal(Type.i32);
+      let check = this.compileDynamicArrayBoundsCheck(
+        module.local_get(baseTemp.index, TypeRef.I32),
+        module.local_get(indexTemp.index, TypeRef.I32),
+        expression
+      );
+      address = this.compileDynamicArrayElementAddress(
+        module.local_get(baseTemp.index, TypeRef.I32),
+        module.local_get(indexTemp.index, TypeRef.I32),
+        arrayType
+      );
+      setup = module.block(null, [
+        module.local_set(baseTemp.index, baseExpr, false),
+        module.local_set(indexTemp.index, indexExpr, false),
+        check
+      ], TypeRef.None);
+    }
     this.currentType = elementType;
     if (isWrite) {
       let value = valueRef || this.compileExpression(
@@ -9009,13 +9110,14 @@ export class Compiler extends DiagnosticEmitter {
       // than letting the generic lookup report "index signature is missing in
       // type '~lib/dynamicarray/DynamicArray<T>'" — that names an internal class
       // and reads as a bug in the shape rather than as work not yet done.
+      // `@managed @dynamic [T * n]` indexed: a class reference whose descriptor
+      // holds the base and the length. Routed into the same access arm as the
+      // unmanaged form, which branches on the model internally — so the read,
+      // the write, compound and increment all get it without separate arms.
       if (this.isManagedDynamicArrayType(targetType)) {
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          expression.range,
-          "indexing a `@managed @dynamic [T * n]` is Landing 4d.2; the descriptor offsets and the bounds check are not wired yet"
+        return this.compileDynamicArrayElementAccess(
+          expression, targetType, false, contextualType, constraints
         );
-        return module.unreachable();
       }
       let classReference = targetType.getClassOrWrapper(this.program);
       if (classReference) {
@@ -11867,7 +11969,19 @@ export class Compiler extends DiagnosticEmitter {
           elementAccess, arrayType, true,
           Type.void, Constraints.None, null, expr
         );
-        this.currentType = arrayType.dynamicElementType;
+        this.currentType = this.dynamicArrayElementOf(arrayType);
+        if (!tempLocal) return stored;
+        return module.block(null, [
+          stored,
+          module.local_get(tempLocal.index, this.currentType.toRef())
+        ], this.currentType.toRef());
+      }
+      if (arrayType && this.isManagedDynamicArrayType(arrayType)) {
+        let stored = this.compileDynamicArrayElementAccess(
+          elementAccess, arrayType, true,
+          Type.void, Constraints.None, null, expr
+        );
+        this.currentType = this.dynamicArrayElementOf(arrayType);
         if (!tempLocal) return stored;
         return module.block(null, [
           stored,
@@ -12276,7 +12390,14 @@ export class Compiler extends DiagnosticEmitter {
         );
       }
       if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
-        this.currentType = arrayType.dynamicElementType;
+        this.currentType = this.dynamicArrayElementOf(arrayType);
+        return this.compileDynamicArrayElementAccess(
+          elementAccess, arrayType, true,
+          this.currentType, Constraints.None, null, expr
+        );
+      }
+      if (arrayType && this.isManagedDynamicArrayType(arrayType)) {
+        this.currentType = this.dynamicArrayElementOf(arrayType);
         return this.compileDynamicArrayElementAccess(
           elementAccess, arrayType, true,
           this.currentType, Constraints.None, null, expr
