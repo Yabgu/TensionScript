@@ -716,6 +716,18 @@ export class Type {
     if (target.kind == TypeKind.DynamicArray) {
       return this.is(TypeFlags.Integer) || this.kind == TypeKind.DynamicArray;
     }
+    // `[T * N]` is the same address `[T *]` is, with an extent the caller
+    // asserts: an integer names one, and so does another fixed array. This is
+    // the cell `changetype<[T * N]>(ptr)` occupies, and without it the form
+    // answered `AS202: Type 'usize' cannot be changed to type 'u32[4]'` -- the
+    // same pre-measurement miss the `UnmanagedArray` arm above records.
+    //
+    // The extent is deliberately not checked here, because an address carries
+    // no count: `changetype<[u32 * 4]>(p)` is the caller saying "four elements
+    // follow p", exactly as `changetype<[u32 *]>(p)` says "some follow p".
+    if (target.kind == TypeKind.FixedArray) {
+      return this.is(TypeFlags.Integer) || this.kind == TypeKind.FixedArray;
+    }
     // special in that it allows integer references as well
     if (this.is(TypeFlags.Integer) && target.is(TypeFlags.Integer)) {
       let size = this.size;
@@ -914,6 +926,24 @@ export class Type {
         return binaryen._BinaryenTypeFromHeapType(HeapTypeRef.String, this.is(TypeFlags.Nullable));
       }
       case TypeKind.Void: return TypeRef.None;
+      case TypeKind.FixedArray: {
+        // A `[T * N]` value is a *view* of N contiguous elements: the address
+        // the caller provides (`changetype<[T * N]>(ptr)`) or the one a parent
+        // record's layout supplies (`@unmanaged struct H { arr: [u32 * 4] }`).
+        // Its value representation is therefore that address -- one slot -- not
+        // its inline extent. This arm is what retires the `assert(false)`
+        // below for the kind: without it, every use that needs a WASM slot
+        // (element access through a local, a parameter, a global, a `new`
+        // field initialiser) aborted the compiler.
+        //
+        // Unlike `UnmanagedArray` above, `this.size` cannot answer the pointer
+        // width here: a fixed array's `size` is its extent
+        // (`elementType.byteSize * length`), because that is what `sizeof`
+        // asks it for. So the slot is `i32` unconditionally, and a memory64
+        // build would have to consult the configured pointer width the way the
+        // `UnmanagedArray` arm does. Deferred with the rest of wasm64.
+        return TypeRef.I32;
+      }
     }
     // TODO: not used yet
     assert(false);
