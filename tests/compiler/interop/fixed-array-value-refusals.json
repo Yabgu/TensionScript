@@ -7,7 +7,6 @@
     "AS100: Not implemented: cannot return `[T * N]` by value yet — Landing 5b.2 (the value form is inline bytes and a return needs caller-allocated storage). Use `@unmanaged [T * N]` for a pointer view",
     "AS100: Not implemented: heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)",
     "AS100: Not implemented: heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)",
-    "AS100: Not implemented: an inline array (T[N]) of a record — the wire records are pointers in this position, not values; use a length + a view base, or wrap the array in an @unmanaged struct with explicit fields",
-    "7 compile error(s)"
+    "6 compile error(s)"
   ]
 }

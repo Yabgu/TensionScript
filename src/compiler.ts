@@ -6769,6 +6769,19 @@ export class Compiler extends DiagnosticEmitter {
       }
       case ElementKind.Property: {
         let propertyInstance = <Property>target;
+        // `arr[i].field = v` where `i` is a **runtime** index into a value-form
+        // record array: the mirror of the read helper, one `local.set` per block
+        // with the value materialised once. Must come before the constant-index
+        // SROA branch below, which cannot name an entry for a runtime index and
+        // would fall through to the element-access path — whose refusal message
+        // ("read or write one of its fields") would be wrong, because the source
+        // did exactly that.
+        if (thisExpression != null && thisExpression.kind == NodeKind.ElementAccess) {
+          let dynStore = this.compileSroaArrayLeafStoreByRuntimeIndex(
+            <ElementAccessExpression>thisExpression, propertyInstance, valueExpr
+          );
+          if (dynStore != 0) return dynStore;
+        }
         // SROA: write the field's own local. `local.set` is the whole store —
         // there is no address, no offset, and (for the non-GC field types this
         // phase accepts) no write barrier to run.
@@ -11595,6 +11608,17 @@ export class Compiler extends DiagnosticEmitter {
         // gets *none*, and that absence is what makes copies real.
         // `thisExpression` is null for a static (global) property access, which
         // can never be an SROA receiver: there is no instance expression.
+        // `arr[i].field` where `arr` is a value-form array **of records** and `i`
+        // is a runtime index: the element is several leaves per candidate, so the
+        // selection is per **leaf** — one `br_table` over the elements, each
+        // block yielding that element's `<field>` leaf. Not expressible through
+        // `resolveSroaReceiver`, which names one entry by a constant key.
+        if (thisExpression != null && thisExpression.kind == NodeKind.ElementAccess) {
+          let dynElement = this.compileSroaArrayLeafByRuntimeIndex(
+            <ElementAccessExpression>thisExpression, propertyInstance
+          );
+          if (dynElement != 0) return dynElement;
+        }
         let sroaReceiver = thisExpression != null
           ? this.resolveSroaReceiver(thisExpression)
           : null;
@@ -14349,6 +14373,181 @@ export class Compiler extends DiagnosticEmitter {
       dispatch,
       module.local_get(valueTemp, elementRef)
     ], elementRef);
+  }
+
+  /**
+   * Reads `arr[i].field` where `arr` is a value-form array **of records** and `i`
+   * is a runtime index. Returns `0` when the shape does not apply.
+   *
+   * A record element is several leaves per candidate, so a single-value
+   * `br_table` cannot select one — but a *field* is one leaf per candidate, so
+   * the selection is per leaf: one block per element, each yielding that
+   * element's `<field>` leaf. Same block nesting as the scalar runtime index
+   * (`compileSroaValueArrayRuntimeIndex`), one hop lower.
+   *
+   * This is the shape the collision solver writes by hand today —
+   * `arr[i].x` with a runtime `i` over a run of records — which is why it is
+   * worth the dispatch rather than only supporting a constant index.
+   */
+  private compileSroaArrayLeafByRuntimeIndex(
+    elementAccess: ElementAccessExpression,
+    property: Property
+  ): ExpressionRef {
+    let arrayLocal = this.resolveSroaValueArray(elementAccess.expression);
+    if (arrayLocal == null) return 0;
+    let arrayType = arrayLocal.type;
+    let elementType = arrayType.fixedArrayElementType;
+    if (elementType.getClass() == null) return 0;    // scalar element: the ordinary path
+    if (this.constantIndexValue(elementAccess.elementExpression) >= 0) return 0;
+    if (!property.isField) return 0;
+    let fieldLocals = assert(arrayLocal.fieldLocals);
+    let length = arrayType.fixedLength;
+    if (length > Compiler.VALUE_ARRAY_MAX_RUNTIME_INDEX) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        elementAccess.range,
+        "a runtime index into a `[T * N]` value with N > 8 (the element is selected by a branch per element, which stops paying for itself past eight). Use a constant index, or `@unmanaged [T * N]` for a pointer view with unlimited runtime indexing"
+      );
+      return this.module.unreachable();
+    }
+    let module = this.module;
+    let fieldRef = property.type.toRef();
+    let suffix = (++this.sroaSelectId).toString();
+    let names = new Array<string>(length);
+    for (let i = 0; i < length; ++i) {
+      unchecked(names[i] = "sroaLeaf" + i.toString() + "_" + suffix);
+    }
+    let outLabel = "sroaLeafOut_" + suffix;
+    let indexLowered = this.compileExpression(
+      elementAccess.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+
+    // One leaf per element. A missing or placeholder entry means the field is
+    // not a leaf of this record (a nested `@inline` field), which the constant
+    // path already refuses by name; there is nothing to select here either.
+    let leaves = new Array<i32>(length);
+    for (let i = 0; i < length; ++i) {
+      let elementEntry = getMapEntry(fieldLocals, i.toString());
+      let elementNested = elementEntry != null ? elementEntry.fieldLocals : null;
+      if (elementNested == null) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          elementAccess.range,
+          "reading this member through a runtime array index (the element field is not a single WASM local; a nested inline value needs the deep-SROA phase)"
+        );
+        return module.unreachable();
+      }
+      let leafEntry = getMapEntry(elementNested, property.name);
+      if (leafEntry == null || leafEntry.index < 0) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          elementAccess.range,
+          "reading this member through a runtime array index (only supported fields are readable; a refused or computed member has no local)"
+        );
+        return module.unreachable();
+      }
+      unchecked(leaves[i] = leafEntry.index);
+    }
+
+    let bodies = new Array<ExpressionRef>(length);
+    for (let i = 0; i < length; ++i) {
+      unchecked(bodies[i] = module.br(
+        outLabel, 0, module.local_get(unchecked(leaves[i]), fieldRef)
+      ));
+    }
+    let chain = module.drop(module.switch(
+      names, unchecked(names[length - 1]), indexLowered
+    ));
+    chain = module.block(unchecked(names[length - 1]), [ chain ]);
+    for (let i = length - 2; i >= 0; --i) {
+      chain = module.block(unchecked(names[i]), [ chain, unchecked(bodies[i + 1]), module.nop() ]);
+    }
+    this.currentType = property.type;
+    return module.block(outLabel, [ chain, unchecked(bodies[0]) ], fieldRef);
+  }
+
+  /**
+   * Writes `arr[i].field = value` where `arr` is a value-form array of records
+   * and `i` is a runtime index. Returns `0` when the shape does not apply.
+   *
+   * The mirror of {@link compileSroaArrayLeafByRuntimeIndex}: one block per
+   * element, each storing into that element's `<field>` leaf. The value is
+   * materialised into a temp first — one WASM node cannot be the parent of N
+   * stores — which is the same reason the scalar runtime-index write does it.
+   */
+  private compileSroaArrayLeafStoreByRuntimeIndex(
+    elementAccess: ElementAccessExpression,
+    property: Property,
+    valueExpr: ExpressionRef
+  ): ExpressionRef {
+    let arrayLocal = this.resolveSroaValueArray(elementAccess.expression);
+    if (arrayLocal == null) return 0;
+    let arrayType = arrayLocal.type;
+    let elementType = arrayType.fixedArrayElementType;
+    if (elementType.getClass() == null) return 0;    // scalar element: the ordinary path
+    if (this.constantIndexValue(elementAccess.elementExpression) >= 0) return 0;
+    if (!property.isField) return 0;
+    let fieldLocals = assert(arrayLocal.fieldLocals);
+    let length = arrayType.fixedLength;
+    if (length > Compiler.VALUE_ARRAY_MAX_RUNTIME_INDEX) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        elementAccess.range,
+        "a runtime index into a `[T * N]` value with N > 8 (the element is selected by a branch per element, which stops paying for itself past eight). Use a constant index, or `@unmanaged [T * N]` for a pointer view with unlimited runtime indexing"
+      );
+      return this.module.unreachable();
+    }
+    let module = this.module;
+    let fieldType = property.type;
+    let fieldRef = fieldType.toRef();
+    let leaves = new Array<i32>(length);
+    for (let i = 0; i < length; ++i) {
+      let elementEntry = getMapEntry(fieldLocals, i.toString());
+      let elementNested = elementEntry != null ? elementEntry.fieldLocals : null;
+      let leafEntry = elementNested != null ? getMapEntry(elementNested, property.name) : null;
+      if (leafEntry == null || leafEntry.index < 0) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          elementAccess.range,
+          "assigning this member through a runtime array index (only supported fields are writable; a refused or computed member has no local)"
+        );
+        return module.unreachable();
+      }
+      unchecked(leaves[i] = leafEntry.index);
+    }
+
+    let suffix = (++this.sroaSelectId).toString();
+    let names = new Array<string>(length);
+    for (let i = 0; i < length; ++i) {
+      unchecked(names[i] = "sroaStore" + i.toString() + "_" + suffix);
+    }
+    let outLabel = "sroaStoreOut_" + suffix;
+    let indexLowered = this.compileExpression(
+      elementAccess.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+    let valueTemp = this.currentFlow.getTempLocal(fieldType).index;
+
+    let bodies = new Array<ExpressionRef>(length);
+    for (let i = 0; i < length; ++i) {
+      unchecked(bodies[i] = module.local_set(
+        unchecked(leaves[i]), module.local_get(valueTemp, fieldRef), false
+      ));
+    }
+    let chain = module.drop(module.switch(
+      names, unchecked(names[length - 1]), indexLowered
+    ));
+    chain = module.block(unchecked(names[length - 1]), [ chain ]);
+    for (let i = length - 2; i >= 0; --i) {
+      chain = module.block(unchecked(names[i]), [
+        chain, unchecked(bodies[i + 1]), module.br(outLabel)
+      ]);
+    }
+    this.currentType = Type.void;
+    return module.block(outLabel, [
+      module.local_set(valueTemp, valueExpr, false),
+      chain,
+      unchecked(bodies[0])
+    ]);
   }
 
   private compileSroaLocal(

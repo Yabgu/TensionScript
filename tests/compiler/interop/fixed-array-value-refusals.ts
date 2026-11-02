@@ -27,9 +27,10 @@
 //
 // **The heap form** is refused in every position (Landing 5c).
 //
-// A **record element** is refused for the value form — it would have to lay N
-// records out inline, which is Landing 5b — and accepted for the view form,
-// which is the pointer-to-a-run-of-records that `[T *]` already gives.
+// A **record element** was refused for the value form until Landing 5b.1 fixed
+// the element sizing; it is accepted now (see `fixed-array-record-element-size`
+// and `fixed-array-record-element-local`), and for the view form it always was
+// — `@unmanaged [T * N]` is a pointer to a run of records.
 //
 // Each probe below is written to produce exactly one diagnostic: no probe reads
 // a binding whose declaration was refused, so the fixture pins causes rather
@@ -74,18 +75,3 @@ export function heapField(o: usize): u32 {
   return 0;
 }
 
-// --- a record element, value form only ------------------------------------
-
-@unmanaged struct RecordElement {
-  a: u32;
-  b: u32;
-}
-
-@unmanaged struct RecordFieldHolder {
-  xs: [RecordElement * 2];
-}
-
-export function recordFieldHolder(o: usize): u32 {
-  const h = changetype<RecordFieldHolder>(o);
-  return 0;
-}

@@ -470,6 +470,58 @@ export class Type {
     return classReference != null && classReference.hasDecorator(DecoratorFlags.Unmanaged);
   }
 
+  /**
+   * This type's extent in bytes when it is stored **inline**, rather than by
+   * reference.
+   *
+   * For a scalar the two are the same number, and for an ordinary class neither
+   * is what an inline array wants -- a class element is stored as its 4-byte
+   * reference, so `byteSize` is right there. The one case where `byteSize` is
+   * **wrong** is a C-layout record (`@unmanaged` / `@managed struct`, and
+   * `@inline struct`, which the parser also flags `@unmanaged`): there
+   * `byteSize` is the reference width (4) while the bytes an inline element
+   * actually occupies are the record's layout size, `Class#nextMemoryOffset`.
+   *
+   * That is the same pair `builtin_sizeof` distinguishes
+   * (`builtins.ts`, the `Unmanaged | ManagedStruct` branch), and it is why
+   * `sizeof<Props>()` answered 16 while `sizeof<[Props * 4]>()` answered 16
+   * instead of 64: the array's size was built from the reference width.
+   */
+  get inlineExtentBytes(): i32 {
+    let classReference = this.classReference;
+    if (
+      classReference != null &&
+      (classReference.hasDecorator(DecoratorFlags.Unmanaged) ||
+       classReference.hasDecorator(DecoratorFlags.ManagedStruct))
+    ) {
+      return <i32>classReference.nextMemoryOffset;
+    }
+    return this.byteSize;
+  }
+
+  /**
+   * This type's alignment as a log2 when it is stored inline.
+   *
+   * A record's alignment is the strongest of its fields', accumulated while the
+   * resolver lays it out (`Class#alignLog2`), and **not** `Type#alignLog2` —
+   * which reads the class's 4-byte reference size and would report 2 for every
+   * record, including one aligned to 8. The same distinction `builtin_alignof`
+   * makes, for the same reason.
+   */
+  get inlineAlignLog2(): i32 {
+    let classReference = this.classReference;
+    if (
+      classReference != null &&
+      (classReference.hasDecorator(DecoratorFlags.Unmanaged) ||
+       classReference.hasDecorator(DecoratorFlags.ManagedStruct))
+    ) {
+      return classReference.alignLog2;
+    }
+    // Includes a nested `FixedArray`, whose own `alignLog2` carries its element's
+    // alignment rather than deriving one from a non-power-of-two extent.
+    return this.alignLog2;
+  }
+
   get isMemory(): bool {
     switch (this.kind) {
       case TypeKind.Bool:
@@ -1177,14 +1229,19 @@ export class Type {
       TypeKind.FixedArray,
       TypeFlags.None,
       isValueForm
-        ? elementType.byteSize * length << 3 // bytes -> bits
+        // The element's **extent**, not `byteSize`: those differ for a record,
+        // where `byteSize` is the 4-byte reference. Landing 1 wrote `byteSize`
+        // here, which was unobservable while record elements were refused
+        // outright and wrong the moment they became reachable.
+        ? elementType.inlineExtentBytes * length << 3 // bytes -> bits
         : pointerSize
     );
     arrayType.fixedElementType = elementType;
     arrayType.fixedLength = length;
     arrayType.fixedMemoryModel = memoryModel;
     arrayType.fixedAlignLog2 = isValueForm
-      ? elementType.alignLog2
+      // Aligned as its element is — for a record, the strongest of its fields'.
+      ? elementType.inlineAlignLog2
       : 31 - clz<i32>(pointerSize >>> 3);
     cache.set(key, arrayType);
     return arrayType;

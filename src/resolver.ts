@@ -801,14 +801,52 @@ export class Resolver extends DiagnosticEmitter {
       let elementClass = elementType.classReference;
       if (
         elementClass != null &&
-        (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
-         elementClass.hasDecorator(DecoratorFlags.ManagedStruct))
+        // A **managed** record element stays refused: its layout has no room for
+        // the GC header the collector would need to trace it, so N of them
+        // inline would be N untraceable references. (The value form cannot carry
+        // a GC edge at all — the same rule that refuses a `@managed` field in a
+        // record, one step further out.)
+        //
+        // An **unmanaged** record element is accepted as of Landing 5b.1. It
+        // used to be refused here as well, because the array's size was built
+        // from the element's `byteSize` — 4 for a record — so `Props[4]` claimed
+        // 16 bytes for four 16-byte records. With the extent fixed
+        // (`Type#inlineExtentBytes`) the claim is true, and the element is laid
+        // out inline exactly as the C declaration would.
+        elementClass.hasDecorator(DecoratorFlags.ManagedStruct)
       ) {
         if (reportMode == ReportMode.Report) {
           this.error(
             DiagnosticCode.Not_implemented_0,
             node.elementType.range,
-            "an inline array (T[N]) of a record — the wire records are pointers in this position, not values; use a length + a view base, or wrap the array in an @unmanaged struct with explicit fields"
+            "an inline array (T[N]) of a @managed record (the elements would be GC references with nowhere for the collector to find their headers; use Array<T>, or @unmanaged records for a C-layout block)"
+          );
+        }
+        return null;
+      }
+      // **A record that is still being laid out has no extent yet.**
+      //
+      // `nextMemoryOffset` is accumulated field by field, so a record that
+      // reaches itself through an inline array reads a partial (or zero) extent,
+      // and the resulting `Type` is interned with that number for the rest of the
+      // compile. Measured before this check: `@unmanaged struct N { head: u32;
+      // next: [N * 2]; }` reported `sizeof<N>()` = **4** — a record claiming to
+      // contain two copies of itself in four bytes — with no diagnostic.
+      //
+      // The same hazard `resolveClass` refuses for a nested `@inline` field, and
+      // it is answered the same way: the layout loop records what it is working
+      // on (`resolveClassPending`), so membership is the test.
+      if (
+        elementClass != null &&
+        elementClass.hasDecorator(DecoratorFlags.Unmanaged) &&
+        this.resolveClassPending.has(elementClass)
+      ) {
+        if (reportMode == ReportMode.Report) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            node.elementType.range,
+            "a recursive record: '" + elementClass.name +
+              "' would have an infinite size (it contains itself by value, directly or through another record)"
           );
         }
         return null;
