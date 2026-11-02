@@ -1,13 +1,11 @@
 {
-  "asc_flags": [
-  ],
+  "asc_flags": [],
   "stderr": [
     "AS100: Not implemented: @managed dynamic arrays are Landing 4d; use @unmanaged @dynamic for now",
     "AS100: Not implemented: inline runtime-length arrays have no WASM representation; use @unmanaged @dynamic (C-compatible) or @managed @dynamic (GC-managed)",
     "AS100: Not implemented: sizeof of a dynamic array view is the pointer size (4), not the data size; use `.length * sizeof<T>` for the element count",
     "AS100: Not implemented: [T * N] where N is a compile-time constant — use [T * <literal>] for a static array or [T * n] (runtime identifier) for a dynamic array",
-    "TS2329: Index signature is missing in type '@unmanaged @dynamic [u32 * n]'.",
     "AS100: Not implemented: a dynamic array cannot hold GC references (its buffer is not scanned); use a scalar, an @unmanaged struct, or an @inline struct element",
-    "6 compile error(s)"
+    "5 compile error(s)"
   ]
 }

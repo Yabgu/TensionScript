@@ -5497,6 +5497,13 @@ export class Compiler extends DiagnosticEmitter {
           contextualType, Constraints.None, null, expr
         );
       }
+      // Same shape for a dynamic array; the access arm carries the bounds check.
+      if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        return this.compileDynamicArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, null, expr
+        );
+      }
     }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
@@ -6412,6 +6419,12 @@ export class Compiler extends DiagnosticEmitter {
       // property and the record setter takes the address this arm yields.
       if (arrayType && arrayType.kind == TypeKind.UnmanagedArray) {
         return this.compileUnmanagedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, valueExpression
+        );
+      }
+      if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        return this.compileDynamicArrayElementAccess(
           elementAccess, arrayType, true,
           contextualType, Constraints.None, valueExpression
         );
@@ -11782,6 +11795,19 @@ export class Compiler extends DiagnosticEmitter {
           module.local_get(tempLocal.index, this.currentType.toRef())
         ], this.currentType.toRef());
       }
+      // The same for a dynamic array, bounds check included.
+      if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        let stored = this.compileDynamicArrayElementAccess(
+          elementAccess, arrayType, true,
+          Type.void, Constraints.None, null, expr
+        );
+        this.currentType = arrayType.dynamicElementType;
+        if (!tempLocal) return stored;
+        return module.block(null, [
+          stored,
+          module.local_get(tempLocal.index, this.currentType.toRef())
+        ], this.currentType.toRef());
+      }
     }
     let target = resolver.lookupExpression(expression.operand, flow); // reports
     if (!target) {
@@ -12179,6 +12205,13 @@ export class Compiler extends DiagnosticEmitter {
         // for the element type makes it return what it stored.
         this.currentType = arrayType.unmanagedArrayElementType;
         return this.compileUnmanagedArrayElementAccess(
+          elementAccess, arrayType, true,
+          this.currentType, Constraints.None, null, expr
+        );
+      }
+      if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        this.currentType = arrayType.dynamicElementType;
+        return this.compileDynamicArrayElementAccess(
           elementAccess, arrayType, true,
           this.currentType, Constraints.None, null, expr
         );
