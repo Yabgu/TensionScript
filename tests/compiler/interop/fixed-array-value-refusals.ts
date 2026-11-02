@@ -20,8 +20,10 @@
 //      inline bytes. This is the one compile-time bug Landing 5a introduced:
 //      one `toRef` arm answered `I32` for every form, so this compiled and a
 //      value-typed thing came to carry an address. Use `@unmanaged [T * N]`.
-//   2. a parameter, 3. a return, 4. a local, 5. a global — inline bytes have no
-//      slot in any of them until Landing 5b.
+//   2. a parameter, 3. a return, 4. a global — inline bytes have no slot in any
+//      of them yet (a **local** does: Landing 5b gives it one WASM local per
+//      element leaf, so that position moved to
+//      `fixed-array-value-local`).
 //
 // **The heap form** is refused in every position (Landing 5c).
 //
@@ -47,11 +49,6 @@ export function valueParam(a: [u32 * 4]): u32 {
 
 export function valueReturn(p: usize): [u32 * 4] {
   return changetype<@unmanaged [u32 * 4]>(p);
-}
-
-export function valueLocal(): u32 {
-  let a: [u32 * 4];
-  return 0;
 }
 
 const valueGlobal: [u32 * 4] = unreachable();

@@ -13934,6 +13934,9 @@ export class Compiler extends DiagnosticEmitter {
    */
   private static readonly VALUE_ARRAY_MAX_RUNTIME_INDEX: i32 = 8;
 
+  /** Per-emission counter for the runtime-index block labels, so two accesses in
+   *  one function cannot collide (Binaryen requires unique block names). */
+  private sroaSelectId: i32 = 0;
 
   /**
    * Fills `into` with one entry per **element** of a value-form `[T * N]`.
@@ -14052,11 +14055,7 @@ export class Compiler extends DiagnosticEmitter {
     if (initializerNode.kind == NodeKind.Identifier) {
       let source = this.resolveSroaValueArray(initializerNode);
       if (source != null && source.type.equals(type)) {
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          initializerNode.range,
-          "copying one `[T * N]` value into another (Landing 5b part 2)"
-        );
+        this.copySroaValue(assert(source.fieldLocals), fieldLocals, initializers);
         return true;
       }
     }
@@ -14200,13 +14199,19 @@ export class Compiler extends DiagnosticEmitter {
         return module.unreachable();
       }
       if (isWrite) {
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          expression.range,
-          "writing a `[T * N]` element (Landing 5b part 2)"
+        let value = valueRef || this.compileExpression(
+          assert(valueExpression), elementType, Constraints.ConvImplicit
         );
+        if (contextualType == Type.void) {
+          this.currentType = Type.void;
+          return module.local_set(entry.index, value, false);
+        }
+        // The assignment is used as a value: store, then yield what was written.
         this.currentType = elementType;
-        return module.unreachable();
+        return module.block(null, [
+          module.local_set(entry.index, value, false),
+          module.local_get(entry.index, entry.type.toRef())
+        ], elementType.toRef());
       }
       this.currentType = elementType;
       return module.local_get(entry.index, entry.type.toRef());
@@ -14236,13 +14241,114 @@ export class Compiler extends DiagnosticEmitter {
       this.currentType = elementType;
       return module.unreachable();
     }
-    this.error(
-      DiagnosticCode.Not_implemented_0,
-      expression.range,
-      "a runtime index into a `[T * N]` value (Landing 5b part 2)"
+    return this.compileSroaValueArrayRuntimeIndex(
+      expression, local, isWrite, contextualType, constraints, valueExpression, valueRef
     );
-    this.currentType = elementType;
-    return module.unreachable();
+  }
+
+  /**
+   * Selects one element leaf of a value-form array by a runtime index.
+   *
+   * The shape is one `br_table` with a block per element, each block yielding
+   * that element's leaf — the only way to choose between WASM locals at runtime,
+   * since they are not addressable. An index outside `[0, N)` is the caller's
+   * error, exactly as it is for `[T *]`: the extent is compile-time and there is
+   * no length on the value stack to check against.
+   */
+  private compileSroaValueArrayRuntimeIndex(
+    expression: ElementAccessExpression,
+    local: Local,
+    isWrite: bool,
+    contextualType: Type,
+    constraints: Constraints,
+    valueExpression: Expression | null,
+    valueRef: ExpressionRef
+  ): ExpressionRef {
+    let module = this.module;
+    let arrayType = local.type;
+    let elementType = arrayType.fixedArrayElementType;
+    let fieldLocals = assert(local.fieldLocals);
+    let length = arrayType.fixedLength;
+    let elementRef = elementType.toRef();
+    let indexLowered = this.compileExpression(
+      expression.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+    let value = isWrite
+      ? (valueRef || this.compileExpression(assert(valueExpression), elementType, Constraints.ConvImplicit))
+      : 0;
+
+    // One case block per element, named so the switch can target them by index.
+    // The names carry a per-emission id: a write compiles its target more than
+    // once (the assignment path reads the destination before storing), and
+    // Binaryen rejects repeated block names — measured as "names in Binaryen IR
+    // must be unique" on `arr[i] = v`.
+    let suffix = (++this.sroaSelectId).toString();
+    let names = new Array<string>(length);
+    for (let i = 0; i < length; ++i) {
+      unchecked(names[i] = "sroaSel" + i.toString() + "_" + suffix);
+    }
+    let outLabel = "sroaSelOut_" + suffix;
+
+    // The store case needs the value in **one** place: a WASM node has one
+    // parent, so N case bodies cannot each hold the same `value` subtree. It is
+    // materialised into a temp first and read back per case.
+    let valueTemp = -1;
+    if (isWrite) {
+      valueTemp = this.currentFlow.getTempLocal(elementType).index;
+    }
+
+    // One case body per element. A read's body **carries** the value, because
+    // `sroaSelOut` has the element's type and a bare `br` there is a validation
+    // error ("non-final block elements returning a value must be dropped").
+    // Built as an array rather than by a helper closure: the self-hosted
+    // compiler refuses a captured local without a declared type, measured as
+    // `AS100: a captured local without a declared type (closures lowering)` when
+    // bootstrapping this very file.
+    let bodies = new Array<ExpressionRef>(length);
+    for (let i = 0; i < length; ++i) {
+      let leaf = assert(fieldLocals.get(i.toString())).index;
+      unchecked(bodies[i] = isWrite
+        ? module.local_set(leaf, module.local_get(valueTemp, elementRef), false)
+        : module.br(outLabel, 0, module.local_get(leaf, elementRef)));
+    }
+
+    // The body of case `i` sits **after** block `i`'s `end`, one level out — that
+    // is where a `br_table` target lands. So the innermost block holds only the
+    // switch, and each enclosing block appends the *next* element's body: block
+    // `i`'s children are [block `i+1`, body `i+1`, branch]. Element 0's body is
+    // the fall-through after block 0, which is the out-block's value.
+    //
+    // Verified the wrong way round first: bodies inside their own block gave
+    // `i=0,1,2,3 -> 10,10,20,30` — every element one index early, and no
+    // diagnostic to say so.
+    let chain = module.drop(module.switch(
+      names, unchecked(names[length - 1]), indexLowered
+    ));
+    chain = module.block(unchecked(names[length - 1]), [ chain ]);
+    for (let i = length - 2; i >= 0; --i) {
+      chain = module.block(unchecked(names[i]), [
+        chain,
+        unchecked(bodies[i + 1]),
+        isWrite ? module.br(outLabel) : module.nop()
+      ]);
+    }
+    let fallThrough = unchecked(bodies[0]);
+    let dispatch = module.block(
+      outLabel, [ chain, fallThrough ], isWrite ? TypeRef.None : elementRef
+    );
+    if (!isWrite) {
+      this.currentType = elementType;
+      return dispatch;
+    }
+    this.currentType = contextualType == Type.void ? Type.void : elementType;
+    if (contextualType == Type.void) {
+      return module.block(null, [ module.local_set(valueTemp, value, false), dispatch ]);
+    }
+    return module.block(null, [
+      module.local_set(valueTemp, value, false),
+      dispatch,
+      module.local_get(valueTemp, elementRef)
+    ], elementRef);
   }
 
   private compileSroaLocal(
