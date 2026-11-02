@@ -2248,6 +2248,16 @@ export class Resolver extends DiagnosticEmitter {
     switch (type.kind) {
       case TypeKind.UnmanagedArray: return type.unmanagedArrayElementType;
       case TypeKind.DynamicArray: return type.dynamicElementType;
+      // `[T * N]`, both storage forms. The element is the same question either
+      // way -- an extent does not change what sits at `base + i * sizeof(T)` --
+      // and `arr[i].field` needs the element's *class* to peel the property, so
+      // without this arm a record-element view
+      // (`changetype<@unmanaged [T * 2]>(p)` then `arr[i].a`) answered
+      // `TS2329: Index signature is missing in type '@unmanaged [T * 2]'`
+      // instead of typing the element. Scalar elements were unaffected only
+      // because a scalar read is compiled without ever asking the resolver for
+      // the element's type.
+      case TypeKind.FixedArray: return type.fixedElementType;
     }
     let classReference = type.classReference;
     if (classReference != null && this.isManagedDynamicArrayClass(classReference)) {
@@ -4518,6 +4528,17 @@ export class Resolver extends DiagnosticEmitter {
                 // element access then indexes as if it were a data pointer.
                 // Refused here, where the layout would otherwise accept the
                 // 4-byte slot, rather than left to misbehave at the first read.
+                if (
+                  fieldType.kind == TypeKind.FixedArray &&
+                  fieldType.fixedMemoryModel == MemoryModelCode.Managed
+                ) {
+                  this.error(
+                    DiagnosticCode.Not_implemented_0,
+                    assert(boundPrototype.typeNode).range,
+                    "heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)"
+                  );
+                  break;
+                }
                 if (fieldType.isExternalReference) {
                   this.error(
                     DiagnosticCode.Not_implemented_0,

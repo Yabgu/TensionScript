@@ -53,7 +53,8 @@ import {
 import {
   Type,
   TypeKind,
-  TypeFlags
+  TypeFlags,
+  MemoryModelCode
 } from "./types";
 
 import {
@@ -4014,6 +4015,31 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   // only place that knows where the operand ends up.
   if (isUnmanagedRecord(toType) && isManagedRecord(fromType)) {
     compiler.markOperandForRooting();
+  }
+  // A **value-form** `[T * N]` target has no address to receive one.
+  //
+  // `changetype<@unmanaged [T * N]>(p)` is the view cell and stays legal: the
+  // target is a pointer, and the operand names one. `changetype<[T * N]>(p)`
+  // reads the same in source but is a different claim — the target is N inline
+  // elements with no address of its own, so there is no slot to put `p` in
+  // until Landing 5b gives the value form inline storage. Landing 5a let this
+  // compile (one `toRef` arm answered `I32` for every form), which is how a
+  // value-typed thing came to carry an address.
+  //
+  // Checked here, ahead of the generic `isChangeableTo` refusal, because the
+  // general answer (`AS202: Type 'usize' cannot be changed to type ...`) says
+  // what failed but not what to write instead.
+  if (
+    toType.kind == TypeKind.FixedArray &&
+    (toType.fixedMemoryModel == MemoryModelCode.None ||
+     toType.fixedMemoryModel == MemoryModelCode.Inline)
+  ) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.range,
+      "a value-typed `[T * N]` cannot be constructed from an address via changetype — use `@unmanaged [T * N]` for a pointer view, or Landing 5b will give the value form inline storage"
+    );
+    return module.unreachable();
   }
   if (!fromType.isChangeableTo(toType)) {
     compiler.error(

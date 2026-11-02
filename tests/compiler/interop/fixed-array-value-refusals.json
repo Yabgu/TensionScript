@@ -1,11 +1,14 @@
 {
   "asc_flags": [],
   "stderr": [
-    "AS100: Not implemented: a `[T * N]` global without an initializer (a fixed array is a view of storage someone else owns; Landing 5c). Give it a `changetype<[T * N]>(ptr)` initializer, or use `[T *]` for an unknown-length view",
-    "AS100: Not implemented: an inline array (T[N]) of an @inline struct (elements by value are a later phase)",
-    "TS2558: Expected 1 type arguments, but got 0.",
-    "TS2329: Index signature is missing in type 'auto'.",
-    "AS100: Not implemented: a record with a `[T * N]` field constructed by `new` (the field is inline storage, not a view, and there is no allocation strategy for its bytes yet; Landing 5b). Use an `@unmanaged struct` plus `changetype<H>(ptr)` to view the bytes instead",
-    "5 compile error(s)"
+    "AS100: Not implemented: cannot declare `[T * N]` at module scope yet — Landing 5b. Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view",
+    "AS100: Not implemented: a value-typed `[T * N]` cannot be constructed from an address via changetype — use `@unmanaged [T * N]` for a pointer view, or Landing 5b will give the value form inline storage",
+    "AS100: Not implemented: cannot pass `[T * N]` by value yet — Landing 5b (inline bytes have no value-stack representation). Use `@unmanaged [T * N]` for a pointer view",
+    "AS100: Not implemented: cannot return `[T * N]` by value yet — Landing 5b (the value form is inline bytes and a return needs caller-allocated storage). Use `@unmanaged [T * N]` for a pointer view",
+    "AS100: Not implemented: cannot declare `[T * N]` as a local value yet — Landing 5b (inline bytes have no local slot). Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view",
+    "AS100: Not implemented: heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)",
+    "AS100: Not implemented: heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)",
+    "AS100: Not implemented: an inline array (T[N]) of a record — the wire records are pointers in this position, not values; use a length + a view base, or wrap the array in an @unmanaged struct with explicit fields",
+    "8 compile error(s)"
   ]
 }
