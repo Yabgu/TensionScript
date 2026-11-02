@@ -196,6 +196,23 @@ export class Type {
   /** Element count of a {@link TypeKind.FixedArray}, else `0`. */
   fixedLength: i32 = 0;
   /**
+   * Who owns a {@link TypeKind.FixedArray}'s storage — the second axis of the
+   * kind, alongside the element and the length.
+   *
+   * The memory model was already on the AST (`TypeNode.memoryModel`) and was
+   * simply dropped before Landing 5a.5: `Type.fixedArray` interned one object
+   * per `(element, length)`, so `[u32 * 4]`, `@unmanaged [u32 * 4]`,
+   * `@managed [u32 * 4]` and `@inline [u32 * 4]` were **the same Type**, and
+   * the prefix was decorative — measured, all four emitted identical code.
+   *
+   * The two forms are not the same thing. `[u32 * 4]` is 16 bytes of inline
+   * elements with no address of its own; `@unmanaged [u32 * 4]` is a pointer to
+   * four elements, i.e. 4 bytes. Part of {@link equals} for the same reason
+   * {@link dynamicMemoryModel} is: interning them together would make the two
+   * spellings the same object, and no downstream test could tell them apart.
+   */
+  fixedMemoryModel: MemoryModelCode = MemoryModelCode.None;
+  /**
    * Element type of a {@link TypeKind.UnmanagedArray}, else `null`.
    *
    * Kept apart from {@link fixedElementType} rather than shared. The two kinds
@@ -218,12 +235,16 @@ export class Type {
    */
   dynamicMemoryModel: MemoryModelCode = MemoryModelCode.None;
   /**
-   * Alignment (log2) of a {@link TypeKind.FixedArray}: its element's.
+   * Alignment (log2) of a {@link TypeKind.FixedArray}.
    *
-   * `alignLog2` cannot derive this from `byteSize` -- a 24-byte `f32[6]` would
-   * report 16-byte alignment (`31 - clz(24)` = 4), and a 96-byte `f32[24]` would
-   * report 64. An array is aligned as its element is, no matter how long it is,
-   * so the value is carried rather than computed.
+   * For the **value** form this is the element's. `alignLog2` cannot derive
+   * that from `byteSize` -- a 24-byte `f32[6]` would report 16-byte alignment
+   * (`31 - clz(24)` = 4), and a 96-byte `f32[24]` would report 64. An array is
+   * aligned as its element is, no matter how long it is, so the value is carried
+   * rather than computed.
+   *
+   * For the **view** form it is the *pointer's*, because that is what the value
+   * is: the extent says nothing about how the address is aligned.
    */
   private fixedAlignLog2: i32 = 0;
   /** Respective non-nullable type, if nullable. */
@@ -531,11 +552,16 @@ export class Type {
       return false;
     }
     if (this.kind == TypeKind.FixedArray) {
+      // Element, length **and model**: `[u32 * 4]` is 16 bytes of inline
+      // elements and `@unmanaged [u32 * 4]` is a 4-byte pointer to them. Same
+      // element, same count, different storage — so different types, exactly
+      // as the `DynamicArray` arm below compares its model.
       let elementType = this.fixedElementType;
       let otherElementType = other.fixedElementType;
       return (
         elementType != null && otherElementType != null
         && this.fixedLength == other.fixedLength
+        && this.fixedMemoryModel == other.fixedMemoryModel
         && elementType.equals(otherElementType)
       );
     }
@@ -725,7 +751,16 @@ export class Type {
     // The extent is deliberately not checked here, because an address carries
     // no count: `changetype<[u32 * 4]>(p)` is the caller saying "four elements
     // follow p", exactly as `changetype<[u32 *]>(p)` says "some follow p".
+    //
+    // Since Landing 5a.5 this is the **view** form's cell only. A value-form
+    // target (`[T * N]`, `@inline [T * N]`) has no address to hold: an integer
+    // names one, but the value it would be stored in is inline bytes, so there
+    // is no slot to put the address in until Landing 5b. Refused here so the
+    // general answer is "no", and refused again with a targeted diagnostic at
+    // the builtin, where the operand and its type are both in hand.
     if (target.kind == TypeKind.FixedArray) {
+      if (target.fixedMemoryModel == MemoryModelCode.None ||
+          target.fixedMemoryModel == MemoryModelCode.Inline) return false;
       return this.is(TypeFlags.Integer) || this.kind == TypeKind.FixedArray;
     }
     // special in that it allows integer references as well
@@ -824,9 +859,20 @@ export class Type {
       case TypeKind.StringviewWTF16: return CommonNames.ref_stringview_wtf16;
       case TypeKind.StringviewIter: return CommonNames.ref_stringview_iter;
       case TypeKind.FixedArray: {
+        // Spelled the way the source spells it, so a diagnostic that quotes the
+        // type is readable back in — and, since Landing 5a.5, so that the two
+        // storage forms cannot be confused in one: `[u32 * 4]` is inline
+        // elements, `@unmanaged [u32 * 4]` is a pointer to them. Before the
+        // split both printed `u32[4]`, which is how the prefix went unnoticed.
         let elementType = this.fixedElementType;
-        return (elementType ? elementType.toString() : "?")
-          + "[" + this.fixedLength.toString() + "]";
+        let inner = "[" + (elementType ? elementType.toString() : "?")
+          + " * " + this.fixedLength.toString() + "]";
+        switch (this.fixedMemoryModel) {
+          case MemoryModelCode.Unmanaged: return "@unmanaged " + inner;
+          case MemoryModelCode.Managed: return "@managed " + inner;
+          case MemoryModelCode.Inline: return "@inline " + inner;
+          default: return inner;
+        }
       }
       case TypeKind.UnmanagedArray: {
         // Spelled the way the source spells it, so a diagnostic that quotes the
@@ -927,21 +973,30 @@ export class Type {
       }
       case TypeKind.Void: return TypeRef.None;
       case TypeKind.FixedArray: {
-        // A `[T * N]` value is a *view* of N contiguous elements: the address
-        // the caller provides (`changetype<[T * N]>(ptr)`) or the one a parent
-        // record's layout supplies (`@unmanaged struct H { arr: [u32 * 4] }`).
-        // Its value representation is therefore that address -- one slot -- not
-        // its inline extent. This arm is what retires the `assert(false)`
-        // below for the kind: without it, every use that needs a WASM slot
-        // (element access through a local, a parameter, a global, a `new`
-        // field initialiser) aborted the compiler.
+        // Only the **view** and **heap** forms have a slot representation: both
+        // are an address, so both cross the value stack as one `i32`.
         //
-        // Unlike `UnmanagedArray` above, `this.size` cannot answer the pointer
-        // width here: a fixed array's `size` is its extent
-        // (`elementType.byteSize * length`), because that is what `sizeof`
-        // asks it for. So the slot is `i32` unconditionally, and a memory64
-        // build would have to consult the configured pointer width the way the
-        // `UnmanagedArray` arm does. Deferred with the rest of wasm64.
+        // The **value** form deliberately asserts. It is inline bytes with no
+        // address, and there is no slot that can carry N x sizeof(T) bytes
+        // until Landing 5b gives it inline storage (a stack slot, copy at the
+        // ABI, sret for a return). The assert is defensive rather than a
+        // placeholder: it means any 5a.5 path that reaches here with a value
+        // form is a bug, not an unimplemented feature — Landing 5a had this
+        // arm answering `I32` for every form, which is how
+        // `changetype<[T * N]>(p)` came to compile and make a value-typed thing
+        // carry an address.
+        //
+        // A fixed array's `size` cannot answer the pointer width here the way
+        // `UnmanagedArray`'s does: for the value form `size` is the extent,
+        // because that is what `sizeof` asks it for. So the view slot is `i32`
+        // unconditionally, and a memory64 build would have to consult the
+        // configured pointer width as the `UnmanagedArray` arm does. Deferred
+        // with the rest of wasm64.
+        if (this.fixedMemoryModel == MemoryModelCode.Unmanaged ||
+            this.fixedMemoryModel == MemoryModelCode.Managed) {
+          return TypeRef.I32;
+        }
+        assert(false);
         return TypeRef.I32;
       }
     }
@@ -1064,21 +1119,49 @@ export class Type {
   );
 
   /** A 64-bit float. */
-  /** Interned fixed-array types, keyed by element type and length. */
+  /** Interned fixed-array types, keyed by model, element type and length. */
   private static _fixedArrays: Map<string, Type> | null = null;
 
   /**
-   * Gets the {@link TypeKind.FixedArray} of `elementType` repeated `length` times.
+   * Gets the {@link TypeKind.FixedArray} of `elementType` repeated `length`
+   * times, in the storage named by `memoryModel`.
    *
-   * Interned: the same element and length always yield the same `Type`, so
-   * `offsetof`, `alignof`, `sizeof` and field lookup can compare by identity the
-   * way they do for every other type. Size is the element's byte size times the
-   * length, and the alignment is the element's -- carried in
-   * {@link fixedAlignLog2} rather than derived from the total, because a total
-   * is not a power of two for the lengths records actually have (`f32[6]`).
+   * Interned: the same `(model, element, length)` always yields the same `Type`,
+   * so `offsetof`, `alignof`, `sizeof` and field lookup can compare by identity
+   * the way they do for every other type.
+   *
+   * **The model is part of the identity**, and that is the point of Landing
+   * 5a.5. Before it, this function had one axis (element, length) and the memory
+   * model was dropped, so `[u32 * 4]` and `@unmanaged [u32 * 4]` were the same
+   * Type object — measured: both compiled, both `sizeof` 16, and all four
+   * spellings (`[T * N]`, `@unmanaged [T * N]`, `@managed [T * N]`,
+   * `@inline [T * N]`) emitted byte-identical code. A prefix that changes
+   * nothing is worse than one that is refused, because it reads as if it means
+   * something.
+   *
+   * The two honourable forms differ in both size and alignment:
+   *
+   *   value  (`Any` / `Inline`) — inline elements: `elementSize * length` bytes,
+   *                               aligned as the element is
+   *   view   (`Unmanaged`)      — one address: `pointerSize` bits, aligned as a
+   *                               pointer is
+   *   heap   (`Managed`)        — one GC reference, same shape as the view; the
+   *                               form itself is refused until Landing 5c, but
+   *                               the Type can be built so that `sizeof` answers
+   *                               the truth before the refusal fires
+   *
+   * `pointerSize` is in **bits**, matching `Type.size`.
    */
-  static fixedArray(elementType: Type, length: i32): Type {
-    let key = elementType.toString() + "[" + length.toString() + "]";
+  static fixedArray(
+    elementType: Type,
+    length: i32,
+    memoryModel: MemoryModelCode,
+    pointerSize: i32
+  ): Type {
+    let isValueForm = memoryModel == MemoryModelCode.None ||
+      memoryModel == MemoryModelCode.Inline;
+    let key = (isValueForm ? "-" : memoryModel == MemoryModelCode.Managed ? "m" : "u")
+      + elementType.toString() + "[" + length.toString() + "]";
     let cache = Type._fixedArrays;
     if (!cache) {
       let fresh = new Map<string, Type>();
@@ -1086,15 +1169,23 @@ export class Type {
       cache = fresh;
     }
     let cached = getMapEntry(cache, key);
-    if (cached) return cached;
+    // Validated by element identity as well: the map outlives a `Program`, so a
+    // second compile in one process must not be handed the first one's element
+    // `Class`.
+    if (cached && cached.fixedElementType == elementType) return cached;
     let arrayType = new Type(
       TypeKind.FixedArray,
       TypeFlags.None,
-      elementType.byteSize * length << 3 // bytes -> bits
+      isValueForm
+        ? elementType.byteSize * length << 3 // bytes -> bits
+        : pointerSize
     );
     arrayType.fixedElementType = elementType;
     arrayType.fixedLength = length;
-    arrayType.fixedAlignLog2 = elementType.alignLog2;
+    arrayType.fixedMemoryModel = memoryModel;
+    arrayType.fixedAlignLog2 = isValueForm
+      ? elementType.alignLog2
+      : 31 - clz<i32>(pointerSize >>> 3);
     cache.set(key, arrayType);
     return arrayType;
   }
