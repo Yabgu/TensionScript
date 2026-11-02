@@ -1,0 +1,11 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: a `[T * N]` global without an initializer (a fixed array is a view of storage someone else owns; Landing 5c). Give it a `changetype<[T * N]>(ptr)` initializer, or use `[T *]` for an unknown-length view",
+    "AS100: Not implemented: an inline array (T[N]) of an @inline struct (elements by value are a later phase)",
+    "TS2558: Expected 1 type arguments, but got 0.",
+    "TS2329: Index signature is missing in type 'auto'.",
+    "AS100: Not implemented: a record with a `[T * N]` field constructed by `new` (the field is inline storage, not a view, and there is no allocation strategy for its bytes yet; Landing 5b). Use an `@unmanaged struct` plus `changetype<H>(ptr)` to view the bytes instead",
+    "5 compile error(s)"
+  ]
+}
