@@ -141,6 +141,14 @@ function hasInlineDecorator(decorators: DecoratorNode[] | null): bool {
  * `@global`, `@abi.alias`, a custom name — is somebody else's decorator and is
  * left for the existing declaration/attribute paths to judge.
  */
+/** Whether a decorator is the bare `@dynamic` spelling. */
+function isDynamicDecoratorName(name: Expression): bool {
+  if (name.kind == NodeKind.Identifier) {
+    return (<IdentifierExpression>name).text == "dynamic";
+  }
+  return false;
+}
+
 function memoryModelOfDecoratorName(name: Expression): MemoryModel {
   let text: string | null = null;
   if (name.kind == NodeKind.Identifier) {
@@ -799,6 +807,13 @@ export class Parser extends DiagnosticEmitter {
     // type). See `TypeNode.memoryModel`.
     let memoryModel = MemoryModel.Any;
     let memoryModelDecorator: DecoratorNode | null = null;
+    // `@dynamic` is **not** a memory model: it says the length is a runtime value,
+    // while the model says who owns the buffer. They compose, so it is collected
+    // as its own flag rather than folded into {@link memoryModel} — `@unmanaged
+    // @dynamic` is the C shape, and `@managed @dynamic` (Landing 4d) is the same
+    // flag under a different owner.
+    let isDynamic = false;
+    let dynamicDecorator: DecoratorNode | null = null;
 
     // NOTE: this parses our limited subset
     let token = tn.next();
@@ -806,7 +821,17 @@ export class Parser extends DiagnosticEmitter {
       let decorator = this.parseDecorator(tn);
       if (!decorator) break;
       let model = memoryModelOfDecoratorName(decorator.name);
-      if (model == MemoryModel.Any) {
+      if (model == MemoryModel.Any && isDynamicDecoratorName(decorator.name)) {
+        if (isDynamic) {
+          this.error(
+            DiagnosticCode.Duplicate_identifier_0,
+            decorator.range, "@dynamic"
+          );
+        } else {
+          isDynamic = true;
+          dynamicDecorator = decorator;
+        }
+      } else if (model == MemoryModel.Any) {
         // A decorator that is not a memory model has no meaning before a type:
         // the only pre-type decorators are the three storage models.
         this.error(
@@ -916,6 +941,47 @@ export class Parser extends DiagnosticEmitter {
       assert(tn.skip(Token.Asterisk)); // established by `startsUnmanagedArrayType`
       if (tn.skip(Token.CloseBracket)) {
         type = Node.createUnmanagedArrayType(elementType, tn.range(startPos, tn.pos));
+      } else if (tn.peek() == Token.Identifier) {
+        // `[T * n]` — the length is an **identifier**, which the parser cannot
+        // evaluate and therefore must not classify: this is dynamic, and whether
+        // `n` is a compile-time constant is the *resolver's* question, because
+        // only it has a symbol table (`resolveDynamicArrayType`).
+        //
+        // Note the ordering: `[T * <int>]` above stays static, `[T * <id>]` here
+        // is dynamic, `[T *]` above that is `[T *]`. Three forms, three nodes,
+        // decided by one token.
+        assert(tn.skip(Token.Identifier));
+        let lengthName = Node.createIdentifierExpression(
+          tn.readIdentifier(), tn.range()
+        );
+        if (!tn.skip(Token.CloseBracket)) {
+          if (!suppressErrors) {
+            this.error(
+              DiagnosticCode._0_expected,
+              tn.range(), "]"
+            );
+          }
+          return null;
+        }
+        // The model decides the buffer's owner, and the two ways in differ:
+        //
+        //   `[T * n]`            — inferred dynamic. No model was written and
+        //                          none is implied, so it takes `@unmanaged`
+        //                          (D4): that is the only one that exists.
+        //   `@dynamic [T * n]`   — the marker was written explicitly and still
+        //                          names no owner. That is the *inline* reading,
+        //                          and inline has no representation, so `Any` is
+        //                          carried through for the resolver to refuse
+        //                          rather than being quietly defaulted (D10).
+        let node = Node.createDynamicArrayType(
+          elementType,
+          lengthName,
+          isDynamic
+            ? memoryModel
+            : (memoryModel != MemoryModel.Any ? memoryModel : MemoryModel.Unmanaged),
+          tn.range(startPos, tn.pos)
+        );
+        type = node;
       } else if (tn.peek() == Token.IntegerLiteral) {
         // `[T * N]`: the const-N desugar. Same bounds and the same diagnostic as
         // the postfix arm, so `[u32 * 0]` and `u32[0]` fail alike.
@@ -1143,6 +1209,22 @@ export class Parser extends DiagnosticEmitter {
         tn.range(startPos, tn.pos)
       );
       if (nullable) break;
+    }
+
+    // `@dynamic` names a runtime length, so it has to sit on a form that carries
+    // one. `@dynamic [u32 * 4]` is a contradiction -- a compile-time extent
+    // annotated as runtime -- and `@dynamic u32` says nothing about a length at
+    // all; both are refused here rather than surfacing later as a type that
+    // silently ignored the marker.
+    if (isDynamic && type.kind != NodeKind.DynamicArrayType) {
+      if (!suppressErrors) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          assert(dynamicDecorator).range,
+          "`@dynamic` applies to `[T * n]` only — a runtime length needs the identifier form"
+        );
+      }
+      return null;
     }
 
     // ... @Attribute: attributes written on the same line as the type belong to

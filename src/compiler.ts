@@ -123,6 +123,7 @@ import {
 import {
   Node,
   NodeKind,
+  DynamicArrayTypeNode,
   DecoratorKind,
   AssertionKind,
   SourceKind,
@@ -2111,6 +2112,40 @@ export class Compiler extends DiagnosticEmitter {
       flow.setLocalFlag(envIn.index, LocalFlags.Initialized);
     }
 
+    // Dynamic-array length prologue: `local.set $n, i32.load($ptr)` for each
+    // `[T * n]` parameter. `n` is bound by the signature
+    // (`Program`, `isDynamicLength`), so by here it is an ordinary i32 local with
+    // no value yet — this is where it gets one.
+    //
+    // Read once, at entry, from the header. That is the contract D5 states: the
+    // binding is a snapshot, not a live view of the buffer. If a callee rewrites
+    // the header, `.length` sees the new value and `n` does not, and the
+    // difference is visible rather than hidden.
+    {
+      let parameterTypes = instance.signature.parameterTypes;
+      let parameterNodes = (<FunctionDeclaration>instance.prototype.declaration).signature.parameters;
+      let flowLocals = flow.scopedLocals;
+      if (flowLocals != null) {
+        for (let i = 0, k = parameterTypes.length; i < k; ++i) {
+          if (i >= parameterNodes.length) break;
+          let typeNode = parameterNodes[i].type;
+          if (typeNode == null || typeNode.kind != NodeKind.DynamicArrayType) continue;
+          let lengthLocal = flowLocals.get((<DynamicArrayTypeNode>typeNode).lengthName.text);
+          let paramLocal = flowLocals.get(instance.getParameterName(i));
+          if (lengthLocal == null || paramLocal == null) continue;
+          if (!lengthLocal.isDynamicLength) continue;
+          stmts.push(
+            module.local_set(
+              lengthLocal.index,
+              module.load(4, false, module.local_get(paramLocal.index, TypeRef.I32), TypeRef.I32, 0, 4),
+              false
+            )
+          );
+          flow.setLocalFlag(lengthLocal.index, LocalFlags.Initialized);
+        }
+      }
+    }
+
     // compile statements
     if (bodyNode.kind == NodeKind.Block) {
       stmts = this.compileStatements((<BlockStatement>bodyNode).statements, stmts);
@@ -3571,6 +3606,20 @@ export class Compiler extends DiagnosticEmitter {
         );
       }
 
+      // Rule 3: a dynamic-array length binding may not be shadowed. Checked
+      // before anything is allocated, so the diagnostic points at the
+      // declaration rather than at the first read that got the wrong `n`.
+      {
+        let shadowed = flow.lookupLocal(name);
+        if (shadowed != null && shadowed.isDynamicLength) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            declaration.name.range,
+            "`" + name + "` is bound from the array header; it cannot be shadowed"
+          );
+        }
+      }
+
       // Resolve type if annotated
       let typeNode = declaration.type;
       let initializerNode = declaration.initializer;
@@ -3788,6 +3837,39 @@ export class Compiler extends DiagnosticEmitter {
           initializers.push(
             this.makeLocalAssignment(local, initExpr, initType ? initType : type, false)
           );
+          // Local-position `n` binding (D5's parameter rule, applied to a
+          // declaration): `const y = changetype<@unmanaged @dynamic [u32 * n]>(p)`
+          // introduces `n` for the enclosing scope, set once here from the
+          // header the initializer just produced.
+          //
+          // The name comes from the **type node**, so it is available only when
+          // the source spells the type — either as the declaration's annotation
+          // or as `changetype`'s type argument. `const y: [T * n] = p` and
+          // `const y = changetype<[T * n]>(p)` both qualify; a value that merely
+          // *is* a dynamic array without naming its length does not, and then
+          // `.length` remains the way to ask.
+          let dynNode = this.dynamicArrayTypeNodeOf(declaration);
+          if (dynNode != null) {
+            let lengthName = dynNode.lengthName.text;
+            let existingLength = flow.lookupLocal(lengthName);
+            if (existingLength != null) {
+              this.error(
+                DiagnosticCode.Duplicate_identifier_0,
+                dynNode.lengthName.range, lengthName
+              );
+            } else {
+              let lengthLocal = flow.targetFunction.addLocal(Type.i32, lengthName, declaration);
+              lengthLocal.isDynamicLength = true;
+              flow.setLocalFlag(lengthLocal.index, LocalFlags.Initialized);
+              initializers.push(
+                module.local_set(
+                  lengthLocal.index,
+                  module.load(4, false, module.local_get(local.index, type.toRef()), TypeRef.I32, 0, 4),
+                  false
+                )
+              );
+            }
+          }
         } else {
           // no need to assign zero
           if (local.type.isShortIntegerValue) {
@@ -6521,6 +6603,25 @@ export class Compiler extends DiagnosticEmitter {
     switch (target.kind) {
       case ElementKind.Local: {
         let local = <Local>target;
+        // Rule 4: a dynamic-array length binding is read-only. Its value comes
+        // from the buffer header at entry, so writing it would make the
+        // compiler's idea of the length disagree with the buffer's — silently,
+        // and for the rest of the function.
+        //
+        // Checked here rather than in `makeLocalAssignment` for two reasons: this
+        // is where the source node is, so the diagnostic points at the
+        // assignment; and this is the one place an assignment to a local is
+        // decided, so the four callers of `makeLocalAssignment` cannot each
+        // forget it.
+        if (local.isDynamicLength) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            valueExpression.range,
+            "the length name `" + local.name + "` is bound from the array header; it cannot be assigned. Read `.length` for the current value."
+          );
+          this.currentType = tee ? local.type : Type.void;
+          return module.unreachable();
+        }
         if (flow.isLocalFlag(local.index, LocalFlags.Constant, true)) {
           this.error(
             DiagnosticCode.Cannot_assign_to_0_because_it_is_a_constant_or_a_read_only_property,
@@ -6741,6 +6842,34 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
     return module.unreachable();
+  }
+
+  /**
+   * The {@link DynamicArrayTypeNode} a declaration names, if it names one.
+   *
+   * Two spellings carry the length's name: the annotation (`const y: [T * n]`)
+   * and `changetype`'s type argument (`const y = changetype<[T * n]>(p)`). Both
+   * are read here so the local-position binding does not depend on which one the
+   * source chose.
+   */
+  private dynamicArrayTypeNodeOf(declaration: VariableDeclaration): DynamicArrayTypeNode | null {
+    let typeNode = declaration.type;
+    if (typeNode != null && typeNode.kind == NodeKind.DynamicArrayType) {
+      return <DynamicArrayTypeNode>typeNode;
+    }
+    let initializer = declaration.initializer;
+    if (initializer != null && initializer.kind == NodeKind.Call) {
+      let call = <CallExpression>initializer;
+      let callee = call.expression;
+      if (callee.kind == NodeKind.Identifier && (<IdentifierExpression>callee).text == "changetype") {
+        let typeArguments = call.typeArguments;
+        if (typeArguments != null && typeArguments.length == 1) {
+          let arg = unchecked(typeArguments[0]);
+          if (arg.kind == NodeKind.DynamicArrayType) return <DynamicArrayTypeNode>arg;
+        }
+      }
+    }
+    return null;
   }
 
   /** Makes an assignment to a local, keeping track of wrap and null states. */
@@ -10810,6 +10939,32 @@ export class Compiler extends DiagnosticEmitter {
     this.maybeCompileEnclosingSource(expression);
 
     let resolver = this.resolver;
+    // `y.length` on a `[T * n]`: the buffer header's first field, an i32.
+    //
+    // Intercepted before `lookupExpression`, because the array kind has no class
+    // member list for the generic path to find `length` in — the same reason
+    // Landing 3's write intercepts sit before their lookups. No clamping and no
+    // validation here: `changetype` and construction already rejected a length
+    // above `i32.MAX` (D3), so the header is known to fit.
+    {
+      let receiverType: Type | null = null;
+      if (expression.expression.kind == NodeKind.Identifier) {
+        let receiverLocal = flow.lookupLocal((<IdentifierExpression>expression.expression).text);
+        if (receiverLocal != null) receiverType = receiverLocal.type;
+      }
+      if (receiverType != null && receiverType.kind == TypeKind.DynamicArray) {
+        if (expression.property.text != "length") {
+          this.error(
+            DiagnosticCode.Property_0_does_not_exist_on_type_1,
+            expression.property.range, expression.property.text, receiverType.toString()
+          );
+          return module.unreachable();
+        }
+        let ptr = this.compileExpression(expression.expression, receiverType, Constraints.ConvImplicit);
+        this.currentType = Type.i32;
+        return module.load(4, false, ptr, TypeRef.I32, 0, 4);
+      }
+    }
     let target = resolver.lookupExpression(expression, flow, ctxType); // reports
     if (!target) return module.unreachable();
     let thisExpression = resolver.currentThisExpression;

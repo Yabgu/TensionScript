@@ -1,0 +1,12 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "TS2300: Duplicate identifier 'n'.",
+    "TS2300: Duplicate identifier 'n'.",
+    "AS100: Not implemented: `n` is bound from the array header; it cannot be shadowed",
+    "TS2451: Cannot redeclare block-scoped variable 'n'",
+    "AS100: Not implemented: the length name `n` is bound from the array header; it cannot be assigned. Read `.length` for the current value.",
+    "5 compile error(s)"
+  ]
+}

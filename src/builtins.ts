@@ -46,7 +46,8 @@ import {
   IdentifierExpression,
   DecoratorNode,
   PropertyAccessExpression,
-  NamedTypeNode
+  NamedTypeNode,
+  Node
 } from "./ast";
 
 import {
@@ -1271,6 +1272,14 @@ function builtin_sizeof(ctx: BuiltinFunctionContext): ExpressionRef {
       DiagnosticCode.Not_implemented_0,
       ctx.reportNode.typeArgumentsRange,
       "sizeof of an unmanaged array ([T *]) — it is a pointer with no length, so it has no extent; use sizeof<T>() for the element and carry the count separately"
+    );
+    return module.unreachable();
+  }
+  if (type.kind == TypeKind.DynamicArray) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.typeArgumentsRange,
+      "sizeof of a dynamic array view is the pointer size (4), not the data size; use `.length * sizeof<T>` for the element count"
     );
     return module.unreachable();
   }
@@ -3808,6 +3817,41 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
     // which is where the type argument was resolved.
     compiler.currentType = toType;
     return fromInline;
+  }
+  // `changetype<@unmanaged @dynamic [T * n]>(ptr)`: a one-argument pointer
+  // reinterpretation, plus the length validation the ABI depends on.
+  //
+  // The buffer header's length is `u32`, and `.length` reads it as `i32` without
+  // clamping (D3). That is only sound if no header above `i32.MAX` ever becomes
+  // a value of this type, so this — the one place a header pointer enters the
+  // type — is where it is checked. Rejecting here keeps `.length` truthful and
+  // keeps Landing 4b's bounds check from being defeated by a wrapped negative.
+  if (toType.kind == TypeKind.DynamicArray) {
+    let ptr = compiler.compileExpression(operands[0], Type.auto);
+    let flow = compiler.currentFlow;
+    let temp = flow.getTempLocal(toType);
+    let lengthOnStack = module.load(
+      4, false, module.local_get(temp.index, TypeRef.I32), TypeRef.I32, 0, 4
+    );
+    let abort = compiler.makeAbort(
+      Node.createStringLiteralExpression(
+        "dynamic array length exceeds i32.MAX (2,147,483,647)",
+        ctx.reportNode.range
+      ),
+      ctx.reportNode
+    );
+    // `makeAbort` compiles its message, which leaves `currentType` on the string;
+    // the call's own type is the dynamic array, so it is set last.
+    compiler.currentType = toType;
+    return module.block(null, [
+      module.local_set(temp.index, ptr, false),
+      module.if(
+        module.binary(BinaryOp.LtI32, lengthOnStack, module.i32(0)),
+        abort,
+        0
+      ),
+      module.local_get(temp.index, TypeRef.I32)
+    ], TypeRef.I32);
   }
   let arg0 = compiler.compileExpression(operands[0], Type.auto);
   let fromType = compiler.currentType;

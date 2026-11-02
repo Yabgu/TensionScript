@@ -136,7 +136,17 @@ export const enum NodeKind {
    * then disagree with `dist/` about what `NodeKind.Comment` means -- silently.
    * The position carries no meaning.
    */
-  UnmanagedArrayType
+  UnmanagedArrayType,
+
+  /**
+   * `@unmanaged @dynamic [T * n]` — a header-prefixed array whose length is a
+   * runtime value read from the buffer.
+   *
+   * Appended for the same reason {@link UnmanagedArrayType} was: this is an
+   * implicit-numbering `const enum`, so an insert would renumber every node kind
+   * after it.
+   */
+  DynamicArrayType
 }
 
 /** Base class of all nodes. */
@@ -198,6 +208,15 @@ export abstract class Node {
     range: Range
   ): UnmanagedArrayTypeNode {
     return new UnmanagedArrayTypeNode(elementType, range);
+  }
+
+  static createDynamicArrayType(
+    elementType: TypeNode,
+    lengthName: IdentifierExpression,
+    memoryModel: MemoryModel,
+    range: Range
+  ): DynamicArrayTypeNode {
+    return new DynamicArrayTypeNode(elementType, lengthName, memoryModel, range);
   }
 
   static createOmittedType(
@@ -1115,6 +1134,32 @@ export class UnmanagedArrayTypeNode extends TypeNode {
     range: Range
   ) {
     super(NodeKind.UnmanagedArrayType, false, range);
+  }
+}
+
+/**
+ * Represents a dynamic array type, `@unmanaged @dynamic [T * n]`.
+ *
+ * The `n` is **spelling, not an expression**: the parser cannot evaluate it (it
+ * has no symbol table), so it is carried as a name and the length is read at
+ * runtime from the buffer header. That is why the form is admissible at parse
+ * time without knowing whether `n` is a constant — resolution decides that, and
+ * `resolveDynamicArrayType` refuses a name that turns out to be compile-time.
+ *
+ * One i32 slot at the ABI, holding a pointer to `[u32 length][pad][T data[n]]`.
+ */
+export class DynamicArrayTypeNode extends TypeNode {
+  constructor(
+    /** Element type. */
+    public elementType: TypeNode,
+    /** The length's name. Bound as a read-only local where a function scope exists. */
+    public lengthName: IdentifierExpression,
+    /** Storage model of the buffer. `Unmanaged` for now; `Managed` is Landing 4d. */
+    public dynamicMemoryModel: MemoryModel,
+    /** Source range. */
+    range: Range
+  ) {
+    super(NodeKind.DynamicArrayType, false, range);
   }
 }
 

@@ -112,7 +112,8 @@ import {
   VariableStatement,
   ParameterKind,
   ParameterNode,
-  TypeName
+  TypeName,
+  DynamicArrayTypeNode
 } from "./ast";
 
 import {
@@ -3896,6 +3897,16 @@ export class Local extends VariableLikeElement {
    */
   isViewLocal: bool = false;
 
+  /**
+   * Whether this local is a **dynamic-array length binding** — the `n` in
+   * `[T * n]`, introduced by the signature rather than written as a declaration.
+   *
+   * It is read-only by construction: its value comes from the buffer header at
+   * function entry, so assigning it would make the compiler's idea of the length
+   * disagree with the buffer's. The assignment and shadowing rules key on this.
+   */
+  isDynamicLength: bool = false;
+
   /** Constructs a new local variable. */
   constructor(
     /** Simple name. */
@@ -4289,6 +4300,74 @@ export class Function extends TypedElement {
         scopedLocals.set(parameterName, local);
         this.localsByIndex[local.index] = local;
         flow.setLocalFlag(local.index, LocalFlags.Initialized);
+      }
+
+      // Dynamic-array length bindings: the `n` in `[T * n]`.
+      //
+      // Bound as an **additional** local (after every parameter), holding the
+      // header's length, which the body prelude loads at function entry
+      // (`compiler.ts`, the `isDynamicLength` prologue). Four rules, each an
+      // error rather than a silent choice:
+      //
+      //   1. one `n` per function — a second binding would have to mean
+      //      "whichever parameter came last";
+      //   2. `n` may not collide with a parameter name;
+      //   3. a body declaration may not shadow it;
+      //   4. it may not be assigned.
+      //
+      // The compile-time-constant check lives here rather than in
+      // `resolveDynamicArrayType` because a **parameter** type resolves with no
+      // `Flow`, so the only table the resolver could consult there is the
+      // *program* one — measured: it answered `null` for a module-level
+      // `const N`, twice (once during type resolution, once at compile time).
+      // A plain top-level `const` is not program-global; it lives on the **File**
+      // (`File#add` only calls `ensureGlobal` for elements carrying
+      // `@global`). So the lookup has to start at the function's parent scope,
+      // which is what `this.parent.lookup` does and `program.lookup` does not.
+      {
+        let declaration = <FunctionDeclaration>prototype.declaration;
+        let parameterNodes = declaration.signature.parameters;
+        let lengthName: string | null = null;
+        for (let i = 0, k = signature.parameterTypes.length; i < k; ++i) {
+          if (i >= parameterNodes.length) break;
+          let typeNode = parameterNodes[i].type;
+          if (typeNode == null || typeNode.kind != NodeKind.DynamicArrayType) continue;
+          let name = (<DynamicArrayTypeNode>typeNode).lengthName.text;
+          if (lengthName != null) {
+            program.error(
+              DiagnosticCode.Duplicate_identifier_0,
+              (<DynamicArrayTypeNode>typeNode).lengthName.range, name
+            );
+            continue;
+          }
+          lengthName = name;
+          let existing = this.flow.scopedLocals;
+          if (existing != null && existing.has(name)) {
+            program.error(
+              DiagnosticCode.Duplicate_identifier_0,
+              (<DynamicArrayTypeNode>typeNode).lengthName.range, name
+            );
+            continue;
+          }
+          let named = this.parent.lookup(name);
+          if (
+            named != null && named.kind == ElementKind.Global &&
+            (<Global>named).is(CommonFlags.Const)
+          ) {
+            program.error(
+              DiagnosticCode.Not_implemented_0,
+              (<DynamicArrayTypeNode>typeNode).lengthName.range,
+              "[T * N] where N is a compile-time constant — use [T * <literal>] for a static array or [T * n] (runtime identifier) for a dynamic array"
+            );
+            continue;
+          }
+          let lengthLocal = new Local(name, localIndex++, Type.i32, this);
+          lengthLocal.isDynamicLength = true;
+          this.localsByIndex[lengthLocal.index] = lengthLocal;
+          let scopedLocals = this.flow.scopedLocals;
+          if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
+          scopedLocals.set(name, lengthLocal);
+        }
       }
 
       // Second pass: the field locals of byval parameters. They are additional
