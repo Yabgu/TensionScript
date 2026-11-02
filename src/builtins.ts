@@ -1283,6 +1283,25 @@ function builtin_sizeof(ctx: BuiltinFunctionContext): ExpressionRef {
     );
     return module.unreachable();
   }
+  // The **managed** form is a std class reference, so `byteSize` would answer 4
+  // (the reference) and look like a legitimate pointer size. It is not: the
+  // extent is the descriptor's `length` times the element size, and `length` is
+  // a runtime field. Refused for the same reason as the unmanaged form.
+  {
+    let sizeofTargetClass = type.classReference;
+    if (
+      sizeofTargetClass != null &&
+      sizeofTargetClass.prototype.internalName ==
+        compiler.resolver.program.dynamicArrayPrototype.internalName
+    ) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.typeArgumentsRange,
+        "sizeof of a dynamic array view is the pointer size (4), not the data size; use `.length * sizeof<T>` for the element count"
+      );
+      return module.unreachable();
+    }
+  }
   let byteSize = type.byteSize;
   if (!byteSize) {
     compiler.error(
@@ -3765,13 +3784,33 @@ function isUnmanagedRecord(type: Type): bool {
 function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
-  if (
-    checkTypeRequired(ctx, true) |
-    checkArgsRequired(ctx, 1)
-  ) return module.unreachable();
+  if (checkTypeRequired(ctx, true)) return module.unreachable();
   let operands = ctx.operands;
   let typeArguments = ctx.typeArguments!;
   let toType = typeArguments[0];
+  // A 2-argument `changetype` has exactly one meaning: constructing the
+  // `@managed @dynamic [T * n]` descriptor from a data pointer and a length.
+  // That is Landing 4d.2, so it is refused here — **before** the arity check,
+  // which would otherwise report `Expected 1 arguments, but got 2` and say
+  // nothing about the feature. (`builtin_changetype` is dispatched before the
+  // generic signature check, so this is the first place with both the operands
+  // and the resolved type argument.)
+  if (operands.length == 2) {
+    let targetClass = toType.classReference;
+    if (
+      targetClass != null &&
+      targetClass.prototype.internalName ==
+        compiler.resolver.program.dynamicArrayPrototype.internalName
+    ) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        "2-arg changetype<@managed @dynamic [T * n]> (construction) is Landing 4d.2"
+      );
+      return module.unreachable();
+    }
+  }
+  if (checkArgsRequired(ctx, 1)) return module.unreachable();
   // `changetype` is a pointer reinterpretation. A value type has no pointer
   // representation -- SROA keeps it in locals, so there is no address to
   // reinterpret. But the **operand** is what supplies an address: when the

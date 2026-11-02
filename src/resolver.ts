@@ -905,14 +905,54 @@ export class Resolver extends DiagnosticEmitter {
   ): Type | null {
     let model = node.dynamicMemoryModel;
     if (model == MemoryModel.Managed) {
-      if (reportMode == ReportMode.Report) {
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          node.range,
-          "@managed dynamic arrays are Landing 4d; use @unmanaged @dynamic for now"
-        );
+      // The managed form is a **GC reference to a std class**, not a
+      // `TypeKind.DynamicArray` with a "managed" flag.
+      //
+      // That distinction is the whole point of Landing 4d.1. A
+      // `TypeKind.DynamicArray` is constructed with `TypeFlags.None`
+      // (`types.ts`, `Type.dynamicArray`), so `isInternalReference` is false,
+      // so `Type#isManaged` is false, so the collector does not scan a local
+      // holding one. Measured: a class-typed parameter produced 7 shadow-stack
+      // visits at `-O0`, a dynamic-array-typed one produced 0. A descriptor
+      // allocated into such a local would be freed while still in use —
+      // use-after-free by construction.
+      //
+      // Resolving to the std `DynamicArray<T>` class gives `classReference`,
+      // `TypeFlags.Reference`, `isManaged == true`, shadow-stack rooting,
+      // nullability, and `.length` as an ordinary field — all from existing
+      // machinery, and the ABI is still one `i32` slot.
+      let elementType = this.resolveType(
+        node.elementType, flow, ctxElement, ctxTypes, reportMode
+      );
+      if (!elementType) return null;
+      if (!elementType.byteSize) {
+        if (reportMode == ReportMode.Report) {
+          this.error(
+            DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+            node.elementType.range, "a dynamic array of", elementType.toString()
+          );
+        }
+        return null;
       }
-      return null;
+      // A GC reference stored in the descriptor's data buffer would dangle: the
+      // buffer is not scanned. Same rule as `[Foo *]` (Landing 3's CX1).
+      if (elementType.isManaged) {
+        if (reportMode == ReportMode.Report) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            node.elementType.range,
+            "a dynamic array cannot hold GC references (its buffer is not scanned); use a scalar, an @unmanaged struct, or an @inline struct element"
+          );
+        }
+        return null;
+      }
+      // `resolveClass` yields the *instance*; the type it carries is what a
+      // parameter or field is declared with — the same `Class#type` the
+      // `Array<T>` path returns.
+      let instance = this.resolveClass(
+        this.program.dynamicArrayPrototype, [ elementType ], new Map(), reportMode
+      );
+      return instance != null ? instance.type : null;
     }
     if (model == MemoryModel.Any || model != MemoryModel.Unmanaged) {
       if (reportMode == ReportMode.Report) {
@@ -2144,6 +2184,46 @@ export class Resolver extends DiagnosticEmitter {
     return type;
   }
 
+  /**
+   * The element type of an array-kind receiver, or `null` when `type` is not one.
+   *
+   * Three kinds answer here, and they are one family even though only two are a
+   * `TypeKind`:
+   *
+   * - `[T *]` — `TypeKind.UnmanagedArray`, element on the type;
+   * - `@unmanaged @dynamic [T * n]` — `TypeKind.DynamicArray`, element on the type;
+   * - `@managed @dynamic [T * n]` — a **class reference** to the std
+   *   `DynamicArray<T>` descriptor (Landing 4d.1), so the element is the class's
+   *   type argument.
+   *
+   * The third case is why this is a helper. Landing 2 added the first arm by
+   * hand, Landing 4b added the second by hand, and the managed form would be the
+   * third copy of the same two-line idea — in two places, since the element is
+   * wanted both as a *type* (`resolveElementAccessExpression`) and as an
+   * *element* (`lookupElementAccessExpression`, which peels `y[i].field` through
+   * the element's class). One definition, three kinds, two consumers.
+   */
+  private arrayKindElementType(type: Type): Type | null {
+    switch (type.kind) {
+      case TypeKind.UnmanagedArray: return type.unmanagedArrayElementType;
+      case TypeKind.DynamicArray: return type.dynamicElementType;
+    }
+    let classReference = type.classReference;
+    if (classReference != null && this.isManagedDynamicArrayClass(classReference)) {
+      let typeArguments = classReference.typeArguments;
+      if (typeArguments != null && typeArguments.length > 0) {
+        return unchecked(typeArguments[0]);
+      }
+    }
+    return null;
+  }
+
+  /** Whether `classReference` is the std `DynamicArray<T>` descriptor class. */
+  private isManagedDynamicArrayClass(classReference: Class): bool {
+    return classReference.prototype.internalName ==
+      this.program.dynamicArrayPrototype.internalName;
+  }
+
   /** Looks up the program element the specified element access expression refers to. */
   private lookupElementAccessExpression(
     /** The expression to look up. */
@@ -2182,19 +2262,9 @@ export class Resolver extends DiagnosticEmitter {
     //
     // A scalar element has no properties to offer, so it falls through to the
     // ordinary refusal below.
-    if (targetType.kind == TypeKind.UnmanagedArray) {
-      let elementClass = targetType.unmanagedArrayElementType.getClassOrWrapper(this.program);
-      if (elementClass != null) {
-        this.currentThisExpression = targetExpression;
-        this.currentElementExpression = node.elementExpression;
-        return elementClass;
-      }
-    }
-    // The same answer for a dynamic array: `y[i]` is the element, so `y[i].field`
-    // peels through the element's class exactly as it does for `[T *]`. The
-    // bounds check is codegen's business, not this lookup's.
-    if (targetType.kind == TypeKind.DynamicArray) {
-      let elementClass = targetType.dynamicElementType.getClassOrWrapper(this.program);
+    let arrayElementType = this.arrayKindElementType(targetType);
+    if (arrayElementType != null) {
+      let elementClass = arrayElementType.getClassOrWrapper(this.program);
       if (elementClass != null) {
         this.currentThisExpression = targetExpression;
         this.currentElementExpression = node.elementExpression;
@@ -2239,17 +2309,13 @@ export class Resolver extends DiagnosticEmitter {
     let targetType = this.resolveExpression(
       node.expression, ctxFlow, ctxType, ReportMode.Swallow
     );
-    if (targetType != null && targetType.kind == TypeKind.UnmanagedArray) {
-      // No bounds check and no writeability gate: `*` means the length is
-      // unknown, so a read is unchecked by contract. A write is refused at the
-      // assignment site instead (`compiler.ts`, the element-access intercept),
-      // which is where the "requires Landing 3" message belongs.
-      return targetType.unmanagedArrayElementType;
-    }
-    if (targetType != null && targetType.kind == TypeKind.DynamicArray) {
-      // The element, like `[T *]` — the difference is enforced in codegen, where
-      // the bounds check lives, not in the type.
-      return targetType.dynamicElementType;
+    if (targetType != null) {
+      // No bounds check and no writeability gate here: `*` means the length is
+      // unknown, so a `[T *]` read is unchecked by contract, and the `@dynamic`
+      // forms carry their check in codegen. A write is refused at the assignment
+      // site instead, where the "requires Landing 3" message belongs.
+      let arrayElementType = this.arrayKindElementType(targetType);
+      if (arrayElementType != null) return arrayElementType;
     }
     let element = this.lookupElementAccessExpression(node, ctxFlow, ctxType, reportMode);
     if (!element) return null;
