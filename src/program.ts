@@ -547,6 +547,22 @@ export class Program extends DiagnosticEmitter {
   }
   private _staticArrayPrototype: ClassPrototype | null = null;
 
+  /**
+   * Gets the `DynamicArray` prototype — the descriptor class behind
+   * `@managed @dynamic [T * n]`.
+   *
+   * Follows `staticArrayPrototype` exactly: a lazily-cached `require` of the
+   * std prototype, so `@managed @dynamic [T * n]` can resolve through
+   * `resolveClass(program.dynamicArrayPrototype, [elementType])` and come back
+   * as an ordinary generic class instance.
+   */
+  get dynamicArrayPrototype(): ClassPrototype {
+    let cached = this._dynamicArrayPrototype;
+    if (!cached) this._dynamicArrayPrototype = cached = <ClassPrototype>this.require(CommonNames.DynamicArray, ElementKind.ClassPrototype);
+    return cached;
+  }
+  private _dynamicArrayPrototype: ClassPrototype | null = null;
+
   /** Gets the standard `Set` prototype. */
   get setPrototype(): ClassPrototype {
     let cached = this._setPrototype;

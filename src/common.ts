@@ -235,6 +235,8 @@ export namespace CommonNames {
   export const Object = "Object";
   export const Array = "Array";
   export const StaticArray = "StaticArray";
+  /** The descriptor behind `@managed @dynamic [T * n]` (Landing 4d.1). */
+  export const DynamicArray = "DynamicArray";
   export const Set = "Set";
   export const Map = "Map";
   export const Function = "Function";

@@ -21,6 +21,8 @@
   (local $3 i32)
   (local $a i32)
   (local $n i32)
+  (local $6 i32)
+  (local $7 i32)
   local.get $p
   local.set $3
   local.get $3
@@ -40,8 +42,12 @@
   local.get $a
   i32.load
   local.set $n
-  local.get $i
   local.get $a
+  local.set $6
+  local.get $i
+  local.set $7
+  local.get $7
+  local.get $6
   i32.load
   i32.ge_u
   if
@@ -52,10 +58,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $a
+  local.get $6
   i32.const 4
   i32.add
-  local.get $i
+  local.get $7
   i32.const 4
   i32.mul
   i32.add
@@ -67,6 +73,8 @@
   (local $a i32)
   (local $n i32)
   (local $6 i32)
+  (local $7 i32)
+  (local $8 i32)
   local.get $p
   local.set $3
   local.get $3
@@ -86,8 +94,12 @@
   local.get $a
   i32.load
   local.set $n
-  local.get $i
   local.get $a
+  local.set $6
+  local.get $i
+  local.set $7
+  local.get $7
+  local.get $6
   i32.load
   i32.ge_u
   if
@@ -99,23 +111,27 @@
    unreachable
   end
   local.get $v
-  local.set $6
-  local.get $a
+  local.set $8
+  local.get $6
   i32.const 4
   i32.add
-  local.get $i
+  local.get $7
   i32.const 4
   i32.mul
   i32.add
-  local.get $6
+  local.get $8
   i32.store
-  local.get $6
+  local.get $8
   return
  )
  (func $interop/dynamic-array-write-scalar-assignment/compoundScalar (param $p i32) (param $i i32) (param $v i32)
   (local $3 i32)
   (local $a i32)
   (local $n i32)
+  (local $6 i32)
+  (local $7 i32)
+  (local $8 i32)
+  (local $9 i32)
   local.get $p
   local.set $3
   local.get $3
@@ -135,8 +151,12 @@
   local.get $a
   i32.load
   local.set $n
-  local.get $i
   local.get $a
+  local.set $8
+  local.get $i
+  local.set $9
+  local.get $9
+  local.get $8
   i32.load
   i32.ge_u
   if
@@ -147,15 +167,19 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $a
+  local.get $8
   i32.const 4
   i32.add
-  local.get $i
+  local.get $9
   i32.const 4
   i32.mul
   i32.add
-  local.get $i
   local.get $a
+  local.set $6
+  local.get $i
+  local.set $7
+  local.get $7
+  local.get $6
   i32.load
   i32.ge_u
   if
@@ -166,10 +190,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $a
+  local.get $6
   i32.const 4
   i32.add
-  local.get $i
+  local.get $7
   i32.const 4
   i32.mul
   i32.add
@@ -182,6 +206,8 @@
   (local $3 i32)
   (local $a i32)
   (local $n i32)
+  (local $6 i32)
+  (local $7 i32)
   local.get $p
   local.set $3
   local.get $3
@@ -201,8 +227,12 @@
   local.get $a
   i32.load
   local.set $n
-  local.get $i
   local.get $a
+  local.set $6
+  local.get $i
+  local.set $7
+  local.get $7
+  local.get $6
   i32.load
   i32.ge_u
   if
@@ -213,10 +243,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $a
+  local.get $6
   i32.const 4
   i32.add
-  local.get $i
+  local.get $7
   i32.const 1
   i32.mul
   i32.add

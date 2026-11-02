@@ -179,10 +179,10 @@
   (local $4 f64)
   i32.const 72
   call $~lib/memory/heap.alloc
-  local.tee $0
+  local.tee $2
   i32.const 4
   i32.store
-  local.get $0
+  local.get $2
   i32.load
   i32.const 0
   i32.lt_s
@@ -194,7 +194,7 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $0
+  local.get $2
   i32.load
   drop
   loop $for-loop|0
@@ -203,7 +203,7 @@
    i32.lt_s
    if
     local.get $1
-    local.get $0
+    local.get $2
     i32.load
     i32.ge_u
     if
@@ -214,7 +214,7 @@
      call $~lib/builtins/abort
      unreachable
     end
-    local.get $0
+    local.get $2
     i32.const 8
     i32.add
     local.get $1
@@ -229,7 +229,7 @@
     f64.add
     f64.store
     local.get $1
-    local.get $0
+    local.get $2
     i32.load
     i32.ge_u
     if
@@ -240,7 +240,7 @@
      call $~lib/builtins/abort
      unreachable
     end
-    local.get $0
+    local.get $2
     i32.const 8
     i32.add
     local.get $1
@@ -262,12 +262,12 @@
    end
   end
   loop $for-loop|1
-   local.get $2
+   local.get $0
    i32.const 4
    i32.lt_s
    if
-    local.get $2
     local.get $0
+    local.get $2
     i32.load
     i32.ge_u
     if
@@ -278,17 +278,17 @@
      call $~lib/builtins/abort
      unreachable
     end
-    local.get $0
+    local.get $2
     i32.const 8
     i32.add
-    local.get $2
+    local.get $0
     i32.const 4
     i32.shl
     i32.add
     f64.load
     local.set $4
-    local.get $2
     local.get $0
+    local.get $2
     i32.load
     i32.ge_u
     if
@@ -301,10 +301,10 @@
     end
     local.get $3
     local.get $4
-    local.get $0
+    local.get $2
     i32.const 8
     i32.add
-    local.get $2
+    local.get $0
     i32.const 4
     i32.shl
     i32.add
@@ -312,10 +312,10 @@
     f64.add
     f64.add
     local.set $3
-    local.get $2
+    local.get $0
     i32.const 1
     i32.add
-    local.set $2
+    local.set $0
     br $for-loop|1
    end
   end
@@ -1105,10 +1105,10 @@
   (local $1 i32)
   i32.const 16
   call $~lib/memory/heap.alloc
-  local.tee $1
+  local.tee $0
   i32.const 3
   i32.store
-  local.get $1
+  local.get $0
   i32.load
   i32.const 0
   i32.lt_s
@@ -1120,16 +1120,16 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
+  local.get $0
   i32.load
   drop
   loop $for-loop|0
-   local.get $0
+   local.get $1
    i32.const 3
    i32.lt_s
    if
-    local.get $0
     local.get $1
+    local.get $0
     i32.load
     i32.ge_u
     if
@@ -1140,24 +1140,24 @@
      call $~lib/builtins/abort
      unreachable
     end
-    local.get $1
+    local.get $0
     i32.const 4
     i32.add
-    local.get $0
+    local.get $1
     i32.const 2
     i32.shl
     i32.add
-    local.get $0
+    local.get $1
     i32.const 1
     i32.add
-    local.tee $0
+    local.tee $1
     i32.const 7
     i32.mul
     i32.store
     br $for-loop|0
    end
   end
-  local.get $1
+  local.get $0
   i32.load
   i32.eqz
   if
@@ -1168,9 +1168,9 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
+  local.get $0
   i32.load offset=4
-  local.get $1
+  local.get $0
   i32.load
   i32.const 1
   i32.le_u
@@ -1182,10 +1182,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
+  local.get $0
   i32.load offset=8
   i32.add
-  local.get $1
+  local.get $0
   i32.load
   i32.const 2
   i32.le_u
@@ -1197,7 +1197,7 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
+  local.get $0
   i32.load offset=12
   i32.add
  )

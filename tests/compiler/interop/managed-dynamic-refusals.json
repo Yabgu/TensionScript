@@ -1,0 +1,12 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "AS100: Not implemented: indexing a `@managed @dynamic [T * n]` is Landing 4d.2; the descriptor offsets and the bounds check are not wired yet",
+    "AS100: Not implemented: 2-arg changetype<@managed @dynamic [T * n]> (construction) is Landing 4d.2",
+    "AS100: Not implemented: a dynamic array cannot hold GC references (its buffer is not scanned); use a scalar, an @unmanaged struct, or an @inline struct element",
+    "AS100: Not implemented: sizeof of a dynamic array view is the pointer size (4), not the data size; use `.length * sizeof<T>` for the element count",
+    "AS100: Not implemented: an @inline struct value in a type argument (Array<T>) (value types are not implemented here yet; a pointer would alias)",
+    "5 compile error(s)"
+  ]
+}

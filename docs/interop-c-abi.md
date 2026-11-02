@@ -153,7 +153,19 @@ requiring the same review as a schema change, because that is what it is.
 - **Producing a buffer from TensionScript.** Returning a dynamic array is still
   refused by the compiler — there is no allocation path for the header. A guest
   can read and write a caller's buffer; it cannot make one yet.
-- **`@managed @dynamic`.** Not implemented. These headers describe the unmanaged
-  (C-compatible) form only.
+- **`@managed @dynamic`.** These headers describe the unmanaged (C-compatible)
+  form only — C cannot hold a GC reference. A C consumer that wants to hand a
+  buffer to a TensionScript function which wraps it into a managed descriptor
+  uses these headers for the buffer and a two-argument `changetype` at the
+  boundary. That construction, and indexing, are Landing 4d.2; the **type**
+  itself lands in 4d.1 and resolves to the std `DynamicArray<T>` descriptor
+  (`dataPtr: usize`, `length: u32`), whose data buffer is **bare** — no header,
+  because the descriptor owns the length.
+- **`@inline` struct elements in a managed dynamic array.** Refused. A bare
+  `struct` is `@inline`, and an `@inline` value cannot be a class type argument
+  ("value types are not implemented here yet; a pointer would alias") — the same
+  limitation `Array<BareStruct>` has, not something specific to arrays. Use a
+  scalar or an `@unmanaged struct` element; the collision solver's own
+  declaration, `@unmanaged struct BodyState`, is unaffected.
 - **A capacity separate from length.** There is one word. A growable array needs
   a reallocating owner, which is a different contract.
