@@ -2190,6 +2190,17 @@ export class Resolver extends DiagnosticEmitter {
         return elementClass;
       }
     }
+    // The same answer for a dynamic array: `y[i]` is the element, so `y[i].field`
+    // peels through the element's class exactly as it does for `[T *]`. The
+    // bounds check is codegen's business, not this lookup's.
+    if (targetType.kind == TypeKind.DynamicArray) {
+      let elementClass = targetType.dynamicElementType.getClassOrWrapper(this.program);
+      if (elementClass != null) {
+        this.currentThisExpression = targetExpression;
+        this.currentElementExpression = node.elementExpression;
+        return elementClass;
+      }
+    }
     if (reportMode == ReportMode.Report) {
       this.error(
         DiagnosticCode.Index_signature_is_missing_in_type_0,
@@ -2234,6 +2245,11 @@ export class Resolver extends DiagnosticEmitter {
       // assignment site instead (`compiler.ts`, the element-access intercept),
       // which is where the "requires Landing 3" message belongs.
       return targetType.unmanagedArrayElementType;
+    }
+    if (targetType != null && targetType.kind == TypeKind.DynamicArray) {
+      // The element, like `[T *]` — the difference is enforced in codegen, where
+      // the bounds check lives, not in the type.
+      return targetType.dynamicElementType;
     }
     let element = this.lookupElementAccessExpression(node, ctxFlow, ctxType, reportMode);
     if (!element) return null;
