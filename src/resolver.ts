@@ -812,6 +812,11 @@ export class Resolver extends DiagnosticEmitter {
    * purpose: it is a value type with a layout, and a pointer to it is a pointer
    * to those bytes -- the refusal that applies to it is the *field* form's, not
    * the pointer's.
+   *
+   * A **GC-managed** element is refused (see the arm below). Measured before it
+   * existed: `[Foo *]` over a `class Foo` compiled and emitted
+   * `base + i*4`, `i32.load`, `call Foo#get:x` -- the buffer holds bare
+   * references that nothing scans.
    */
   private resolveUnmanagedArrayType(
     node: UnmanagedArrayTypeNode,
@@ -829,6 +834,30 @@ export class Resolver extends DiagnosticEmitter {
         this.error(
           DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
           node.elementType.range, "an unmanaged array of", elementType.toString()
+        );
+      }
+      return null;
+    }
+    // A GC-managed element is refused: the buffer behind a `[T *]` is not
+    // scanned, so a reference stored in it is not a root. The collector is free
+    // to reclaim the object while the array still holds the word, and the next
+    // `y[i]` dereferences freed memory. That is not a layout question the
+    // element can answer -- it is a provenance one, and the provenance a
+    // managed reference needs is a scanned slot.
+    //
+    // Two shapes reach this: an ordinary class (`class Foo`, a GC reference) and
+    // a `@managed struct` (a GC-owned record). Both are `isManaged`; a scalar, an
+    // `@unmanaged struct` and an `@inline struct` are not, and keep working.
+    //
+    // Measured before this arm: `[Foo *]` compiled, with a stride of 4 (the
+    // reference width) and a load-then-getter read -- correct arithmetic for a
+    // pointer array, and unsound for a GC one.
+    if (elementType.isManaged) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          node.elementType.range,
+          "an unmanaged array cannot hold GC references ([T *] where T is @managed); a GC reference in an unscanned buffer will dangle. Use a scalar, an @unmanaged struct, or an @inline struct element"
         );
       }
       return null;

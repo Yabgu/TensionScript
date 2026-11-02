@@ -1,0 +1,9 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "AS100: Not implemented: whole-record assignment to a `[T *]` element — `y[i]` of a record is an address, not a value slot; use copyInto(y + i*sizeof(T), v), or write one field with `y[i].field = v`",
+    "AS100: Not implemented: whole-record assignment to a `[T *]` element — `y[i]` of a record is an address, not a value slot; use copyInto(y + i*sizeof(T), v), or write one field with `y[i].field = v`",
+    "2 compile error(s)"
+  ]
+}

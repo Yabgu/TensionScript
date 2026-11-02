@@ -5396,15 +5396,21 @@ export class Compiler extends DiagnosticEmitter {
     // before `lookupExpression`, which reports an index signature that an inline
     // array cannot have -- and this path never reaches `compileAssignment`, so
     // the intercept there does not cover it.
-    {
-      let unmanagedRoot = this.unmanagedArrayElementWriteRoot(left);
-      if (unmanagedRoot != null) return this.refuseUnmanagedArrayWrite(unmanagedRoot);
-    }
     if (left.kind == NodeKind.ElementAccess) {
       let elementAccess = <ElementAccessExpression>left;
       let arrayType = resolver.resolveExpression(elementAccess.expression, this.currentFlow);
       if (arrayType && arrayType.kind == TypeKind.FixedArray) {
         return this.compileFixedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, null, expr
+        );
+      }
+      // `a[i] += v`: `expr` is already `old op v`, because the operator itself
+      // was compiled above and its left operand read through the read arm. So
+      // this is a plain store of `expr`, exactly like the fixed-array arm -- no
+      // re-read of the element.
+      if (arrayType && arrayType.kind == TypeKind.UnmanagedArray) {
+        return this.compileUnmanagedArrayElementAccess(
           elementAccess, arrayType, true,
           contextualType, Constraints.None, null, expr
         );
@@ -6309,15 +6315,21 @@ export class Compiler extends DiagnosticEmitter {
     // a `T[N]` is inline storage and has no class to hang an operator on -- the
     // lookup below would report "index signature missing" for a target that is
     // perfectly writable.
-    {
-      let unmanagedRoot = this.unmanagedArrayElementWriteRoot(expression);
-      if (unmanagedRoot != null) return this.refuseUnmanagedArrayWrite(unmanagedRoot);
-    }
     if (expression.kind == NodeKind.ElementAccess) {
       let elementAccess = <ElementAccessExpression>expression;
       let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
       if (arrayType && arrayType.kind == TypeKind.FixedArray) {
         return this.compileFixedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, valueExpression
+        );
+      }
+      // `a[i] = v` over `[T *]`. A scalar element is an ordinary store; a record
+      // element is refused inside the access arm, where the element kind is
+      // known — `y[i].x = v` never reaches here, because its target is a
+      // property and the record setter takes the address this arm yields.
+      if (arrayType && arrayType.kind == TypeKind.UnmanagedArray) {
+        return this.compileUnmanagedArrayElementAccess(
           elementAccess, arrayType, true,
           contextualType, Constraints.None, valueExpression
         );
@@ -8249,38 +8261,19 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
-   * Whether `node` is a write path rooted at a `[T *]` element access, and if so
-   * which access that is.
-   *
-   * A write can address the element directly (`y[i] = v`) or a field of it
-   * (`y[i].x = v`), so the search peels property accesses down to the element
-   * access underneath. Returning the access lets the refusal point at the part of
-   * the expression that has no store this landing, rather than at the field.
-   */
-  private unmanagedArrayElementWriteRoot(
-    node: Expression
-  ): ElementAccessExpression | null {
-    let current = node;
-    while (current.kind == NodeKind.PropertyAccess) {
-      current = (<PropertyAccessExpression>current).expression;
-    }
-    if (current.kind != NodeKind.ElementAccess) return null;
-    let elementAccess = <ElementAccessExpression>current;
-    let arrayType = this.resolver.resolveExpression(elementAccess.expression, this.currentFlow);
-    return arrayType != null && arrayType.kind == TypeKind.UnmanagedArray
-      ? elementAccess
-      : null;
-  }
-
-  /**
    * The byte extent of one element of a `[T *]` — the stride `y[i]` walks by.
    *
-   * For a scalar this is `Type.byteSize`. For a record it is **not**: a record's
-   * `Type` is reference-like, so its `byteSize` is the 4-byte address, and the
-   * extent lives on the `Class` that laid the fields out. `builtin_sizeof`
-   * already answers this way for the same reason (`builtins.ts`, the
-   * `Unmanaged | ManagedStruct` branch answers `nextMemoryOffset`), so the two
-   * cannot disagree about how big a record is.
+   * For a scalar this is `Type.byteSize`. For a record it is **not**: an
+   * `@unmanaged`/`@managed` record's `Type` is reference-like, so its `byteSize`
+   * is the 4-byte address, and the extent lives on the `Class` that laid the
+   * fields out. `builtin_sizeof` already answers this way for the same reason
+   * (`builtins.ts`, the `Unmanaged | ManagedStruct` branch answers
+   * `nextMemoryOffset`), so the two cannot disagree about how big a record is.
+   *
+   * An `@inline struct` needs no arm: it *is* a value type, so its
+   * `byteSize` is already the extent. Measured — `[Inl *]` over
+   * `@inline struct Inl { x: f64; y: f64 }` strides 16, which is
+   * `sizeof<Inl>()`.
    *
    * Measured, and the reason this helper exists: using `byteSize` directly gave
    * a stride of 4 for a two-`f64` record of 16 bytes — the same "alignment or
@@ -8301,62 +8294,41 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
-   * Refuses an indexed **write** to a `[T *]`, naming the landing that lifts it.
+   * Whether `type` is a record whose elements live **at** the address rather
+   * than being a value loaded from it: `@unmanaged`, `@managed` or `@inline`.
    *
-   * Reads are supported this landing, so the old answer — the resolver's
-   * `TS2329 Index signature is missing in type '[u32 *]'` — would now be
-   * actively misleading: the type has no index signature by design, and that is
-   * an answer about *reading* a type that does read. Three paths reach here and
-   * none of them goes through `compileAssignment`: the compound-assignment
-   * intercept, the plain-assignment intercept, and the `++`/`--` intercept.
+   * This is the discriminator between "the address is the element" and "load the
+   * element from the address", and it is deliberately about the *element kind*
+   * rather than about type equality — see {@link compileUnmanagedArrayElementAccess}.
    */
-  private refuseUnmanagedArrayWrite(
-    expression: ElementAccessExpression
-  ): ExpressionRef {
-    this.error(
-      DiagnosticCode.Not_implemented_0,
-      expression.range,
-      "writing to a `[T *]` element — indexed writes are Landing 3; reads (`y[i]`, `y[i].field`) are supported"
+  private isRecordValueType(type: Type): bool {
+    let classReference = type.classReference;
+    return classReference != null && (
+      classReference.hasDecorator(DecoratorFlags.Unmanaged) ||
+      classReference.hasDecorator(DecoratorFlags.ManagedStruct) ||
+      classReference.hasDecorator(DecoratorFlags.InlineStruct)
     );
-    this.currentType = Type.void;
-    return this.module.unreachable();
   }
 
   /**
-   * Compiles `y[i]` for an unmanaged array, `[T *]` — read only, this landing.
+   * Compiles the byte address of `y[i]` for an unmanaged array: `base + i*sizeof(T)`.
    *
-   * The address is `base + index * sizeof(T)`. Two things separate this from
-   * {@link compileFixedArrayElementAccess} just below, and both are load-bearing:
+   * Shared by the read and the write arm, so the two cannot disagree about which
+   * bytes they address — the same reason `compileFixedArrayElementAccess` and
+   * `compileFixedArrayElementAddress` are split.
    *
-   * - **The stride is a multiply, not a shift.** The fixed-array arm scales by
-   *   `1 << alignof(T)`, which is right for every element *it* admits (a record
-   *   there is refused, so the element is always a scalar, where size and
-   *   alignment coincide). A record element is the ordinary case here -- the
-   *   reason the kind exists -- and for a record the two disagree: two `f64`s
-   *   give `sizeof` 16 and `alignof` 8, so a shift would walk the second element
-   *   at the first element's midpoint.
-   *
-   * - **A record element compiles to an address, not a load.** `@unmanaged`,
-   *   `@managed` and `@inline` records are all *layout*, and their `toRef` is the
-   *   4-byte reference -- loading there would read the record's first four bytes
-   *   and call them a pointer. So the address is yielded typed as the element,
-   *   and `.field` on it resolves through the record's own accessor, which is
-   *   already a load at `addr + offsetof`. A scalar or a class reference is a
-   *   real value and is loaded at its own width.
-   *
-   * No bounds check. `*` says the length is unknown, so there is nothing to check
-   * against; that is the contract for this spelling, and `@dynamic` is where a
-   * checked form lives.
+   * The stride is a **multiply**, not the fixed-array arm's `1 << alignof(T)`.
+   * That shift is right only for the elements the fixed arm admits (records are
+   * refused there, so every element is a scalar, where size and alignment
+   * coincide). A record element is the ordinary case here, and for a record the
+   * two disagree: two `f64`s give `sizeof` 16 and `alignof` 8.
    */
-  private compileUnmanagedArrayElementAccess(
+  private compileUnmanagedArrayElementAddress(
     expression: ElementAccessExpression,
-    arrayType: Type,
-    contextualType: Type,
-    constraints: Constraints
+    arrayType: Type
   ): ExpressionRef {
     let module = this.module;
-    let elementType = arrayType.unmanagedArrayElementType;
-    let elementSize = this.unmanagedArrayElementSize(elementType);
+    let elementSize = this.unmanagedArrayElementSize(arrayType.unmanagedArrayElementType);
     let base = this.compileExpression(
       expression.expression, arrayType, Constraints.ConvImplicit
     );
@@ -8374,19 +8346,88 @@ export class Compiler extends DiagnosticEmitter {
         ? module.i64(elementSize)
         : module.i32(elementSize)
     );
-    let address = module.binary(BinaryOp.AddSize, base, scaledIndex);
+    return module.binary(BinaryOp.AddSize, base, scaledIndex);
+  }
+
+  /**
+   * Compiles `y[i]` for an unmanaged array, `[T *]` — both directions.
+   *
+   * Two things separate this from {@link compileFixedArrayElementAccess}:
+   *
+   * - **The stride is a multiply** (see the address helper).
+   *
+   * - **A record element compiles to an address, not a load.** A record's
+   *   `toRef` is the 4-byte reference, so loading there would read the record's
+   *   first four bytes and call them a pointer. So the address is yielded typed
+   *   as the element, and `.field` on it resolves through the record's own
+   *   accessor — a load or a store at `addr + offsetof`. **That is also how a
+   *   field write works**: `y[i].x = v` reaches the property setter, whose
+   *   `this` is this address. No separate arm.
+   *
+   * Reads are unchecked. `*` says the length is unknown, so there is nothing to
+   * check against; `@dynamic` is where a checked form lives.
+   *
+   * A whole-record **write** is refused, keyed on the element being a record.
+   * The key is the element kind, not "both sides have the same type": a scalar
+   * element assignment (`a[i] = 5` over `[u32 *]`) is an ordinary store and must
+   * keep compiling. Refusing by type equality would have caught that case too,
+   * which is the trap this comment exists to keep shut.
+   */
+  private compileUnmanagedArrayElementAccess(
+    expression: ElementAccessExpression,
+    arrayType: Type,
+    isWrite: boolean,
+    contextualType: Type,
+    constraints: Constraints,
+    valueExpression: Expression | null = null,
+    valueRef: ExpressionRef = 0
+  ): ExpressionRef {
+    let module = this.module;
+    let elementType = arrayType.unmanagedArrayElementType;
+    let elementSize = this.unmanagedArrayElementSize(elementType);
+    let isRecordElement = this.isRecordValueType(elementType);
+    if (isWrite && isRecordElement) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "whole-record assignment to a `[T *]` element — `y[i]` of a record is an address, not a value slot; use copyInto(y + i*sizeof(T), v), or write one field with `y[i].field = v`"
+      );
+      this.currentType = Type.void;
+      return module.unreachable();
+    }
+    let address = this.compileUnmanagedArrayElementAddress(expression, arrayType);
     this.currentType = elementType;
-    let elementClass = elementType.classReference;
-    if (
-      elementClass != null && (
-        elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
-        elementClass.hasDecorator(DecoratorFlags.ManagedStruct) ||
-        elementClass.hasDecorator(DecoratorFlags.InlineStruct)
-      )
-    ) {
-      // A record element: the address *is* the view. `y[i].x` then compiles as
-      // the record's own getter on this address, which is `f64.load
-      // offset=offsetof(T, x)`.
+    if (isWrite) {
+      // `valueRef` is a value already compiled by the caller -- the result of a
+      // compound operator or an increment, which must not be recomputed here.
+      let value = valueRef || this.compileExpression(
+        assert(valueExpression), elementType, Constraints.ConvImplicit
+      );
+      if (contextualType == Type.void) {
+        this.currentType = Type.void;
+        return module.store(
+          elementSize, address, value, elementType.toRef(), 0, elementSize
+        );
+      }
+      // The assignment is used as a value: store, then yield what was written.
+      let temp = this.currentFlow.getTempLocal(elementType);
+      this.currentType = elementType;
+      if (elementType.isManaged) {
+        this.currentFlow.setLocalFlag(temp.index, LocalFlags.Initialized);
+      }
+      return module.block(null, [
+        module.local_set(temp.index, value, elementType.isManaged),
+        module.store(
+          elementSize, address,
+          module.local_get(temp.index, elementType.toRef()),
+          elementType.toRef(), 0, elementSize
+        ),
+        module.local_get(temp.index, elementType.toRef())
+      ], elementType.toRef());
+    }
+    if (isRecordElement) {
+      // The address *is* the view: `y[i].x` is the record's own getter on it,
+      // which is `f64.load offset=offsetof(T, x)`.
       return address;
     }
     return module.load(
@@ -8533,7 +8574,7 @@ export class Compiler extends DiagnosticEmitter {
       // multiply here and a shift in the arm above.
       if (targetType.kind == TypeKind.UnmanagedArray) {
         return this.compileUnmanagedArrayElementAccess(
-          expression, targetType, contextualType, constraints
+          expression, targetType, false, contextualType, constraints
         );
       }
       let classReference = targetType.getClassOrWrapper(this.program);
@@ -11316,10 +11357,6 @@ export class Compiler extends DiagnosticEmitter {
     // incremented value. Intercepted before `lookupExpression` for the same
     // reason as the binary compound operators -- an inline array has no index
     // signature to find, and this path does not go through `compileAssignment`.
-    {
-      let unmanagedRoot = this.unmanagedArrayElementWriteRoot(expression.operand);
-      if (unmanagedRoot != null) return this.refuseUnmanagedArrayWrite(unmanagedRoot);
-    }
     if (expression.operand.kind == NodeKind.ElementAccess) {
       let elementAccess = <ElementAccessExpression>expression.operand;
       let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
@@ -11328,6 +11365,30 @@ export class Compiler extends DiagnosticEmitter {
           elementAccess, arrayType, true,
           contextualType, Constraints.None, null, expr
         );
+        if (!tempLocal) return stored;
+        return module.block(null, [
+          stored,
+          module.local_get(tempLocal.index, this.currentType.toRef())
+        ], this.currentType.toRef());
+      }
+      // `a[i]++` / `--a[i]`: `expr` is already the incremented value (the read
+      // arm supplied the old one), so this stores it. Post-increment's *return*
+      // is the old value and is produced by the caller from `tempLocal`, which
+      // is why the fixed-array arm's block shape is mirrored rather than
+      // re-derived.
+      if (arrayType && arrayType.kind == TypeKind.UnmanagedArray) {
+        // `Type.void`: the store's own value is discarded here -- the value this
+        // expression yields is decided below, from `tempLocal` (post) or `expr`
+        // (pre). Asking for a value would make `stored` a value-yielding block in
+        // a non-final position, which the validator refuses.
+        let stored = this.compileUnmanagedArrayElementAccess(
+          elementAccess, arrayType, true,
+          Type.void, Constraints.None, null, expr
+        );
+        // The store yields nothing (it is a discarded element of the block
+        // below), so the element type the caller expects -- and that
+        // `tempLocal`'s `local_get` is typed by -- has to be restored here.
+        this.currentType = arrayType.unmanagedArrayElementType;
         if (!tempLocal) return stored;
         return module.block(null, [
           stored,
@@ -11716,6 +11777,26 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (!compound) return expr;
     let resolver = this.resolver;
+    // `++a[i]` / `--a[i]` over `[T *]`. The postfix intercept cannot serve this:
+    // a prefix form reaches here with the new value already in `expr` and no
+    // `tempLocal`, and falls through to `makeAssignment`, whose target lookup has
+    // no element-access case -- measured, it reported `TS2541 The target of an
+    // assignment must be a variable or a property access`. (The same gap exists
+    // for `T[N]`, which is why this arm sits beside that call rather than inside
+    // it.)
+    if (expression.operand.kind == NodeKind.ElementAccess) {
+      let elementAccess = <ElementAccessExpression>expression.operand;
+      let arrayType = resolver.resolveExpression(elementAccess.expression, this.currentFlow);
+      if (arrayType && arrayType.kind == TypeKind.UnmanagedArray) {
+        // Prefix yields the **new** value, which is `expr`; asking the write arm
+        // for the element type makes it return what it stored.
+        this.currentType = arrayType.unmanagedArrayElementType;
+        return this.compileUnmanagedArrayElementAccess(
+          elementAccess, arrayType, true,
+          this.currentType, Constraints.None, null, expr
+        );
+      }
+    }
     let target = resolver.lookupExpression(expression.operand, this.currentFlow);
     if (!target) return module.unreachable();
     return this.makeAssignment(
