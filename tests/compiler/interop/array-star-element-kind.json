@@ -1,0 +1,9 @@
+{
+  "asc_flags": [
+  ],
+  "stderr": [
+    "AS100: Not implemented: an unmanaged array cannot hold GC references ([T *] where T is @managed); a GC reference in an unscanned buffer will dangle. Use a scalar, an @unmanaged struct, or an @inline struct element",
+    "AS100: Not implemented: an unmanaged array cannot hold GC references ([T *] where T is @managed); a GC reference in an unscanned buffer will dangle. Use a scalar, an @unmanaged struct, or an @inline struct element",
+    "2 compile error(s)"
+  ]
+}
