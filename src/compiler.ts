@@ -2130,9 +2130,27 @@ export class Compiler extends DiagnosticEmitter {
           if (i >= parameterNodes.length) break;
           let typeNode = parameterNodes[i].type;
           if (typeNode == null || typeNode.kind != NodeKind.DynamicArrayType) continue;
-          let lengthLocal = flowLocals.get((<DynamicArrayTypeNode>typeNode).lengthName.text);
-          let paramLocal = flowLocals.get(instance.getParameterName(i));
-          if (lengthLocal == null || paramLocal == null) continue;
+          let lenName = (<DynamicArrayTypeNode>typeNode).lengthName.text;
+          let paramName = instance.getParameterName(i);
+          // `Map#get` **throws** on a missing key — it never returns null
+          // (`std/assembly/map.ts`, "cannot represent `undefined`") — so
+          // existence has to be asked for explicitly. The previous guards here
+          // checked the *result* of `get` for null and could therefore never
+          // fire; a parameter whose length binding was refused reached this loop
+          // with no `n` bound and the `get` threw.
+          //
+          // A missing binding is a **legitimate state**, not an error: Landing
+          // 4a's D4 refuses `[T * CONST_N]` where the name is a compile-time
+          // constant, and that refusal happens in `program.ts` precisely by not
+          // binding `n`. So the loop skips, and the refusal the user already saw
+          // is the only diagnostic.
+          if (!flowLocals.has(lenName) || !flowLocals.has(paramName)) continue;
+          // `assert` rather than a null check: `has` above already established
+          // presence, and this is the codebase's idiom for exactly this pair
+          // (`assert(map.get(k))` after `map.has(k)` — see `filesByName`,
+          // `elementsByName`, `builtinVariables_onCompile`).
+          let lengthLocal = assert(flowLocals.get(lenName));
+          let paramLocal = assert(flowLocals.get(paramName));
           if (!lengthLocal.isDynamicLength) continue;
           stmts.push(
             module.local_set(
