@@ -3,17 +3,15 @@
 //
 // Every case below is a distinct reason, not a distinct spelling:
 //
-//   1. `@managed @dynamic` — Landing 4d. The buffer would need a
-//      collector-visible header, which this landing does not produce.
-//   2. `@dynamic` with no owner — inline runtime-length arrays have no WASM
+//   1. `@dynamic` with no owner — inline runtime-length arrays have no WASM
 //      representation (no variable stack allocation), so "no model" is not a
 //      default that could be guessed.
 //   3. `sizeof<[T * n]>` — the type is a pointer; the data has no compile-time
 //      extent, and answering 4 would read as a count.
-//   4. `[T * N]` where `N` is a compile-time constant — the source asked for a
+//   3. `[T * N]` where `N` is a compile-time constant — the source asked for a
 //      *static* extent and spelled it as a name. Both forms stay
 //      distinguishable, and the message names both.
-//   5. a GC-managed element — the buffer is not scanned (Landing 3's CX1).
+//   4. a GC-managed element — the buffer is not scanned (Landing 3's CX1).
 //
 // Indexing used to be on this list. Landing 4b implements it — `y[i]` with a
 // bounds check — so the positive shapes live in `dynamic-array-index-read.ts`
@@ -30,10 +28,10 @@ class Ref {
 
 const CONST_N: i32 = 4;
 
-// 1. Managed owner.
-export function managed(y: @managed @dynamic [u32 * n]): i32 {
-  return 0;
-}
+// 1. ~~Managed owner~~ — Landing 4d.1 implements the managed form as a std
+//    class reference, so `@managed @dynamic [u32 * n]` now resolves. Its own
+//    refusals (indexing, construction, GC element, sizeof) live in
+//    `managed-dynamic-refusals.ts`.
 
 // 2. No owner named.
 export function unowned(y: @dynamic [u32 * n]): i32 {

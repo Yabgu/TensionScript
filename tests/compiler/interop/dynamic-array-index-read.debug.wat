@@ -35,6 +35,8 @@
   (local $2 i32)
   (local $a i32)
   (local $n i32)
+  (local $5 i32)
+  (local $6 i32)
   local.get $p
   local.set $2
   local.get $2
@@ -54,8 +56,12 @@
   local.get $a
   i32.load
   local.set $n
-  local.get $i
   local.get $a
+  local.set $5
+  local.get $i
+  local.set $6
+  local.get $6
+  local.get $5
   i32.load
   i32.ge_u
   if
@@ -66,10 +72,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $a
+  local.get $5
   i32.const 4
   i32.add
-  local.get $i
+  local.get $6
   i32.const 4
   i32.mul
   i32.add
@@ -80,6 +86,8 @@
   (local $2 i32)
   (local $a i32)
   (local $n i32)
+  (local $5 i32)
+  (local $6 i32)
   local.get $p
   local.set $2
   local.get $2
@@ -99,8 +107,12 @@
   local.get $a
   i32.load
   local.set $n
-  local.get $i
   local.get $a
+  local.set $5
+  local.get $i
+  local.set $6
+  local.get $6
+  local.get $5
   i32.load
   i32.ge_u
   if
@@ -111,10 +123,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $a
+  local.get $5
   i32.const 8
   i32.add
-  local.get $i
+  local.get $6
   i32.const 8
   i32.mul
   i32.add
@@ -125,6 +137,8 @@
   (local $2 i32)
   (local $a i32)
   (local $n i32)
+  (local $5 i32)
+  (local $6 i32)
   local.get $p
   local.set $2
   local.get $2
@@ -144,8 +158,12 @@
   local.get $a
   i32.load
   local.set $n
-  local.get $i
   local.get $a
+  local.set $5
+  local.get $i
+  local.set $6
+  local.get $6
+  local.get $5
   i32.load
   i32.ge_u
   if
@@ -156,10 +174,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $a
+  local.get $5
   i32.const 4
   i32.add
-  local.get $i
+  local.get $6
   i32.const 1
   i32.mul
   i32.add
@@ -174,6 +192,8 @@
   (local $2 i32)
   (local $y i32)
   (local $n i32)
+  (local $5 i32)
+  (local $6 i32)
   local.get $p
   local.set $2
   local.get $2
@@ -193,8 +213,12 @@
   local.get $y
   i32.load
   local.set $n
-  local.get $i
   local.get $y
+  local.set $5
+  local.get $i
+  local.set $6
+  local.get $6
+  local.get $5
   i32.load
   i32.ge_u
   if
@@ -205,10 +229,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $y
+  local.get $5
   i32.const 8
   i32.add
-  local.get $i
+  local.get $6
   i32.const 16
   i32.mul
   i32.add
@@ -223,6 +247,8 @@
   (local $2 i32)
   (local $y i32)
   (local $n i32)
+  (local $5 i32)
+  (local $6 i32)
   local.get $p
   local.set $2
   local.get $2
@@ -242,8 +268,12 @@
   local.get $y
   i32.load
   local.set $n
-  local.get $i
   local.get $y
+  local.set $5
+  local.get $i
+  local.set $6
+  local.get $6
+  local.get $5
   i32.load
   i32.ge_u
   if
@@ -254,10 +284,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $y
+  local.get $5
   i32.const 8
   i32.add
-  local.get $i
+  local.get $6
   i32.const 16
   i32.mul
   i32.add
@@ -268,6 +298,8 @@
   (local $2 i32)
   (local $y i32)
   (local $n i32)
+  (local $5 i32)
+  (local $6 i32)
   (local $b i32)
   local.get $p
   local.set $2
@@ -288,8 +320,12 @@
   local.get $y
   i32.load
   local.set $n
-  local.get $i
   local.get $y
+  local.set $5
+  local.get $i
+  local.set $6
+  local.get $6
+  local.get $5
   i32.load
   i32.ge_u
   if
@@ -300,10 +336,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $y
+  local.get $5
   i32.const 8
   i32.add
-  local.get $i
+  local.get $6
   i32.const 16
   i32.mul
   i32.add
@@ -318,6 +354,8 @@
   (local $n i32)
   (local $s f64)
   (local $i i32)
+  (local $6 i32)
+  (local $7 i32)
   local.get $p
   local.set $1
   local.get $1
@@ -347,8 +385,12 @@
    i32.lt_s
    if
     local.get $s
-    local.get $i
     local.get $y
+    local.set $6
+    local.get $i
+    local.set $7
+    local.get $7
+    local.get $6
     i32.load
     i32.ge_u
     if
@@ -359,10 +401,10 @@
      call $~lib/builtins/abort
      unreachable
     end
-    local.get $y
+    local.get $6
     i32.const 8
     i32.add
-    local.get $i
+    local.get $7
     i32.const 16
     i32.mul
     i32.add

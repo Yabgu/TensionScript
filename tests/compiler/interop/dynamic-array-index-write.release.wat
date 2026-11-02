@@ -37,10 +37,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
   local.get $0
   i32.load
-  i32.ge_u
+  local.get $1
+  i32.le_u
   if
    i32.const 1280
    i32.const 1184
@@ -72,10 +72,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
   local.get $0
   i32.load
-  i32.ge_u
+  local.get $1
+  i32.le_u
   if
    i32.const 1280
    i32.const 1184
@@ -107,10 +107,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
   local.get $0
   i32.load
-  i32.ge_u
+  local.get $1
+  i32.le_u
   if
    i32.const 1280
    i32.const 1184
@@ -142,10 +142,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
   local.get $0
   i32.load
-  i32.ge_u
+  local.get $1
+  i32.le_u
   if
    i32.const 1280
    i32.const 1184
@@ -179,13 +179,15 @@
    unreachable
   end
   block $folding-inner0
-   local.get $1
    local.get $0
    i32.load
-   i32.ge_u
    local.tee $2
+   local.get $1
+   i32.le_u
    br_if $folding-inner0
+   local.get $1
    local.get $2
+   i32.ge_u
    br_if $folding-inner0
    local.get $0
    i32.const 4
@@ -227,13 +229,15 @@
    unreachable
   end
   block $folding-inner0
-   local.get $1
    local.get $0
    i32.load
-   i32.ge_u
    local.tee $2
+   local.get $1
+   i32.le_u
    br_if $folding-inner0
+   local.get $1
    local.get $2
+   i32.ge_u
    br_if $folding-inner0
    local.get $0
    i32.const 4
@@ -275,13 +279,15 @@
    unreachable
   end
   block $folding-inner0
-   local.get $1
    local.get $0
    i32.load
-   i32.ge_u
    local.tee $2
+   local.get $1
+   i32.le_u
    br_if $folding-inner0
+   local.get $1
    local.get $2
+   i32.ge_u
    br_if $folding-inner0
    local.get $0
    i32.const 4
@@ -323,13 +329,15 @@
    unreachable
   end
   block $folding-inner0
-   local.get $1
    local.get $0
    i32.load
-   i32.ge_u
    local.tee $2
+   local.get $1
+   i32.le_u
    br_if $folding-inner0
+   local.get $1
    local.get $2
+   i32.ge_u
    br_if $folding-inner0
    local.get $0
    i32.const 4
@@ -369,10 +377,10 @@
    call $~lib/builtins/abort
    unreachable
   end
-  local.get $1
   local.get $0
   i32.load
-  i32.ge_u
+  local.get $1
+  i32.le_u
   if
    i32.const 1280
    i32.const 1184
@@ -407,13 +415,15 @@
    unreachable
   end
   block $folding-inner0
-   local.get $1
    local.get $0
    i32.load
-   i32.ge_u
    local.tee $3
+   local.get $1
+   i32.le_u
    br_if $folding-inner0
+   local.get $1
    local.get $3
+   i32.ge_u
    br_if $folding-inner0
    local.get $0
    i32.const 4
@@ -452,13 +462,15 @@
    unreachable
   end
   block $folding-inner0
-   local.get $1
    local.get $0
    i32.load
-   i32.ge_u
    local.tee $3
+   local.get $1
+   i32.le_u
    br_if $folding-inner0
+   local.get $1
    local.get $3
+   i32.ge_u
    br_if $folding-inner0
    local.get $0
    i32.const 8
