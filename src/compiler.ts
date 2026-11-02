@@ -14301,64 +14301,20 @@ export class Compiler extends DiagnosticEmitter {
       ? (valueRef || this.compileExpression(assert(valueExpression), elementType, Constraints.ConvImplicit))
       : 0;
 
-    // One case block per element, named so the switch can target them by index.
-    // The names carry a per-emission id: a write compiles its target more than
-    // once (the assignment path reads the destination before storing), and
-    // Binaryen rejects repeated block names — measured as "names in Binaryen IR
-    // must be unique" on `arr[i] = v`.
-    let suffix = (++this.sroaSelectId).toString();
-    let names = new Array<string>(length);
-    for (let i = 0; i < length; ++i) {
-      unchecked(names[i] = "sroaSel" + i.toString() + "_" + suffix);
-    }
-    let outLabel = "sroaSelOut_" + suffix;
-
-    // The store case needs the value in **one** place: a WASM node has one
-    // parent, so N case bodies cannot each hold the same `value` subtree. It is
+    // The value a store needs lives in **one** place: a WASM node has one
+    // parent, so N case bodies cannot each hold the same expression tree. It is
     // materialised into a temp first and read back per case.
-    let valueTemp = -1;
-    if (isWrite) {
-      valueTemp = this.currentFlow.getTempLocal(elementType).index;
-    }
-
-    // One case body per element. A read's body **carries** the value, because
-    // `sroaSelOut` has the element's type and a bare `br` there is a validation
-    // error ("non-final block elements returning a value must be dropped").
-    // Built as an array rather than by a helper closure: the self-hosted
-    // compiler refuses a captured local without a declared type, measured as
-    // `AS100: a captured local without a declared type (closures lowering)` when
-    // bootstrapping this very file.
-    let bodies = new Array<ExpressionRef>(length);
+    let leafIndices = new Array<i32>(length);
     for (let i = 0; i < length; ++i) {
-      let leaf = assert(fieldLocals.get(i.toString())).index;
-      unchecked(bodies[i] = isWrite
-        ? module.local_set(leaf, module.local_get(valueTemp, elementRef), false)
-        : module.br(outLabel, 0, module.local_get(leaf, elementRef)));
+      unchecked(leafIndices[i] = assert(fieldLocals.get(i.toString())).index);
     }
-
-    // The body of case `i` sits **after** block `i`'s `end`, one level out — that
-    // is where a `br_table` target lands. So the innermost block holds only the
-    // switch, and each enclosing block appends the *next* element's body: block
-    // `i`'s children are [block `i+1`, body `i+1`, branch]. Element 0's body is
-    // the fall-through after block 0, which is the out-block's value.
-    //
-    // Verified the wrong way round first: bodies inside their own block gave
-    // `i=0,1,2,3 -> 10,10,20,30` — every element one index early, and no
-    // diagnostic to say so.
-    let chain = module.drop(module.switch(
-      names, unchecked(names[length - 1]), indexLowered
-    ));
-    chain = module.block(unchecked(names[length - 1]), [ chain ]);
-    for (let i = length - 2; i >= 0; --i) {
-      chain = module.block(unchecked(names[i]), [
-        chain,
-        unchecked(bodies[i + 1]),
-        isWrite ? module.br(outLabel) : module.nop()
-      ]);
-    }
-    let fallThrough = unchecked(bodies[0]);
-    let dispatch = module.block(
-      outLabel, [ chain, fallThrough ], isWrite ? TypeRef.None : elementRef
+    let valueTemp = -1;
+    if (isWrite) valueTemp = this.currentFlow.getTempLocal(elementType).index;
+    let dispatch = this.compileLeafIndexSelect(
+      leafIndices, indexLowered,
+      isWrite ? TypeRef.None : elementRef,
+      valueTemp,
+      elementRef
     );
     if (!isWrite) {
       this.currentType = elementType;
@@ -14548,6 +14504,72 @@ export class Compiler extends DiagnosticEmitter {
       chain,
       unchecked(bodies[0])
     ]);
+  }
+
+  /**
+   * Emits the `br_table` that selects one of `leafIndices` by a runtime index.
+   *
+   * The only way to choose between WASM locals at runtime, since locals are not
+   * addressable: one block per candidate, the body sitting **after** its block's
+   * `end` (where a branch target lands), element 0 as the fall-through.
+   *
+   * One helper rather than four. After Landing 5b.1 four call sites emitted this
+   * same nesting — scalar read, scalar write, record-field read, record-field
+   * write — differing only in which leaf each block touched. Params and returns
+   * would have added more, and a structural bug in one of them would have been
+   * invisible in the other three.
+   *
+   * **A method, not a closure.** The self-hosted compiler refuses an arrow
+   * function that captures a local without a declared type — `AS100: a captured
+   * local without a declared type (closures lowering)` — so the four sites
+   * cannot share a callback.
+   *
+   * `storeValueLocal` is `-1` for a read; for a store it names the temp holding
+   * the value. A store's body cannot reuse the caller's expression tree: a WASM
+   * node has one parent, so N stores cannot share one subtree. `resultType` is
+   * `TypeRef.None` for a store, in which case the dispatch yields nothing.
+   */
+  private compileLeafIndexSelect(
+    leafIndices: i32[],
+    indexLowered: ExpressionRef,
+    resultType: TypeRef,
+    storeValueLocal: i32,
+    storeValueType: TypeRef
+  ): ExpressionRef {
+    let module = this.module;
+    let length = leafIndices.length;
+    let isStore = storeValueLocal >= 0;
+    // Per-emission label suffix: a write compiles its target more than once (the
+    // assignment path reads the destination before storing), and Binaryen
+    // rejects repeated block names — measured as "names in Binaryen IR must be
+    // unique" on `arr[i] = v`.
+    let suffix = (++this.sroaSelectId).toString();
+    let names = new Array<string>(length);
+    for (let i = 0; i < length; ++i) {
+      unchecked(names[i] = "sroaSel" + i.toString() + "_" + suffix);
+    }
+    let outLabel = "sroaSelOut_" + suffix;
+
+    let bodies = new Array<ExpressionRef>(length);
+    for (let i = 0; i < length; ++i) {
+      let leaf = unchecked(leafIndices[i]);
+      unchecked(bodies[i] = isStore
+        ? module.local_set(leaf, module.local_get(storeValueLocal, storeValueType), false)
+        : module.br(outLabel, 0, module.local_get(leaf, resultType)));
+    }
+
+    let chain = module.drop(module.switch(
+      names, unchecked(names[length - 1]), indexLowered
+    ));
+    chain = module.block(unchecked(names[length - 1]), [ chain ]);
+    for (let i = length - 2; i >= 0; --i) {
+      chain = module.block(unchecked(names[i]), [
+        chain,
+        unchecked(bodies[i + 1]),
+        isStore ? module.br(outLabel) : module.nop()
+      ]);
+    }
+    return module.block(outLabel, [ chain, unchecked(bodies[0]) ], resultType);
   }
 
   private compileSroaLocal(
