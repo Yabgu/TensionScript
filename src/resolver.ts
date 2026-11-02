@@ -51,6 +51,7 @@ import {
   TupleTypeNode,
   FixedArrayTypeNode,
   UnmanagedArrayTypeNode,
+  DynamicArrayTypeNode,
   ParameterKind,
   TypeNode,
   NodeKind,
@@ -94,7 +95,8 @@ import {
   Signature,
   typesToString,
   TypeKind,
-  TypeFlags
+  TypeFlags,
+  MemoryModelCode
 } from "./types";
 
 import {
@@ -301,6 +303,11 @@ export class Resolver extends DiagnosticEmitter {
         resolved = this.resolveUnmanagedArrayType(<UnmanagedArrayTypeNode>node, flow, ctxElement, ctxTypes, reportMode);
         break;
       }
+      case NodeKind.DynamicArrayType: {
+        resolved = this.resolveDynamicArrayType(<DynamicArrayTypeNode>node, flow, ctxElement, ctxTypes, reportMode);
+        break;
+      }
+
       default: assert(false);
     }
     node.currentlyResolving = false;
@@ -863,6 +870,86 @@ export class Resolver extends DiagnosticEmitter {
       return null;
     }
     return Type.unmanagedArray(elementType, this.program.options.usizeType.size);
+  }
+
+  /**
+   * Resolves a {@link DynamicArrayTypeNode} to a {@link TypeKind.DynamicArray}.
+   *
+   * The type is **one pointer** to a `[u32 length][pad][data]` header; the length
+   * is not in the type, which is the whole point — it is a runtime value, read
+   * from the buffer. `n` is spelling here and a binding where a function scope
+   * exists (see `Program#bindDynamicLengthLocals`).
+   *
+   * Three refusals, each for a different reason:
+   *
+   * - **`@managed`** is Landing 4d. The buffer would need a collector-visible
+   *   header, which this landing does not produce.
+   *
+   * - **No model at all** cannot be honoured by any emitter: an inline
+   *   runtime-length array would need variable stack allocation, which WASM does
+   *   not have. Naming a model is the source saying where the bytes live.
+   *
+   * - **A GC-managed element** is the same hazard Landing 3's CX1 closed for
+   *   `[T *]`: the buffer is not scanned, so a reference stored in it is not a
+   *   root.
+   *
+   * An `@inline` element is accepted: it is a value type, so its extent is
+   * `byteSize` and Landing 3 measured that stride works.
+   */
+  private resolveDynamicArrayType(
+    node: DynamicArrayTypeNode,
+    flow: Flow | null,
+    ctxElement: Element,
+    ctxTypes: Map<string,Type> | null = null,
+    reportMode: ReportMode = ReportMode.Report
+  ): Type | null {
+    let model = node.dynamicMemoryModel;
+    if (model == MemoryModel.Managed) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          node.range,
+          "@managed dynamic arrays are Landing 4d; use @unmanaged @dynamic for now"
+        );
+      }
+      return null;
+    }
+    if (model == MemoryModel.Any || model != MemoryModel.Unmanaged) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          node.range,
+          "inline runtime-length arrays have no WASM representation; use @unmanaged @dynamic (C-compatible) or @managed @dynamic (GC-managed)"
+        );
+      }
+      return null;
+    }
+    let elementType = this.resolveType(
+      node.elementType, flow, ctxElement, ctxTypes, reportMode
+    );
+    if (!elementType) return null;
+    if (!elementType.byteSize) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Operation_0_cannot_be_applied_to_type_1,
+          node.elementType.range, "a dynamic array of", elementType.toString()
+        );
+      }
+      return null;
+    }
+    if (elementType.isManaged) {
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          node.elementType.range,
+          "a dynamic array cannot hold GC references (its buffer is not scanned); use a scalar, an @unmanaged struct, or an @inline struct element"
+        );
+      }
+      return null;
+    }
+    return Type.dynamicArray(
+      elementType, MemoryModelCode.Unmanaged, this.program.options.usizeType.size
+    );
   }
 
   private resolveTupleType(
@@ -2016,6 +2103,33 @@ export class Resolver extends DiagnosticEmitter {
     /** How to proceed with eventual diagnostics. */
     reportMode: ReportMode = ReportMode.Report
   ): Type | null {
+    // `y.length` on a dynamic array: an i32 read of the buffer header. Answered
+    // here rather than by `lookupPropertyAccessExpression` for the same reason
+    // Landing 2 answered `y[i]` here — the array kinds carry their own
+    // information, and there is no class whose member list a `.length` could be
+    // found on.
+    // Narrow on purpose: only an **identifier** receiver is recognised, looked
+    // up as a local, with **no** expression resolution. Resolving here would run
+    // for every property access in every program, and expression resolution has
+    // side effects (it repopulates `currentThisExpression`, forces lazy elements
+    // and shifts the compiler's id sequence) — measured: doing it unconditionally
+    // changed the emitted module of sixteen unrelated fixtures.
+    let receiverType: Type | null = null;
+    if (node.expression.kind == NodeKind.Identifier) {
+      let receiverLocal = ctxFlow.lookupLocal((<IdentifierExpression>node.expression).text);
+      if (receiverLocal != null) receiverType = receiverLocal.type;
+    }
+    if (receiverType != null && receiverType.kind == TypeKind.DynamicArray) {
+      let name = node.property.text;
+      if (name == "length") return Type.i32;
+      if (reportMode == ReportMode.Report) {
+        this.error(
+          DiagnosticCode.Property_0_does_not_exist_on_type_1,
+          node.property.range, name, receiverType.toString()
+        );
+      }
+      return null;
+    }
     let element = this.lookupPropertyAccessExpression(node, ctxFlow, ctxType, reportMode);
     if (!element) return null;
     let type = this.getTypeOfElement(element);

@@ -126,7 +126,23 @@ export const enum TypeKind {
    * which is what lets a `[T *]` parameter, local, global and return bind as one
    * slot where `T[N]` reaches `Type#toRef`'s `assert(false)`.
    */
-  UnmanagedArray
+  UnmanagedArray,
+
+  /**
+   * `@unmanaged @dynamic [T * n]` — a header-prefixed array whose length is a
+   * runtime value.
+   *
+   * Appended for the same reason {@link UnmanagedArray} was: an insert would
+   * renumber every kind after it, and the compiler is self-hosted.
+   *
+   * A separate kind rather than a flag on `UnmanagedArray` because the two have
+   * different layouts — one addresses bare elements, the other a
+   * `[u32 length][pad][data]` header — and every element access has to know
+   * which it is looking at. The storage *model* is a field
+   * ({@link dynamicMemoryModel}), not a kind, so `@managed @dynamic` (Landing 4d)
+   * is the same kind under a different owner.
+   */
+  DynamicArray
 }
 
 /** Indicates capabilities of a type. */
@@ -190,6 +206,17 @@ export class Type {
    * the pointer's, not the element's replicated.
    */
   unmanagedElementType: Type | null = null;
+  /** Element type of a {@link TypeKind.DynamicArray}, else `null`. */
+  dynamicArrayElementType: Type | null = null;
+  /**
+   * Who owns a {@link TypeKind.DynamicArray}'s buffer.
+   *
+   * {@link MemoryModelCode.Unmanaged} for a C-compatible header-prefixed buffer;
+   * {@link MemoryModelCode.Managed} is Landing 4d. Part of {@link equals}, so the
+   * two cannot be confused for one another even though they share a kind and a
+   * layout.
+   */
+  dynamicMemoryModel: MemoryModelCode = MemoryModelCode.None;
   /**
    * Alignment (log2) of a {@link TypeKind.FixedArray}: its element's.
    *
@@ -512,6 +539,18 @@ export class Type {
         && elementType.equals(otherElementType)
       );
     }
+    if (this.kind == TypeKind.DynamicArray) {
+      // Element **and** model: `@unmanaged @dynamic [u32 * n]` and
+      // `@managed @dynamic [u32 * n]` are the same element in buffers with
+      // different owners, so they are different types.
+      let elementType = this.dynamicArrayElementType;
+      let otherElementType = other.dynamicArrayElementType;
+      return (
+        elementType != null && otherElementType != null
+        && this.dynamicMemoryModel == other.dynamicMemoryModel
+        && elementType.equals(otherElementType)
+      );
+    }
     if (this.kind == TypeKind.UnmanagedArray) {
       // The element decides, and there is no length to compare: `[u32 *]` is the
       // same type however many elements the caller says are there.
@@ -670,6 +709,13 @@ export class Type {
     if (target.kind == TypeKind.UnmanagedArray) {
       return this.is(TypeFlags.Integer) || this.kind == TypeKind.UnmanagedArray;
     }
+    // Same cell for `@unmanaged @dynamic [T * n]`: it is also one address, and
+    // `changetype` is how a caller who already holds a header pointer names it.
+    // The length is *not* part of this test — it lives in the buffer, and the
+    // builtin validates it on the way in (`builtins.ts`, `builtin_changetype`).
+    if (target.kind == TypeKind.DynamicArray) {
+      return this.is(TypeFlags.Integer) || this.kind == TypeKind.DynamicArray;
+    }
     // special in that it allows integer references as well
     if (this.is(TypeFlags.Integer) && target.is(TypeFlags.Integer)) {
       let size = this.size;
@@ -776,6 +822,13 @@ export class Type {
         let elementType = this.unmanagedElementType;
         return "[" + (elementType ? elementType.toString() : "?") + " *]";
       }
+      case TypeKind.DynamicArray: {
+        let elementType = this.dynamicArrayElementType;
+        let model = this.dynamicMemoryModel == MemoryModelCode.Managed
+          ? "@managed @dynamic "
+          : "@unmanaged @dynamic ";
+        return model + "[" + (elementType ? elementType.toString() : "?") + " * n]";
+      }
       default: assert(false);
       case TypeKind.Void: return CommonNames.void_;
     }
@@ -827,7 +880,10 @@ export class Type {
       // width: `i32` on wasm32, `i64` on memory64. This is the case that retires
       // `TypeKind.FixedArray`'s `assert(false)` below for the new kind -- a
       // `[T *]` parameter, local, global and return each bind as one slot.
-      case TypeKind.UnmanagedArray: if (this.size != 64) return TypeRef.I32;
+      case TypeKind.UnmanagedArray:
+      // A dynamic array is also one address at the ABI: the pointer to the
+      // header. The length travels in the buffer, not on the value stack.
+      case TypeKind.DynamicArray: if (this.size != 64) return TypeRef.I32;
       case TypeKind.I64:
       case TypeKind.U64:  return TypeRef.I64;
       case TypeKind.F32:  return TypeRef.F32;
@@ -1072,6 +1128,51 @@ export class Type {
   /** Gets the element type of a {@link TypeKind.UnmanagedArray}. */
   get unmanagedArrayElementType(): Type {
     return assert(this.unmanagedElementType);
+  }
+
+  /** Interned dynamic-array types, keyed by model, element and pointer width. */
+  private static _dynamicArrays: Map<string, Type> | null = null;
+
+  /**
+   * Gets the {@link TypeKind.DynamicArray} of `elementType`.
+   *
+   * The key carries the **model** as well as the element, because `equals`
+   * compares both: two models over one element are different types, and
+   * interning them together would make them the same object.
+   *
+   * Like {@link Type.unmanagedArray} the entry is validated by element identity
+   * on the way out — the map outlives a `Program`, so a second compile in one
+   * process must not be handed the first one's element `Class`.
+   */
+  static dynamicArray(
+    elementType: Type,
+    memoryModel: MemoryModelCode,
+    pointerSize: i32
+  ): Type {
+    let key = (memoryModel == MemoryModelCode.Managed ? "m" : "u")
+      + elementType.toString() + "*d" + pointerSize.toString();
+    let cache = Type._dynamicArrays;
+    if (!cache) {
+      let fresh = new Map<string, Type>();
+      Type._dynamicArrays = fresh;
+      cache = fresh;
+    }
+    let cached = getMapEntry(cache, key);
+    if (cached && cached.dynamicArrayElementType == elementType) return cached;
+    let arrayType = new Type(
+      TypeKind.DynamicArray,
+      TypeFlags.None,
+      pointerSize
+    );
+    arrayType.dynamicArrayElementType = elementType;
+    arrayType.dynamicMemoryModel = memoryModel;
+    cache.set(key, arrayType);
+    return arrayType;
+  }
+
+  /** Gets the element type of a {@link TypeKind.DynamicArray}. */
+  get dynamicElementType(): Type {
+    return assert(this.dynamicArrayElementType);
   }
 
   static readonly f64: Type = new Type(TypeKind.F64,

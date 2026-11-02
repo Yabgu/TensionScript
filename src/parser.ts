@@ -963,12 +963,22 @@ export class Parser extends DiagnosticEmitter {
           }
           return null;
         }
-        // The model decides the buffer's owner; `[T * n]` with no prefix is
-        // `@unmanaged` (D4), because that is the only one that exists.
+        // The model decides the buffer's owner, and the two ways in differ:
+        //
+        //   `[T * n]`            — inferred dynamic. No model was written and
+        //                          none is implied, so it takes `@unmanaged`
+        //                          (D4): that is the only one that exists.
+        //   `@dynamic [T * n]`   — the marker was written explicitly and still
+        //                          names no owner. That is the *inline* reading,
+        //                          and inline has no representation, so `Any` is
+        //                          carried through for the resolver to refuse
+        //                          rather than being quietly defaulted (D10).
         let node = Node.createDynamicArrayType(
           elementType,
           lengthName,
-          memoryModel != MemoryModel.Any ? memoryModel : MemoryModel.Unmanaged,
+          isDynamic
+            ? memoryModel
+            : (memoryModel != MemoryModel.Any ? memoryModel : MemoryModel.Unmanaged),
           tn.range(startPos, tn.pos)
         );
         type = node;
