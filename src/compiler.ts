@@ -5497,6 +5497,13 @@ export class Compiler extends DiagnosticEmitter {
           contextualType, Constraints.None, null, expr
         );
       }
+      // Same shape for a dynamic array; the access arm carries the bounds check.
+      if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        return this.compileDynamicArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, null, expr
+        );
+      }
     }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
@@ -6412,6 +6419,12 @@ export class Compiler extends DiagnosticEmitter {
       // property and the record setter takes the address this arm yields.
       if (arrayType && arrayType.kind == TypeKind.UnmanagedArray) {
         return this.compileUnmanagedArrayElementAccess(
+          elementAccess, arrayType, true,
+          contextualType, Constraints.None, valueExpression
+        );
+      }
+      if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        return this.compileDynamicArrayElementAccess(
           elementAccess, arrayType, true,
           contextualType, Constraints.None, valueExpression
         );
@@ -8440,6 +8453,134 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * The header an `@unmanaged @dynamic [T * n]` buffer carries in front of its
+   * elements: `align_up(4, alignof(T))`.
+   *
+   * Four bytes hold the `u32` length; anything needing stronger alignment than
+   * that gets padding after it. So `u32` elements sit at `ptr + 4`, and a
+   * two-`f64` record sits at `ptr + 8`.
+   *
+   * Reported in Landing 4a: **no header-size helper existed**, because nothing
+   * in 4a needed one — `.length` reads offset 0, and 4a's own V5 recorded that
+   * the constant could not be observed from outside. This is its first
+   * definition; `.length` and the element address both go through it so they
+   * cannot drift.
+   *
+   * A record's alignment is `Class#alignLog2` rather than `Type#alignLog2` for
+   * the same reason its size is `nextMemoryOffset`: a record's `Type` is
+   * reference-like and would report the 4-byte pointer's alignment for every
+   * record, including the `f64`-only ones that are aligned 8.
+   */
+  private dynamicArrayHeaderSize(elementType: Type): i32 {
+    let alignLog2 = elementType.alignLog2;
+    let classReference = elementType.classReference;
+    if (
+      classReference != null && (
+        classReference.hasDecorator(DecoratorFlags.Unmanaged) ||
+        classReference.hasDecorator(DecoratorFlags.ManagedStruct)
+      )
+    ) {
+      alignLog2 = classReference.alignLog2;
+    }
+    // align_up(4, alignof): the length word is the floor, and a stronger element
+    // alignment raises it. Both are powers of two, so the larger wins.
+    return alignLog2 > 2 ? 1 << alignLog2 : 4;
+  }
+
+  /**
+   * Compiles the byte address of `y[i]` for a dynamic array:
+   * `ptr + headerSize + i*sizeof(T)`.
+   *
+   * Shared by the read and the write arm, so the two cannot disagree about which
+   * bytes they address — the same split the fixed and unmanaged arms use.
+   *
+   * Two constants, each of which was a bug somewhere else in this family:
+   *
+   * - **`headerSize` is present.** It is what separates a dynamic array from a
+   *   `[T *]`: the data starts after the length word and its padding.
+   * - **The stride is a multiply by the element's extent**, not a shift by its
+   *   alignment. For a two-`f64` record those differ (16 vs 8), which is Landing
+   *   2's lesson and the reason `unmanagedArrayElementSize` exists.
+   */
+  private compileDynamicArrayElementAddress(
+    expression: ElementAccessExpression,
+    arrayType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let elementType = arrayType.dynamicElementType;
+    let elementSize = this.unmanagedArrayElementSize(elementType);
+    let headerSize = this.dynamicArrayHeaderSize(elementType);
+    let base = this.compileExpression(
+      expression.expression, arrayType, Constraints.ConvImplicit
+    );
+    let index = this.compileExpression(
+      expression.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+    let scaledIndex = module.binary(
+      BinaryOp.MulSize,
+      this.options.isWasm64
+        ? module.unary(UnaryOp.ExtendU32ToU64, index)
+        : index,
+      this.options.isWasm64
+        ? module.i64(elementSize)
+        : module.i32(elementSize)
+    );
+    return module.binary(
+      BinaryOp.AddSize,
+      module.binary(
+        BinaryOp.AddSize,
+        base,
+        this.options.isWasm64 ? module.i64(headerSize) : module.i32(headerSize)
+      ),
+      scaledIndex
+    );
+  }
+
+  /**
+   * The bounds check an `@unmanaged @dynamic [T * n]` access performs before it
+   * touches memory: `if ((u32)index >= (u32)length) trap`.
+   *
+   * **Unsigned** on purpose. A negative index is a huge `u32`, so it fails the
+   * same comparison as any other out-of-range value — one check covers both ends
+   * without a second comparison, and `y[-1]` cannot walk backwards out of the
+   * buffer.
+   *
+   * The length comes from the header directly rather than from the `n` binding.
+   * `n` is a snapshot taken at entry (D5 of 4a); the header is what the buffer
+   * currently says, and a bounds check is about the memory that exists now.
+   *
+   * The message is a literal: `makeAbort` takes a string expression, and nothing
+   * in this compiler formats an index and a length into one (measured — 4a's
+   * `changetype` trap is the same shape). Naming the two causes would mean
+   * building a string at every check.
+   */
+  private compileDynamicArrayBoundsCheck(
+    expression: ElementAccessExpression,
+    arrayType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let base = this.compileExpression(
+      expression.expression, arrayType, Constraints.ConvImplicit
+    );
+    let index = this.compileExpression(
+      expression.elementExpression, Type.i32, Constraints.ConvImplicit
+    );
+    let length = module.load(4, false, base, TypeRef.I32, 0, 4);
+    let abort = this.makeAbort(
+      Node.createStringLiteralExpression(
+        "dynamic array index out of bounds",
+        expression.range
+      ),
+      expression
+    );
+    return module.if(
+      module.binary(BinaryOp.GeU32, index, length),
+      abort,
+      0
+    );
+  }
+
+  /**
    * Compiles the byte address of `y[i]` for an unmanaged array: `base + i*sizeof(T)`.
    *
    * Shared by the read and the write arm, so the two cannot disagree about which
@@ -8567,6 +8708,102 @@ export class Compiler extends DiagnosticEmitter {
       0,
       elementSize
     );
+  }
+
+  /**
+   * Compiles `y[i]` for an `@unmanaged @dynamic [T * n]` — both directions.
+   *
+   * Differs from {@link compileUnmanagedArrayElementAccess} in exactly one place,
+   * and it is the whole point of the kind: **the bounds check**. A `[T *]` has no
+   * length to check against, so its access is unchecked by contract; a dynamic
+   * array carries one in its header, and an index outside it is a diagnostic
+   * rather than whatever memory happens to follow.
+   *
+   * Everything else is the unmanaged arm's shape, deliberately:
+   *
+   * - a **record element** compiles to the address, typed as the element, so
+   *   `.field` reads and writes go through the record's own accessor — which is
+   *   also how `y[i].field = v` works, with no arm of its own;
+   * - a **scalar element** is loaded or stored at its own width;
+   * - a whole-record **write** is refused, keyed on the element being a record
+   *   rather than on type equality, so `a[i] = 5` over `[u32 * n]` still
+   *   compiles.
+   *
+   * Compound assignment and increment call this **twice** — once by way of the
+   * read the operator performs, once for the store — so the check is emitted
+   * twice. That is the smaller of the two correct shapes: sharing one check
+   * would mean threading the checked address through the operator's own codegen,
+   * which does not know this arm exists.
+   */
+  private compileDynamicArrayElementAccess(
+    expression: ElementAccessExpression,
+    arrayType: Type,
+    isWrite: boolean,
+    contextualType: Type,
+    constraints: Constraints,
+    valueExpression: Expression | null = null,
+    valueRef: ExpressionRef = 0
+  ): ExpressionRef {
+    let module = this.module;
+    let elementType = arrayType.dynamicElementType;
+    let elementSize = this.unmanagedArrayElementSize(elementType);
+    let isRecordElement = this.isRecordValueType(elementType);
+    if (isWrite && isRecordElement) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "whole-record assignment to a dynamic array element — `y[i]` of a record is an address, not a value slot; use copyInto on the element address, or write one field with `y[i].field = v`"
+      );
+      this.currentType = Type.void;
+      return module.unreachable();
+    }
+    let check = this.compileDynamicArrayBoundsCheck(expression, arrayType);
+    let address = this.compileDynamicArrayElementAddress(expression, arrayType);
+    this.currentType = elementType;
+    if (isWrite) {
+      let value = valueRef || this.compileExpression(
+        assert(valueExpression), elementType, Constraints.ConvImplicit
+      );
+      if (contextualType == Type.void) {
+        this.currentType = Type.void;
+        return module.block(null, [
+          check,
+          module.store(
+            elementSize, address, value, elementType.toRef(), 0, elementSize
+          )
+        ], TypeRef.None);
+      }
+      let temp = this.currentFlow.getTempLocal(elementType);
+      this.currentType = elementType;
+      if (elementType.isManaged) {
+        this.currentFlow.setLocalFlag(temp.index, LocalFlags.Initialized);
+      }
+      return module.block(null, [
+        check,
+        module.local_set(temp.index, value, elementType.isManaged),
+        module.store(
+          elementSize, address,
+          module.local_get(temp.index, elementType.toRef()),
+          elementType.toRef(), 0, elementSize
+        ),
+        module.local_get(temp.index, elementType.toRef())
+      ], elementType.toRef());
+    }
+    if (isRecordElement) {
+      // The address *is* the view; the check still runs first.
+      return module.block(null, [ check, address ], TypeRef.I32);
+    }
+    return module.block(null, [
+      check,
+      module.load(
+        elementSize,
+        elementType.isSignedIntegerValue,
+        address,
+        elementType.toRef(),
+        0,
+        elementSize
+      )
+    ], elementType.toRef());
   }
 
   /**
@@ -8703,6 +8940,14 @@ export class Compiler extends DiagnosticEmitter {
       // multiply here and a shift in the arm above.
       if (targetType.kind == TypeKind.UnmanagedArray) {
         return this.compileUnmanagedArrayElementAccess(
+          expression, targetType, false, contextualType, constraints
+        );
+      }
+      // `@unmanaged @dynamic [T * n]` indexed: one word past the header, and
+      // checked against the length in it. See
+      // `compileDynamicArrayElementAccess`.
+      if (targetType.kind == TypeKind.DynamicArray) {
+        return this.compileDynamicArrayElementAccess(
           expression, targetType, false, contextualType, constraints
         );
       }
@@ -11550,6 +11795,19 @@ export class Compiler extends DiagnosticEmitter {
           module.local_get(tempLocal.index, this.currentType.toRef())
         ], this.currentType.toRef());
       }
+      // The same for a dynamic array, bounds check included.
+      if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        let stored = this.compileDynamicArrayElementAccess(
+          elementAccess, arrayType, true,
+          Type.void, Constraints.None, null, expr
+        );
+        this.currentType = arrayType.dynamicElementType;
+        if (!tempLocal) return stored;
+        return module.block(null, [
+          stored,
+          module.local_get(tempLocal.index, this.currentType.toRef())
+        ], this.currentType.toRef());
+      }
     }
     let target = resolver.lookupExpression(expression.operand, flow); // reports
     if (!target) {
@@ -11947,6 +12205,13 @@ export class Compiler extends DiagnosticEmitter {
         // for the element type makes it return what it stored.
         this.currentType = arrayType.unmanagedArrayElementType;
         return this.compileUnmanagedArrayElementAccess(
+          elementAccess, arrayType, true,
+          this.currentType, Constraints.None, null, expr
+        );
+      }
+      if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
+        this.currentType = arrayType.dynamicElementType;
+        return this.compileDynamicArrayElementAccess(
           elementAccess, arrayType, true,
           this.currentType, Constraints.None, null, expr
         );

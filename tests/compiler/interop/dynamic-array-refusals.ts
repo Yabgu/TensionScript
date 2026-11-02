@@ -13,9 +13,12 @@
 //   4. `[T * N]` where `N` is a compile-time constant — the source asked for a
 //      *static* extent and spelled it as a name. Both forms stay
 //      distinguishable, and the message names both.
-//   5. indexing — Landing 4b, so `y[i]` is still the resolver's
-//      "no index signature" rather than an unchecked access.
-//   6. a GC-managed element — the buffer is not scanned (Landing 3's CX1).
+//   5. a GC-managed element — the buffer is not scanned (Landing 3's CX1).
+//
+// Indexing used to be on this list. Landing 4b implements it — `y[i]` with a
+// bounds check — so the positive shapes live in `dynamic-array-index-read.ts`
+// and `dynamic-array-index-write.ts`, and whole-record assignment is refused on
+// its own terms in `dynamic-array-write-whole-record.ts`.
 //
 // The length-binding rules (duplicate / collision / shadow / assign) are scoped
 // to a function and are pinned in `dynamic-array-length-rules.ts`, so this file
@@ -47,12 +50,7 @@ export function constantLength(y: [u32 * CONST_N]): i32 {
   return 0;
 }
 
-// 5. Indexing, which is Landing 4b.
-export function index(y: [u32 * n], i: i32): u32 {
-  return y[i];
-}
-
-// 6. A GC reference in an unscanned buffer.
+// 5. A GC reference in an unscanned buffer.
 export function gcElement(y: [Ref * n]): i32 {
   return 0;
 }
