@@ -3788,26 +3788,121 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   let operands = ctx.operands;
   let typeArguments = ctx.typeArguments!;
   let toType = typeArguments[0];
-  // A 2-argument `changetype` has exactly one meaning: constructing the
-  // `@managed @dynamic [T * n]` descriptor from a data pointer and a length.
-  // That is Landing 4d.2, so it is refused here — **before** the arity check,
-  // which would otherwise report `Expected 1 arguments, but got 2` and say
-  // nothing about the feature. (`builtin_changetype` is dispatched before the
-  // generic signature check, so this is the first place with both the operands
-  // and the resolved type argument.)
-  if (operands.length == 2) {
-    let targetClass = toType.classReference;
-    if (
-      targetClass != null &&
-      targetClass.prototype.internalName ==
-        compiler.resolver.program.dynamicArrayPrototype.internalName
-    ) {
+  // --- the managed dynamic-array target, handled before the arity check -----
+  //
+  // `builtin_changetype` is dispatched ahead of the generic signature check, so
+  // this is the first place with both the operands and the resolved type
+  // argument. Three shapes are decided here rather than by the generic paths,
+  // because the generic paths get all three wrong:
+  //
+  //   1. **2 args** is the construction form: allocate a `DynamicArray<T>`
+  //      descriptor, store `dataPtr` and `length`, validate the length.
+  //
+  //   2. **1 arg** used to *compile* and produce a class reference from an
+  //      arbitrary pointer — no descriptor allocated, no length. Measured on
+  //      4d.1: `changetype<@managed @dynamic [BodyState * n]>(p)` then reading
+  //      `.length` answered 1076166656 for a buffer whose first element was
+  //      10.5, i.e. the high half of that `f64` read as a count. It got there
+  //      through `isChangeableTo`'s integer arm, since a class type *is*
+  //      `TypeFlags.Integer`. A descriptor cannot be conjured from a bare
+  //      pointer, so one argument is refused **for this target only** — every
+  //      other `changetype<X>(ptr)` reinterpretation stays legal.
+  //
+  //   3. **Cross-model** — `@managed` ↔ `@unmanaged` — refuses in both
+  //      directions. Both are one `i32` slot, so `isChangeableTo` waves them
+  //      through, but the shapes differ completely: one is a GC reference to a
+  //      descriptor, the other a pointer to a header-prefixed buffer. Measured:
+  //      `changetype<@unmanaged @dynamic [BodyState * m]>(managedRef)` compiled
+  //      and emitted `i32.load` of the descriptor's `dataPtr` field as if it
+  //      were the buffer's length — a silent, plausible-looking number.
+  let targetClass = toType.classReference;
+  if (
+    targetClass != null &&
+    targetClass.prototype.internalName ==
+      compiler.resolver.program.dynamicArrayPrototype.internalName
+  ) {
+    if (operands.length == 1) {
       compiler.error(
         DiagnosticCode.Not_implemented_0,
         ctx.reportNode.range,
-        "2-arg changetype<@managed @dynamic [T * n]> (construction) is Landing 4d.2"
+        "changetype<@managed @dynamic [T * n]> requires 2 args (dataPtr, length); a descriptor cannot be constructed from a bare pointer alone"
       );
       return module.unreachable();
+    }
+    if (operands.length != 2) {
+      // 0 or 3+: the ordinary arity diagnostic is the right one.
+      if (checkArgsRequired(ctx, 2)) return module.unreachable();
+    }
+    let operandType = compiler.resolver.resolveExpression(operands[0], compiler.currentFlow);
+    if (operandType != null && operandType.kind == TypeKind.DynamicArray) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        "cannot changetype between @managed and @unmanaged dynamic arrays; the ABI shapes differ (GC reference vs bare header-prefixed pointer) even though both are 1 slot. Construct the target model explicitly from the data pointer and length."
+      );
+      return module.unreachable();
+    }
+    // --- construction -----------------------------------------------------
+    // The element type comes from the target's own type argument: the target is
+    // `DynamicArray<T>` already, so re-resolving with its argument yields the
+    // same class instance — the one whose constructor and field offsets are
+    // already laid out.
+    let targetArguments = targetClass.typeArguments;
+    let elementTypeForAlloc = targetArguments != null && targetArguments.length > 0
+      ? unchecked(targetArguments[0])
+      : toType;
+    let instance = compiler.resolver.resolveClass(
+      compiler.resolver.program.dynamicArrayPrototype,
+      [ elementTypeForAlloc ],
+      new Map(), ReportMode.Swallow
+    );
+    if (instance == null) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0, ctx.reportNode.range,
+        "cannot resolve the dynamic array descriptor class"
+      );
+      return module.unreachable();
+    }
+    let dataPtr = compiler.compileExpression(operands[0], compiler.options.usizeType, Constraints.ConvImplicit);
+    let length = compiler.compileExpression(operands[1], Type.i32, Constraints.ConvImplicit);
+    let abort = compiler.makeAbort(
+      Node.createStringLiteralExpression(
+        "dynamic array length exceeds i32.MAX (2,147,483,647)",
+        ctx.reportNode.range
+      ),
+      ctx.reportNode
+    );
+    compiler.currentType = toType;
+    return module.block(null, [
+      // Reject before allocating: a negative length in a `u32` field would read
+      // back as a huge count, and every bounds check against it would pass.
+      module.if(
+        module.binary(BinaryOp.LtI32, length, module.i32(0)),
+        abort,
+        0
+      ),
+      compiler.makeCallDirect(assert(instance.constructorInstance), [
+        compiler.makeAllocation(instance), dataPtr, length
+      ], ctx.reportNode, false)
+    ], TypeRef.I32);
+  }
+  // The unmanaged target must not accept a managed descriptor either.
+  if (toType.kind == TypeKind.DynamicArray && operands.length == 1) {
+    let operandType = compiler.resolver.resolveExpression(operands[0], compiler.currentFlow);
+    if (operandType != null) {
+      let operandClass = operandType.classReference;
+      if (
+        operandClass != null &&
+        operandClass.prototype.internalName ==
+          compiler.resolver.program.dynamicArrayPrototype.internalName
+      ) {
+        compiler.error(
+          DiagnosticCode.Not_implemented_0,
+          ctx.reportNode.range,
+          "cannot changetype between @managed and @unmanaged dynamic arrays; the ABI shapes differ (GC reference vs bare header-prefixed pointer) even though both are 1 slot. Construct the target model explicitly from the data pointer and length."
+        );
+        return module.unreachable();
+      }
     }
   }
   if (checkArgsRequired(ctx, 1)) return module.unreachable();
