@@ -65,6 +65,7 @@ import {
 import {
   Type,
   TypeKind,
+  MemoryModelCode,
   Signature,
   TypeFlags
 } from "./types";
@@ -4169,6 +4170,58 @@ export class Function extends TypedElement {
   }
 
 
+  /**
+   * Binds a value-form `[T * N]` parameter's **leaves** to the WASM parameters
+   * that carry them.
+   *
+   * The array sibling of {@link bindSroaParameterLeaves}, and the same tree
+   * shape `fillSroaArrayLocals` builds for a local: the map is keyed `"0"`,
+   * `"1"`, ... and a record element is a placeholder carrying its field leaves.
+   * What differs is where the leaves' storage comes from — incoming parameters
+   * here, fresh locals there.
+   *
+   * Element-major, matching `Signature.leafTypesOf` and the caller's operand
+   * order. A parameter is a **value** for the callee's whole body: nothing is
+   * written back, so a store to `arr[0].x` is invisible to the caller. That is
+   * the copy semantics the representation is for, and it costs nothing extra —
+   * the leaves are separate slots precisely because the value has no address.
+   */
+  bindSroaArrayParameterLeaves(
+    type: Type,
+    path: string,
+    into: Map<string, Local>,
+    localIndex: i32,
+    flow: Flow
+  ): BindResult {
+    let elementType = assert(type.fixedElementType);
+    let classReference = elementType.classReference;
+    let isRecordElement = classReference != null &&
+      (classReference.hasDecorator(DecoratorFlags.Unmanaged) ||
+       classReference.hasDecorator(DecoratorFlags.ManagedStruct));
+    let consumed = 0;
+    for (let i = 0, n = type.fixedLength; i < n; ++i) {
+      let elementPath = path + "$" + i.toString();
+      if (isRecordElement) {
+        let nested = new Map<string, Local>();
+        let inner = this.bindSroaParameterLeaves(
+          elementType, elementPath, nested, localIndex + consumed, flow
+        );
+        consumed += inner.leafCount;
+        let placeholder = new Local(elementPath, -1, elementType, flow.sourceFunction);
+        placeholder.fieldLocals = nested;
+        into.set(i.toString(), placeholder);
+        continue;
+      }
+      let local = new Local(elementPath, localIndex + consumed, elementType, flow.sourceFunction);
+      this.localsByIndex[local.index] = local;
+      flow.setLocalFlag(local.index, LocalFlags.Initialized);
+      into.set(i.toString(), local);
+      ++consumed;
+    }
+    return new BindResult(consumed);
+  }
+
+
   /** Constructs a new concrete function. */
   constructor(
     /** Name incl. type parameters, i.e. `foo<i32>`. */
@@ -4286,6 +4339,23 @@ export class Function extends TypedElement {
         // ordinary-local path — bound as a local of the record type, with
         // `toRef()`'s GC heap type, and `s.a` then had no SROA field to read.
         // Every one-field value-type parameter was unusable.
+        if (parameterType.kind == TypeKind.FixedArray &&
+            (parameterType.fixedMemoryModel == MemoryModelCode.None ||
+             parameterType.fixedMemoryModel == MemoryModelCode.Inline)) {
+          // A value-form `[T * N]`: one WASM parameter per element leaf, bound
+          // into the same tree shape a local of the type gets.
+          let scopedLocals = this.flow.scopedLocals;
+          if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();
+          let fieldLocals = new Map<string, Local>();
+          let bound = this.bindSroaArrayParameterLeaves(
+            parameterType, parameterName, fieldLocals, localIndex, flow
+          );
+          localIndex += bound.leafCount;
+          let parent = new Local(parameterName, -1, parameterType, this);
+          parent.fieldLocals = fieldLocals;
+          scopedLocals.set(parameterName, parent);
+          continue;
+        }
         if (Signature.isInlineStructRef(parameterType)) {
           let scopedLocals = this.flow.scopedLocals;
           if (!scopedLocals) this.flow.scopedLocals = scopedLocals = new Map();

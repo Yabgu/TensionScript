@@ -44,6 +44,10 @@ export function valueChangetype(p: usize): u32 {
 
 // --- 2-5. the value form has no slot --------------------------------------
 
+// A `[T * N]` parameter is a **value**: the signature flattens to one WASM
+// parameter per element leaf and the callee binds them as SROA locals. That
+// works for an internal function. At an export boundary it is refused, because
+// the element count and layout would become part of the host ABI.
 export function valueParam(a: [u32 * 4]): u32 {
   return a[0];
 }
