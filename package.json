@@ -88,6 +88,7 @@
     "test:flags": "node --enable-source-maps tests/flags.js",
     "test:async": "node --enable-source-maps tests/async/resolver.js && node --enable-source-maps tests/async/lower.js && node --enable-source-maps tests/async/runtime.js",
     "test:compiler": "node --enable-source-maps --no-warnings tests/compiler",
+    "test:bootstrap": "npm run bootstrap:debug && npm run test:compiler -- --wasm build/assemblyscript.debug-bootstrap.js",
     "test:browser": "node --enable-source-maps tests/browser",
     "test:asconfig": "cd tests/asconfig && npm run test",
     "test:transform": "npm run test:transform:esm && npm run test:transform:cjs",
