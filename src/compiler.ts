@@ -202,8 +202,7 @@ import {
   TypeKind,
   TypeFlags,
   MemoryModelCode,
-  Signature,
-  typesToRefs
+  Signature
 } from "./types";
 
 import {
@@ -817,7 +816,7 @@ export class Compiler extends DiagnosticEmitter {
         startFunctionInstance.internalName,
         signature.paramRefs,
         signature.resultRefs,
-        typesToRefs(startFunctionInstance.getNonParameterLocalTypes()),
+        startFunctionInstance.getNonParameterLocalTypeRefs(),
         module.flatten(startFunctionBody)
       );
       startFunctionInstance.finalize(module, funcRef);
@@ -2025,7 +2024,7 @@ export class Compiler extends DiagnosticEmitter {
         instance.internalName,
         signature.paramRefs,
         signature.resultRefs,
-        typesToRefs(instance.getNonParameterLocalTypes()),
+        instance.getNonParameterLocalTypeRefs(),
         module.flatten(stmts, signature.resultRefs)
       );
 
@@ -2399,7 +2398,7 @@ export class Compiler extends DiagnosticEmitter {
       getterInstance.internalName,
       thisTypeRef,
       valueTypeRef,
-      typesToRefs(getterInstance.getNonParameterLocalTypes()),
+      getterInstance.getNonParameterLocalTypeRefs(),
       body
     );
   }
@@ -7889,7 +7888,7 @@ export class Compiler extends DiagnosticEmitter {
       stub.internalName,
       stub.signature.paramRefs,
       stub.signature.resultRefs,
-      typesToRefs(stub.getNonParameterLocalTypes()),
+      stub.getNonParameterLocalTypeRefs(),
       module.flatten(stmts, returnType.toRef())
     );
     stub.set(CommonFlags.Compiled);
@@ -12857,6 +12856,11 @@ export class Compiler extends DiagnosticEmitter {
     // WASM parameter per element leaf and the callee binds them as SROA locals,
     // so the argument is copied at the call and nothing is aliased.
     if (position == "a parameter") return true;
+    // A **return** works too, by multivalue — the callee emits one result per
+    // element leaf and the caller unpacks them into its own leaves through a
+    // tuple local. `Resolver` turns the feature on when it resolves the type, so
+    // no flag is needed here.
+    // (a return stays refused in this commit; part 2 lifts it)
     // Value form: inline bytes, no address.
     //
     // `"a local"` is retained deliberately even though the local declaration
@@ -14135,6 +14139,7 @@ export class Compiler extends DiagnosticEmitter {
     flow: Flow,
     initializers: ExpressionRef[]
   ): bool {
+    let module = this.module;
     let name = declaration.name.text;
 
     let fieldLocals = new Map<string, Local>();

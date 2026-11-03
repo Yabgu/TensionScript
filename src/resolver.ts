@@ -101,8 +101,13 @@ import {
 
 import {
   CommonFlags,
-  CommonNames
+  CommonNames,
+  Feature
 } from "./common";
+
+import {
+  FeatureFlags
+} from "./module";
 
 import {
   cloneMap
@@ -719,6 +724,11 @@ export class Resolver extends DiagnosticEmitter {
         reportMode
       );
       if (!returnType) return null;
+      // A value-form `[T * N]` **return** is lowered to multivalue results, so
+      // the module needs the feature. Turned on here, when the type is
+      // resolved, rather than in the return emitter — see
+      // `enableMultiValueForArrayReturn`.
+      // (feature hook lands in part 2)
     }
     let signature = Signature.create(this.program, parameterTypes, returnType, thisType, requiredParameters, hasRest);
     return node.isNullable ? signature.type.asNullable() : signature.type;
@@ -733,6 +743,43 @@ export class Resolver extends DiagnosticEmitter {
    * collection wants `Array<T>`, and letting `T[N]` hold references would make
    * `@unmanaged` records carry GC edges they cannot describe. Refused by name.
    */
+  /**
+   * Turns on `Feature.MultiValue` the first time a value-form `[T * N]` return
+   * type is resolved.
+   *
+   * **At resolution, not at emission.** The module's feature flags are computed
+   * once, in `Compiler`'s constructor (`module.setFeatures`), and a return is
+   * emitted long after that — so this sets the option *and* re-sets the module's
+   * flags, which `setFeatures` supports (`module.ts`). Measuring that
+   * re-settability is what this hook rests on: with a write-once flags word this
+   * would have needed a deferred second pass.
+   *
+   * Policy is **auto-enable** rather than a required flag: a consumer who writes
+   * `function make(): [T * N]` should not have to know that the emitter lowers it
+   * to multivalue results. The trade is that the module's declared feature set
+   * depends on its source, which is exactly the contract `--exportRuntime`
+   * already sets. A module that never returns one never gets the flag.
+   *
+   * Idempotent: `features` is a bitmask, and re-setting the same flags is a
+   * no-op for binaryen.
+   */
+  private enableMultiValueForArrayReturn(): void {
+    let options = this.program.options;
+    if (options.hasFeature(Feature.MultiValue)) return;
+    options.features |= Feature.MultiValue;
+    let module = this.program.module;
+    module.setFeatures(module.getFeatures() | FeatureFlags.MultiValue);
+  }
+
+  /** Whether `type` is a fixed array in its **value** form — N inline elements
+   *  with no address of their own — as opposed to the `@unmanaged` view (a
+   *  pointer) or the `@managed` heap form (Landing 5c). */
+  private isValueFormFixedArray(type: Type): bool {
+    if (type.kind != TypeKind.FixedArray) return false;
+    return type.fixedMemoryModel == MemoryModelCode.None ||
+      type.fixedMemoryModel == MemoryModelCode.Inline;
+  }
+
   private resolveFixedArrayType(
     node: FixedArrayTypeNode,
     flow: Flow | null,
@@ -3915,6 +3962,14 @@ export class Resolver extends DiagnosticEmitter {
       );
       if (!type) return null;
       returnType = type;
+      // A value-form `[T * N]` **return** is lowered to multivalue results, so
+      // the module needs the feature. Turned on here — where a *function
+      // declaration's* return type is resolved, which is the path
+      // `function make(): [T * N]` actually takes — rather than in the return
+      // emitter. `resolveFunctionType` has the same hook for function *type*
+      // nodes; measuring showed this one is the path that fires for a
+      // declaration, so both are needed.
+      // (feature hook lands in part 2)
     }
 
     // A constructor returns the allocated `this` pointer, not a value, so it
