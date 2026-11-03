@@ -13113,9 +13113,10 @@ export class Compiler extends DiagnosticEmitter {
    * with five operands for four slots and crashed the compiler, so this bound is
    * a guard, not a formality.
    *
-   * A **record** element is several leaves and no literal names them, so it is
-   * refused by name; constructing the array field-by-field in a local is the
-   * working route in every position.
+   * A **record** element is several leaves, so it is read one leaf per field: an
+   * object literal (`{ x: 1.5, y: 2.5 }`) compiles straight to them
+   * (`emitSroaObjectElementLeaves`), and anything else — a record local, a call —
+   * is refused by name, because a local there is a pointer, not the leaves.
    */
   private emitSroaArrayLiteralLeaves(
     literal: ArrayLiteralExpression,
@@ -13126,10 +13127,19 @@ export class Compiler extends DiagnosticEmitter {
     let elementType = arrayType.fixedArrayElementType;
     let count = Signature.wasmParamCountOf(arrayType);
     let expressions = literal.elementExpressions;
-    let isRecordElement = elementType.getClass() != null;
+    let classReference = elementType.getClass();
+    // A record element is several leaves and can be built from an object
+    // literal. A **class** element is one leaf (a reference) and stays refused
+    // as a literal element — that domain is unchanged, which is why the record
+    // test is narrower than the refusal test.
+    let fields = classReference != null &&
+      classReference.hasDecorator(DecoratorFlags.Unmanaged)
+      ? this.recordFieldsOf(elementType)
+      : null;
+    let perElement = fields != null ? Signature.leafCountOf(elementType) : 1;
     let remedy = verb == "passing" ? "pass" : verb == "returning" ? "return" : "initialise";
     for (let i = 0, k = expressions.length; i < k; ++i) {
-      if (leaves.length >= count) {
+      if (leaves.length + perElement > count) {
         this.error(
           DiagnosticCode.Type_0_is_not_assignable_to_type_1,
           literal.range,
@@ -13139,7 +13149,13 @@ export class Compiler extends DiagnosticEmitter {
         return;
       }
       let element = unchecked(expressions[i]);
-      if (isRecordElement) {
+      if (fields != null) {
+        // Stops on a refusal, like the other arms: one diagnostic per cause, and
+        // a short leaf list rather than one error per element.
+        if (!this.emitSroaObjectElementLeaves(element, elementType, fields, leaves, verb)) return;
+        continue;
+      }
+      if (classReference != null) {
         this.error(
           DiagnosticCode.Not_implemented_0,
           element.range,
@@ -13151,6 +13167,117 @@ export class Compiler extends DiagnosticEmitter {
         element, elementType, Constraints.ConvImplicit
       ));
     }
+  }
+
+  /**
+   * Compiles one **object literal** element of a `[T * N]` array literal into
+   * that element's field leaves, in declaration order.
+   *
+   * `{ x: 10.5, y: 20.5 }` is the natural way to write a record element, and for
+   * an `@unmanaged struct` it can be compiled straight to leaves — no heap
+   * record, no constructor, no pointer. The class path (`compileObjectLiteral`)
+   * cannot be reused for it: that one requires a class, takes a temp local of
+   * that class, and returns one reference, because it has to produce an
+   * *address*. Measured on the same spelling: `const p: P = { x: 10.5 }` emits
+   * `P#constructor` plus `__alloc(16)` and setters — a heap record, not a value.
+   *
+   * Policies, each measured against the class path so the two spellings agree:
+   *
+   * - **Declaration order.** Fields are emitted in the record's declaration
+   *   order, not the literal's, because the leaves are positional.
+   * - **Last duplicate wins** — `{ x: 1.0, x: 2.0 }` is `2.0`, as measured for
+   *   `const p: P = { x: 1.0, x: 2.0 }`.
+   * - **An unknown name is an error** at the name, matching
+   *   `compileObjectLiteral`'s `TS2339`.
+   * - **An omitted field takes its declared default**, matching the constructor
+   *   the class path runs: measured, `{ x: 10.0 }` on `{ x = 5.0; y = 7.0 }`
+   *   yielded `y = 7.0`, not `0`. Only a **constant** default is reproduced
+   *   here; one that needs the record instance (`y = this.x * 2.0`) is refused
+   *   by name, because a leaf emission has no instance to evaluate it against.
+   * - **A field left with no default is zero**, matching `{ x: 3.0 }` on a record
+   *   with no initialisers (measured: `y` came back `0`).
+   *
+   * A **nested** field (an `@inline struct` inside the record) is refused: its
+   * value is a second set of leaves behind a second object literal, which is the
+   * recursion this landing does not carry.
+   */
+  private emitSroaObjectElementLeaves(
+    element: Expression,
+    elementType: Type,
+    fields: Property[],
+    leaves: ExpressionRef[],
+    verb: string
+  ): bool {
+    let classReference = assert(elementType.getClass());
+    if (
+      element.kind != NodeKind.Literal ||
+      (<LiteralExpression>element).literalKind != LiteralKind.Object
+    ) {
+      // Shape (ii): an `@unmanaged` record local is **one** leaf (a pointer), so
+      // `[p0, p1]` would put four addresses where eight `f64`s belong. The
+      // refusal is load-bearing, not an oversight.
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        element.range,
+        verb + " a record element of a `[T * N]` value inside an array literal (an element is several leaves, and a local names one pointer; write an object literal `{ x: 1.0, y: 2.0 }`, or construct the array field-by-field in a local)"
+      );
+      return false;
+    }
+    let objectLiteral = <ObjectLiteralExpression>element;
+    let names = objectLiteral.names;
+    let values = objectLiteral.values;
+    for (let i = 0, k = names.length; i < k; ++i) {
+      let name = unchecked(names[i]);
+      let member = classReference.getMember(name.text);
+      let property = member != null && member.kind == ElementKind.PropertyPrototype
+        ? (<PropertyPrototype>member).instance
+        : null;
+      if (property == null || !property.isField) {
+        this.error(
+          DiagnosticCode.Property_0_does_not_exist_on_type_1,
+          name.range, name.text, elementType.toString()
+        );
+      }
+    }
+    for (let f = 0, fk = fields.length; f < fk; ++f) {
+      let field = unchecked(fields[f]);
+      let fieldType = field.type;
+      if (Signature.isInlineStructRef(fieldType)) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          element.range,
+          "a nested `@inline struct` field inside a `[T * N]` element object literal (its value is a second set of leaves; assign the fields instead)"
+        );
+        return false;
+      }
+      // Last duplicate wins — the class path's setters run in literal order, so
+      // the last assignment is the visible one, and the two spellings agree.
+      let source = -1;
+      for (let i = 0, k = names.length; i < k; ++i) {
+        if (unchecked(names[i]).text == field.name) source = i;
+      }
+      if (source >= 0) {
+        leaves.push(this.compileExpression(
+          unchecked(values[source]), fieldType, Constraints.ConvImplicit
+        ));
+        continue;
+      }
+      let initializer = field.initializerNode;
+      if (initializer == null) {
+        leaves.push(this.makeZero(fieldType));
+        continue;
+      }
+      if (initializer.kind != NodeKind.Literal) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          initializer.range,
+          "an omitted field whose default initialiser is not a constant (the class path evaluates it in the record's constructor, which a leaf emission has no instance for; name the field in the object literal)"
+        );
+        return false;
+      }
+      leaves.push(this.compileExpression(initializer, fieldType, Constraints.ConvImplicit));
+    }
+    return true;
   }
 
   private expandSroaArgument(
