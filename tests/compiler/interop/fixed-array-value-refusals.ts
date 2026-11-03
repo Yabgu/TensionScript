@@ -30,7 +30,10 @@
 // A **record element** was refused for the value form until Landing 5b.1 fixed
 // the element sizing; it is accepted now (see `fixed-array-record-element-size`
 // and `fixed-array-record-element-local`), and for the view form it always was
-// — `@unmanaged [T * N]` is a pointer to a run of records.
+// — `@unmanaged [T * N]` is a pointer to a run of records. Landing 5b.4 added
+// the construction spelling: an **object literal** element
+// (`fixed-array-record-literal-object`). What stays refused is a record
+// **local** in element position — see the last section.
 //
 // Each probe below is written to produce exactly one diagnostic: no probe reads
 // a binding whose declaration was refused, so the fixture pins causes rather
@@ -82,5 +85,25 @@ export function heapParam(a: @managed [u32 * 4]): u32 {
 export function heapField(o: usize): u32 {
   const h = changetype<HeapField>(o);
   return 0;
+}
+
+// --- a record element that is not an object literal -----------------------
+
+// `[p0, p1]` refused, and the refusal is **load-bearing**, not an oversight:
+// under `@unmanaged` a `Props` local is one leaf — a pointer — while
+// `[Props * 2]` needs four `f64`s. Accepting this would put two addresses where
+// four doubles belong. Landing 5b.4 added the object-literal spelling instead
+// (`fixed-array-record-literal-object`), which names the fields and so has
+// leaves to write.
+@unmanaged struct Props {
+  x: f64;
+  y: f64;
+}
+
+export function recordLocalElement(): f64 {
+  const p0 = new Props();
+  const p1 = new Props();
+  const arr: [Props * 2] = [p0, p1];
+  return arr[0].x;
 }
 

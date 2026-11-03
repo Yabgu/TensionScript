@@ -7,6 +7,7 @@
     "AS100: Not implemented: returning this expression as a `[T * N]` value (only a local value or an array literal can be returned: a value has no address, so the leaves have to exist as locals)",
     "AS100: Not implemented: heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)",
     "AS100: Not implemented: heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)",
-    "6 compile error(s)"
+    "AS100: Not implemented: initializing a record element of a `[T * N]` value inside an array literal (an element is several leaves, and a local names one pointer; write an object literal `{ x: 1.0, y: 2.0 }`, or construct the array field-by-field in a local)",
+    "7 compile error(s)"
   ]
 }
