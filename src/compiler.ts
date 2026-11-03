@@ -13052,23 +13052,10 @@ export class Compiler extends DiagnosticEmitter {
    * Compiles an array literal into one operand per element leaf, starting at
    * `at`, and returns how many were written.
    *
-   * Shared by the call site (`expandSroaArrayArgument`) and the return
-   * (`compileMultivalueReturnStatement`) so the two positions accept the same
-   * shapes and refuse the same ones by the same rule, instead of by two copies
-   * of it. `verb` is `"passing"` or `"returning"` — the only word the two
-   * refusals disagree on.
-   *
-   * Three rules:
-   *
-   * - A **record element** is several leaves and no literal names them, so it is
-   *   refused by name; building the array field-by-field in a local is the
-   *   working route in both positions.
-   * - A **short** literal zero-fills. The slot exists either way, and a WASM
-   *   operand cannot be left out.
-   * - A **long** literal is an arity error rather than a write past the operand
-   *   block — `sum([1, 2, 3, 4, 5])` into a `[u32 * 4]` parameter reached
-   *   Binaryen with five operands for four slots and crashed the compiler, so
-   *   this bound is a guard, not a formality.
+   * The operand sink of `emitSroaArrayLiteralLeaves`: the walk yields the leaves
+   * and this places them, then fills any element the literal omitted — a WASM
+   * operand cannot be left out, even when a local could (`fillSroaArrayFromLiteral`,
+   * where zero is free).
    */
   private pushSroaArrayLiteralOperands(
     literal: ArrayLiteralExpression,
@@ -13077,43 +13064,93 @@ export class Compiler extends DiagnosticEmitter {
     at: i32,
     verb: string
   ): i32 {
+    let count = Signature.wasmParamCountOf(arrayType);
+    let leaves = new Array<ExpressionRef>();
+    this.emitSroaArrayLiteralLeaves(literal, arrayType, leaves, verb);
+    let pushed = 0;
+    for (let i = 0, k = leaves.length; i < k; ++i) {
+      unchecked(operands[at + pushed] = unchecked(leaves[i]));
+      ++pushed;
+    }
+    // Any elements the literal omitted are zero, which a WASM operand cannot be
+    // left as: the slot exists either way. A refused element lands here too, so
+    // the operand count still matches the signature's. Zeroing goes one **leaf**
+    // at a time, off the same type-level walk the signature uses — an element of
+    // a record is several leaves and `makeZero(elementType)` would be one.
+    if (pushed < count) {
+      let leafTypes = new Array<Type>();
+      Signature.leafTypesOf(arrayType, leafTypes);
+      assert(leafTypes.length == count);
+      while (pushed < count) {
+        unchecked(operands[at + pushed] = this.makeZero(unchecked(leafTypes[pushed])));
+        ++pushed;
+      }
+    }
+    return pushed;
+  }
+
+  /**
+   * Compiles an array literal into one **leaf expression per leaf**, appended to
+   * `leaves` in element-major order.
+   *
+   * **The one array-literal element walk.** Three positions use it: the call site
+   * (`pushSroaArrayLiteralOperands`), the return
+   * (`compileMultivalueReturnStatement`), and the local declaration
+   * (`fillSroaArrayFromLiteral`). A value-form array's elements are leaves, and
+   * the positions differ only in what they do with them — push operands, make a
+   * tuple, or `local.set` — so the rules for *reading* a literal live here once.
+   *
+   * `verb` is `"passing"`, `"returning"` or `"initializing"`; it only chooses
+   * the wording of the refusals.
+   *
+   * The elements a literal omits are **not** produced here: a WASM local starts
+   * at zero, so a local declaration needs no stores for them, while an argument
+   * or a return needs an operand and the caller fills it (`makeZero` per leaf
+   * type). Two different destinations, one walk.
+   *
+   * A **long** literal is an arity error rather than a write past the leaf
+   * block — `sum([1, 2, 3, 4, 5])` into a `[u32 * 4]` parameter reached Binaryen
+   * with five operands for four slots and crashed the compiler, so this bound is
+   * a guard, not a formality.
+   *
+   * A **record** element is several leaves and no literal names them, so it is
+   * refused by name; constructing the array field-by-field in a local is the
+   * working route in every position.
+   */
+  private emitSroaArrayLiteralLeaves(
+    literal: ArrayLiteralExpression,
+    arrayType: Type,
+    leaves: ExpressionRef[],
+    verb: string
+  ): void {
     let elementType = arrayType.fixedArrayElementType;
     let count = Signature.wasmParamCountOf(arrayType);
     let expressions = literal.elementExpressions;
     let isRecordElement = elementType.getClass() != null;
-    let remedy = verb == "passing" ? "pass" : "return";
-    let pushed = 0;
+    let remedy = verb == "passing" ? "pass" : verb == "returning" ? "return" : "initialise";
     for (let i = 0, k = expressions.length; i < k; ++i) {
-      if (pushed >= count) {
+      if (leaves.length >= count) {
         this.error(
           DiagnosticCode.Type_0_is_not_assignable_to_type_1,
           literal.range,
           "too many elements",
           arrayType.toString()
         );
-        break;
+        return;
       }
+      let element = unchecked(expressions[i]);
       if (isRecordElement) {
         this.error(
           DiagnosticCode.Not_implemented_0,
-          unchecked(expressions[i]).range,
+          element.range,
           verb + " a record element of a `[T * N]` value inside an array literal (an element is several leaves, and no literal names them). Construct the array field-by-field in a local and " + remedy + " that"
         );
-        break;
+        return;
       }
-      unchecked(operands[at + pushed] = this.compileExpression(
-        unchecked(expressions[i]), elementType, Constraints.ConvImplicit
+      leaves.push(this.compileExpression(
+        element, elementType, Constraints.ConvImplicit
       ));
-      ++pushed;
     }
-    // Any elements the literal omitted are zero, which a WASM operand cannot be
-    // left as: the slot exists either way. A refused element lands here too, so
-    // the operand count still matches the signature's.
-    while (pushed < count) {
-      unchecked(operands[at + pushed] = this.makeZero(elementType));
-      ++pushed;
-    }
-    return pushed;
   }
 
   private expandSroaArgument(
@@ -13185,19 +13222,42 @@ export class Compiler extends DiagnosticEmitter {
     operands: ExpressionRef[],
     at: i32
   ): i32 {
+    let leafLocals = new Array<Local>();
+    this.collectSroaLeafLocals(fieldLocals, leafLocals);
     let pushed = 0;
+    for (let i = 0, k = leafLocals.length; i < k; ++i) {
+      let leaf = unchecked(leafLocals[i]);
+      unchecked(operands[at + pushed] =
+        this.module.local_get(leaf.index, leaf.type.toRef()));
+      ++pushed;
+    }
+    return pushed;
+  }
+
+  /**
+   * Collects a `fieldLocals` tree's leaves into `out`, depth first.
+   *
+   * **The one definition of leaf order.** A nested value is a placeholder
+   * (index `-1`) carrying its own map, so the walk descends through it rather
+   * than yielding it. Every emitter that needs "the leaves of this value, in
+   * order" goes through here — `pushSroaLeafOperands` for call operands, the
+   * array-literal walk for literal elements, the local binder for stores — so
+   * order is stated once instead of re-derived per site. It must agree with
+   * `Signature.leafTypesOf`, which is the type-level twin.
+   */
+  private collectSroaLeafLocals(
+    fieldLocals: Map<string, Local>,
+    out: Local[]
+  ): void {
     for (let _keys = Map_keys(fieldLocals), i = 0, k = _keys.length; i < k; ++i) {
       let entry = assert(getMapEntry(fieldLocals, unchecked(_keys[i])));
       if (entry.index < 0) {
         let nested = entry.fieldLocals;
-        if (nested != null) pushed += this.pushSroaLeafOperands(nested, operands, at + pushed);
+        if (nested != null) this.collectSroaLeafLocals(nested, out);
         continue;
       }
-      unchecked(operands[at + pushed] =
-        this.module.local_get(entry.index, entry.type.toRef()));
-      ++pushed;
+      out.push(entry);
     }
-    return pushed;
   }
 
   private resolveSroaReceiver(expression: Expression): Local | null {
@@ -14228,7 +14288,7 @@ export class Compiler extends DiagnosticEmitter {
       (<LiteralExpression>initializerNode).literalKind == LiteralKind.Array
     ) {
       return this.fillSroaArrayFromLiteral(
-        type, fieldLocals, <ArrayLiteralExpression>initializerNode, flow, initializers
+        type, fieldLocals, <ArrayLiteralExpression>initializerNode, initializers
       );
     }
 
@@ -14308,47 +14368,38 @@ export class Compiler extends DiagnosticEmitter {
   /**
    * Stores an array literal's elements into a value-form array's leaves.
    *
-   * A scalar element is compiled straight into its leaf. A **record** element is
-   * several leaves and a literal cannot name them one at a time, so it is
-   * refused by name here rather than compiled: the object-literal spelling
-   * (`{ x: 1.5, y: 2.5 }`) goes through the class path and *allocates* — measured,
-   * `const p: P = { x: 1.5 }` emitted `P#constructor` plus setters and needed
-   * `env.abort`, i.e. a heap record behind a pointer, which is not a value.
-   * Initialising the elements field by field (`arr[0].x = 10.5`) is the working
-   * route, and it is what the diagnostic says.
+   * The **local-declaration sink** of `emitSroaArrayLiteralLeaves`: the walk
+   * yields one expression per leaf in element-major order, and this local's
+   * leaves were created in the same order (`fillSroaArrayLocals` keys them
+   * `"0"`, `"1"`, ...), so the two line up positionally and a `local.set` per
+   * pair is the whole job. No zero-fill: a WASM local starts at zero, so an
+   * omitted element needs no store — which is why the walk does not produce one.
+   *
+   * A scalar element is one leaf. A **record** element is several, and the walk
+   * refuses it by name: the object-literal spelling (`{ x: 1.5, y: 2.5 }`) goes
+   * through the class path and *allocates* — measured, `const p: P = { x: 1.5 }`
+   * emitted `P#constructor` plus setters and needed `env.abort`, i.e. a heap
+   * record behind a pointer, which is not a value.
    */
   private fillSroaArrayFromLiteral(
     type: Type,
     fieldLocals: Map<string, Local>,
     literal: ArrayLiteralExpression,
-    flow: Flow,
     initializers: ExpressionRef[]
   ): bool {
     let module = this.module;
-    let elementType = type.fixedArrayElementType;
-    let length = type.fixedLength;
-    let expressions = literal.elementExpressions;
-    if (expressions.length > length) {
-      this.error(
-        DiagnosticCode.Type_0_is_not_assignable_to_type_1,
-        literal.range, "too many elements", type.toString()
-      );
-      return true;
-    }
-    for (let i = 0, k = expressions.length; i < k; ++i) {
-      let entry = getMapEntry(fieldLocals, i.toString());
-      if (entry == null) continue;
-      if (entry.index < 0) {
-        this.error(
-          DiagnosticCode.Not_implemented_0,
-          unchecked(expressions[i]).range,
-          "constructing a record element of a `[T * N]` value inside an array literal (an element is several leaves, and no literal names them). Assign its fields instead: `arr[0].x = ...`"
-        );
-        return true;
-      }
+    let leaves = new Array<ExpressionRef>();
+    this.emitSroaArrayLiteralLeaves(literal, type, leaves, "initializing");
+    let leafLocals = new Array<Local>();
+    this.collectSroaLeafLocals(fieldLocals, leafLocals);
+    // A long literal already reported; a refused element leaves a short list.
+    // Either way the count can only be short here, never long, and the pairing
+    // is positional.
+    assert(leaves.length <= leafLocals.length);
+    for (let i = 0, k = leaves.length; i < k; ++i) {
       initializers.push(module.local_set(
-        entry.index,
-        this.compileExpression(unchecked(expressions[i]), elementType, Constraints.ConvImplicit),
+        unchecked(leafLocals[i]).index,
+        unchecked(leaves[i]),
         false
       ));
     }
