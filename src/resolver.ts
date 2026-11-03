@@ -728,7 +728,9 @@ export class Resolver extends DiagnosticEmitter {
       // the module needs the feature. Turned on here, when the type is
       // resolved, rather than in the return emitter — see
       // `enableMultiValueForArrayReturn`.
-      // (feature hook lands in part 2)
+      if (this.isValueFormFixedArray(returnType)) {
+        this.enableMultiValueForArrayReturn();
+      }
     }
     let signature = Signature.create(this.program, parameterTypes, returnType, thisType, requiredParameters, hasRest);
     return node.isNullable ? signature.type.asNullable() : signature.type;
@@ -3969,7 +3971,9 @@ export class Resolver extends DiagnosticEmitter {
       // emitter. `resolveFunctionType` has the same hook for function *type*
       // nodes; measuring showed this one is the path that fires for a
       // declaration, so both are needed.
-      // (feature hook lands in part 2)
+      if (this.isValueFormFixedArray(returnType)) {
+        this.enableMultiValueForArrayReturn();
+      }
     }
 
     // A constructor returns the allocated `this` pointer, not a value, so it

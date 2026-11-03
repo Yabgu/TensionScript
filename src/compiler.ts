@@ -3353,6 +3353,14 @@ export class Compiler extends DiagnosticEmitter {
       if (this.isInlineStructType(returnType)) {
         return this.compileSretReturnStatement(statement, returnType);
       }
+      // A value-form `[T * N]` return: multivalue, one result per element leaf.
+      // Deliberately **not** sret — a value has no address, so there is no
+      // destination a caller could provide, and inventing one would make the
+      // return alias the callee's storage. The caller-side blocker 5b.2 stopped
+      // on (a tuple slot has no `Type`) is answered by `Local#typeRefOverride`.
+      if (this.isValueFormFixedArray(returnType)) {
+        return this.compileMultivalueReturnStatement(statement, returnType);
+      }
       let constraints = Constraints.ConvImplicit;
       if (flow.sourceFunction.is(CommonFlags.ModuleExport)) constraints |= Constraints.MustWrap;
 
@@ -12860,7 +12868,7 @@ export class Compiler extends DiagnosticEmitter {
     // element leaf and the caller unpacks them into its own leaves through a
     // tuple local. `Resolver` turns the feature on when it resolves the type, so
     // no flag is needed here.
-    // (a return stays refused in this commit; part 2 lifts it)
+    if (position == "a return type") return true;
     // Value form: inline bytes, no address.
     //
     // `"a local"` is retained deliberately even though the local declaration
@@ -14192,6 +14200,58 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
+    // `const arr: [T * N] = make()` — unpack the callee's multivalue results.
+    //
+    // The tuple needs a local of its own, and a tuple has **no `Type`**: binaryen
+    // makes the `TypeRef` from the signature's result list, and the type system
+    // has no name for it. That is what `Local#typeRefOverride` exists for — the
+    // slot is declared from the ref while `type` stays the array, so the rest of
+    // the compiler keeps seeing a `[T * N]`.
+    if (initializerNode.kind == NodeKind.Call) {
+      let callType = this.resolver.resolveExpression(
+        initializerNode, flow, Type.auto, ReportMode.Swallow
+      );
+      if (callType != null && callType.kind == TypeKind.FixedArray && callType.equals(type)) {
+        let tupleRef = Signature.create(
+          this.program, new Array<Type>(), type
+        ).resultRefs;
+        let tuple = this.compileExpression(initializerNode, type, Constraints.ConvImplicit);
+        let tupleLocal = flow.getTempLocal(type);
+        tupleLocal.typeRefOverride = tupleRef;
+        initializers.push(module.local_set(tupleLocal.index, tuple, false));
+        // One extract per element leaf, element-major — the order `resultRefs`
+        // declares and `compileMultivalueReturnStatement` pushes.
+        let at = 0;
+        let elementType = type.fixedArrayElementType;
+        let isRecordElement = elementType.getClass() != null;
+        for (let i = 0, n = type.fixedLength; i < n; ++i) {
+          let entry = getMapEntry(fieldLocals, i.toString());
+          if (entry == null) continue;
+          let nested = entry.fieldLocals;
+          if (isRecordElement && nested != null) {
+            // A record element is several leaves; each gets its own extract.
+            for (let _k = Map_keys(nested), j = 0, kn = _k.length; j < kn; ++j) {
+              let leaf = assert(getMapEntry(nested, unchecked(_k[j])));
+              initializers.push(module.local_set(
+                leaf.index,
+                module.tuple_extract(module.local_get(tupleLocal.index, tupleRef), at),
+                false
+              ));
+              ++at;
+            }
+            continue;
+          }
+          initializers.push(module.local_set(
+            entry.index,
+            module.tuple_extract(module.local_get(tupleLocal.index, tupleRef), at),
+            false
+          ));
+          ++at;
+        }
+        return true;
+      }
+    }
+
     this.error(
       DiagnosticCode.Not_implemented_0,
       initializerNode.range,
@@ -14678,6 +14738,49 @@ export class Compiler extends DiagnosticEmitter {
       ]);
     }
     return module.block(outLabel, [ chain, unchecked(bodies[0]) ], resultType);
+  }
+
+  /**
+   * Returns a value-form `[T * N]` value as WASM multivalue results.
+   *
+   * One result per element leaf, element-major — the order `resultRefs` declares
+   * and the caller's unpack indexes into. The leaves are read out of the value's
+   * SROA locals; a fresh array literal goes through the same path, because the
+   * literal binds to leaves before the return is compiled.
+   *
+   * Requires `Feature.MultiValue`, which `Resolver` turns on when it resolves
+   * this return type (`enableMultiValueOnce`), so a module that returns one of
+   * these always has the feature and a module that does not never does.
+   */
+  private compileMultivalueReturnStatement(
+    statement: ReturnStatement,
+    returnType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let valueExpression = statement.value;
+    let local = valueExpression != null && valueExpression.kind == NodeKind.Identifier
+      ? flow.lookupLocal((<IdentifierExpression>valueExpression).text)
+      : null;
+    if (local == null || local.fieldLocals == null) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        statement.range,
+        "returning this expression as a `[T * N]` value (only a local value or an array literal can be returned: a value has no address, so the leaves have to exist as locals)"
+      );
+      flow.set(FlowFlags.Returns | FlowFlags.Terminates);
+      this.currentType = returnType;
+      return module.unreachable();
+    }
+    let operands = new Array<ExpressionRef>();
+    let pushed = this.pushSroaLeafOperands(assert(local.fieldLocals), operands, 0);
+    // One operand per leaf, or the tuple's type will not match `resultRefs`.
+    // Asserted rather than silently emitting a short tuple: a mismatch here is a
+    // slot-count disagreement, which is the failure mode 5b.1 spent a cycle on.
+    assert(pushed == Signature.wasmParamCountOf(returnType));
+    flow.set(FlowFlags.Returns | FlowFlags.Terminates);
+    this.currentType = returnType;
+    return module.block(null, [ module.return(module.tuple_make(operands)) ]);
   }
 
   private compileSroaLocal(

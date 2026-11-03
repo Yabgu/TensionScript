@@ -2000,7 +2000,27 @@ export class Signature {
    *  stack. */
   get resultRefs(): TypeRef {
     if (this.hasHiddenDestParam) return TypeRef.None;
-    return this.returnType.toRef();
+    let returnType = this.returnType;
+    // A value-form `[T * N]` return crosses as **multivalue**: one result per
+    // element leaf, element-major. A value has no address, so there is no
+    // destination sret could write to — and a tuple is not a `Type`, which is
+    // why the caller needs `Local#typeRefOverride` to hold one.
+    //
+    // The implementation is `createType`, which builds a tuple for more than one
+    // ref (`module.ts`). `Signature#paramRefs` already relies on that path for
+    // multi-value *parameters*; this is the result side of the same machinery.
+    if (returnType.kind == TypeKind.FixedArray &&
+        (returnType.fixedMemoryModel == MemoryModelCode.None ||
+         returnType.fixedMemoryModel == MemoryModelCode.Inline)) {
+      let leafTypes = new Array<Type>();
+      Signature.leafTypesOf(returnType, leafTypes);
+      let refs = new Array<TypeRef>(leafTypes.length);
+      for (let i = 0, n = leafTypes.length; i < n; ++i) {
+        unchecked(refs[i] = unchecked(leafTypes[i]).toRef());
+      }
+      return createType(refs);
+    }
+    return returnType.toRef();
   }
 
   /** Tests if this signature equals the specified. */
