@@ -3,8 +3,8 @@
   "stderr": [
     "AS100: Not implemented: cannot declare `[T * N]` at module scope yet — Landing 5b.2. Use `@unmanaged [T * N]` for a pointer view, or `[T *]` for an unknown-length view",
     "AS100: Not implemented: a value-typed `[T * N]` cannot be constructed from an address via changetype — use `@unmanaged [T * N]` for a pointer view, or Landing 5b will give the value form inline storage",
-    "AS100: Not implemented: cannot pass `[T * N]` by value yet — Landing 5b.2 (inline bytes have no value-stack representation). Use `@unmanaged [T * N]` for a pointer view",
-    "AS100: Not implemented: cannot return `[T * N]` by value yet — Landing 5b.2 (the value form is inline bytes and a return needs caller-allocated storage). Use `@unmanaged [T * N]` for a pointer view",
+    "AS100: Not implemented: a `[T * N]` value as an export parameter (one WASM parameter per element leaf would make the extent and layout part of the host ABI). Pass `@unmanaged [T * N]` — a pointer — and the count separately",
+    "AS100: Not implemented: cannot return `[T * N]` by value yet — the callee side works (WebAssembly multivalue, one result per element leaf, measured to 16 results), but the caller cannot hold the result: a tuple has no `Type`, and every local slot in this compiler is typed by one. Landing 5b.3. Use `@unmanaged [T * N]` for a pointer view meanwhile",
     "AS100: Not implemented: heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)",
     "AS100: Not implemented: heap fixed-extent is Landing 5c (GC block, N in type, no length field). Use `@managed @dynamic [T * n]` for a runtime-length heap array (available now)",
     "6 compile error(s)"

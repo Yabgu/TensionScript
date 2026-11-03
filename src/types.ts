@@ -1655,6 +1655,15 @@ export class Signature {
    * all of them.
    */
   static wasmParamCountOf(type: Type): i32 {
+    // The value form spends one slot per element leaf. Checked before the
+    // class-reference test below, which answers 1 for anything that is not an
+    // `@inline struct` — including the view form, where 1 is the right answer.
+    if (type.kind == TypeKind.FixedArray &&
+        (type.fixedMemoryModel == MemoryModelCode.None ||
+         type.fixedMemoryModel == MemoryModelCode.Inline)) {
+      let count = Signature.leafCountOf(type);
+      return count > 0 ? count : 1;
+    }
     let classReference = type.classReference;
     if (
       classReference == null ||
@@ -1677,6 +1686,32 @@ export class Signature {
    * the caller pushes operands in the same walk.
    */
   static leafTypesOf(type: Type, out: Type[]): void {
+    // A value-form `[T * N]` is a value too — N elements, each contributing its
+    // own leaves. Element-major, because that is the order the SROA locals are
+    // created in (`fillSroaArrayLocals` keys them `"0"`, `"1"`, ...) and the
+    // order a reader expects `arr[0].x` to sit at.
+    //
+    // The view form is deliberately **not** here: `@unmanaged [T * N]` is one
+    // `i32` address, and `wasmParamCountOf` already answers 1 for it by falling
+    // through the class-reference test.
+    if (type.kind == TypeKind.FixedArray &&
+        (type.fixedMemoryModel == MemoryModelCode.None ||
+         type.fixedMemoryModel == MemoryModelCode.Inline)) {
+      let elementType = assert(type.fixedElementType);
+      // A **scalar** element is its own leaf. `leafTypesOf` pushes nothing for
+      // a non-record — that is why `paramRefs` handles a scalar parameter with
+      // `toRef()` rather than through this walk — so the recursion has to place
+      // it, or an array of scalars would contribute zero leaves.
+      let elementClass = elementType.classReference;
+      let isRecordElement = elementClass != null &&
+        (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
+         elementClass.hasDecorator(DecoratorFlags.ManagedStruct));
+      for (let i = 0, n = type.fixedLength; i < n; ++i) {
+        if (isRecordElement) Signature.leafTypesOf(elementType, out);
+        else out.push(elementType);
+      }
+      return;
+    }
     let classReference = type.classReference;
     if (classReference == null) return;
     let members = classReference.members;
@@ -1941,6 +1976,17 @@ export class Signature {
         for (let j = 0, n = leafTypes.length; j < n; ++j) {
           unchecked(typeRefs[at++] = unchecked(leafTypes[j]).toRef());
         }
+      } else if (parameterType.kind == TypeKind.FixedArray &&
+                 (parameterType.fixedMemoryModel == MemoryModelCode.None ||
+                  parameterType.fixedMemoryModel == MemoryModelCode.Inline)) {
+        // A value-form `[T * N]`: one ref per element leaf, element-major. The
+        // array has no address to pass, so the leaves *are* the argument —
+        // which is also what makes the call copy rather than alias.
+        let leafTypes = new Array<Type>();
+        Signature.leafTypesOf(parameterType, leafTypes);
+        for (let j = 0, n = leafTypes.length; j < n; ++j) {
+          unchecked(typeRefs[at++] = unchecked(leafTypes[j]).toRef());
+        }
       } else {
         // Scalar or reference: one ref, exactly as before.
         unchecked(typeRefs[at++] = parameterType.toRef());
@@ -1953,7 +1999,8 @@ export class Signature {
    *  written to the caller's slot, so nothing flows back through the value
    *  stack. */
   get resultRefs(): TypeRef {
-    return this.hasHiddenDestParam ? TypeRef.None : this.returnType.toRef();
+    if (this.hasHiddenDestParam) return TypeRef.None;
+    return this.returnType.toRef();
   }
 
   /** Tests if this signature equals the specified. */

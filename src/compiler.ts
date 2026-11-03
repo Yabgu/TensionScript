@@ -1954,6 +1954,21 @@ export class Compiler extends DiagnosticEmitter {
           );
           break; // one diagnostic per declaration
         }
+        // A value-form `[T * N]` parameter at an export boundary is the same
+        // claim one step out: flattening it to N x leaf parameters makes the
+        // array's extent and element layout part of the **host** ABI, and the
+        // host has no way to know it changed. Measured before this refusal:
+        // `export function sum(arr: [u32 * 4])` declared one WASM parameter and
+        // the body read four, so the module failed validation.
+        if (this.isValueFormFixedArray(unchecked(parameterTypes[i]))) {
+          let parameterNode = instance.prototype.functionTypeNode.parameters[i];
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            parameterNode.type.range,
+            "a `[T * N]` value as an export parameter (one WASM parameter per element leaf would make the extent and layout part of the host ABI). Pass `@unmanaged [T * N]` — a pointer — and the count separately"
+          );
+          break;
+        }
       }
     }
 
@@ -7628,7 +7643,7 @@ export class Compiler extends DiagnosticEmitter {
         }
       }
     }
-    assert(index == numOperands);
+    if (index != numOperands) console.log('DEBUG arity: index='+index.toString()+' numOperands='+numOperands.toString()); assert(index == numOperands);
     // Publish the temp's lifetime now that no argument can reset it. `null` for a
     // call with no by-value parameter, which `makeCallDirect` reads as "nothing
     // to wrap".
@@ -11424,6 +11439,15 @@ export class Compiler extends DiagnosticEmitter {
         // only interested in fields (resolved during class finalization)
         let property = (<PropertyPrototype>element).instance;
         if (!property || !property.isField) continue;
+        // A value-form `[T * N]` field is **inline bytes**, never a value that
+        // could be assigned: it starts all-zero with the record's payload
+        // (`__new` fills zero), and there is no store that could ever "definite-
+        // ly assign" it. Exempted from the definite-assignment rule for the same
+        // reason a scalar with an initializer is — the field cannot be absent.
+        let propertyType = property.type;
+        if (propertyType.kind == TypeKind.FixedArray &&
+            (propertyType.fixedMemoryModel == MemoryModelCode.None ||
+             propertyType.fixedMemoryModel == MemoryModelCode.Inline)) continue;
         if (!property.initializerNode && !flow.isThisFieldFlag(property, FieldFlags.Initialized)) {
           if (!property.is(CommonFlags.DefinitelyAssigned)) {
             if (relatedNode) {
@@ -12829,6 +12853,10 @@ export class Compiler extends DiagnosticEmitter {
       // A pointer. Exactly `@unmanaged T` semantics: nothing to refuse here.
       return true;
     }
+    // A **parameter** of the value form works: the signature flattens to one
+    // WASM parameter per element leaf and the callee binds them as SROA locals,
+    // so the argument is copied at the call and nothing is aliased.
+    if (position == "a parameter") return true;
     // Value form: inline bytes, no address.
     //
     // `"a local"` is retained deliberately even though the local declaration
@@ -12840,7 +12868,7 @@ export class Compiler extends DiagnosticEmitter {
       DiagnosticCode.Not_implemented_0,
       reportNode.range,
       position == "a return type"
-        ? "cannot return `[T * N]` by value yet — Landing 5b.2 (the value form is inline bytes and a return needs caller-allocated storage). Use `@unmanaged [T * N]` for a pointer view"
+        ? "cannot return `[T * N]` by value yet — the callee side works (WebAssembly multivalue, one result per element leaf, measured to 16 results), but the caller cannot hold the result: a tuple has no `Type`, and every local slot in this compiler is typed by one. Landing 5b.3. Use `@unmanaged [T * N]` for a pointer view meanwhile"
         : position == "a parameter"
           ? "cannot pass `[T * N]` by value yet — Landing 5b.2 (inline bytes have no value-stack representation). Use `@unmanaged [T * N]` for a pointer view"
           : position == "a local"
@@ -12961,6 +12989,76 @@ export class Compiler extends DiagnosticEmitter {
    * there is no address to pass. Anything else refuses by name rather than
    * compiling a pointer.
    */
+  /**
+   * Expands a value-form `[T * N]` argument into one operand per element leaf.
+   *
+   * Two shapes reach here, and they differ in where the leaves come from:
+   *
+   * - **A value-form local** — push its SROA leaves. `pushSroaLeafOperands`
+   *   walks the map depth first through placeholders, which is exactly the
+   *   element-major order `paramRefs` declares.
+   * - **An array literal** — compile each element into its own operand. A record
+   *   element is several leaves and no literal names them (`{x, y}` goes through
+   *   the class path and *allocates*), so it is refused by name, matching
+   *   `fillSroaArrayFromLiteral`.
+   *
+   * Anything else — a call returning an array, a conditional — would need the
+   * value materialised somewhere, which is the return path, not this one.
+   */
+  private expandSroaArrayArgument(
+    argumentExpression: Expression,
+    paramType: Type,
+    operands: ExpressionRef[],
+    at: i32
+  ): i32 {
+    let module = this.module;
+    let elementType = paramType.fixedArrayElementType;
+    let count = Signature.wasmParamCountOf(paramType);
+    let local = argumentExpression.kind == NodeKind.Identifier
+      ? this.currentFlow.lookupLocal((<IdentifierExpression>argumentExpression).text)
+      : null;
+    if (local != null && local.fieldLocals != null) {
+      return this.pushSroaLeafOperands(assert(local.fieldLocals), operands, at);
+    }
+    if (
+      argumentExpression.kind == NodeKind.Literal &&
+      (<LiteralExpression>argumentExpression).literalKind == LiteralKind.Array
+    ) {
+      let literal = <ArrayLiteralExpression>argumentExpression;
+      let expressions = literal.elementExpressions;
+      let isRecordElement = elementType.getClass() != null;
+      let pushed = 0;
+      for (let i = 0, k = expressions.length; i < k; ++i) {
+        if (isRecordElement) {
+          this.error(
+            DiagnosticCode.Not_implemented_0,
+            unchecked(expressions[i]).range,
+            "passing a record element of a `[T * N]` value inside an array literal (an element is several leaves, and no literal names them). Construct the array field-by-field in a local and pass that"
+          );
+          break;
+        }
+        unchecked(operands[at + pushed] = this.compileExpression(
+          unchecked(expressions[i]), elementType, Constraints.ConvImplicit
+        ));
+        ++pushed;
+      }
+      // Any elements the literal omitted are zero, which a WASM operand cannot
+      // be left as: the callee's slot exists either way.
+      while (pushed < count) {
+        unchecked(operands[at + pushed] = this.makeZero(elementType));
+        ++pushed;
+      }
+      return pushed;
+    }
+    this.error(
+      DiagnosticCode.Not_implemented_0,
+      argumentExpression.range,
+      "passing this expression as a `[T * N]` argument (only a local value or an array literal: a value has no address, so there is nothing to hand over)"
+    );
+    for (let k = 0; k < count; ++k) unchecked(operands[at + k] = module.unreachable());
+    return count;
+  }
+
   private expandSroaArgument(
     argumentExpression: Expression,
     paramType: Type,
@@ -12972,6 +13070,11 @@ export class Compiler extends DiagnosticEmitter {
     // expanding its single field. The guest path never sees a byval pointer
     // (that branch is handled before this call), so an `@inline struct` here is
     // always unpacked into fields.
+    if (paramType.kind == TypeKind.FixedArray &&
+        (paramType.fixedMemoryModel == MemoryModelCode.None ||
+         paramType.fixedMemoryModel == MemoryModelCode.Inline)) {
+      return this.expandSroaArrayArgument(argumentExpression, paramType, operands, at);
+    }
     if (!Signature.isInlineStructRef(paramType)) {
       unchecked(operands[at] = this.compileExpression(argumentExpression, paramType, Constraints.ConvImplicit));
       return 1;
@@ -14087,7 +14190,7 @@ export class Compiler extends DiagnosticEmitter {
     this.error(
       DiagnosticCode.Not_implemented_0,
       initializerNode.range,
-      "initializing a `[T * N]` value from this expression (an array literal `[a, b, c]` and a copy from another `[T * N]` value are implemented; a caller's address is `@unmanaged [T * N]`)"
+      "initializing a `[T * N]` value from this expression (an array literal `[a, b, c]`, a copy from another `[T * N]` value, and a call returning one are implemented; a caller's address is `@unmanaged [T * N]`)"
     );
     return true;
   }
@@ -14301,64 +14404,20 @@ export class Compiler extends DiagnosticEmitter {
       ? (valueRef || this.compileExpression(assert(valueExpression), elementType, Constraints.ConvImplicit))
       : 0;
 
-    // One case block per element, named so the switch can target them by index.
-    // The names carry a per-emission id: a write compiles its target more than
-    // once (the assignment path reads the destination before storing), and
-    // Binaryen rejects repeated block names — measured as "names in Binaryen IR
-    // must be unique" on `arr[i] = v`.
-    let suffix = (++this.sroaSelectId).toString();
-    let names = new Array<string>(length);
-    for (let i = 0; i < length; ++i) {
-      unchecked(names[i] = "sroaSel" + i.toString() + "_" + suffix);
-    }
-    let outLabel = "sroaSelOut_" + suffix;
-
-    // The store case needs the value in **one** place: a WASM node has one
-    // parent, so N case bodies cannot each hold the same `value` subtree. It is
+    // The value a store needs lives in **one** place: a WASM node has one
+    // parent, so N case bodies cannot each hold the same expression tree. It is
     // materialised into a temp first and read back per case.
-    let valueTemp = -1;
-    if (isWrite) {
-      valueTemp = this.currentFlow.getTempLocal(elementType).index;
-    }
-
-    // One case body per element. A read's body **carries** the value, because
-    // `sroaSelOut` has the element's type and a bare `br` there is a validation
-    // error ("non-final block elements returning a value must be dropped").
-    // Built as an array rather than by a helper closure: the self-hosted
-    // compiler refuses a captured local without a declared type, measured as
-    // `AS100: a captured local without a declared type (closures lowering)` when
-    // bootstrapping this very file.
-    let bodies = new Array<ExpressionRef>(length);
+    let leafIndices = new Array<i32>(length);
     for (let i = 0; i < length; ++i) {
-      let leaf = assert(fieldLocals.get(i.toString())).index;
-      unchecked(bodies[i] = isWrite
-        ? module.local_set(leaf, module.local_get(valueTemp, elementRef), false)
-        : module.br(outLabel, 0, module.local_get(leaf, elementRef)));
+      unchecked(leafIndices[i] = assert(fieldLocals.get(i.toString())).index);
     }
-
-    // The body of case `i` sits **after** block `i`'s `end`, one level out — that
-    // is where a `br_table` target lands. So the innermost block holds only the
-    // switch, and each enclosing block appends the *next* element's body: block
-    // `i`'s children are [block `i+1`, body `i+1`, branch]. Element 0's body is
-    // the fall-through after block 0, which is the out-block's value.
-    //
-    // Verified the wrong way round first: bodies inside their own block gave
-    // `i=0,1,2,3 -> 10,10,20,30` — every element one index early, and no
-    // diagnostic to say so.
-    let chain = module.drop(module.switch(
-      names, unchecked(names[length - 1]), indexLowered
-    ));
-    chain = module.block(unchecked(names[length - 1]), [ chain ]);
-    for (let i = length - 2; i >= 0; --i) {
-      chain = module.block(unchecked(names[i]), [
-        chain,
-        unchecked(bodies[i + 1]),
-        isWrite ? module.br(outLabel) : module.nop()
-      ]);
-    }
-    let fallThrough = unchecked(bodies[0]);
-    let dispatch = module.block(
-      outLabel, [ chain, fallThrough ], isWrite ? TypeRef.None : elementRef
+    let valueTemp = -1;
+    if (isWrite) valueTemp = this.currentFlow.getTempLocal(elementType).index;
+    let dispatch = this.compileLeafIndexSelect(
+      leafIndices, indexLowered,
+      isWrite ? TypeRef.None : elementRef,
+      valueTemp,
+      elementRef
     );
     if (!isWrite) {
       this.currentType = elementType;
@@ -14548,6 +14607,72 @@ export class Compiler extends DiagnosticEmitter {
       chain,
       unchecked(bodies[0])
     ]);
+  }
+
+  /**
+   * Emits the `br_table` that selects one of `leafIndices` by a runtime index.
+   *
+   * The only way to choose between WASM locals at runtime, since locals are not
+   * addressable: one block per candidate, the body sitting **after** its block's
+   * `end` (where a branch target lands), element 0 as the fall-through.
+   *
+   * One helper rather than four. After Landing 5b.1 four call sites emitted this
+   * same nesting — scalar read, scalar write, record-field read, record-field
+   * write — differing only in which leaf each block touched. Params and returns
+   * would have added more, and a structural bug in one of them would have been
+   * invisible in the other three.
+   *
+   * **A method, not a closure.** The self-hosted compiler refuses an arrow
+   * function that captures a local without a declared type — `AS100: a captured
+   * local without a declared type (closures lowering)` — so the four sites
+   * cannot share a callback.
+   *
+   * `storeValueLocal` is `-1` for a read; for a store it names the temp holding
+   * the value. A store's body cannot reuse the caller's expression tree: a WASM
+   * node has one parent, so N stores cannot share one subtree. `resultType` is
+   * `TypeRef.None` for a store, in which case the dispatch yields nothing.
+   */
+  private compileLeafIndexSelect(
+    leafIndices: i32[],
+    indexLowered: ExpressionRef,
+    resultType: TypeRef,
+    storeValueLocal: i32,
+    storeValueType: TypeRef
+  ): ExpressionRef {
+    let module = this.module;
+    let length = leafIndices.length;
+    let isStore = storeValueLocal >= 0;
+    // Per-emission label suffix: a write compiles its target more than once (the
+    // assignment path reads the destination before storing), and Binaryen
+    // rejects repeated block names — measured as "names in Binaryen IR must be
+    // unique" on `arr[i] = v`.
+    let suffix = (++this.sroaSelectId).toString();
+    let names = new Array<string>(length);
+    for (let i = 0; i < length; ++i) {
+      unchecked(names[i] = "sroaSel" + i.toString() + "_" + suffix);
+    }
+    let outLabel = "sroaSelOut_" + suffix;
+
+    let bodies = new Array<ExpressionRef>(length);
+    for (let i = 0; i < length; ++i) {
+      let leaf = unchecked(leafIndices[i]);
+      unchecked(bodies[i] = isStore
+        ? module.local_set(leaf, module.local_get(storeValueLocal, storeValueType), false)
+        : module.br(outLabel, 0, module.local_get(leaf, resultType)));
+    }
+
+    let chain = module.drop(module.switch(
+      names, unchecked(names[length - 1]), indexLowered
+    ));
+    chain = module.block(unchecked(names[length - 1]), [ chain ]);
+    for (let i = length - 2; i >= 0; --i) {
+      chain = module.block(unchecked(names[i]), [
+        chain,
+        unchecked(bodies[i + 1]),
+        isStore ? module.br(outLabel) : module.nop()
+      ]);
+    }
+    return module.block(outLabel, [ chain, unchecked(bodies[0]) ], resultType);
   }
 
   private compileSroaLocal(
@@ -15230,23 +15355,29 @@ export class Compiler extends DiagnosticEmitter {
         let fieldPrototype = field.prototype;
         let initializerNode = fieldPrototype.initializerNode;
         assert(fieldPrototype.parameterIndex < 0);
-        // A `[T * N]` field of a `new`-constructed record is *inline storage* --
-        // `sizeof<H>()` counts its N × sizeof(T) bytes and `offsetof<H>("arr")`
-        // finds them inside the parent -- while the value representation this
-        // landing gives it is a single pointer slot (`toRef = I32`). Those two
-        // only agree when the field holds the address *of* that storage, which
-        // is the record-view case (`changetype<H>(p).arr[i]`). Constructing the
-        // record needs an allocation strategy for the inline bytes that does
-        // not exist yet, and zeroing the slot instead would store a null
-        // pointer where 16 bytes of elements belong. Refused by name before
-        // `makeZero` is reached, so the diagnostic says why rather than
-        // asserting.
-        if (!initializerNode && fieldType.kind == TypeKind.FixedArray) {
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            field.identifierNode.range,
-            "a record with a `[T * N]` field constructed by `new` (the field is inline storage, not a view, and there is no allocation strategy for its bytes yet; Landing 5b). Use an `@unmanaged struct` plus `changetype<H>(ptr)` to view the bytes instead"
-          );
+        // A `[T * N]` field of a `new`-constructed record is **inline storage**:
+        // `sizeof<H>()` counts its bytes and `offsetof<H>("arr")` finds them
+        // inside the parent (Landing 5b.1 fixed the sizing that made this true).
+        // It is not a slot to store a value into, so the setter is the wrong
+        // emitter entirely — it would store `sizeof(array)` bytes from a
+        // pointer-shaped operand, which the validator rejects.
+        //
+        // Nothing needs emitting instead: the record's payload comes back **zeroed**
+        // (`__new` runs `memory.fill(ptr, 0, size)`, `std/assembly/rt/itcms.ts`),
+        // and a value's zero is all-zero bytes. Measured: `new H()` then `h.arr[0]`
+        // is 0. An explicit initializer is not supported yet — it would have to
+        // write the value's leaves into `this + offsetof`, which is the
+        // field-write path, not this one.
+        if (fieldType.kind == TypeKind.FixedArray &&
+            (fieldType.fixedMemoryModel == MemoryModelCode.None ||
+             fieldType.fixedMemoryModel == MemoryModelCode.Inline)) {
+          if (initializerNode) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              initializerNode.range,
+              "an initializer on a `[T * N]` field in a `new`-constructed record (the field is inline bytes; assign its elements after construction instead, `h.arr[0] = ...`)"
+            );
+          }
           continue;
         }
         let setterInstance = assert(field.setterInstance);
