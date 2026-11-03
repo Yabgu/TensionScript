@@ -4,11 +4,17 @@
  (memory $0 0)
  (export "scalarReturn" (func $interop/fixed-array-value-returns/scalarReturn))
  (export "scalarReturnAll" (func $interop/fixed-array-value-returns/scalarReturnAll))
+ (export "literalReturn" (func $interop/fixed-array-value-returns/scalarReturn))
+ (export "literalReturnAll" (func $interop/fixed-array-value-returns/scalarReturnAll))
+ (export "shortLiteralZeroFills" (func $interop/fixed-array-value-returns/shortLiteralZeroFills))
  (export "returnIsACopy" (func $interop/fixed-array-value-returns/returnIsACopy))
  (export "recordReturnX" (func $interop/fixed-array-value-returns/recordReturnX))
  (export "recordReturnLast" (func $interop/fixed-array-value-returns/recordReturnLast))
  (export "recordReturnSum" (func $interop/fixed-array-value-returns/recordReturnSum))
  (export "memory" (memory $0))
+ (func $interop/fixed-array-value-returns/shortLiteralZeroFills (result i32)
+  i32.const 87
+ )
  (func $interop/fixed-array-value-returns/scalarReturnAll (result i32)
   i32.const 43210
  )
