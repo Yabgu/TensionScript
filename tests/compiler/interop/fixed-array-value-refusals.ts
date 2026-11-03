@@ -52,6 +52,11 @@ export function valueParam(a: [u32 * 4]): u32 {
   return a[0];
 }
 
+// Returning a `[T * N]` **works** as of Landing 5b.3 — the callee emits one
+// multivalue result per element leaf and the caller unpacks them
+// (`fixed-array-value-returns`). What this probe refuses is narrower: the value
+// has to exist as locals, so returning an expression that is not a local and not
+// an array literal has nothing to flatten.
 export function valueReturn(p: usize): [u32 * 4] {
   return changetype<@unmanaged [u32 * 4]>(p);
 }

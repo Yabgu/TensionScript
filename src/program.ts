@@ -122,6 +122,7 @@ import {
   ExpressionRef,
   FunctionRef,
   MemorySegment,
+  TypeRef,
   getFunctionName
 } from "./module";
 
@@ -3892,6 +3893,30 @@ export class Local extends VariableLikeElement {
   fieldLocals: Map<string, Local> | null = null;
 
   /**
+   * The WASM slot type for this local, when it is **not** what {@link type}
+   * says it is.
+   *
+   * `type` answers "what does the source see" — a record, so `p.field` resolves;
+   * an array, so `arr[i]` resolves. The slot is a different question, and for
+   * most locals the two agree. Three cases where they do not:
+   *
+   * - **view local** (`isViewLocal`) — the slot is the pointer; handled below by
+   *   substituting `usizeType`, because a pointer *is* a type.
+   * - **multivalue tuple** — the slot is the `TypeRef` binaryen makes for a
+   *   multi-result signature. That has **no `Type` at all**: `createType(refs)`
+   *   answers a `TypeRef` the type system cannot describe. Hence an override
+   *   rather than a substitution — this is the one local whose slot cannot be
+   *   named by a `Type`.
+   *
+   * {@link TypeRef.None} for every other local, so the ordinary case costs
+   * nothing — the same reasoning as {@link fieldLocals}. A sentinel rather than
+   * `| null` because `TypeRef` is an integer type and cannot be nullable here
+   * (measured: `AS204: Type 'TypeRef' cannot be nullable` when the self-hosted
+   * compiler parsed this declaration).
+   */
+  typeRefOverride: TypeRef = TypeRef.None;
+
+  /**
    * Whether this local is a **view parameter**: `a: @unmanaged T` where `T` is
    * an inline type.
    *
@@ -4503,8 +4528,23 @@ export class Function extends TypedElement {
     }
   }
 
-  /** Gets the types of additional locals that are not parameters. */
-  getNonParameterLocalTypes(): Type[] {
+  /**
+   * The **WASM slot types** of the additional locals that are not parameters.
+   *
+   * Named for the refs rather than the types because that is what it now
+   * answers: most slots are `local.type.toRef()`, but a multivalue tuple's slot
+   * is a `TypeRef` with no `Type` behind it ({@link Local.typeRefOverride}), and
+   * a view local's slot is the pointer rather than the record it names. Callers
+   * feed this straight to `Module#addFunction`'s `varTypes`, which is a
+   * `TypeRef[]` — so the conversion belongs here, where the slot is decided,
+   * rather than at each of them.
+   *
+   * Renamed from `getNonParameterLocalTypes` when the tuple override landed:
+   * four call sites all wrapped the old answer in `typesToRefs`, and renaming
+   * means a caller that was missed fails to compile instead of silently
+   * declaring a slot of the wrong type.
+   */
+  getNonParameterLocalTypeRefs(): TypeRef[] {
     let localsByIndex = this.localsByIndex;
     let signature = this.signature;
     let numTotal = localsByIndex.length;
@@ -4518,17 +4558,26 @@ export class Function extends TypedElement {
     let numFixed = signature.wasmParamCount();
     if (signature.thisType) ++numFixed;
     let numAdditional = numTotal - numFixed;
-    let types = new Array<Type>(numAdditional);
+    let refs = new Array<TypeRef>(numAdditional);
     for (let i = 0; i < numAdditional; ++i) {
       let local = localsByIndex[numFixed + i];
+      let slotOverride = local.typeRefOverride;
+      if (slotOverride != TypeRef.None) {
+        // A multivalue tuple slot: a `TypeRef` with no `Type`, so it cannot be
+        // expressed by the substitutions below.
+        refs[i] = slotOverride;
+        continue;
+      }
       // A **view local** holds an address in an `i32` slot. Its `type` is the
       // record (so `p.field` resolves), but the slot must be the pointer, not
       // the record's reference type — the same distinction `isViewParam` makes
       // for parameters, done here because this is the one place a body local's
       // WASM type is decided.
-      types[i] = local.isViewLocal ? this.program.options.usizeType : local.type;
+      refs[i] = local.isViewLocal
+        ? this.program.options.usizeType.toRef()
+        : local.type.toRef();
     }
-    return types;
+    return refs;
   }
 
   /** Gets the name of the parameter at the specified index. */
