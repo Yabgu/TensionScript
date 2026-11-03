@@ -18,6 +18,14 @@
 //      that does not never does. A consumer writes `function make(): [T * 4]`
 //      and does not have to know how it is lowered.
 //
+// Two shapes reach the return emitter, and the fixture covers both: a value-form
+// **local** (`return arr`) pushes its SROA leaves, and a fresh **array literal**
+// (`return [10, 20, 30, 40]`) compiles element by element into the results
+// through the same walk a call argument uses. The diagnostic this position emits
+// promised the literal shape from 5b.3 on while the condition only read
+// identifiers — Tension PR #46 measured the gap: `return [10, 20, 30, 40]`
+// refused with a message saying literals were accepted.
+//
 // The return copies: the caller's leaves are filled from the tuple, so writing
 // through the result cannot reach the callee's storage — there is none left to
 // reach.
@@ -46,6 +54,33 @@ export function scalarReturn(): u32 {
 export function scalarReturnAll(): u32 {
   const arr: [u32 * 4] = make();
   return arr[0] + arr[1] * 10 + arr[2] * 100 + arr[3] * 1000;   // 43210
+}
+
+// --- a fresh array literal ------------------------------------------------
+
+// No local at all: the four results are the four constants. A literal shorter
+// than the extent zero-fills the rest, because the slot exists either way.
+function makeLiteral(): [u32 * 4] {
+  return [10, 20, 30, 40];
+}
+
+function makeShortLiteral(): [u32 * 4] {
+  return [7, 8];
+}
+
+export function literalReturn(): u32 {
+  const arr: [u32 * 4] = makeLiteral();
+  return arr[2];                                 // 30
+}
+
+export function literalReturnAll(): u32 {
+  const arr: [u32 * 4] = makeLiteral();
+  return arr[0] + arr[1] * 10 + arr[2] * 100 + arr[3] * 1000;   // 43210
+}
+
+export function shortLiteralZeroFills(): u32 {
+  const arr: [u32 * 4] = makeShortLiteral();
+  return arr[0] + arr[1] * 10 + arr[2] * 100 + arr[3] * 1000;   // 87
 }
 
 // --- the result is a value ------------------------------------------------

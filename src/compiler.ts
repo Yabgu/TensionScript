@@ -13024,7 +13024,6 @@ export class Compiler extends DiagnosticEmitter {
     at: i32
   ): i32 {
     let module = this.module;
-    let elementType = paramType.fixedArrayElementType;
     let count = Signature.wasmParamCountOf(paramType);
     let local = argumentExpression.kind == NodeKind.Identifier
       ? this.currentFlow.lookupLocal((<IdentifierExpression>argumentExpression).text)
@@ -13036,31 +13035,9 @@ export class Compiler extends DiagnosticEmitter {
       argumentExpression.kind == NodeKind.Literal &&
       (<LiteralExpression>argumentExpression).literalKind == LiteralKind.Array
     ) {
-      let literal = <ArrayLiteralExpression>argumentExpression;
-      let expressions = literal.elementExpressions;
-      let isRecordElement = elementType.getClass() != null;
-      let pushed = 0;
-      for (let i = 0, k = expressions.length; i < k; ++i) {
-        if (isRecordElement) {
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            unchecked(expressions[i]).range,
-            "passing a record element of a `[T * N]` value inside an array literal (an element is several leaves, and no literal names them). Construct the array field-by-field in a local and pass that"
-          );
-          break;
-        }
-        unchecked(operands[at + pushed] = this.compileExpression(
-          unchecked(expressions[i]), elementType, Constraints.ConvImplicit
-        ));
-        ++pushed;
-      }
-      // Any elements the literal omitted are zero, which a WASM operand cannot
-      // be left as: the callee's slot exists either way.
-      while (pushed < count) {
-        unchecked(operands[at + pushed] = this.makeZero(elementType));
-        ++pushed;
-      }
-      return pushed;
+      return this.pushSroaArrayLiteralOperands(
+        <ArrayLiteralExpression>argumentExpression, paramType, operands, at, "passing"
+      );
     }
     this.error(
       DiagnosticCode.Not_implemented_0,
@@ -13069,6 +13046,74 @@ export class Compiler extends DiagnosticEmitter {
     );
     for (let k = 0; k < count; ++k) unchecked(operands[at + k] = module.unreachable());
     return count;
+  }
+
+  /**
+   * Compiles an array literal into one operand per element leaf, starting at
+   * `at`, and returns how many were written.
+   *
+   * Shared by the call site (`expandSroaArrayArgument`) and the return
+   * (`compileMultivalueReturnStatement`) so the two positions accept the same
+   * shapes and refuse the same ones by the same rule, instead of by two copies
+   * of it. `verb` is `"passing"` or `"returning"` — the only word the two
+   * refusals disagree on.
+   *
+   * Three rules:
+   *
+   * - A **record element** is several leaves and no literal names them, so it is
+   *   refused by name; building the array field-by-field in a local is the
+   *   working route in both positions.
+   * - A **short** literal zero-fills. The slot exists either way, and a WASM
+   *   operand cannot be left out.
+   * - A **long** literal is an arity error rather than a write past the operand
+   *   block — `sum([1, 2, 3, 4, 5])` into a `[u32 * 4]` parameter reached
+   *   Binaryen with five operands for four slots and crashed the compiler, so
+   *   this bound is a guard, not a formality.
+   */
+  private pushSroaArrayLiteralOperands(
+    literal: ArrayLiteralExpression,
+    arrayType: Type,
+    operands: ExpressionRef[],
+    at: i32,
+    verb: string
+  ): i32 {
+    let elementType = arrayType.fixedArrayElementType;
+    let count = Signature.wasmParamCountOf(arrayType);
+    let expressions = literal.elementExpressions;
+    let isRecordElement = elementType.getClass() != null;
+    let remedy = verb == "passing" ? "pass" : "return";
+    let pushed = 0;
+    for (let i = 0, k = expressions.length; i < k; ++i) {
+      if (pushed >= count) {
+        this.error(
+          DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+          literal.range,
+          "too many elements",
+          arrayType.toString()
+        );
+        break;
+      }
+      if (isRecordElement) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          unchecked(expressions[i]).range,
+          verb + " a record element of a `[T * N]` value inside an array literal (an element is several leaves, and no literal names them). Construct the array field-by-field in a local and " + remedy + " that"
+        );
+        break;
+      }
+      unchecked(operands[at + pushed] = this.compileExpression(
+        unchecked(expressions[i]), elementType, Constraints.ConvImplicit
+      ));
+      ++pushed;
+    }
+    // Any elements the literal omitted are zero, which a WASM operand cannot be
+    // left as: the slot exists either way. A refused element lands here too, so
+    // the operand count still matches the signature's.
+    while (pushed < count) {
+      unchecked(operands[at + pushed] = this.makeZero(elementType));
+      ++pushed;
+    }
+    return pushed;
   }
 
   private expandSroaArgument(
@@ -14744,9 +14789,10 @@ export class Compiler extends DiagnosticEmitter {
    * Returns a value-form `[T * N]` value as WASM multivalue results.
    *
    * One result per element leaf, element-major — the order `resultRefs` declares
-   * and the caller's unpack indexes into. The leaves are read out of the value's
-   * SROA locals; a fresh array literal goes through the same path, because the
-   * literal binds to leaves before the return is compiled.
+   * and the caller's unpack indexes into. Two shapes reach here, and both end as
+   * one operand per leaf: a value-form local pushes its SROA leaves, and a fresh
+   * array literal compiles element by element through the same walk the call
+   * site uses (`pushSroaArrayLiteralOperands`).
    *
    * Requires `Feature.MultiValue`, which `Resolver` turns on when it resolves
    * this return type (`enableMultiValueOnce`), so a module that returns one of
@@ -14762,7 +14808,24 @@ export class Compiler extends DiagnosticEmitter {
     let local = valueExpression != null && valueExpression.kind == NodeKind.Identifier
       ? flow.lookupLocal((<IdentifierExpression>valueExpression).text)
       : null;
-    if (local == null || local.fieldLocals == null) {
+    let leafCount = Signature.wasmParamCountOf(returnType);
+    let operands = new Array<ExpressionRef>(leafCount);
+    let pushed: i32;
+    if (local != null && local.fieldLocals != null) {
+      pushed = this.pushSroaLeafOperands(assert(local.fieldLocals), operands, 0);
+    } else if (
+      valueExpression != null &&
+      valueExpression.kind == NodeKind.Literal &&
+      (<LiteralExpression>valueExpression).literalKind == LiteralKind.Array
+    ) {
+      // Landing 5b.3 wrote the diagnostic below promising this shape and did not
+      // implement it: the condition above read identifiers only, so
+      // `return [10, 20, 30, 40]` reached the refusal while the message told the
+      // user an array literal would work (Tension PR #46 measured exactly that).
+      pushed = this.pushSroaArrayLiteralOperands(
+        <ArrayLiteralExpression>valueExpression, returnType, operands, 0, "returning"
+      );
+    } else {
       this.error(
         DiagnosticCode.Not_implemented_0,
         statement.range,
@@ -14772,12 +14835,10 @@ export class Compiler extends DiagnosticEmitter {
       this.currentType = returnType;
       return module.unreachable();
     }
-    let operands = new Array<ExpressionRef>();
-    let pushed = this.pushSroaLeafOperands(assert(local.fieldLocals), operands, 0);
     // One operand per leaf, or the tuple's type will not match `resultRefs`.
     // Asserted rather than silently emitting a short tuple: a mismatch here is a
     // slot-count disagreement, which is the failure mode 5b.1 spent a cycle on.
-    assert(pushed == Signature.wasmParamCountOf(returnType));
+    assert(pushed == leafCount);
     flow.set(FlowFlags.Returns | FlowFlags.Terminates);
     this.currentType = returnType;
     return module.block(null, [ module.return(module.tuple_make(operands)) ]);

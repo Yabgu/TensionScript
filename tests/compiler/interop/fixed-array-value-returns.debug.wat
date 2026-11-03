@@ -1,7 +1,7 @@
 (module
  (type $0 (func (result i32)))
- (type $1 (func (result f64)))
- (type $2 (func (result i32 i32 i32 i32)))
+ (type $1 (func (result i32 i32 i32 i32)))
+ (type $2 (func (result f64)))
  (type $3 (func (result f64 f64 f64 f64 f64 f64 f64 f64 f64 f64 f64 f64 f64 f64 f64 f64)))
  (global $~lib/memory/__data_end i32 (i32.const 8))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 32776))
@@ -11,6 +11,9 @@
  (elem $0 (i32.const 1))
  (export "scalarReturn" (func $interop/fixed-array-value-returns/scalarReturn))
  (export "scalarReturnAll" (func $interop/fixed-array-value-returns/scalarReturnAll))
+ (export "literalReturn" (func $interop/fixed-array-value-returns/literalReturn))
+ (export "literalReturnAll" (func $interop/fixed-array-value-returns/literalReturnAll))
+ (export "shortLiteralZeroFills" (func $interop/fixed-array-value-returns/shortLiteralZeroFills))
  (export "returnIsACopy" (func $interop/fixed-array-value-returns/returnIsACopy))
  (export "recordReturnX" (func $interop/fixed-array-value-returns/recordReturnX))
  (export "recordReturnLast" (func $interop/fixed-array-value-returns/recordReturnLast))
@@ -66,6 +69,115 @@
   (local $arr$3 i32)
   (local $4 (tuple i32 i32 i32 i32))
   call $interop/fixed-array-value-returns/make
+  local.set $4
+  local.get $4
+  tuple.extract 4 0
+  local.set $arr$0
+  local.get $4
+  tuple.extract 4 1
+  local.set $arr$1
+  local.get $4
+  tuple.extract 4 2
+  local.set $arr$2
+  local.get $4
+  tuple.extract 4 3
+  local.set $arr$3
+  local.get $arr$0
+  local.get $arr$1
+  i32.const 10
+  i32.mul
+  i32.add
+  local.get $arr$2
+  i32.const 100
+  i32.mul
+  i32.add
+  local.get $arr$3
+  i32.const 1000
+  i32.mul
+  i32.add
+  return
+ )
+ (func $interop/fixed-array-value-returns/makeLiteral (result i32 i32 i32 i32)
+  i32.const 10
+  i32.const 20
+  i32.const 30
+  i32.const 40
+  tuple.make 4
+  return
+ )
+ (func $interop/fixed-array-value-returns/literalReturn (result i32)
+  (local $arr$0 i32)
+  (local $arr$1 i32)
+  (local $arr$2 i32)
+  (local $arr$3 i32)
+  (local $4 (tuple i32 i32 i32 i32))
+  call $interop/fixed-array-value-returns/makeLiteral
+  local.set $4
+  local.get $4
+  tuple.extract 4 0
+  local.set $arr$0
+  local.get $4
+  tuple.extract 4 1
+  local.set $arr$1
+  local.get $4
+  tuple.extract 4 2
+  local.set $arr$2
+  local.get $4
+  tuple.extract 4 3
+  local.set $arr$3
+  local.get $arr$2
+  return
+ )
+ (func $interop/fixed-array-value-returns/literalReturnAll (result i32)
+  (local $arr$0 i32)
+  (local $arr$1 i32)
+  (local $arr$2 i32)
+  (local $arr$3 i32)
+  (local $4 (tuple i32 i32 i32 i32))
+  call $interop/fixed-array-value-returns/makeLiteral
+  local.set $4
+  local.get $4
+  tuple.extract 4 0
+  local.set $arr$0
+  local.get $4
+  tuple.extract 4 1
+  local.set $arr$1
+  local.get $4
+  tuple.extract 4 2
+  local.set $arr$2
+  local.get $4
+  tuple.extract 4 3
+  local.set $arr$3
+  local.get $arr$0
+  local.get $arr$1
+  i32.const 10
+  i32.mul
+  i32.add
+  local.get $arr$2
+  i32.const 100
+  i32.mul
+  i32.add
+  local.get $arr$3
+  i32.const 1000
+  i32.mul
+  i32.add
+  return
+ )
+ (func $interop/fixed-array-value-returns/makeShortLiteral (result i32 i32 i32 i32)
+  i32.const 7
+  i32.const 8
+  i32.const 0
+  i32.const 0
+  tuple.make 4
+  return
+ )
+ (func $interop/fixed-array-value-returns/shortLiteralZeroFills (result i32)
+  (local $arr$0 i32)
+  (local $arr$1 i32)
+  (local $arr$2 i32)
+  (local $arr$3 i32)
+  (local $4 (tuple i32 i32 i32 i32))
+  call $interop/fixed-array-value-returns/makeShortLiteral
   local.set $4
   local.get $4
   tuple.extract 4 0
