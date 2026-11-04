@@ -95,6 +95,7 @@
     "test:transform:esm": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/simple.js --noEmit",
     "test:transform:cjs": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/simple.js --noEmit",
     "test:cli": "node tests/cli/options.js",
+    "test:debug": "node tests/debug/runner.js --check",
     "asbuild": "npm run asbuild:debug && npm run asbuild:release",
     "asbuild:debug": "node bin/tensionscript.js --config src/asconfig.json --target debug",
     "asbuild:release": "node bin/tensionscript.js --config src/asconfig.json --target release",
@@ -116,5 +117,11 @@
     "lib/binaryen.d.ts",
     "tsconfig-base.json",
     "NOTICE"
-  ]
+  ],
+  "optionalDependencies": {
+    "@debugmcp/codelldb-darwin-arm64": "^1.11.8",
+    "@debugmcp/codelldb-darwin-x64": "^1.11.8",
+    "@debugmcp/codelldb-linux-x64": "^1.11.8",
+    "@debugmcp/codelldb-win32-x64": "^1.11.8"
+  }
 }
