@@ -9,21 +9,17 @@
 // encoder (rule 4 exempts end-to-end behaviour gates, not this). The
 // behavioural gate is ../runner.js.
 //
-// What this test does NOT assert, and why (measured 2026-11-04):
+// Five blocks: sections, comp_dir, hook fidelity, allocating programs, and
+// whole-module parity with the CLI.
 //
-//   The library flow's .debug_line file table differs from the CLI's for the
-//   same fixture: the CLI's compile registers four stdlib sources
-//   (~lib/rt/common.ts, ~lib/rt/tlsf.ts, ~lib/shared/typeinfo.ts,
-//   ~lib/rt/itcms.ts) plus game.ts, so its rows point at file index 5; a
-//   reconstructed embedder flow registers only game.ts, so its rows point at
-//   file index 1. The line/address/column values are identical, and
-//   .debug_info is semantically identical (llvm-dwarfdump --debug-info differs
-//   only in the filename line). So this is not a difference between the two
-//   emit hooks - both append exactly what synthesizeDwarf returns (asserted
-//   below) - but between the two *compiles*, and the CLI-side cause was not
-//   localised. Asserting CLI parity here would encode that unknown as a
-//   requirement; the test asserts hook fidelity instead, which is the property
-//   Prompt B's V6 left uncovered.
+// The last two exist because the first three passed while the helper was still
+// incomplete. Measured 2026-11-04: the library flow's file table held one
+// source where the CLI's held five, because the helper never parsed the
+// runtime entry (`~lib/rt/index-incremental.ts`, cli/index.js:705-719) - and
+// the same omission made the helper throw "Missing standard library component:
+// __link" on any program that allocates. `add-locals` needs no allocation, so
+// nothing caught it. The allocating block is that catcher; the parity block
+// pins the whole module against the CLI.
 
 import assert from "assert";
 import { execFileSync } from "node:child_process";
@@ -36,6 +32,8 @@ import { synthesizeDwarf } from "../../../dist/assemblyscript.js";
 import { compileViaLibrary } from "../lib/embedder.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+/** The CLI entry point, used by the parity block to compile the same fixture. */
+const CLI = path.resolve(here, "..", "..", "..", "bin", "tensionscript.js");
 const fixture = path.resolve(here, "..", "examples", "add-locals", "game.ts");
 /** The value handed to the library hook as `compDir`. */
 const PASSED_COMP_DIR = "/opt/q3-test";
@@ -149,4 +147,95 @@ function dwarfInfo(wasm) {
   }
 }
 
-console.log("library-path test: ok (3 cases)");
+// --- 4. allocating programs compile, and the runtime enters the file table ---
+
+{
+  // Inline, not a committed fixture: this is a library-compile test, not a
+  // debug-behaviour fixture. `new Array<i32>` is the smallest construct that
+  // needs the runtime's allocator; without the runtime entry parsed as an
+  // entry, the compile throws `Missing standard library component: __link`.
+  const source = [
+    "export function _start_game(): void {",
+    "  let items: i32[] = new Array<i32>(3);",
+    "  items[0] = 1;",
+    "  items[1] = 2;",
+    "  items[2] = items[0] + items[1];",
+    "}",
+    "",
+  ].join("\n");
+  const allocPath = path.join(os.tmpdir(), `ts-library-alloc-${process.pid}.ts`);
+  fs.writeFileSync(allocPath, source);
+  let alloc;
+  try {
+    alloc = compileViaLibrary({
+      sourcePath: allocPath,
+      compDir: PASSED_COMP_DIR,
+      moduleName: "alloc.wasm",
+    });
+  } finally {
+    fs.unlinkSync(allocPath);
+  }
+
+  const sources = sourcesOf(alloc);
+  assert.ok(
+    sources.some((entry) => entry.startsWith("~lib/rt/")),
+    `an allocating program must pull runtime sources into the file table; got ${JSON.stringify(sources)}`
+  );
+  assert.ok(
+    sources.some((entry) => entry.includes("ts-library-alloc")),
+    `the entry file must be in the file table; got ${JSON.stringify(sources)}`
+  );
+}
+
+// --- 5. the whole module matches the CLI's, byte for byte -------------------
+
+{
+  // Same fixture, same compDir, same module name and map URL, both paths.
+  // Anything the helper does differently shows up here - it is the strongest
+  // statement available without crossing into the behaviour harness.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ts-library-parity-"));
+  const outFile = path.join(dir, "add-locals.wasm");
+  try {
+    execFileSync(
+      process.execPath,
+      [CLI, "game.ts", "-o", outFile, "--debug", "--sourceMap",
+        "--optimizeLevel", "0", "--compDir", PASSED_COMP_DIR],
+      { cwd: path.dirname(fixture), encoding: "utf8" }
+    );
+    const fromCli = fs.readFileSync(outFile);
+
+    const fromLibrary = compileViaLibrary({
+      sourcePath: fixture,
+      sourceMapUrl: "./add-locals.wasm.map",
+      compDir: PASSED_COMP_DIR,
+      moduleName: "add-locals.wasm",
+    });
+
+    const cliSources = JSON.parse(fs.readFileSync(`${outFile}.map`, "utf8")).sources;
+    const libSources = sourcesOf(fromLibrary);
+    assert.deepStrictEqual(
+      libSources,
+      cliSources,
+      "the library path's file table must match the CLI's"
+    );
+    console.log(
+      `  parity: cli ${fromCli.length} B / lib ${fromLibrary.output.length} B, sources ${cliSources.length}`
+    );
+    assert.deepStrictEqual(
+      Buffer.from(fromLibrary.output),
+      Buffer.from(fromCli),
+      "the library path must emit the same module as the CLI for the same fixture and compDir"
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The `sources` array of a compiled module's source map. */
+function sourcesOf(binary) {
+  assert.ok(typeof binary.sourceMap === "string" && binary.sourceMap.length > 0,
+    "the compile must produce a source map");
+  return JSON.parse(binary.sourceMap).sources;
+}
+
+console.log("library-path test: ok (5 cases)");
