@@ -26,6 +26,9 @@ A fixture is `examples/<name>/game.ts` plus `expect.json` with `description`,
 `compile`, `breakpoints`, `stops`, `variables`. The guest must export
 `_start_game` (or `_start`) or the host refuses it.
 
+`npm run test:debug:unit` runs the ported byte-level encoder tests
+(`tests/debug/unit/`) against the built compiler.
+
 ## Structural baseline
 
 `node tests/debug/capture-baseline.js` writes `baseline/<name>/*.txt`: the DWARF

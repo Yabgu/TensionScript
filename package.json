@@ -96,6 +96,7 @@
     "test:transform:cjs": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/simple.js --noEmit",
     "test:cli": "node tests/cli/options.js",
     "test:debug": "node tests/debug/runner.js --check",
+    "test:debug:unit": "node --enable-source-maps tests/debug/unit/dwarf.js",
     "asbuild": "npm run asbuild:debug && npm run asbuild:release",
     "asbuild:debug": "node bin/tensionscript.js --config src/asconfig.json --target debug",
     "asbuild:release": "node bin/tensionscript.js --config src/asconfig.json --target release",

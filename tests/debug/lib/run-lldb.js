@@ -22,8 +22,8 @@ import lldb, json, re
 dbg = lldb.debugger
 target = dbg.GetSelectedTarget()
 process = target.GetProcess()
-interp = dbg.GetCommandInterpreter()
 max_stops = MAX_STOPS
+UNAVAILABLE = "<unavailable>"
 
 def reason_string(thread):
     reason = thread.GetStopReason()
@@ -53,18 +53,21 @@ def snapshot():
     if entry and entry.IsValid():
         file = entry.GetFileSpec().GetFilename() or ""
         line = entry.GetLine() or 0
-    result = lldb.SBCommandReturnObject()
-    interp.HandleCommand("frame variable", result)
-    text = result.GetOutput() or ""
+    # Read locals through the SB API, not the frame-variable command: the
+    # interpreter keeps its own selected frame, which goes stale after
+    # Continue() and returns nothing for the second stop.
     variables = []
-    for raw in text.splitlines():
-        found = re.match(r"^\(([^)]*)\)\s+(\S+)\s+=\s+(.*)$", raw)
-        if found:
-            variables.append({
-                "type": found.group(1),
-                "name": found.group(2),
-                "value": found.group(3).strip(),
-            })
+    values = frame.GetVariables(True, True, False, False)
+    for i in range(values.GetSize()):
+        value = values.GetValueAtIndex(i)
+        if not value or not value.IsValid():
+            continue
+        text = value.GetValue()
+        variables.append({
+            "type": value.GetTypeName() or "",
+            "name": value.GetName() or "",
+            "value": UNAVAILABLE if text is None else text,
+        })
     return {
         "file": file,
         "line": line,
