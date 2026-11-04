@@ -124,5 +124,8 @@
     "@debugmcp/codelldb-darwin-x64": "^1.11.8",
     "@debugmcp/codelldb-linux-x64": "^1.11.8",
     "@debugmcp/codelldb-win32-x64": "^1.11.8"
+  },
+  "config": {
+    "wasmtime": "24.0.13"
   }
 }
