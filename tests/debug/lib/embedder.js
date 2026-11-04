@@ -57,7 +57,9 @@ function resolveLib(internalPath) {
  *   defaults to `debugInfo`. Setting it false emits the same module as a debug
  *   build without the append - which is how the hook's output can be compared
  *   against a hand-rolled `synthesizeDwarf` call on identical inputs.
- * @param {string} options.compDir  DW_AT_comp_dir when DWARF is emitted
+ * @param {string} options.compDir  DW_AT_comp_dir when DWARF is emitted; it
+ *   reaches the emitter as `toBinary`'s positional argument, not through the
+ *   Options object
  * @param {string} options.moduleName  DW_AT_name for the compile unit
  * @returns {{output: Uint8Array, sourceMap: string|null}}
  */
@@ -72,7 +74,6 @@ export function compileViaLibrary({
   const options = asc.newOptions();
   asc.setDebugInfo(options, debugInfo);
   asc.setSourceMap(options, true);
-  asc.setCompDir(options, compDir);
   asc.setOptimizeLevelHints(options, 0, 0);
 
   const program = asc.newProgram(options);

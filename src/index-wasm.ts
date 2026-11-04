@@ -240,11 +240,6 @@ export function setDebugInfo(options: Options, debug: bool): void {
   options.debugInfo = debug;
 }
 
-/** Sets the `compDir` option: the DWARF compile directory. */
-export function setCompDir(options: Options, compDir: string): void {
-  options.compDir = compDir;
-}
-
 /**
  * Appends synthesized DWARF (`.debug_abbrev`, `.debug_info`, `.debug_line`,
  * `.debug_ranges`) to an emitted module and returns the augmented bytes.
