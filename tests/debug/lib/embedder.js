@@ -30,6 +30,13 @@ import * as cli from "../../../dist/asc.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
+/** The CLI spells runtimes as lowercase flags; the compiler as an enum. */
+const RUNTIME_KINDS = {
+  stub: 0,
+  minimal: 1,
+  incremental: 2,
+};
+
 /** Resolve a `~lib/...` name the way the CLI's `getFile` does. */
 function resolveLib(internalPath) {
   const rest = internalPath.startsWith("~lib/") ? internalPath.slice(5) : internalPath;
@@ -61,7 +68,12 @@ function resolveLib(internalPath) {
  *   reaches the emitter as `toBinary`'s positional argument, not through the
  *   Options object
  * @param {string} options.moduleName  DW_AT_name for the compile unit
- * @returns {{output: Uint8Array, sourceMap: string|null}}
+ * @param {string} [options.runtime]  "stub" | "minimal" | "incremental"; the
+ *   CLI's default is "incremental"
+ * @param {number} [options.stackSize]  0 means "the CLI's default for this
+ *   runtime" (32768 for incremental, 0 otherwise)
+ * @returns {{output: Uint8Array, sourceMap: string|null}}  `sourceMap` is the
+ *   v3 map as JSON text; its `sources` array is the file table
  */
 export function compileViaLibrary({
   sourcePath,
@@ -70,24 +82,56 @@ export function compileViaLibrary({
   appendDwarf = debugInfo,
   compDir = ".",
   moduleName = "game.wasm",
+  runtime = "incremental",
+  stackSize = 0,
 }) {
   const options = asc.newOptions();
   asc.setDebugInfo(options, debugInfo);
   asc.setSourceMap(options, true);
   asc.setOptimizeLevelHints(options, 0, 0);
 
+  // The CLI's runtime and stack defaults (cli/index.js:299-338). Both matter
+  // beyond optimisation: the runtime entry below is what makes the stdlib's
+  // files enter the source map, and a non-zero stack is what makes the
+  // compiler emit `~lib/memory`'s three globals.
+  const runtimeKind = RUNTIME_KINDS[runtime];
+  if (runtimeKind === undefined) {
+    throw new Error(`unknown runtime ${JSON.stringify(runtime)}; expected stub, minimal or incremental`);
+  }
+  asc.setRuntime(options, runtimeKind);
+  const stack = stackSize || (runtimeKind === asc.Runtime.Incremental ? asc.DEFAULT_STACK_SIZE : 0);
+  asc.setStackSize(options, stack);
+
   const program = asc.newProgram(options);
   for (const key of Object.keys(cli.libraryFiles)) {
     if (key.includes("/")) continue; // sub-directories are imported on demand
     asc.parse(program, cli.libraryFiles[key], `~lib/${key}.ts`, false);
   }
+
+  // The runtime as an *entry file*, before the user's (cli/index.js:705-719:
+  // "Include runtime before entry files so its setup runs first"). This is the
+  // step whose absence made the helper unable to compile anything that
+  // allocates: without it the runtime's implementation is never reached, so
+  // `__link` has no definition and none of its sources enter the file table.
+  const runtimeKey = `rt/index-${runtime}`;
+  const runtimeText = cli.libraryFiles[runtimeKey];
+  if (runtimeText == null) {
+    throw new Error(`no bundled runtime entry ${runtimeKey} in cli.libraryFiles`);
+  }
+  asc.parse(program, runtimeText, `~lib/${runtimeKey}.ts`, true);
+
   asc.parse(program, fs.readFileSync(sourcePath, "utf8"), path.basename(sourcePath), true);
 
   for (let guard = 0; guard < 2000; guard++) {
     const file = asc.nextFile(program);
     if (file == null) break;
     const resolved = resolveLib(file);
-    asc.parse(program, fs.readFileSync(resolved, "utf8"), file, false);
+    // The CLI records the resolved path with its extension (cli/index.js:680
+    // parses `file.sourcePath`, which `getFile` builds as `path + ".ts"`).
+    // Recording the bare specifier instead puts a differently-shaped name in
+    // the source map's file table.
+    const recorded = /\.(ts|d\.ts)$/.test(file) ? file : `${file}.ts`;
+    asc.parse(program, fs.readFileSync(resolved, "utf8"), recorded, false);
   }
 
   asc.initializeProgram(program);
