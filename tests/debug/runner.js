@@ -1,21 +1,21 @@
 #!/usr/bin/env node
-// The debug harness: compile each fixture, run it under lldb against the
-// tension-core interpreter, and compare what was observed with expect.json.
+// The debug harness: compile each fixture, run it under lldb against
+// standalone Wasmtime, and compare what was observed with expect.json.
 //
 // Usage:
-//   node tests/debug/runner.mjs                 # same as --check
-//   node tests/debug/runner.mjs --update        # rewrite expect.json from a run
-//   node tests/debug/runner.mjs --only add-locals
+//   node tests/debug/runner.js                 # same as --check
+//   node tests/debug/runner.js --update        # rewrite expect.json from a run
+//   node tests/debug/runner.js --only add-locals
 //
 // Exit 0 when every fixture passes. A fixture that cannot be run at all (no
-// compiler, no lldb, no tension-core) fails with one message, not a stack trace.
+// compiler, no lldb, no Wasmtime) fails with one message, not a stack trace.
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveLldb, lldbBuildString, describeLldb } from "./lib/lldb.js";
-import { resolveTensionCore, tensionCoreVersion } from "./lib/tension-core.js";
+import { resolveWasmtime, describeWasmtime } from "./lib/wasmtime.js";
 import { compileFixture } from "./lib/compile.js";
 import { runUnderLldb } from "./lib/run-lldb.js";
 import { compare, observedToExpect } from "./lib/compare.js";
@@ -66,10 +66,10 @@ async function main() {
   const lldbBuild = lldbBuildString(lldbInfo.executable);
   console.log(`debug harness: ${describeLldb(lldbInfo, lldbBuild)}`);
 
-  const core = resolveTensionCore({ log: (line) => console.log(`debug harness: ${line}`) });
-  console.log(
-    `debug harness: tension-core ${core.sha.slice(0, 12)} (${core.binary}; ${tensionCoreVersion(core.binary)})`
-  );
+  const wasmtime = await resolveWasmtime({
+    log: (line) => console.log(`debug harness: ${line}`),
+  });
+  console.log(`debug harness: ${describeWasmtime(wasmtime)}`);
 
   let failures = 0;
   for (const name of names) {
@@ -91,7 +91,7 @@ async function main() {
 
     const observed = runUnderLldb({
       lldb: lldbInfo.executable,
-      core: core.binary,
+      wasmtime: wasmtime.executable,
       wasm,
       symbolPath: fixtureDir,
       breakpoints: expect.breakpoints,

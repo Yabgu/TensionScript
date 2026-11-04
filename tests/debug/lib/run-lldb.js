@@ -1,16 +1,17 @@
 // Drive one fixture run under lldb and return what was observed.
 //
-// The inferior is the tension-core binary; lldb launches it with `--debug` and
-// the compiled guest, then the host's wasmtime registers the JIT image through
-// the GDB JIT interface. Breakpoints are set by source file and line.
+// The inferior is standalone Wasmtime (`wasmtime run -D debug-info`), not the
+// Tension engine: the guest is the one this repo's compiler emits, and it
+// carries its own DWARF, so nothing has to supply debug info at load time.
+// Breakpoints are set by source file and line before the process starts.
 //
 // Two measured details the command file depends on:
 //   * `settings set plugin.jit-loader.gdb.enable on` is what lets lldb see the
-//     JIT image at all.
-//   * the guest path is absolute and `--symbol-path` is passed. A bare relative
-//     filename yields an empty DW_AT_comp_dir, which makes the host's line-table
-//     prologue empty and panics wasmtime (index out of bounds in
-//     line_program.rs). With a directory on the path the same guest compiles.
+//     JIT image at all (measured against wasmtime 24.0.13, the pinned
+//     consumer).
+//   * the guest path is absolute. `--invoke` names the fixture's export
+//     (`_start_game`); Wasmtime's default entry point `_start` does not exist
+//     in these fixtures.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -97,15 +98,25 @@ print("@@LLDB_JSON " + json.dumps({
 /**
  * @param {{
  *   lldb: string,
- *   core: string,
+ *   wasmtime: string,
  *   wasm: string,
  *   symbolPath: string,
  *   breakpoints: {file: string, line: number}[],
  *   workDir: string,
+ *   invoke?: string,
  *   maxStops?: number,
  * }} options
  */
-export function runUnderLldb({ lldb, core, wasm, symbolPath, breakpoints, workDir, maxStops = 20 }) {
+export function runUnderLldb({
+  lldb,
+  wasmtime,
+  wasm,
+  symbolPath,
+  breakpoints,
+  workDir,
+  invoke = "_start_game",
+  maxStops = 20,
+}) {
   fs.mkdirSync(workDir, { recursive: true });
   const driverPath = path.join(workDir, "driver.py");
   fs.writeFileSync(driverPath, DRIVER.replace("MAX_STOPS", String(maxStops)));
@@ -123,9 +134,15 @@ export function runUnderLldb({ lldb, core, wasm, symbolPath, breakpoints, workDi
   lines.push("quit");
   fs.writeFileSync(commandsPath, lines.join("\n") + "\n");
 
+  // No `-O opt-level=0`: the committed baseline was captured from the engine's
+  // embedded wasmtime with Cranelift's default opt level, and lowering it
+  // changes which locals the debugger can read (measured — see
+  // tests/debug/README.md). The consumer must stay the one that produced the
+  // baseline, not merely a recent one.
   const result = spawnSync(
     lldb,
-    ["-b", "-s", commandsPath, "--", core, "--debug", "--symbol-path", symbolPath, path.resolve(wasm)],
+    ["-b", "-s", commandsPath, "--", wasmtime, "run", "-D", "debug-info",
+      "--invoke", invoke, path.resolve(wasm)],
     { encoding: "utf8", cwd: workDir, maxBuffer: 32 * 1024 * 1024 }
   );
 
@@ -133,7 +150,14 @@ export function runUnderLldb({ lldb, core, wasm, symbolPath, breakpoints, workDi
   const line = output.split("\n").find((entry) => entry.startsWith("@@LLDB_JSON "));
   if (!line) {
     const tail = output.trim().split("\n").slice(-25).join("\n");
-    throw new Error(`lldb produced no result (exit ${result.status}); last output:\n${tail}`);
+    // Distinguish "lldb never got the process running" from "it ran and the
+    // breakpoint never resolved" - two different failures for a reader.
+    if (/executable found|Attaching|attach|failed to launch|process launch failed/i.test(output)) {
+      throw new Error(
+        `lldb could not attach to wasmtime (exit ${result.status}); last output:\n${tail}`
+      );
+    }
+    throw new Error(`breakpoint never resolved (exit ${result.status}); last output:\n${tail}`);
   }
   const observed = JSON.parse(line.slice("@@LLDB_JSON ".length));
   return { ...observed, raw: output };
