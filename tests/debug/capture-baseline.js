@@ -1,23 +1,25 @@
 #!/usr/bin/env node
-// Capture the structural baseline: the DWARF the CURRENT host synthesises for a
-// fixture, dumped by llvm-dwarfdump.
+// Capture the structural baseline: the DWARF the compiler emits for a fixture,
+// dumped by llvm-dwarfdump.
 //
-// The synthesised module is obtained from the host process (see
-// lib/synth-capture.mjs) because tension-core never writes it to disk. The dumps
-// are normalised for the machine they came from: the fixture's absolute path is
-// replaced by <fixture>, so the committed baseline is portable.
+// The module on disk *is* the DWARF-bearing module now: the compiler appends
+// .debug_abbrev / .debug_info / .debug_line / .debug_ranges when --debug and
+// --sourceMap are both set. So this is just compile -> dwarfdump -> write;
+// there is no host, no lldb, and no in-memory peek (the previous capture read
+// the engine's synthesised copy out of a running process, which is no longer
+// where the DWARF comes from).
 //
-// Usage: node tests/debug/capture-baseline.mjs [--only add-locals]
+// The dumps are normalised for the machine they came from: the fixture's
+// absolute path becomes <fixture>, so the committed baseline is portable.
+//
+// Usage: node tests/debug/capture-baseline.js [--only add-locals]
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resolveLldb } from "./lib/lldb.js";
-import { resolveTensionCore } from "./lib/tension-core.js";
 import { compileFixture } from "./lib/compile.js";
-import { captureSynthesized } from "./lib/synth-capture.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -38,7 +40,7 @@ function normalize(text, fixtureDir, workDir) {
     .replace(/[A-Za-z]:\\[^\s"'`]+/g, "<path>");
 }
 
-async function main() {
+function main() {
   const index = process.argv.indexOf("--only");
   const only = index >= 0 ? process.argv[index + 1] : null;
 
@@ -51,9 +53,6 @@ async function main() {
     .filter((name) => !only || name === only)
     .sort();
 
-  const lldbInfo = await resolveLldb();
-  const core = resolveTensionCore({ log: (line) => console.log(line) });
-
   for (const name of names) {
     const fixtureDir = path.join(examplesRoot, name);
     const expect = JSON.parse(fs.readFileSync(path.join(fixtureDir, "expect.json"), "utf8"));
@@ -65,15 +64,12 @@ async function main() {
       optLevel: expect.compile.optLevel ?? "O0",
     });
 
-    const synthesized = path.join(workDir, "tension-synth.wasm");
-    captureSynthesized({
-      lldb: lldbInfo.executable,
-      core: core.binary,
-      wasm,
-      symbolPath: fixtureDir,
-      workDir,
-      outFile: synthesized,
-    });
+    // The compiled module carries the sections; dump it directly.
+    if (!Buffer.from(fs.readFileSync(wasm)).includes(".debug_line")) {
+      throw new Error(
+        `${wasm} carries no .debug_line; the compiler did not emit DWARF for ${name}`
+      );
+    }
 
     const baselineDir = path.join(here, "baseline", name);
     fs.mkdirSync(baselineDir, { recursive: true });
@@ -81,7 +77,7 @@ async function main() {
       ["debug-line", "--debug-line"],
       ["debug-info", "--debug-info"],
     ]) {
-      const dump = normalize(dwarfSection(flag, synthesized), fixtureDir, workDir);
+      const dump = normalize(dwarfSection(flag, wasm), fixtureDir, workDir);
       const file = path.join(baselineDir, `${name}.${suffix}.txt`);
       fs.writeFileSync(file, dump);
       console.log(`wrote ${path.relative(process.cwd(), file)}`);
@@ -89,7 +85,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+try {
+  main();
+} catch (error) {
   console.error(`baseline capture: ${error.message}`);
   process.exit(1);
-});
+}
