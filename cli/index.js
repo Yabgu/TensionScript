@@ -964,6 +964,23 @@ export async function main(argv, options) {
       }
       stats.emitTime += stats.end(begin);
 
+      // Compiler-side DWARF: both --debug and --sourceMap must be set, exactly
+      // the pair the host's `--debug` used to require before it synthesized
+      // this from the guest's source map. A guest that ships its own .debug_*
+      // sections is passed through untouched by the host.
+      if (opts.debug && opts.sourceMap != null && wasm.sourceMap) {
+        let moduleName = opts.outFile.length ? path.basename(opts.outFile) : "guest.wasm";
+        try {
+          wasm.binary = assemblyscriptJS.synthesizeDwarf(
+            wasm.binary, wasm.sourceMap, process.cwd(), moduleName
+          );
+        } catch (e) {
+          stderr.write(
+            `${stderrColors.yellow("WARNING ")}DWARF emission failed: ${e.message}${EOL}`
+          );
+        }
+      }
+
       if (opts.outFile.length) {
         pending.push(
           writeFile(opts.outFile, wasm.binary, baseDir)

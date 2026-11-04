@@ -42,6 +42,7 @@ import {
 import { Module } from "./module";
 import { Program } from "./program";
 import { Source } from "./ast";
+import { synthesize as dwarfSynthesize } from "./dwarf";
 
 // Options
 
@@ -237,6 +238,27 @@ export function setPedantic(options: Options, pedantic: bool): void {
 
 export function setDebugInfo(options: Options, debug: bool): void {
   options.debugInfo = debug;
+}
+
+/** Sets the `compDir` option: the DWARF compile directory. */
+export function setCompDir(options: Options, compDir: string): void {
+  options.compDir = compDir;
+}
+
+/**
+ * Appends synthesized DWARF (`.debug_abbrev`, `.debug_info`, `.debug_line`,
+ * `.debug_ranges`) to an emitted module and returns the augmented bytes.
+ *
+ * Exposed for hosts that emit through Binaryen's own writer rather than
+ * `Module#toBinary` - the CLI does exactly that. See `src/dwarf/`.
+ */
+export function synthesizeDwarf(
+  wasmBytes: Uint8Array,
+  sourceMapJson: string,
+  compDir: string,
+  moduleName: string
+): Uint8Array {
+  return dwarfSynthesize(wasmBytes, sourceMapJson, compDir, moduleName);
 }
 
 // Program
