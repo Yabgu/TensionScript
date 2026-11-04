@@ -1,0 +1,61 @@
+{
+  "description": "Two stops across two functions; named locals and the live-range contract",
+  "notes": "Stop 1 (add, game.ts:3): sum = 5; a and b are already consumed at the return instruction and report no readable value - the live-range contract. Stop 2 (_start_game, game.ts:10): i = 5 after the loop; total has no location there. Measured: a breakpoint requested at game.ts:7, :8 or :9 resolves to game.ts:9:9, and one requested at game.ts:2 resolves to game.ts:3:2, so those lines are not separately observable in this JIT image.",
+  "skip": false,
+  "compile": {
+    "flags": [
+      "--debug",
+      "--sourceMap"
+    ],
+    "optLevel": "O0"
+  },
+  "breakpoints": [
+    {
+      "file": "game.ts",
+      "line": 3
+    },
+    {
+      "file": "game.ts",
+      "line": 10
+    }
+  ],
+  "stops": [
+    {
+      "file": "game.ts",
+      "line": 3,
+      "reason": "breakpoint 1.1"
+    },
+    {
+      "file": "game.ts",
+      "line": 10,
+      "reason": "breakpoint 2.1"
+    }
+  ],
+  "variables": [
+    {
+      "name": "a",
+      "type": "int",
+      "value": "<unavailable>"
+    },
+    {
+      "name": "b",
+      "type": "int",
+      "value": "<unavailable>"
+    },
+    {
+      "name": "sum",
+      "type": "int",
+      "value": "5"
+    },
+    {
+      "name": "total",
+      "type": "int",
+      "value": "<unavailable>"
+    },
+    {
+      "name": "i",
+      "type": "int",
+      "value": "5"
+    }
+  ]
+}

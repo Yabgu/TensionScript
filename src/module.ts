@@ -27,6 +27,7 @@ import {
   PropertyPrototype
 } from "./program";
 import * as binaryen from "./glue/binaryen";
+import { synthesize as synthesizeDwarf } from "./dwarf";
 
 /** A Binaryen-compatible index. */
 export type Index = binaryen.Index;
@@ -2947,7 +2948,21 @@ export class Module {
     binaryen._BinaryenModuleInterpret(this.ref);
   }
 
-  toBinary(sourceMapUrl: string | null = null): BinaryModule {
+  /**
+   * Emits the module.
+   *
+   * When `debugInfo` is set *and* a source map is requested, the emitted bytes
+   * gain synthesized DWARF (`.debug_abbrev`, `.debug_info`, `.debug_line`,
+   * `.debug_ranges`) - the same sections `tension-core` used to rebuild from
+   * the guest's source map. A host that already ships DWARF (a C or Rust
+   * guest) is unaffected: this only decorates a module this compiler emits.
+   */
+  toBinary(
+    sourceMapUrl: string | null = null,
+    debugInfo: bool = false,
+    compDir: string = ".",
+    moduleName: string = "guest.wasm"
+  ): BinaryModule {
     assert(
       binaryen._BinaryenSizeofLiteral() >=
       binaryen._BinaryenSizeofAllocateAndWriteResult()
@@ -2972,6 +2987,20 @@ export class Module {
     if (urlPtr) binaryen._free(urlPtr);
     if (srcMapPtr) binaryen._free(srcMapPtr);
     binaryen._free(binaryPtr);
+
+    // Compiler-side DWARF, gated exactly as the host's `--debug` used to be:
+    // both debug info and a source map must be on. `compDir` is never empty;
+    // an empty `DW_AT_comp_dir` leaves the line-table prologue empty, which
+    // panics wasmtime's transform.
+    let mapText = binary.sourceMap;
+    if (debugInfo && sourceMapUrl !== null && mapText !== null && mapText.length > 0) {
+      binary.output = synthesizeDwarf(
+        binary.output,
+        <string>mapText,
+        compDir.length > 0 ? compDir : ".",
+        moduleName
+      );
+    }
 
     return binary;
   }

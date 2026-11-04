@@ -1,0 +1,78 @@
+<module>:	file format WASM
+
+.debug_line contents:
+debug_line[0x00000000]
+Line table prologue:
+    total_length: 0x00000159
+          format: DWARF32
+         version: 4
+ prologue_length: 0x000000d6
+ min_inst_length: 1
+max_ops_per_inst: 1
+ default_is_stmt: 1
+       line_base: -5
+      line_range: 14
+     opcode_base: 13
+standard_opcode_lengths[DW_LNS_copy] = 0
+standard_opcode_lengths[DW_LNS_advance_pc] = 1
+standard_opcode_lengths[DW_LNS_advance_line] = 1
+standard_opcode_lengths[DW_LNS_set_file] = 1
+standard_opcode_lengths[DW_LNS_set_column] = 1
+standard_opcode_lengths[DW_LNS_negate_stmt] = 0
+standard_opcode_lengths[DW_LNS_set_basic_block] = 0
+standard_opcode_lengths[DW_LNS_const_add_pc] = 0
+standard_opcode_lengths[DW_LNS_fixed_advance_pc] = 0
+standard_opcode_lengths[DW_LNS_set_prologue_end] = 1
+standard_opcode_lengths[DW_LNS_set_epilogue_begin] = 0
+standard_opcode_lengths[DW_LNS_set_isa] = 0
+include_directories[  1] = "<fixture>"
+file_names[  1]:
+           name: "node_modules/rt/common.ts"
+      dir_index: 1
+       mod_time: 0x00000000
+         length: 0x00000000
+file_names[  2]:
+           name: "node_modules/rt/tlsf.ts"
+      dir_index: 1
+       mod_time: 0x00000000
+         length: 0x00000000
+file_names[  3]:
+           name: "node_modules/shared/typeinfo.ts"
+      dir_index: 1
+       mod_time: 0x00000000
+         length: 0x00000000
+file_names[  4]:
+           name: "node_modules/rt/itcms.ts"
+      dir_index: 1
+       mod_time: 0x00000000
+         length: 0x00000000
+file_names[  5]:
+           name: "game.ts"
+      dir_index: 1
+       mod_time: 0x00000000
+         length: 0x00000000
+
+Address            Line   Column File   ISA Discriminator OpIndex Flags
+------------------ ------ ------ ------ --- ------------- ------- -------------
+0x0000000000000005      2     17      5   0             0       0  is_stmt
+0x0000000000000007      2     21      5   0             0       0  is_stmt
+0x0000000000000009      2     17      5   0             0       0  is_stmt
+0x000000000000000a      2      2      5   0             0       0  is_stmt
+0x000000000000000c      3      9      5   0             0       0  is_stmt
+0x000000000000000e      3      2      5   0             0       0  is_stmt
+0x000000000000000e      3      2      5   0             0       0  is_stmt end_sequence
+0x0000000000000014      7     23      5   0             0       0  is_stmt
+0x0000000000000016      7     26      5   0             0       0  is_stmt
+0x0000000000000018      7     19      5   0             0       0  is_stmt
+0x000000000000001a      7      2      5   0             0       0  is_stmt
+0x000000000000001c      8     15      5   0             0       0  is_stmt
+0x000000000000001e      8      2      5   0             0       0  is_stmt
+0x0000000000000020      9      2      5   0             0       0  is_stmt
+0x0000000000000024      9      9      5   0             0       0  is_stmt
+0x0000000000000026      9     13      5   0             0       0  is_stmt
+0x0000000000000028      9      9      5   0             0       0  is_stmt
+0x000000000000002b     10      4      5   0             0       0  is_stmt
+0x000000000000002d     10      9      5   0             0       0  is_stmt
+0x0000000000000030     10      4      5   0             0       0  is_stmt
+0x0000000000000030     10      4      5   0             0       0  is_stmt end_sequence
+
