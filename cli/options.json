@@ -98,6 +98,16 @@
     ],
     "type": "s"
   },
+  "compDir": {
+    "category": "Debugging",
+    "description": [
+      "The compile directory written as DWARF `DW_AT_comp_dir`, the base",
+      "every source path in the line table is relative to. Defaults to the",
+      "working directory. Resolved to an absolute path, as clang writes it.",
+      "Only used when DWARF is emitted (--debug with --sourceMap)."
+    ],
+    "type": "s"
+  },
   "uncheckedBehavior": {
     "category": "Debugging",
     "description": [

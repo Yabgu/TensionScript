@@ -276,7 +276,9 @@ export class Options {
    * The DWARF compile directory, written as `DW_AT_comp_dir` when DWARF is
    * emitted (both `debugInfo` and `sourceMap` set). Absolute, as clang writes
    * it. The compiler has no access to the process working directory, so the
-   * embedder supplies it; the CLI passes `process.cwd()`.
+   * caller supplies it: the CLI passes `--compDir` or the working directory,
+   * and an embedder passes it to {@link Module#toBinary} (this field is the
+   * declarative record; `toBinary` takes the value as an argument).
    */
   compDir: string = ".";
   /** Unchecked behavior. Defaults to only using unchecked operations inside unchecked(). */

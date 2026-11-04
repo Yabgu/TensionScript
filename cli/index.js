@@ -970,9 +970,18 @@ export async function main(argv, options) {
       // sections is passed through untouched by the host.
       if (opts.debug && opts.sourceMap != null && wasm.sourceMap) {
         let moduleName = opts.outFile.length ? path.basename(opts.outFile) : "guest.wasm";
+        // The compile directory the DWARF records. `--compDir` lets a caller
+        // pin it for a reproducible build; otherwise it is the working
+        // directory, as before. Either way it is absolute: a relative value is
+        // resolved against `baseDir` (clang writes absolute paths, and a
+        // relative one would mean something different at every launch).
+        // Inert unless DWARF is emitted - this whole block is that gate.
+        let compDir = opts.compDir != null && opts.compDir.length
+          ? path.resolve(baseDir, opts.compDir)
+          : process.cwd();
         try {
           wasm.binary = assemblyscriptJS.synthesizeDwarf(
-            wasm.binary, wasm.sourceMap, process.cwd(), moduleName
+            wasm.binary, wasm.sourceMap, compDir, moduleName
           );
         } catch (e) {
           stderr.write(
