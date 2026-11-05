@@ -129,3 +129,19 @@ compiler's to solve:
 - **A check that cannot fail is not a check.** Every fixture here is written so
   that reverting the change makes it fail; a byte-comparison gate is only
   meaningful because in-place builds reproduce.
+
+## Open defects
+
+- **SROA value-return corruption (blocks the engine's `Quat`-as-value conversion).**
+  An `@inline` struct local whose name is reused across scopes — two sibling
+  loops, the arms of an `if`, or plain shadowing — aborts compilation with
+  `duplicate local name` at `compileSroaLocal` (`compiler.ts:12259`). Renaming
+  the local makes the identical program compile, so the SROA local appears to be
+  named without its scope — a **hypothesis, not a diagnosis**: the naming code
+  has not been read. Separately, a method returning a plain struct corrupts
+  memory under sustained load in the engine (fault at ~1,500 frames, `0xb7b50008`
+  — a float used as a pointer). **Related to but not the same as that
+  corruption; both touch SROA local handling, and a common cause is unproven.**
+  Reproducer: `tests/benches/value-return-reductions.ts` and
+  `run-reductions.sh` (the crash); the engine's
+  `tension-framework/tests/benches/quat-value-bench.ts` (the corruption).
