@@ -67,8 +67,10 @@ import {
   TypeKind,
   MemoryModelCode,
   Signature,
-  TypeFlags
+  TypeFlags,
+  setGcClassesEnabled
 } from "./types";
+import { FeatureFlags } from "./module";
 
 import {
   Token
@@ -449,7 +451,23 @@ export class Program extends DiagnosticEmitter {
     diagnostics: DiagnosticMessage[] | null = null
   ) {
     super(diagnostics);
-    this.module = Module.create(options.stackSize > 0, options.sizeTypeRef);
+    // **Set before anything resolves.** Signature type refs are computed during
+    // resolution, and a class's `toRef` consults this switch — so setting it in
+    // the compiler's constructor would be one phase too late and the first
+    // signatures built would keep the pointer ABI.
+    setGcClassesEnabled(options.wasmGc);
+    // No shadow stack under `--wasm-gc`: the pass exists to let a *guest*
+    // collector find roots between `__stack_pointer` and `__heap_base`, and the
+    // engine's tracer roots references itself. Read here rather than from a
+    // setter so the answer cannot depend on the order options were assigned.
+    this.module = Module.create(!options.wasmGc && options.stackSize > 0, options.sizeTypeRef);
+    // **Before any type is built.** Struct types are constructed during
+    // resolution, and a type built while the module's features exclude GC is
+    // recorded against a module that cannot hold it. The compiler sets these too
+    // (it is the same idempotent bit-set); this one is the earlier of the two.
+    if (options.wasmGc) {
+      this.module.setFeatures(this.module.getFeatures() | FeatureFlags.GC | FeatureFlags.ReferenceTypes);
+    }
     this.parser = new Parser(this.diagnostics, this.sources);
     this.resolver = new Resolver(this);
     let nativeFile = new File(this, Source.native);

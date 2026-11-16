@@ -20,7 +20,8 @@ import {
 import {
   Type,
   TypeFlags,
-  TypeKind
+  TypeKind,
+  isGcClass
 } from "./types";
 import {
   ElementKind,
@@ -1452,6 +1453,38 @@ export class Module {
     }
     binaryen._BinaryenLiteralVec128(out, out);
     return binaryen._BinaryenConst(this.ref, out);
+  }
+
+  /** The heap type behind a ref type — what `struct.new`/`struct.get`/`struct.set` take. */
+  heapType(type: TypeRef): HeapTypeRef {
+    return binaryen._BinaryenTypeGetHeapType(type);
+  }
+
+  /**
+   * `struct.new $heapType (operands…)` — allocate a wasm GC struct.
+   *
+   * One operand per field, in declaration order. The heap type comes from the
+   * type builder through `Type#toRef` (`_BinaryenTypeGetHeapType` of a nullable
+   * ref), so a struct this module never registered cannot be constructed by
+   * accident.
+   */
+  struct_new(heapType: HeapTypeRef, operands: ExpressionRef[]): ExpressionRef {
+    let numOperands = operands.length;
+    let operandsPtr = numOperands
+      ? allocPtrArray(operands)
+      : 0;
+    let expr = binaryen._BinaryenStructNew(this.ref, operandsPtr, numOperands, heapType);
+    return expr;
+  }
+
+  /** `struct.get $heapType $index` — a field read by type and index, never by offset. */
+  struct_get(heapType: HeapTypeRef, index: Index, ref: ExpressionRef, type: TypeRef): ExpressionRef {
+    return binaryen._BinaryenStructGet(this.ref, index, ref, type, false);
+  }
+
+  /** `struct.set $heapType $index` — a field write by type and index. */
+  struct_set(heapType: HeapTypeRef, index: Index, ref: ExpressionRef, value: ExpressionRef): ExpressionRef {
+    return binaryen._BinaryenStructSet(this.ref, index, ref, value);
   }
 
   ref_null(type: TypeRef): ExpressionRef {
@@ -3710,6 +3743,28 @@ function allocI32Array(i32s: i32[] | null): usize {
   return ptr;
 }
 
+/**
+ * A C `bool*` array: **one byte per element**, not four.
+ *
+ * `BinaryenTypeBuilderSetStructType`'s `fieldMutables` parameter is `bool*` in
+ * the C API, and the glue declares `ArrayRef<bool>` — but AssemblyScript's
+ * `bool` is a 32-bit `i32`. Writing four bytes per field therefore lands the
+ * second field's flag three bytes past where the reader looks, and every field
+ * after the first reads as immutable. Measured with a two-field struct: the u32
+ * array validates to `struct.set field must be mutable` on field 1 and 0 on
+ * field 0, and the byte array validates 1. Nothing built a multi-field struct
+ * type before `--wasm-gc`, which is why it went unseen.
+ */
+function allocBoolArray(bools: bool[] | null): usize {
+  if (!bools) return 0;
+  let len = bools.length;
+  let ptr = binaryen._malloc(len);
+  for (let i = 0; i < len; ++i) {
+    binaryen.__i32_store8(ptr + i, unchecked(bools[i]) ? 1 : 0);
+  }
+  return ptr;
+}
+
 function allocU32Array(u32s: u32[] | null): usize {
   if (!u32s) return 0;
   let len = u32s.length;
@@ -4032,9 +4087,14 @@ function prepareType(builder: binaryen.TypeBuilderRef, seen: Map<Type,HeapTypeRe
   let classReference = type.getClass();
   if (classReference) {
     // Make sure the base type has been built prior, at a lower index
+    // **A supertype only when it is itself a GC struct.** A class in this slice
+    // is flat, but the resolution still gives it `Object` as a base, and Object
+    // is standard library — still an `i32` pointer. Declaring a `(ref $C)` as a
+    // subtype of an integer is what the type builder refuses (`InvalidSupertype`),
+    // and rightly: the two have no representation in common.
     let base = classReference.base;
     let baseRef: HeapTypeRef = 0;
-    if (base) baseRef = prepareType(builder, seen, base.type); // might be temporary, is non-nullable
+    if (base && isGcClass(base)) baseRef = prepareType(builder, seen, base.type); // might be temporary, is non-nullable
 
     // Block this index with a temporary type and cache
     let index = binaryen._TypeBuilderGetSize(builder);
@@ -4049,7 +4109,7 @@ function prepareType(builder: binaryen.TypeBuilderRef, seen: Map<Type,HeapTypeRe
     // Populate the struct type (TODO: names)
     let fieldTypes = new Array<TypeRef>();
     let packedTypes = new Array<PackedType>();
-    let fieldMutables = new Array<u32>();
+    let fieldMutables = new Array<bool>();
     let members = classReference.members;
     if (members) {
       for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
@@ -4076,17 +4136,17 @@ function prepareType(builder: binaryen.TypeBuilderRef, seen: Map<Type,HeapTypeRe
           fieldTypes.push(prepareType(builder, seen, fieldType));
         }
         packedTypes.push(determinePackedType(fieldType));
-        fieldMutables.push(1);
+        fieldMutables.push(true);
       }
     }
     let cArrFT = allocPtrArray(fieldTypes);
     let cArrPT = allocU32Array(packedTypes);
-    let cArrFM = allocU32Array(fieldMutables);
+    let cArrFM = allocBoolArray(fieldMutables);
     if (DEBUG_TYPEBUILDER) {
       console.log(` concretize [${index}]: ${type.toString()}`);
     }
     binaryen._TypeBuilderSetStructType(builder, index, cArrFT, cArrPT, cArrFM, fieldTypes.length);
-    if (base) {
+    if (baseRef && base) {
       if (DEBUG_TYPEBUILDER) {
         console.log(` set super [${index}]: ${type.toString()} <: ${base.type.toString()} ${baseRef == base.type.ref ? " (known)" : ""}`);
       }

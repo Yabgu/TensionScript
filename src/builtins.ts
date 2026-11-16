@@ -54,7 +54,8 @@ import {
   Type,
   TypeKind,
   TypeFlags,
-  MemoryModelCode
+  MemoryModelCode,
+  isGcClass
 } from "./types";
 
 import {
@@ -3789,6 +3790,29 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   let operands = ctx.operands;
   let typeArguments = ctx.typeArguments!;
   let toType = typeArguments[0];
+
+  // **A wasm GC reference is not an integer, and that is the point.** Under
+  // `--wasm-gc` a class instance is a `(ref null $C)`: there is no instruction
+  // that turns it into an address, no field offset to add, and no byte buffer to
+  // `memory.copy`. So `changetype<usize>(instance)` is refused at compile time
+  // with a message that says why, rather than emitted and failing at validation
+  // with `type mismatch: expected i32, found (ref $type)`.
+  if (operands.length && isIntegerTarget(toType)) {
+    let sourceType = compiler.resolver.resolveExpression(
+      operands[0], compiler.currentFlow
+    );
+    let sourceClass = sourceType ? sourceType.classReference : null;
+    if (sourceClass != null && isGcClass(sourceClass)) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        `changetype<${toType.toString()}> of a wasm GC class instance (${sourceClass.name}): a ` +
+        "wasm GC reference has no address, so it cannot become an integer or a pointer. " +
+        "Pass it as a reference, or read a field through the class"
+      );
+      return module.unreachable();
+    }
+  }
   // --- the managed dynamic-array target, handled before the arity check -----
   //
   // `builtin_changetype` is dispatched ahead of the generic signature check, so
@@ -11951,4 +11975,29 @@ function contextualUsize(compiler: Compiler, value: i64, contextualType: Type): 
     assert(!i64_high(value));
     return module.i32(i64_low(value));
   }
+}
+
+/**
+ * Whether `type` is an integer-shaped target for a `changetype` *from* a
+ * reference — i.e. the direction a wasm GC reference cannot take.
+ *
+ * `usize` is the one that matters (an address), but `i32`/`u32`/`i64`/`u64` are
+ * the same mistake spelled differently, and a check that named only `usize`
+ * would let `changetype<u32>(instance)` through to the same validation error.
+ */
+function isIntegerTarget(type: Type): bool {
+  switch (type.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.I16:
+    case TypeKind.I32:
+    case TypeKind.I64:
+    case TypeKind.Isize:
+    case TypeKind.U8:
+    case TypeKind.U16:
+    case TypeKind.U32:
+    case TypeKind.U64:
+    case TypeKind.Usize: return true;
+  }
+  return false;
 }

@@ -202,7 +202,8 @@ import {
   TypeKind,
   TypeFlags,
   MemoryModelCode,
-  Signature
+  Signature,
+  isGcClass
 } from "./types";
 
 import {
@@ -294,6 +295,22 @@ export class Options {
   exportRuntime: bool = false;
   /** Stack size in bytes, if using a stack. */
   stackSize: i32 = 0;
+  /**
+   * Emit user-declared classes as wasm GC structs (opt-in, off by default).
+   *
+   * **Why a flag and not the default:** a wasm GC class is a `(ref null $C)`,
+   * not an `i32`, so it cannot be stored in the linear-memory structures the
+   * standard library is built from (`String`, `Array`, `Map`, `Set`, the
+   * collector's own blocks). Until those move, a program that mixes the two
+   * worlds must say so. Off, this option changes nothing: not one emission site
+   * consults it, and the module's feature set is untouched.
+   *
+   * On, it (a) sets the GC and reference-types Binaryen features — struct
+   * emission is gated on them, and GC does not imply them — and (b) turns the
+   * shadow stack off, because its only purpose is to let a *guest* collector
+   * find roots in linear memory and the engine's tracer does that job here.
+   */
+  wasmGc: bool = false;
   /** Semantic major bundle version from root package.json */
   bundleMajorVersion: i32 = 0;
   /** Semantic minor bundle version from root package.json */
@@ -563,6 +580,17 @@ export class Compiler extends DiagnosticEmitter {
     this.program = program;
     let module = program.module;
     let options = program.options;
+
+    // **`--wasm-gc` is a dependency, not a hint.** Two things follow from it and
+    // both are stated at the option (`Options.wasmGc`): the GC and
+    // reference-types features, because Binaryen gates `struct.new`/`struct.get`
+    // on them and the GC bit alone does not imply reference types; and no shadow
+    // stack, because its whole job is to let a guest collector find roots in
+    // linear memory, which the engine's tracer now does without being asked.
+    // (`setGcClassesEnabled` already ran, in `Program`'s constructor — before any
+    // type was built. Setting it twice would be harmless and misleading.)
+    if (options.wasmGc) options.features |= Feature.GC | Feature.ReferenceTypes;
+
     if (options.memoryBase) {
       this.memoryOffset = i64_new(options.memoryBase);
       module.setLowMemoryUnused(false);
@@ -608,7 +636,7 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let program = this.program;
     let resolver = this.resolver;
-    let hasShadowStack = options.stackSize > 0; // implies runtime=incremental
+    let hasShadowStack = !options.wasmGc && options.stackSize > 0; // implies runtime=incremental
 
     // Register a dummy memory so Binaryen's EffectAnalyzer can read
     // memory.shared on loads/stores emitted during compilation. The real
@@ -2374,6 +2402,28 @@ export class Compiler extends DiagnosticEmitter {
     let valueTypeRef = valueType.toRef();
     let thisTypeRef = this.options.sizeTypeRef;
     getterInstance.set(CommonFlags.Compiled);
+
+    // **A wasm GC class reads its field by type, not by offset.** `struct.get`
+    // needs the struct's heap type and the field's *index*, and a reference has
+    // no `i32` to add an offset to — so this is the one branch where the offset
+    // the rest of the function is built around has no meaning at all.
+    let gcClass = this.gcClassOfFieldGetter(property);
+    if (gcClass != null) {
+      let classTypeRef = gcClass.type.toRef();
+      let body = module.struct_get(
+        module.heapType(classTypeRef),
+        gcFieldIndex(gcClass, property),
+        module.local_get(0, classTypeRef),
+        valueTypeRef
+      );
+      return module.addFunction(
+        getterInstance.internalName,
+        classTypeRef,
+        valueTypeRef,
+        getterInstance.getNonParameterLocalTypeRefs(),
+        body
+      );
+    }
     // `this` is the object's reference, and for every reference kind here that
     // is the first field's address: `__new` returns `object + TOTAL_OVERHEAD`
     // (`std/assembly/rt/itcms.ts:268`) and the unmanaged allocator returns the
@@ -2403,6 +2453,32 @@ export class Compiler extends DiagnosticEmitter {
     );
   }
 
+  /**
+   * The class whose GC struct owns `property`, or `null` when this field is not
+   * emitted as a GC struct.
+   *
+   * A getter's `this` is the class instance it belongs to — for a field accessor
+   * that is the declaring class, so `property.parent` is the answer. Kept as one
+   * function so the getter, the setter and the constructor cannot disagree about
+   * which class is in play, which they would if each tested the flag itself.
+   */
+  private gcClassOfField(property: Property): Class | null {
+    let parent = property.parent;
+    if (parent == null || parent.kind != ElementKind.Class) return null;
+    let classInstance = <Class>parent;
+    return isGcClass(classInstance) ? classInstance : null;
+  }
+
+  /** {@link gcClassOfField}, for the getter path. */
+  private gcClassOfFieldGetter(property: Property): Class | null {
+    return this.gcClassOfField(property);
+  }
+
+  /** {@link gcClassOfField}, for the setter path. */
+  private gcClassOfFieldSetter(property: Property): Class | null {
+    return this.gcClassOfField(property);
+  }
+
   /** Makes a built-in setter of a property that is a field. */
   private makeBuiltinFieldSetter(property: Property): FunctionRef {
     let setterInstance = assert(property.setterInstance);
@@ -2410,6 +2486,28 @@ export class Compiler extends DiagnosticEmitter {
     let valueType = property.type;
     let thisTypeRef = this.options.sizeTypeRef;
     let valueTypeRef = valueType.toRef();
+
+    // A wasm GC class writes by type: `struct.set` takes the struct's heap type
+    // and the field's index. No write barrier either — the engine's tracer owns
+    // the edges, which is the whole reason `__link` disappears on this path.
+    let gcClass = this.gcClassOfFieldSetter(property);
+    if (gcClass != null) {
+      let classTypeRef = gcClass.type.toRef();
+      let body = module.struct_set(
+        module.heapType(classTypeRef),
+        gcFieldIndex(gcClass, property),
+        module.local_get(0, classTypeRef),
+        module.local_get(1, valueTypeRef)
+      );
+      setterInstance.set(CommonFlags.Compiled);
+      return module.addFunction(
+        setterInstance.internalName,
+        createType([ classTypeRef, valueTypeRef ]),
+        TypeRef.None,
+        null,
+        body
+      );
+    }
     // void(this.field = value)
     let bodyExpr = module.store(valueType.byteSize,
       module.local_get(0, thisTypeRef),
@@ -8085,7 +8183,11 @@ export class Compiler extends DiagnosticEmitter {
 
   /** Marks managed call operands for the shadow stack. */
   private operandsTostack(signature: Signature, operands: ExpressionRef[]): void {
-    if (!this.options.stackSize) return;
+    // Same condition the pass itself uses: no shadow stack under `--wasm-gc`,
+    // because the engine's tracer is the root set. Without this, a managed
+    // operand is handed to `needToStack`, which reads it as an integer constant
+    // and aborts on a `ref.null`.
+    if (!this.options.stackSize || this.options.wasmGc) return;
     let module = this.module;
     let operandIndex = 0;
     let thisType = signature.thisType;
@@ -11505,11 +11607,24 @@ export class Compiler extends DiagnosticEmitter {
     assert(parent.kind == ElementKind.Class);
     let classInstance = <Class>parent;
     if (classInstance.type.isUnmanaged || ctorInstance.hasDecorator(DecoratorFlags.Unsafe)) this.checkUnsafe(reportNode);
+    // The `this` operand a constructor call passes: a null pointer today, and
+    // for a wasm GC class a `ref.null` of the struct type. `i32(0)` is not a
+    // value of a ref type, and that mismatch is what validation reports as
+    // "call param types must match" rather than anything pointing here.
+    // `ref.null` takes a **heap type**, not a ref type: `Module#ref_null`
+    // forwards its argument straight to `_BinaryenRefNull`, which reads it as a
+    // heap type. Passing the nullable ref type there prints `ref.null none` (the
+    // bottom type) rather than `ref.null $C`, which is a different value.
+    let thisArg = isGcClass(classInstance)
+      // `ref.null` asserts its argument is a *nullable* ref type; a class's own
+      // type is non-nullable, so the null value is typed by the nullable variant.
+      ? this.module.ref_null(assert(classInstance.type.nullableType).toRef())
+      : this.makeZero(this.options.usizeType);
     let expr = this.compileCallDirect(
       ctorInstance,
       argumentExpressions,
       reportNode,
-      this.makeZero(this.options.usizeType),
+      thisArg,
       constraints
     );
     if (getExpressionType(expr) != TypeRef.None) { // possibly WILL_DROP
@@ -15561,6 +15676,13 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let options = this.options;
     this.currentType = classInstance.type;
+    // **A wasm GC class is `struct.new`, and there is nothing to lay out.** The
+    // header, the id and the size all lived in the object so a guest collector
+    // could find and size it; the engine's tracer needs none of them. Field
+    // initialisers still run afterwards through the generated setters, which are
+    // `struct.set` on this path, so the constructor's shape is unchanged — only
+    // where the storage comes from.
+    if (isGcClass(classInstance)) return this.makeGcStructNew(classInstance);
     if (classInstance.hasDecorator(DecoratorFlags.Unmanaged)) {
       let allocInstance = program.allocInstance;
       this.compileFunction(allocInstance);
@@ -15589,6 +15711,21 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let classType = classInstance.type;
     let classTypeRef = classType.toRef();
+    // A GC class's `this` is a ref, so the "is it already allocated?" test is
+    // `ref.is_null` and the local's type is the struct's, not the pointer width.
+    // The `__new` path below keeps its `classTypeRef == sizeTypeRef` assertion
+    // because for a pointer-shaped class those two really are the same type.
+    if (isGcClass(classInstance)) {
+      // No `ifFalse` and no type argument: `Module#if` takes two branches, and
+      // its result type is the branches' — which for a GC class is the struct
+      // ref, exactly what `struct.new` produces.
+      return module.if(
+        module.ref_is_null(module.local_get(thisIndex, classTypeRef)),
+        // `false` for `isManaged`: the shadow stack is off under `--wasm-gc`
+        // (the engine's tracer is the root set), so there is no slot to fill.
+        module.local_set(thisIndex, this.makeAllocation(classInstance), false)
+      );
+    }
     assert(classTypeRef == this.options.sizeTypeRef);
     return module.if(
       module.unary(classTypeRef == TypeRef.I64 ? UnaryOp.EqzI64 : UnaryOp.EqzI32,
@@ -15599,6 +15736,37 @@ export class Compiler extends DiagnosticEmitter {
         classInstance.type.isManaged
       )
     );
+  }
+
+  /**
+   * `struct.new $C (defaults…)` — one operand per field, in declaration order.
+   *
+   * The defaults are the same "zero" the linear-memory path gets for free from
+   * `__new` (which `memory.fill`s the record), spelled per field: an integer 0, a
+   * float 0, a `ref.null` for a reference. `makeZero` cannot be reused for a
+   * reference field because a pointer-shaped field's zero is `i32(0)`, which is
+   * not a value of a ref type.
+   */
+  makeGcStructNew(classInstance: Class): ExpressionRef {
+    let module = this.module;
+    let classTypeRef = classInstance.type.toRef();
+    let operands = new Array<ExpressionRef>();
+    let members = classInstance.members;
+    if (members) {
+      for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+        let member = _values[i];
+        if (member.kind != ElementKind.PropertyPrototype) continue;
+        let property = (<PropertyPrototype>member).instance;
+        if (!property || !property.isField) continue;
+        let fieldType = property.type;
+        if (fieldType.isReference) {
+          operands.push(module.ref_null(assert(fieldType.nullableType).toRef()));
+        } else {
+          operands.push(this.makeZero(fieldType));
+        }
+      }
+    }
+    return module.struct_new(module.heapType(classTypeRef), operands);
   }
 
   /** Makes the initializers for a class's fields within the constructor. */
@@ -15952,4 +16120,31 @@ function mangleImportName(
       decorator.range, "1", "0"
     );
   }
+}
+
+/**
+ * The index of `property` among its class's fields, in declaration order.
+ *
+ * **The same walk `prepareType` does when it builds the struct type**, which is
+ * why it must count *fields* and not members: methods, accessors and static
+ * members are not struct fields, and a struct type whose field N is the Nth
+ * field is only addressable if both sides agree on that ordinal. A mismatch
+ * would not trap — `struct.get` with a wrong index reads a different field of
+ * the right type — so it is worth computing rather than assuming.
+ */
+function gcFieldIndex(classInstance: Class, property: Property): i32 {
+  let members = classInstance.members;
+  if (members) {
+    let index = 0;
+    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+      let member = _values[i];
+      if (member.kind != ElementKind.PropertyPrototype) continue;
+      let instance = (<PropertyPrototype>member).instance;
+      if (!instance || !instance.isField) continue;
+      if (instance == property) return index;
+      ++index;
+    }
+  }
+  assert(false); // a field that is not among its class's fields is a compiler bug
+  return 0;
 }

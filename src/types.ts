@@ -178,9 +178,48 @@ export const enum TypeFlags {
   Function = 1 << 13
 }
 
+/**
+ * Whether `--wasm-gc` is on: a user-declared class is a wasm GC struct.
+ *
+ * **A module-level switch, set once from {@link Options.wasmGc} before any type
+ * is converted.** `Type#toRef` is called from the resolver, the binder and the
+ * compiler, and threading a flag through all of them would mean every signature
+ * builder carried an argument that is the same value everywhere. One process
+ * compiles one program, so one switch is the same statement with fewer places to
+ * forget it.
+ *
+ * Off by default, and that is not a detail: with it off `toRef` is byte-for-byte
+ * the function it was, so `--wasm-gc` absent cannot change any output.
+ */
+export let gcClassesEnabled: bool = false;
+
+/** Sets {@link gcClassesEnabled}. Called once, from the compiler's constructor. */
+export function setGcClassesEnabled(enabled: bool): void {
+  gcClassesEnabled = enabled;
+}
+
+/**
+ * Whether a class is emitted as a wasm GC struct in this slice.
+ *
+ * **Two exclusions, both deliberate.** `~lib/` is the standard library, which
+ * still keeps the pointer ABI: `String`, `Array`, `Map`, `Set` and the runtime's
+ * own blocks are linear-memory objects and stay that way until the migration
+ * reaches them (a `String` literal is in every program, so it is the last thing
+ * that can move). A class with a real base class is excluded because inheritance
+ * is the next slice, not this one — flat classes only.
+ */
+export function isGcClass(cls: Class): bool {
+  if (!gcClassesEnabled) return false;
+  if (cls.internalName.startsWith("~lib/")) return false;
+  // A real base class means inheritance, which is the next slice. A class that
+  // only *implicitly* extends `Object` has no fields to inherit and is flat for
+  // this purpose — `Point extends Object` is what every class does.
+  if (!cls.prototype.implicitlyExtendsObject) return false;
+  return true;
+}
+
 /** Represents a resolved type. */
 export class Type {
-
   /** Type kind. */
   kind: TypeKind;
   /** Type flags. */
@@ -976,6 +1015,40 @@ export class Type {
 
   /** Converts this type to its respective type reference. */
   toRef(): TypeRef {
+    // **A wasm GC class is a reference type, not a pointer.** Under `--wasm-gc`,
+    // a user-declared class that the slice covers is a `(ref null $C)` — a
+    // Binaryen GC struct type from the type builder — instead of the `i32`
+    // pointer every class is today. The check sits before the switch because a
+    // class's `kind` is `Usize` ("also the base of class types"), so the Usize
+    // arm would otherwise answer `I32` first.
+    //
+    // Scoped deliberately: `isGcClass` excludes `~lib/` (the standard library
+    // keeps the pointer ABI until the migration reaches it) and excludes
+    // anything with a real base class (flat classes only in this slice).
+    if (gcClassesEnabled && this.isInternalReference) {
+      let cls = this.classReference;
+      if (cls != null && isGcClass(cls)) {
+        // **One struct type per class, whatever `Type` object asks.** The type
+        // builder's cache lives on the *canonical* class type (`cls.type`), and
+        // `this` may be any of its variants — nullable, a fresh `asNullable()`,
+        // a copy made by `getNullableType`. Asking with a variant would build a
+        // second struct type with the same *name*, which prints identically and
+        // fails validation as a parameter/local mismatch. So: always build from
+        // the canonical type, then apply this variant's nullability.
+        // **Always nullable**, whatever variant asked. A constructor's `this` is
+        // null until it allocates and the constructor signature is built from
+        // the class's own (non-nullable) type — so a non-null `(ref $C)` there
+        // would make the very first `ref.is_null` a formality and the call site's
+        // `ref.null` a type error. Non-nullability is a refinement a later slice
+        // can add where it can be proven; inferring it here has to be right at
+        // every site at once, and is not worth the risk for a slice.
+        let built = ensureType(cls.type);
+        return binaryen._BinaryenTypeFromHeapType(
+          binaryen._BinaryenTypeGetHeapType(built),
+          true
+        );
+      }
+    }
     switch (this.kind) {
       case TypeKind.Bool:
       case TypeKind.I8:
