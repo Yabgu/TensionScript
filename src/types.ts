@@ -231,6 +231,55 @@ export function isGcClass(cls: Class): bool {
 }
 
 /**
+ * The element type when `type` is a `StaticArray<T>` emitted as a wasm GC array,
+ * else `null`.
+ *
+ * **Prototype identity, not `extendsPrototype`.** `String extends
+ * StaticArray<u16>` and so do the nine `TypedArray`s; an `extends` test mapped all
+ * of them onto wasm arrays and then failed deep inside `String`. Only a
+ * `StaticArray<T>` *instance* is mapped, and this is the one test that decides it.
+ */
+export function gcArrayElementOf(type: Type | null): Type | null {
+  if (type == null || !gcClassesEnabled) return null;
+  let cls = type.classReference;
+  if (cls == null) return null;
+  let program = cls.program;
+  if (cls.prototype != program.staticArrayPrototype) return null;
+  let typeArguments = cls.getTypeArgumentsTo(program.staticArrayPrototype);
+  if (typeArguments == null || !typeArguments.length) return null;
+  let element = unchecked(typeArguments[0]);
+  return gcArrayElementSupported(element) ? element : null;
+}
+
+/**
+ * Whether an element type can be a wasm array's element in this slice.
+ *
+ * Value types, and a class this slice emits as a struct. Anything else —
+ * `String`, `Array`, a function reference, a nested `StaticArray` — leaves the
+ * instantiation pointer-shaped so a program using it keeps compiling exactly as it
+ * does today. Half-supporting an element kind would fail somewhere unrelated.
+ */
+export function gcArrayElementSupported(element: Type): bool {
+  switch (element.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.I16:
+    case TypeKind.I32:
+    case TypeKind.I64:
+    case TypeKind.Isize:
+    case TypeKind.U8:
+    case TypeKind.U16:
+    case TypeKind.U32:
+    case TypeKind.U64:
+    case TypeKind.Usize:
+    case TypeKind.F32:
+    case TypeKind.F64: return true;
+  }
+  let elementClass = element.classReference;
+  return elementClass != null && isGcClass(elementClass);
+}
+
+/**
  * The **brand id** of a wasm GC class: the value it stores in struct field 0.
  *
  * # Why a value and not a type
@@ -1187,6 +1236,13 @@ export class Type {
     // Scoped deliberately: `isGcClass` excludes `~lib/` (the standard library
     // keeps the pointer ABI until the migration reaches it) and excludes
     // anything with a real base class (flat classes only in this slice).
+    // **`StaticArray<T>` is a wasm GC array.** Before the class arm because it is
+    // a class reference, and per instantiation: `StaticArray<i32>` is an array
+    // while `StaticArray<String>` keeps the pointer ABI. The build is delegated to
+    // `ensureType` — the array type needs the module that owns the builder cache,
+    // and `module.ts` imports this file.
+    if (gcArrayElementOf(this) != null) return ensureType(this);
+
     if (gcClassesEnabled && this.isInternalReference) {
       let cls = this.classReference;
       if (cls != null && isGcClass(cls)) {

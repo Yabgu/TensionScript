@@ -204,6 +204,7 @@ import {
   MemoryModelCode,
   Signature,
   gcFieldsOf,
+  gcArrayElementOf,
   gcSubtreeBrands,
   gcBrandOf,
   GC_BRAND_INDEX,
@@ -6642,6 +6643,26 @@ export class Compiler extends DiagnosticEmitter {
           contextualType, Constraints.None, valueExpression
         );
       }
+      // **`a[i] = v` on a wasm GC `StaticArray<T>`: `array.set`.** Intercepted
+      // here, before the index-signature lookup — that lookup resolves `__set`,
+      // which is linear-memory code and cannot be called on a wasm array.
+      //
+      // Flag-guarded: the extra `resolveExpression` below must not run in a
+      // program that never asked for wasm GC.
+      let gcWriteType = this.options.wasmGc
+        ? resolver.resolveExpression(elementAccess.expression, flow)
+        : null;
+      let gcWriteElement = gcArrayElementOf(gcWriteType);
+      if (gcWriteElement != null) {
+        let value = this.compileExpression(valueExpression, gcWriteElement);
+        let valueRefType = this.currentType;
+        return this.compileGcStaticArraySet(
+          elementAccess.expression, elementAccess.elementExpression,
+          assert(gcWriteType), gcWriteElement,
+          this.convertExpression(value, valueRefType, gcWriteElement, false, valueExpression),
+          contextualType != Type.void
+        );
+      }
       if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
         return this.compileDynamicArrayElementAccess(
           elementAccess, arrayType, true,
@@ -6763,6 +6784,7 @@ export class Compiler extends DiagnosticEmitter {
         assert(parent.kind == ElementKind.Class);
         let classInstance = <Class>parent;
         let isUnchecked = flow.is(FlowFlags.UncheckedContext);
+
         let indexedSet = classInstance.lookupOverload(OperatorKind.IndexedSet, isUnchecked);
         if (!indexedSet) {
           let indexedGet = classInstance.lookupOverload(OperatorKind.IndexedGet, isUnchecked);
@@ -9413,6 +9435,14 @@ export class Compiler extends DiagnosticEmitter {
           expression, targetType, false, contextualType, constraints
         );
       }
+      // **`StaticArray<T>` indexed under `--wasm-gc`: `array.get`.** Before the
+      // generic `__get` overload, which is linear-memory code.
+      let gcReadElement = gcArrayElementOf(targetType);
+      if (gcReadElement != null) {
+        return this.compileGcStaticArrayGet(
+          targetExpression, expression.elementExpression, targetType, gcReadElement
+        );
+      }
       let classReference = targetType.getClassOrWrapper(this.program);
       if (classReference) {
         let isUnchecked = this.currentFlow.is(FlowFlags.UncheckedContext);
@@ -11453,6 +11483,16 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (!classInstance) return module.unreachable();
     if (contextualType == Type.void) constraints |= Constraints.WillDrop;
+
+    // **`new StaticArray<T>(n)` is `array.new`.**
+    let gcNewElement = gcArrayElementOf(classInstance.type);
+    if (gcNewElement != null) {
+      return this.compileGcStaticArrayNew(
+        classInstance, gcNewElement,
+        expression.args.length ? expression.args[0] : null, expression
+      );
+    }
+
     let ctor = this.ensureConstructor(classInstance, expression);
     if (!ctor.hasDecorator(DecoratorFlags.Inline)) {
       // Inlined ctors haven't been compiled yet and are checked upon inline
@@ -11744,6 +11784,46 @@ export class Compiler extends DiagnosticEmitter {
     this.maybeCompileEnclosingSource(expression);
 
     let resolver = this.resolver;
+
+    // **`StaticArray#length` is `array.len`, answered in emission.** The resolver
+    // already types `a.length` correctly — `compilePropertyAccessExpression` reaches
+    // `lookupPropertyAccessExpression` and yields the getter's `i32` — so no
+    // resolver change is needed and none is made. What must not happen is *calling*
+    // that getter: its body reads `rtSize` out of a header a wasm array does not
+    // have.
+    //
+    // **The receiver is compiled first, and that ordering is the whole bug GC6
+    // reported as "a.length does not type as i32":** `compileExpression` sets
+    // `this.currentType = contextualType` on entry, so assigning `i32` before
+    // calling it leaves `currentType` as the receiver's type, which the caller then
+    // reports as `StaticArray<i32> is not assignable to i32`. The resolver was
+    // never wrong.
+    //
+    // **Guarded on the flag before anything resolves.** `resolveExpression` here
+    // would resolve the receiver for *every* property access in every program, and
+    // an early resolution changes what later resolutions see — measured: it moved
+    // 14 compiler fixtures that have nothing to do with arrays. With the flag off
+    // this block must not run at all.
+    if (this.options.wasmGc) {
+      let gcLengthReceiver = resolver.resolveExpression(
+        expression.expression, flow, Type.auto, ReportMode.Swallow
+      );
+      if (gcLengthReceiver != null && gcArrayElementOf(gcLengthReceiver) != null) {
+        if (expression.property.text != "length") {
+          this.error(
+            DiagnosticCode.Property_0_does_not_exist_on_type_1,
+            expression.property.range, expression.property.text, gcLengthReceiver.toString()
+          );
+          return module.unreachable();
+        }
+        let receiver = this.compileExpression(
+          expression.expression, gcLengthReceiver, Constraints.ConvImplicit
+        );
+        this.currentType = Type.i32;
+        return module.array_len(receiver);
+      }
+    }
+
     // `y.length` on a `[T * n]`: the buffer header's first field, an i32.
     //
     // Intercepted before `lookupExpression`, because the array kind has no class
@@ -16108,6 +16188,144 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Makes a runtime non-null check, e.g. on `<Type>possiblyNull` or `possiblyNull!`. */
+  /**
+   * `new StaticArray<T>(n)` as `array.new $Elem (n) (zero)`.
+   *
+   * **Why the stdlib body is never compiled.** `StaticArray`'s members are
+   * linear-memory code — the constructor calls `__new`, `#get:length` reads
+   * `rtSize` out of a header, `__get`/`__uset` load/store at an offset — and none
+   * of it type-checks when the instance is a wasm array. Every call site is
+   * intercepted (`new` here, `.length`, `a[i]`, `a[i] = v`), so none of them is
+   * ever referenced and none is emitted. **That is the boundary in emitted code**:
+   * a `StaticArray<T>` instance gets `array.*`; the class's own methods are
+   * unreachable and unemitted.
+   */
+  private compileGcStaticArrayNew(
+    classInstance: Class,
+    element: Type,
+    lengthExpression: Expression | null,
+    reportNode: Node
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let arrayTypeRef = classInstance.type.toRef();
+    let heapType = module.heapType(arrayTypeRef);
+    let length = lengthExpression != null
+      ? this.compileExpression(lengthExpression, Type.i32, Constraints.ConvImplicit)
+      : module.i32(0);
+    let lengthLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(lengthLocal, length, false));
+    // A negative length must not become a huge `array.new`. The stdlib constructor
+    // refused it with `RangeError(E_INVALIDLENGTH)`; an abort with the same message
+    // is this language's `throw` (`compileThrowStatement`).
+    stmts.push(module.if(
+      module.binary(BinaryOp.GtU32, module.local_get(lengthLocal, TypeRef.I32),
+        module.i32(0x7ffffff0)),
+      this.makeStaticAbort(this.ensureStaticString("Invalid length"), reportNode)
+    ));
+    stmts.push(module.array_new(
+      heapType, module.local_get(lengthLocal, TypeRef.I32), this.makeFieldZero(element)
+    ));
+    this.currentType = classInstance.type;
+    return module.block(null, stmts, arrayTypeRef);
+  }
+
+  /**
+   * `a[i]` on a wasm GC `StaticArray<T>`: a range check, then `array.get`.
+   *
+   * **The check throws rather than letting `array.get` trap.** A wasm trap is fatal
+   * to the store — the guest cannot catch it — while `StaticArray`'s contract is a
+   * `RangeError(E_INDEXOUTOFRANGE)`, and `throw` compiles to an abort in this
+   * language (`compileThrowStatement`: no error-handling spec). So the shape is
+   * `u32(i) >= u32(array.len)` then the same abort with the stdlib's own
+   * `"Index out of range"`. Cost: one compare and one branch — the check the
+   * pointer version already performed — and no change in observable behaviour.
+   * `unchecked` skips it, which is that flag's meaning.
+   */
+  private compileGcStaticArrayGet(
+    targetExpression: Expression,
+    indexExpression: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let arrayTypeRef = targetType.toRef();
+    let heapType = module.heapType(arrayTypeRef);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let indexLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(targetExpression, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(indexLocal,
+      this.compileExpression(indexExpression, Type.i32, Constraints.ConvImplicit), false));
+    if (!flow.is(FlowFlags.UncheckedContext)) {
+      stmts.push(this.makeGcArrayBoundsCheck(
+        indexLocal, module.array_len(module.local_get(refLocal, arrayTypeRef))
+      ));
+    }
+    stmts.push(module.array_get(heapType, module.local_get(refLocal, arrayTypeRef),
+      module.local_get(indexLocal, TypeRef.I32), element.toRef()));
+    this.currentType = element;
+    return module.block(null, stmts, element.toRef());
+  }
+
+  /**
+   * `a[i] = v` on a wasm GC `StaticArray<T>`: a range check, then `array.set`.
+   *
+   * Takes the value already compiled (`valueExpr` in `makeAssignment`), because
+   * recompiling the expression would emit its side effects twice.
+   */
+  private compileGcStaticArraySet(
+    targetExpression: Expression | null,
+    indexExpression: Expression | null,
+    targetType: Type,
+    element: Type,
+    valueExpr: ExpressionRef,
+    tee: bool
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let arrayTypeRef = targetType.toRef();
+    let heapType = module.heapType(arrayTypeRef);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let indexLocal = flow.getTempLocal(Type.i32).index;
+    let valueLocal = flow.getTempLocal(element).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(assert(targetExpression), targetType,
+        Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(indexLocal,
+      this.compileExpression(assert(indexExpression), Type.i32,
+        Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(valueLocal, valueExpr, element.isManaged));
+    if (!flow.is(FlowFlags.UncheckedContext)) {
+      stmts.push(this.makeGcArrayBoundsCheck(
+        indexLocal, module.array_len(module.local_get(refLocal, arrayTypeRef))
+      ));
+    }
+    stmts.push(module.array_set(heapType,
+      module.local_get(refLocal, arrayTypeRef),
+      module.local_get(indexLocal, TypeRef.I32),
+      module.local_get(valueLocal, element.toRef())));
+    if (tee) stmts.push(module.local_get(valueLocal, element.toRef()));
+    this.currentType = tee ? element : Type.void;
+    return module.block(null, stmts, tee ? element.toRef() : TypeRef.None);
+  }
+
+  /** `if (u32(i) >= u32(len)) abort with the stdlib's "Index out of range"`. */
+  private makeGcArrayBoundsCheck(indexLocal: i32, len: ExpressionRef): ExpressionRef {
+    let module = this.module;
+    return module.if(
+      module.binary(BinaryOp.GeU32, module.local_get(indexLocal, TypeRef.I32), len),
+      this.makeStaticAbort(
+        this.ensureStaticString("Index out of range"),
+        this.currentFlow.sourceFunction.identifierNode
+      )
+    );
+  }
+
   /**
    * The brand test for `instanceof C` / `<C>x`: is the runtime object's brand one
    * of the brands in `classInstance`'s subtree?

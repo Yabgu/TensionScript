@@ -196,46 +196,53 @@ and the same abort with the stdlib's own `"Index out of range"` string. Cost: on
 compare and one branch per access — the same check the pointer version performs —
 and no change in observable behaviour, which is the point.
 
-### Why it is not wired yet, stated plainly
+### It is wired now, and the blocker was mine
 
-The IR is proven; the **type mapping is blocked**. Mapping `StaticArray<i32>`'s
-`toRef` to an array type makes the *resolver* type `new StaticArray<i32>(2)` as
-`~lib/string/String`, so every element access reports
-`Index signature in type '~lib/string/String' only permits reading` and a plain
-`a[i]` reports `Type '~lib/string/String' is not assignable to type 'i32'`.
+GC6 reported that `a.length` did not type as `i32`, and that neither
+`lookupPropertyAccessExpression` nor `resolveExpression`'s `ElementKind.Property`
+arm fired. The second half of that was an instrumentation mistake — the print never
+landed in the function. The first half had a real cause, and it was in the
+interception GC6 had just written:
 
-That is the **shared-`Type`** hazard GC3 found in the type cache, in a second
-place: `String` is `extends StaticArray<u16>`, so `String` and `StaticArray<i32>`
-both resolve to a `Usize`-kind reference type and the resolver's
-`getClassOrWrapper(targetType)` answers `String` for a `StaticArray<i32>` receiver.
-Measured directly: `resolver.ts:2379`,
-`resolveIndexSignature`'s `targetType.getClassOrWrapper(...)` →
-`~lib/string/String` with `classReference` also `String`. Fixing it means giving a
-generic class instantiation a reliable identity in the resolver, which is a
-resolver change, not an array one — and a resolver change made hastily is how the
-GC3 `-O2` defect happened. So the mapping is reverted and nothing about the flag's
-current behaviour changed.
-
-**What *is* proven, in the engine that will run it** (`/tmp/gc5r`, a wasmtime
-50.0.1 harness using `Store::gc`, the same shape as GC1):
-
-```
-A: array of class refs, no forced collection        sum=36 len=8
-B: 5 forced collections, array is the only root     sum=36 len=8
-C: gc, 100000 x 1 KiB garbage (102 MB), gc, read    sum=36 len=8  capacity 65536
-D: same, moving collector (gc_heap_may_move)        sum=36 len=8
-E: negative control, (array i32) of raw indices     sum=36  (nothing traced — the
-                                                    bug a wasm GC array removes)
-F: control, every element nulled after fill         traps: null reference
-verdict: elements ARE traced
+```ts
+this.currentType = Type.i32;                                   // set…
+return module.array_len(this.compileExpression(receiver, …));  // …then overwritten
 ```
 
-C is the load-bearing one: 102 MB allocated and collected while the heap capacity
-stayed at 65,536 bytes, so `gc()` demonstrably reclaimed, and the eight `$item`
-structs — reachable only through the array — were still there. D repeats it with a
-**moving** collector, so an untraced element reference would be left pointing at
-the old arena instead of being rewritten. F proves the read is a real dereference
-rather than a cached number.
+`compileExpression` sets `this.currentType = contextualType` **on entry**, so setting
+`i32` before calling it leaves `currentType` as the receiver's type — which the
+caller reports as `StaticArray<i32> is not assignable to i32`. Compiling the
+receiver *first* fixes it. The resolver was never wrong, which is why the earlier
+`getClassOrWrapper` diagnosis did not survive measurement.
+
+Where each of the four operations is answered, and why there rather than in the
+resolver:
+
+| operation | site | why not the resolver |
+| --- | --- | --- |
+| `new StaticArray<T>(n)` | `compileNewExpression` | the constructor body is linear-memory code; it must not be emitted |
+| `a[i]` | `compileElementAccessExpression` | `__get` is `load<T>(base + (i << alignof))` — unemittable for an array |
+| `a[i] = v` | `compileAssignment` | same, for `__set` |
+| `a.length` | `compilePropertyAccessExpression` | the getter reads `rtSize` from a header |
+
+**Emission, not the resolver, because the resolver is already correct**: it types
+`a.length` as `i32` and `a[i]` as `T` today, through
+`lookupPropertyAccessExpression` and the index signature. What cannot survive is
+*calling* the members those types come from, and call-vs-not is an emission
+decision. A resolver special case would have to lie about the class to stop the
+members being compiled, and mapping `StaticArray#length` to a builtin would change
+the class for every program including flag-off ones.
+
+The four intercepts are **guarded on `options.wasmGc` before they resolve
+anything**, because a stray `resolveExpression` on every property access changes
+what later resolutions see: measured, it moved **14 compiler fixtures** that have
+nothing to do with arrays (`simd`, `number`, `resolve-access`, `std/string`, …).
+With the flag off, none of these blocks runs.
+
+`@unmanaged`/`T[N]` fixed arrays and `Array`'s buffer stay linear memory. The
+boundary in emitted code is the receiver's static type: a `StaticArray<T>` instance
+gets `array.*`; every other array shape keeps `load`/`store` at an offset, and
+`StaticArray`'s own members are never referenced so never compiled.
 
 ## What it does not do (and why the test says so)
 
@@ -434,6 +441,11 @@ defect is mapping-induced and not a latent resolver bug.
 
 ## What actually breaks, and it is not what the brief describes
 
+> **Superseded by "It is wired now, and the blocker was mine" above.** The three
+> failures listed here were real, but item 2's cause was an ordering bug in the
+> interception GC6 had just written, not a resolver or property-access defect. Kept
+> as the record of what was measured at the time.
+
 With the mapping applied, three distinct things fail, and only one of them is about
 types:
 
@@ -470,6 +482,10 @@ localised.** Generic-instantiation identity — the cause the brief names — is
 present and working.
 
 ## The two routes, as the brief defined them
+
+> **Neither was taken, and neither was needed.** The blocker turned out to be two
+> lines in the compiler. This comparison is kept because both routes were
+> considered seriously and the measurements behind them are still true.
 
 Provided as requested, with the correction above attached to each.
 
@@ -535,3 +551,25 @@ file made it exit 0.
 `test:gc` before it compiles anything — and it does not yet, because this round
 does not own `scripts/`. Until then it is `/tmp/build-assert.sh`, and every command
 in this document assumes it ran first.
+
+## `StaticArray` results, measured through the compiler
+
+```
+probe()                  = 11504     new StaticArray<i32>(4), write index 1, sum ×100 + length
+len(makeN(7))            = 7         array.len
+managedProbe()           = 1004      StaticArray<Item>, 4 elements, values 1..4
+outOfRange()             aborts      "Index out of range", the stdlib's message
+outOfRangeWrite()        aborts      the same
+```
+
+23 `array.*` operations in the emitted text; `StaticArray<i32>#__uset` and
+`#get:length` appear **nowhere** — the class body is unreachable, so unemitted.
+`-O0`, `-O1`, `-O2`, `-O3` compile and agree on all six fixtures. Flag off: the
+fixture compiles to byte-identical output against the parent commit, and contains
+no `array.new`/`array.get`/`array.set`/`array.len` at all.
+
+The **managed-element** case is the one that matters: `a[i] = new Item(i + 1)` puts
+a reference into the array with `array.set`, `a[i].v` reads it back with
+`array.get` + `struct.get`, and the engine's tracer follows it — proven at the IR
+level in GC5 (102 MB of garbage reclaimed at 65,536-byte capacity, moving
+collector, null-control trap) and now through the real compiler path.

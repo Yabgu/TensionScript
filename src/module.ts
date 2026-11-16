@@ -26,7 +26,8 @@ import {
   gcBrandOf,
   GC_BRAND_INDEX,
   GC_BRAND_NAME,
-  GC_FIRST_FIELD_INDEX
+  GC_FIRST_FIELD_INDEX,
+  gcArrayElementOf
 } from "./types";
 import { Class } from "./program";
 import * as binaryen from "./glue/binaryen";
@@ -1399,6 +1400,9 @@ export class Module {
   /** Brand id -> the class that owns it, so a hash collision is caught. */
   gcBrandOwners: Map<i32, Class> = new Map();
 
+  /** GC array type per element type, so `StaticArray<i32>` is built once. */
+  gcArrayTypeCache: Map<Type, TypeRef> = new Map();
+
   /**
    * Heap-type slots allocated but not yet filled, keyed by class.
    *
@@ -1526,6 +1530,33 @@ export class Module {
     // The C API takes a **heap type**, not a ref type — `ref.cast $T`, and the
     // result is the non-null `(ref $T)`.
     return binaryen._BinaryenRefCast(this.ref, ref, this.heapType(type));
+  }
+
+  /** `array.len` — the length a wasm array carries, so `StaticArray` needs no field. */
+  array_len(ref: ExpressionRef): ExpressionRef {
+    return binaryen._BinaryenArrayLen(this.ref, ref);
+  }
+
+  /**
+   * `array.new $heapType (n) (zero)`.
+   *
+   * **`_BinaryenArrayNew`, not `_BinaryenArrayNewDefault`** — the latter is the text
+   * format's name for this form and the glue does not export it (measured:
+   * `typeof _BinaryenArrayNewDefault === "undefined"` in 131.0.0-nightly.20260721).
+   * Same lesson as `_BinaryenContNew` in C1: probe the runtime, not the `.d.ts`.
+   */
+  array_new(heapType: HeapTypeRef, length: ExpressionRef, init: ExpressionRef): ExpressionRef {
+    return binaryen._BinaryenArrayNew(this.ref, heapType, length, init);
+  }
+
+  /** `array.get $heapType` — the caller range-checks first. */
+  array_get(heapType: HeapTypeRef, ref: ExpressionRef, index: ExpressionRef, type: TypeRef): ExpressionRef {
+    return binaryen._BinaryenArrayGet(this.ref, ref, index, type, false);
+  }
+
+  /** `array.set $heapType` — the caller range-checks first. */
+  array_set(heapType: HeapTypeRef, ref: ExpressionRef, index: ExpressionRef, value: ExpressionRef): ExpressionRef {
+    return binaryen._BinaryenArraySet(this.ref, ref, index, value);
   }
 
   /** `struct.get $heapType $index` — a field read by type and index, never by offset. */
@@ -3973,6 +4004,16 @@ export function ensureType(type: Type): TypeRef {
   let typeRef = tryEnsureBasicType(type);
   if (typeRef) return typeRef;
 
+  // **`StaticArray<T>` is a wasm GC array.** Answered here because the array type
+  // needs this module's builder cache, and `types.ts` is imported by this file.
+  {
+    let gcArrayElement = gcArrayElementOf(type);
+    if (gcArrayElement != null) {
+      let owner = type.nonNullableType.classReference;
+      if (owner != null) return ensureGcArrayType(owner.program.module, gcArrayElement);
+    }
+  }
+
   // **A class is answered by its `Class`, before anything consults `Type.ref`.**
   // `Type` objects are interned by kind and flags, and every class is a `Usize`
   // reference, so two classes can share one `Type` — and then `Type.ref`, which
@@ -4304,6 +4345,74 @@ function gcReachableFrom(cls: Class): Class[] {
     }
   }
   return seen;
+}
+
+/**
+ * The wasm GC array type for `StaticArray<T>`: `(ref null (array (mut T)))`.
+ *
+ * **Mutable element slots for every element kind.** Mutability is about the slot,
+ * not about tracing: `(array (mut (ref null $C)))` is traced exactly like
+ * `(array (ref null $C))`, and the elements are written by `__set`, `sort`,
+ * `copyWithin` and the constructors — an immutable element type would forbid the
+ * ordinary operations. It also keeps one type per element kind instead of two,
+ * which matters because wasm GC identity is structural.
+ *
+ * Nullable, like every other reference this slice emits: a `StaticArray` local or
+ * field starts as `ref.null`.
+ */
+export function ensureGcArrayType(module: Module, element: Type): TypeRef {
+  let cached = module.gcArrayTypeCache.get(element);
+  if (cached) return cached;
+  let builder = binaryen._TypeBuilderCreate(1);
+  binaryen._TypeBuilderSetArrayType(builder, 0, gcElementTypeRef(element), PackedType.NotPacked, true);
+  let out = binaryen._malloc(8);
+  if (!binaryen._TypeBuilderBuildAndDispose(builder, out, out, out + 4)) {
+    let errorIndex = binaryen.__i32_load(out);
+    let errorReason = binaryen.__i32_load(out + 4);
+    binaryen._free(out);
+    throw new Error(`wasm GC array builder refused ${element.toString()} ` +
+                    `(index ${errorIndex}): ${TypeBuilderErrorReason.toString(errorReason)}`);
+  }
+  let heapType = <HeapTypeRef>binaryen.__i32_load(out);
+  binaryen._free(out);
+  binaryen._BinaryenModuleSetTypeName(
+    module.ref, heapType, module.allocStringCached(`~gcarray/${element.toString()}`)
+  );
+  let nullable = binaryen._BinaryenTypeFromHeapType(heapType, true);
+  module.gcArrayTypeCache.set(element, nullable);
+  return nullable;
+}
+
+/** The wasm value type of one array element. */
+function gcElementTypeRef(element: Type): TypeRef {
+  // **A class is checked before the kind switch**, because a class reference's
+  // `kind` is `Usize` ("also the base of class types") — so the integer arms below
+  // would answer `i64` for `StaticArray<Item>` and produce `(array (mut i64))`.
+  // Measured: that is exactly what the first attempt emitted.
+  let elementClass = element.classReference;
+  if (elementClass != null && isGcClass(elementClass)) {
+    // Nullable, so `ref.null` is a legal element default — which is what
+    // `array.new` is given and what an unassigned slot reads as.
+    return binaryen._BinaryenTypeFromHeapType(
+      binaryen._BinaryenTypeGetHeapType(ensureClassType(elementClass)), true);
+  }
+  switch (element.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.U8:
+    case TypeKind.I16:
+    case TypeKind.U16:
+    case TypeKind.I32:
+    case TypeKind.U32: return TypeRef.I32;
+    case TypeKind.I64:
+    case TypeKind.U64:
+    case TypeKind.Isize:
+    case TypeKind.Usize: return TypeRef.I64;
+    case TypeKind.F32: return TypeRef.F32;
+    case TypeKind.F64: return TypeRef.F64;
+  }
+  assert(false); // `gcArrayElementSupported` refused this before we got here
+  return TypeRef.I32;
 }
 
 /** The `TypeRef` for one struct field. */

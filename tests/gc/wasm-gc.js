@@ -309,6 +309,80 @@ function check(name, condition, detail) {
   }
 }
 
+
+// 11 — `StaticArray<T>` as a wasm GC array ------------------------------------
+//
+// The class body's members are linear-memory code and must never be emitted on
+// this path: four call sites are intercepted (`new`, `a[i]`, `a[i] = v`,
+// `.length`) so `StaticArray#__get`/`#__uset`/`#get:length` are never referenced.
+{
+  const built = compile("arrays.ts", "arr.wasm", ["--wasmGc"]);
+  check("the array fixture compiles with validation on", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "arr.wat"), "utf8");
+    check("an array type per element kind",
+      /\(type \S*~gcarray\/i32 \(array \(mut i32\)\)\)/.test(wat) &&
+          /\(type \S*~gcarray\/tests\/gc\/arrays\/Item \(array \(mut \(ref null \S*Item\)\)\)\)/.test(wat),
+      wat.split("\n").slice(0, 5).join("\n"));
+    check("StaticArray's linear-memory members never appear",
+      !wat.includes("StaticArray<i32>#__uset") &&
+          !wat.includes("StaticArray<i32>#get:length"),
+      "the class body must be unreachable, so unemitted");
+
+    const bytes = readFileSync(join(scratch, "arr.wasm"));
+    const { instance } = await WebAssembly.instantiate(bytes, imports);
+    const e = instance.exports;
+    check("new + write + read + length on primitives",
+      e.probe() === 11504, `probe() = ${e.probe()} (expected 11504)`);
+    check("length is array.len, not a header read",
+      e.len(e.makeN(7)) === 7);
+    check("managed elements: write, read back, length",
+      e.managedProbe() === 1004, `managedProbe() = ${e.managedProbe()} (expected 1004)`);
+    let aborted = false;
+    try { e.outOfRange(); } catch (error) { aborted = /abort/.test(String(error)); }
+    check("reading past the end aborts (the stdlib's behaviour)", aborted);
+    aborted = false;
+    try { e.outOfRangeWrite(); } catch (error) { aborted = /abort/.test(String(error)); }
+    check("writing past the end aborts", aborted);
+  }
+}
+
+// 12 — the standing gate: every optimization level agrees, on the array fixture
+{
+  const answers = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("arrays.ts", `arr${level}.wasm`, ["--wasmGc", level]);
+    check(`arrays ${level} compiles`,
+      built.ok && !/wasm-validator|Aborted/.test(built.output), built.output);
+    if (built.ok) {
+      const { instance } = await WebAssembly.instantiate(
+        readFileSync(join(scratch, `arr${level}.wasm`)), imports);
+      answers.push(`${instance.exports.probe()},${instance.exports.managedProbe()}`);
+    }
+  }
+  check("arrays: -O0..-O3 all agree",
+    answers.length === 4 && answers.every((v) => v === answers[0]),
+    `answers: ${answers.join(" | ")}`);
+}
+
+// 13 — flag off: `StaticArray` is still linear memory -------------------------
+{
+  const built = compile("arrays.ts", "arr-plain.wasm", []);
+  check("arrays compile without the flag", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "arr-plain.wat"), "utf8");
+    check("flag off: no wasm array operations at all",
+      !wat.includes("array.new") && !wat.includes("array.get") &&
+          !wat.includes("array.set") && !wat.includes("array.len"));
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "arr-plain.wasm")), imports);
+    check("flag off: the same answers",
+      instance.exports.probe() === 11504 &&
+          instance.exports.managedProbe() === 1004,
+      `probe=${instance.exports.probe()} managed=${instance.exports.managedProbe()}`);
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);
