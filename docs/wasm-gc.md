@@ -154,6 +154,89 @@ each needs the other's heap type before either exists.
 )
 ```
 
+## `StaticArray<T>` as `(array (mut T))` — designed, proven at the IR, not yet wired
+
+`StaticArray` is the right first container: a bare block, `[key: number]: T`, data
+at offset 0, length implied by the allocation, no `length_` field. It maps 1:1 onto
+a wasm array, so there is no growth policy to invent (which is exactly why `Array`
+is *not* in this slice — the glue has `array.new`/`array.copy` and **no**
+`array.grow`, so a push must reallocate, and that is a design decision).
+
+**The type: `(array (mut T))`, mutable for every element kind.**
+
+```wat
+(type $item (sub (struct (field $<brand> i32) (field $v (mut i32)))))
+(type $arr  (array (mut (ref null $item))))     ;; StaticArray<Item>
+```
+
+Mutability is about the **slot**, not about tracing: `(array (mut (ref null $C)))`
+is traced exactly like `(array (ref null $C))`, and the elements are written by
+`__set`, `copyWithin`, `sort` and the constructors, so an immutable element type
+would forbid the ordinary operations. One type per element kind instead of two also
+keeps wasm GC's *structural* identity from splitting `StaticArray<T>` into a mutable
+and an immutable version that must stay in step at every access site. The element is
+`(ref null $C)` for a class and the plain value type for a primitive, so
+`array.new`'s seed is `ref.null` or a zero constant accordingly.
+
+**The four operations:**
+
+| today | as a wasm array |
+| --- | --- |
+| `length` = `(rtSize − TOTAL_OVERHEAD) >>> alignof<T>()` | `array.len` — explicit and free |
+| `__new(length << alignof<T>(), id)` + `memory.fill` | `array.new $Elem (n) (zero)` |
+| `load<T>(base + (i << alignof<T>()))` | `array.get $Elem` |
+| `store<T>(base + (i << alignof<T>())), __link(...)` | `array.set $Elem` |
+
+**Bounds: checked in the emitted code, and it throws.** `array.get`/`array.set`
+trap out of range, and a wasm trap is fatal to the store — the guest cannot catch
+it. `StaticArray`'s contract is a `RangeError(E_INDEXOUTOFRANGE)`, and `throw`
+compiles to an abort in this language (`compileThrowStatement`: the error-handling
+spec is not implemented), so the shape is a `u32(index) >= u32(array.len)` compare
+and the same abort with the stdlib's own `"Index out of range"` string. Cost: one
+compare and one branch per access — the same check the pointer version performs —
+and no change in observable behaviour, which is the point.
+
+### Why it is not wired yet, stated plainly
+
+The IR is proven; the **type mapping is blocked**. Mapping `StaticArray<i32>`'s
+`toRef` to an array type makes the *resolver* type `new StaticArray<i32>(2)` as
+`~lib/string/String`, so every element access reports
+`Index signature in type '~lib/string/String' only permits reading` and a plain
+`a[i]` reports `Type '~lib/string/String' is not assignable to type 'i32'`.
+
+That is the **shared-`Type`** hazard GC3 found in the type cache, in a second
+place: `String` is `extends StaticArray<u16>`, so `String` and `StaticArray<i32>`
+both resolve to a `Usize`-kind reference type and the resolver's
+`getClassOrWrapper(targetType)` answers `String` for a `StaticArray<i32>` receiver.
+Measured directly: `resolver.ts:2379`,
+`resolveIndexSignature`'s `targetType.getClassOrWrapper(...)` →
+`~lib/string/String` with `classReference` also `String`. Fixing it means giving a
+generic class instantiation a reliable identity in the resolver, which is a
+resolver change, not an array one — and a resolver change made hastily is how the
+GC3 `-O2` defect happened. So the mapping is reverted and nothing about the flag's
+current behaviour changed.
+
+**What *is* proven, in the engine that will run it** (`/tmp/gc5r`, a wasmtime
+50.0.1 harness using `Store::gc`, the same shape as GC1):
+
+```
+A: array of class refs, no forced collection        sum=36 len=8
+B: 5 forced collections, array is the only root     sum=36 len=8
+C: gc, 100000 x 1 KiB garbage (102 MB), gc, read    sum=36 len=8  capacity 65536
+D: same, moving collector (gc_heap_may_move)        sum=36 len=8
+E: negative control, (array i32) of raw indices     sum=36  (nothing traced — the
+                                                    bug a wasm GC array removes)
+F: control, every element nulled after fill         traps: null reference
+verdict: elements ARE traced
+```
+
+C is the load-bearing one: 102 MB allocated and collected while the heap capacity
+stayed at 65,536 bytes, so `gc()` demonstrably reclaimed, and the eight `$item`
+structs — reachable only through the array — were still there. D repeats it with a
+**moving** collector, so an untraced element reference would be left pointing at
+the old arena instead of being rewritten. F proves the read is a real dereference
+rather than a cached number.
+
 ## What it does not do (and why the test says so)
 
 Collection itself is not asserted by `tests/gc/wasm-gc.js`: forcing a GC needs a
@@ -218,3 +301,52 @@ assertion stand in for it.
 Every class reference is **nullable**: a constructor's `this` is null until it
 allocates, and a non-null `(ref $C)` there would make the call site's `ref.null` a
 type error. Non-nullability is a later refinement, not this slice's.
+
+## Inventory: sites that assume a managed block's data is a raw pointer
+
+The count GC6 and GC7 have to work through. **Nothing here is fixed this round** —
+it is the honest size of what rests on `StaticArray`'s linear storage.
+
+Command, reproducible:
+
+```sh
+cd ~/work/TensionScript/std/assembly
+grep -rc  'changetype<usize>'        --include=*.ts .   # address-of a managed value
+grep -rc  'dataStart'                --include=*.ts .   # the raw data pointer of a view
+grep -rcE '(load|store)<'            --include=*.ts .   # a read/write through one
+grep -rcE 'memory\.(copy|fill)\('    --include=*.ts .   # a bulk copy through one
+```
+
+| file | `changetype<usize>` | `dataStart` | `load<>`/`store<>` | `memory.*` |
+| --- | --- | --- | --- | --- |
+| `string.ts` | 99 | 3 | 57 | 28 |
+| `staticarray.ts` | 49 | 6 | 32 | 9 |
+| `typedarray.ts` | 20 | 126 | 88 | 4 |
+| `array.ts` | 30 | 46 | 44 | 11 |
+| `dataview.ts` | 2 | 28 | 24 | 0 |
+| `util/string.ts` | 30 | 21 | 51 | 8 |
+| **std/assembly total** | **361** | **238** | **635** | **80** |
+| tension-framework/assembly | 80 | 31 | — | — |
+
+**34 of `staticarray.ts`'s 49** address-of sites are `changetype<usize>(this)` —
+the class's own methods reaching into itself — across 31 members. That is the file
+that must be rewritten, and it is *one* file; everything else on the list is a
+client that reaches into a `StaticArray` it was handed.
+
+The worst files, and why they are worst:
+
+- **`string.ts` (99 / 57 / 28)** — `String extends StaticArray<u16>`, so the whole
+  string implementation is StaticArray's storage with a UTF-16 view on it. A
+  `String` literal is in every program, so this is the last thing that can move and
+  the largest single block of work.
+- **`typedarray.ts` (126 `dataStart`)** — nine numeric view types over
+  `ArrayBuffer`, each with `dataStart`-based indexing.
+- **`array.ts` (46 `dataStart`)** — `Array<T>`'s storage *is* a `StaticArray`-shaped
+  buffer reached through `dataStart`; `Array` is GC6's design question (growth).
+- **`util/string.ts` (30 / 51)** — join/split/replace paths that copy through
+  pointers.
+
+The framework adds **80** address-of and **31** `dataStart` sites of its own,
+concentrated in `res.ts`, `runtime/arena.ts`, `2d/buffers.ts` and `anim/reader.ts`
+— all record-layout code over `@unmanaged` memory, which this migration does not
+touch, but they are listed so the count is complete.
