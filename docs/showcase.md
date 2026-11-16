@@ -7,7 +7,10 @@ result is recorded in that commit's message. Examples that do not yet compile ar
 marked **pending** with the phase that will land them, and are not written as if
 they work.
 
-Version this describes: **0.10.0**. Base: `origin/main` after PR #31.
+Version this describes: **0.14.1** (`package.json`, which is what npm's
+`dist-tags.latest` reports), **plus the phases [`CHANGELOG.md`](../CHANGELOG.md)
+still marks "Unreleased"** — sized enums among them. Base: `origin/main` at
+`f941a1f0`; this document's rewrite landed in PR #31.
 
 ---
 
@@ -562,9 +565,12 @@ repository.
 - **[`roadmap.md`](roadmap.md)** — deferred features and durable findings, one
   line each with the reason it is not built yet, and the repository's workflow.
 - **[`fork-posture.md`](fork-posture.md)** — what this fork is, what it
-  deliberately shares with AssemblyScript, and the sync cadence.
+  deliberately shares with AssemblyScript, and the sync question.
 - **[`scheduler-contract.md`](scheduler-contract.md)** — the async contract §5
   implements against.
+- **[`binaryen-stack-switching.md`](binaryen-stack-switching.md)** — what the
+  pinned Binaryen can and cannot emit for stack switching, with the bytes and the
+  re-run commands. Read it before planning any Backend B emission.
 - **[`async-phase1.md`](async-phase1.md)** — the phase-1 async record, kept
   because it documents the shape the later phases were built on.
 - **[`../CHANGELOG.md`](../CHANGELOG.md)** — what shipped in which release.

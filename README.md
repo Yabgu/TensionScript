@@ -11,7 +11,7 @@ and the package are its own: it does not collide with `asc` (AssemblyScript's
 compiler) or `tsc` (TypeScript's), so a project that installs both compilers
 always resolves the one it named.
 
-**Current version: 0.11.0.** The [feature showcase](docs/showcase.md) has one
+**Current version: 0.14.1.** The [feature showcase](docs/showcase.md) has one
 section per capability, with runnable examples and the refused forms; the scoping
 notes it draws from are in [`docs/`](docs/).
 
@@ -120,7 +120,8 @@ for lacking an AS equivalent.
 
 [`docs/fork-posture.md`](docs/fork-posture.md) is the frame: what this fork is,
 what it deliberately shares with AssemblyScript, what it diverges on, and the
-quarterly sync cadence. [`docs/showcase.md`](docs/showcase.md) is the
+sync question: how far behind upstream it is, and that no review schedule exists
+yet. [`docs/showcase.md`](docs/showcase.md) is the
 per-capability reference — examples, semantics, and what each feature refuses.
 [`docs/roadmap.md`](docs/roadmap.md) carries the deferred items, the durable
 findings, and the workflow this repository uses. Deferred and named, each with
