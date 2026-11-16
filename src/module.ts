@@ -21,12 +21,10 @@ import {
   Type,
   TypeFlags,
   TypeKind,
-  isGcClass
+  isGcClass,
+  gcFieldsOf
 } from "./types";
-import {
-  ElementKind,
-  PropertyPrototype
-} from "./program";
+import { Class } from "./program";
 import * as binaryen from "./glue/binaryen";
 import { synthesize as synthesizeDwarf } from "./dwarf";
 
@@ -1382,6 +1380,18 @@ export class Module {
 
   private lit: usize;
 
+  /**
+   * The wasm GC struct type built for each class, **keyed by the class**.
+   *
+   * Not by `Type`. Two classes can share one `Type` object — types are interned
+   * by kind and flags, and every class is a `Usize` reference — so a cache keyed
+   * on the `Type` handed the second class the first one's struct. Measured: a
+   * file with `Base`, `Derived` and `Sibling` emitted `Derived`'s constructor
+   * with `Sibling`'s type, because `Sibling` was built first and the `Type` was
+   * the same object. Nothing about the two classes is the same.
+   */
+  gcTypeCache: Map<Class, TypeRef> = new Map();
+
   static create(useShadowStack: bool, sizeType: TypeRef): Module {
     return new Module(binaryen._BinaryenModuleCreate(), useShadowStack, sizeType);
   }
@@ -1475,6 +1485,15 @@ export class Module {
       : 0;
     let expr = binaryen._BinaryenStructNew(this.ref, operandsPtr, numOperands, heapType);
     return expr;
+  }
+
+  /**
+   * `ref.test $heapType` — is this reference an instance of that type or a
+   * subtype of it? The wasm GC answer to `instanceof`, and it needs no header,
+   * no type id and no visitor: the engine knows the type of every reference.
+   */
+  ref_test(heapType: HeapTypeRef, ref: ExpressionRef): ExpressionRef {
+    return binaryen._BinaryenRefTest(this.ref, ref, heapType);
   }
 
   /** `struct.get $heapType $index` — a field read by type and index, never by offset. */
@@ -3922,6 +3941,23 @@ export function ensureType(type: Type): TypeRef {
   let typeRef = tryEnsureBasicType(type);
   if (typeRef) return typeRef;
 
+  // **A class is answered by its `Class`, before anything consults `Type.ref`.**
+  // `Type` objects are interned by kind and flags, and every class is a `Usize`
+  // reference, so two classes can share one `Type` — and then `Type.ref`, which
+  // is one field on that shared object, holds whichever class was built first.
+  // Measured: `Base`/`Derived`/`Sibling` in one file, `Derived` emitted with
+  // `Sibling`'s struct type. The class cache below is keyed by the class, so it
+  // cannot confuse the two.
+  {
+    let classReference = type.getClass();
+    if (classReference != null && isGcClass(classReference)) {
+      let built = ensureClassType(classReference);
+      return type.is(TypeFlags.Nullable)
+        ? built
+        : binaryen._BinaryenTypeFromHeapType(binaryen._BinaryenTypeGetHeapType(built), false);
+    }
+  }
+
   // From here on we are dealing with heap types independent of nullability.
   // Nullability is applied again when returning the final type.
   let originalType = type;
@@ -3951,7 +3987,6 @@ export function ensureType(type: Type): TypeRef {
     binaryen._free(out);
     throw new Error(`type builder error at index ${errorIndex}: ${TypeBuilderErrorReason.toString(errorReason)}`);
   }
-
   // Assign all the built types to their respective non-nullable type
   for (let _keys = Map_keys(seen), i = 0, k = _keys.length; i < k; ++i) {
     let seenType = _keys[i];
@@ -3960,28 +3995,6 @@ export function ensureType(type: Type): TypeRef {
     let fullType = binaryen._BinaryenTypeFromHeapType(heapType, false);
     assert(!seenType.ref);
     seenType.ref = fullType;
-    if (DEBUG_TYPEBUILDER) {
-      console.log(` set ${seenType.toString()}`);
-    }
-    let classInstance = seenType.getClass();
-    if (classInstance) {
-      let module = classInstance.program.module;
-      binaryen._BinaryenModuleSetTypeName(module.ref, heapType, module.allocStringCached(classInstance.internalName));
-      let members = classInstance.members;
-      if (members) {
-        let numFieldsInType = binaryen._BinaryenStructTypeGetNumFields(heapType);
-        let numFieldsInClass = 0;
-        for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-          let member = _values[i];
-          if (member.kind != ElementKind.PropertyPrototype) continue;
-          // only interested in fields (resolved during class finalization)
-          let property = (<PropertyPrototype>member).instance;
-          if (!property || !property.isField) continue;
-          binaryen._BinaryenModuleSetFieldName(module.ref, heapType, numFieldsInClass++, module.allocStringCached(property.name));
-        }
-        assert(numFieldsInType == numFieldsInClass);
-      }
-    }
   }
   binaryen._free(out);
 
@@ -3994,6 +4007,118 @@ export function ensureType(type: Type): TypeRef {
     binaryen._BinaryenTypeGetHeapType(typeRef),
     originalType.is(TypeFlags.Nullable) // apply nullability
   );
+}
+
+/**
+ * The wasm GC struct type for one class, built once and cached **by class**.
+ *
+ * # Order, and why it is not negotiable
+ *
+ * The base is built first, recursively, because `sub` requires the supertype to
+ * exist at a lower index — the type builder refuses a forward supertype
+ * reference. The fields are `gcFieldsOf`'s list: the base chain's first, then the
+ * class's own, which is the *same order* the supertype declared them in. That
+ * prefix is what makes a `(ref $Derived)` usable where a `(ref $Base)` is
+ * wanted, and therefore what makes `instanceof` a `ref.test` and a base-typed
+ * field read work on a derived instance.
+ *
+ * # Why the cache is on the `Class`
+ *
+ * Two classes can share one `Type` object (types are interned by kind and flags,
+ * and every class is a `Usize` reference), so a `Type`-keyed cache gave the
+ * second class the first one's struct. Measured with `Base`/`Derived`/`Sibling`:
+ * `Derived`'s constructor came out with `Sibling`'s type because `Sibling` was
+ * built first.
+ *
+ * # What it does not do
+ *
+ * No cycles. A class-typed field is resolved by recursing, so `A { b: B }` works
+ * when `B` is already built or is a leaf, and two classes that reference each
+ * other would recurse forever — that needs a forward-declaration pass and is a
+ * later problem, deliberately not papered over here.
+ */
+export function ensureClassType(classInstance: Class): TypeRef {
+  let module = classInstance.program.module;
+  let cached = module.gcTypeCache.get(classInstance);
+  if (cached) return cached;
+
+  // The supertype first: `sub` requires it at a lower index.
+  let base = classInstance.base;
+  let baseRef: HeapTypeRef = 0;
+  if (base != null && isGcClass(base)) {
+    baseRef = binaryen._BinaryenTypeGetHeapType(ensureClassType(base));
+  }
+
+  let builder = binaryen._TypeBuilderCreate(1);
+  let fields = gcFieldsOf(classInstance);
+  let fieldTypes = new Array<TypeRef>();
+  let packedTypes = new Array<u32>();
+  let fieldMutables = new Array<bool>();
+  for (let i = 0, k = fields.length; i < k; ++i) {
+    let fieldType = unchecked(fields[i]).type;
+    fieldTypes.push(gcFieldTypeRef(fieldType));
+    packedTypes.push(determinePackedType(fieldType));
+    // Every field is mutable. A `readonly` field would need the mutability
+    // threaded from the declaration, and a `struct.get` on an immutable field
+    // costs the same — so this waits for a reason to be different.
+    fieldMutables.push(true);
+  }
+  let cArrFT = allocPtrArray(fieldTypes);
+  let cArrPT = allocU32Array(packedTypes);
+  let cArrFM = allocBoolArray(fieldMutables);
+  binaryen._TypeBuilderSetStructType(builder, 0, cArrFT, cArrPT, cArrFM, fieldTypes.length);
+  // Open, because a subtype may exist: Binaryen refuses `SetSubType` on a final
+  // type, and whether anything extends this class is a fact the type builder is
+  // asked for before the extenders are known. `sub` costs nothing.
+  binaryen._TypeBuilderSetOpen(builder, 0);
+  if (baseRef) binaryen._TypeBuilderSetSubType(builder, 0, baseRef);
+
+  let out = binaryen._malloc(8);
+  if (!binaryen._TypeBuilderBuildAndDispose(builder, out, out, out + 4)) {
+    let errorIndex = binaryen.__i32_load(out);
+    let errorReason = binaryen.__i32_load(out + 4);
+    binaryen._free(out);
+    throw new Error(`type builder error at index ${errorIndex} for ${classInstance.internalName}: ` +
+                    TypeBuilderErrorReason.toString(errorReason));
+  }
+  let heapType = <HeapTypeRef>binaryen.__i32_load(out);
+  binaryen._free(out);
+  binaryen._free(cArrFM);
+  binaryen._free(cArrPT);
+  binaryen._free(cArrFT);
+
+  binaryen._BinaryenModuleSetTypeName(
+    module.ref, heapType, module.allocStringCached(classInstance.internalName)
+  );
+  let numFieldsInType = binaryen._BinaryenStructTypeGetNumFields(heapType);
+  assert(numFieldsInType == fields.length);
+  for (let i = 0, k = fields.length; i < k; ++i) {
+    binaryen._BinaryenModuleSetFieldName(module.ref, heapType, i,
+      module.allocStringCached(unchecked(fields[i]).name));
+  }
+
+  // **Deliberately not stored on `classInstance.type.ref`.** That field can be
+  // shared with another class (`Type` is interned by kind and flags), so writing
+  // it here would hand the next class this one's type — the exact defect the
+  // cache below exists to avoid.
+  let nullable = binaryen._BinaryenTypeFromHeapType(heapType, true);
+  module.gcTypeCache.set(classInstance, nullable);
+  return nullable;
+}
+
+/** The `TypeRef` for one struct field. */
+function gcFieldTypeRef(fieldType: Type): TypeRef {
+  // A class-typed field is a nullable ref to that class's struct. Recursing here
+  // is what makes `A { b: B }` work; it is also where a cycle would never
+  // terminate, so cycles are refused by construction rather than by a check.
+  let fieldClass = fieldType.getClass();
+  if (fieldClass != null && isGcClass(fieldClass)) {
+    return ensureClassType(fieldClass);
+  }
+  let basic = tryEnsureBasicType(fieldType);
+  if (basic) return basic;
+  assert(false); // a struct field of an unsupported kind is out of this slice
+  return TypeRef.I32;
 }
 
 /** Obtains the basic type of the given type, if any. */
@@ -4086,76 +4211,9 @@ function prepareType(builder: binaryen.TypeBuilderRef, seen: Map<Type,HeapTypeRe
   // directly representing an `ArrayBuffer` or `StaticArray`. TBD.
   let classReference = type.getClass();
   if (classReference) {
-    // Make sure the base type has been built prior, at a lower index
-    // **A supertype only when it is itself a GC struct.** A class in this slice
-    // is flat, but the resolution still gives it `Object` as a base, and Object
-    // is standard library — still an `i32` pointer. Declaring a `(ref $C)` as a
-    // subtype of an integer is what the type builder refuses (`InvalidSupertype`),
-    // and rightly: the two have no representation in common.
-    let base = classReference.base;
-    let baseRef: HeapTypeRef = 0;
-    if (base && isGcClass(base)) baseRef = prepareType(builder, seen, base.type); // might be temporary, is non-nullable
-
-    // Block this index with a temporary type and cache
-    let index = binaryen._TypeBuilderGetSize(builder);
-    binaryen._TypeBuilderGrow(builder, 1);
-    if (DEBUG_TYPEBUILDER) {
-      console.log(` block [${index}]: ${type.toString()}`);
-    }
-    let heapTypeRef = binaryen._TypeBuilderGetTempHeapType(builder, index);
-    typeRef = binaryen._TypeBuilderGetTempRefType(builder, heapTypeRef, false);
-    seen.set(type, typeRef);
-
-    // Populate the struct type (TODO: names)
-    let fieldTypes = new Array<TypeRef>();
-    let packedTypes = new Array<PackedType>();
-    let fieldMutables = new Array<bool>();
-    let members = classReference.members;
-    if (members) {
-      for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-        let member = _values[i];
-        if (member.kind != ElementKind.PropertyPrototype) continue;
-        // only interested in fields (resolved during class finalization)
-        let property = (<PropertyPrototype>member).instance;
-        if (!property || !property.isField) continue;
-        let fieldType = property.type;
-        if (DEBUG_TYPEBUILDER) {
-          console.log(`  field ${fieldType.toString()}`);
-        }
-        if (fieldType.is(TypeFlags.Nullable)) {
-          fieldTypes.push(
-            binaryen._TypeBuilderGetTempRefType(
-              builder,
-              binaryen._BinaryenTypeGetHeapType(
-                prepareType(builder, seen, fieldType.nonNullableType)
-              ),
-              true
-            )
-          );
-        } else {
-          fieldTypes.push(prepareType(builder, seen, fieldType));
-        }
-        packedTypes.push(determinePackedType(fieldType));
-        fieldMutables.push(true);
-      }
-    }
-    let cArrFT = allocPtrArray(fieldTypes);
-    let cArrPT = allocU32Array(packedTypes);
-    let cArrFM = allocBoolArray(fieldMutables);
-    if (DEBUG_TYPEBUILDER) {
-      console.log(` concretize [${index}]: ${type.toString()}`);
-    }
-    binaryen._TypeBuilderSetStructType(builder, index, cArrFT, cArrPT, cArrFM, fieldTypes.length);
-    if (baseRef && base) {
-      if (DEBUG_TYPEBUILDER) {
-        console.log(` set super [${index}]: ${type.toString()} <: ${base.type.toString()} ${baseRef == base.type.ref ? " (known)" : ""}`);
-      }
-      binaryen._TypeBuilderSetSubType(builder, index, binaryen._BinaryenTypeGetHeapType(baseRef));
-    }
-    binaryen._free(cArrFM);
-    binaryen._free(cArrPT);
-    binaryen._free(cArrFT);
-    return typeRef;
+    // One builder per class (`ensureClassType`), so a class referenced from a
+    // tuple or a signature is built by the same code that builds it as a class.
+    return ensureClassType(classReference);
   }
 
   // Respectively a new signature type

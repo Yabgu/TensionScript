@@ -203,6 +203,7 @@ import {
   TypeFlags,
   MemoryModelCode,
   Signature,
+  gcFieldsOf,
   isGcClass
 } from "./types";
 
@@ -7262,7 +7263,12 @@ export class Compiler extends DiagnosticEmitter {
         return module.unreachable();
       }
       let thisLocal = assert(flow.lookupLocal(CommonNames.this_));
-      let sizeTypeRef = this.options.sizeTypeRef;
+      // **The derived class's ref, not the base's.** A `super(…)` call passes
+      // the same object to the base constructor, and under wasm GC the value is a
+      // `(ref null $Derived)` — a subtype of `(ref null $Base)`, so it is
+      // accepted there, while the pointer-width `i32` this used to pass is not a
+      // ref at all. `thisSlotTypeRef` asks the class whose local this is.
+      let sizeTypeRef = this.thisSlotTypeRef(classInstance);
 
       let baseCtorInstance = this.ensureConstructor(baseClassInstance, expression);
       this.checkFieldInitialization(baseClassInstance, expression);
@@ -7286,6 +7292,20 @@ export class Compiler extends DiagnosticEmitter {
       }
       flow.set(FlowFlags.AccessesThis | FlowFlags.CallsSuper);
       this.currentType = Type.void;
+      if (isGcClass(classInstance)) {
+        // **A super call under wasm GC: run it, keep our own `this`.** The base
+        // constructor returns a `(ref null $Base)` and this local holds a
+        // `(ref null $Derived)` — assigning one to the other is ill-typed, and
+        // rightly so: the object never changed. The derived constructor already
+        // allocated a struct whose leading fields *are* the base's (the prefix
+        // requirement), so the base's initialisers write into the same object and
+        // its "allocate if null" arm finds it non-null and does nothing. The call
+        // is kept for its side effects, its result is dropped, and the expression
+        // answers our own reference — which is what the caller expects.
+        // A statement, so: run it and drop the result. `currentType` is
+        // `Type.void` above — the same shape the pointer-ABI `local.set` had.
+        return module.drop(superCall);
+      }
       return module.local_set(thisLocal.index, superCall, classInstance.type.isManaged);
     }
 
@@ -10224,6 +10244,27 @@ export class Compiler extends DiagnosticEmitter {
     // <value> instanceof <nonValue> - always false
     if (actualType.isValue) {
       return module.maybeDropCondition(expr, module.i32(0));
+    }
+
+    // **`instanceof` under wasm GC is one instruction.** The engine knows the
+    // type of a reference, so `ref.test` answers "is this a T or a subtype of T"
+    // without reading a header, walking an id table or consulting RTTI — which is
+    // the whole of what this function's pointer-ABI arms below do. Both
+    // directions fall out of one emission: a `Derived` passes a `Base` test
+    // because its heap type is a subtype, a `Base` fails a `Derived` test, and a
+    // sibling fails both. A null reference fails every test, which is
+    // `instanceof`'s answer too.
+    //
+    // Taken only when both sides are GC structs. A mixed comparison would be a
+    // ref against a pointer, which the type checker has already refused.
+    let actualClass = actualType.getClass();
+    let expectedClass = expectedType.nonNullableType.getClass();
+    if (actualClass != null && expectedClass != null &&
+        isGcClass(actualClass) && isGcClass(expectedClass)) {
+      return module.ref_test(
+        module.heapType(expectedType.nonNullableType.toRef()),
+        expr
+      );
     }
 
     // both LHS and RHS are references now
@@ -15385,6 +15426,24 @@ export class Compiler extends DiagnosticEmitter {
     return !type.isManaged;
   }
 
+  /**
+   * The zero value of a **field** type: `ref.null` for a wasm GC reference,
+   * `makeZero` for everything else.
+   *
+   * `makeZero` answers `i32(0)` for a class because a class *is* a `usize`
+   * reference — and for a `(ref null $C)` that constant is not a value of the
+   * type. Two emitters need this: the `struct.new` operand list and the deferred
+   * field initialiser, which writes the zero through the setter when a field has
+   * no initialiser.
+   */
+  makeFieldZero(fieldType: Type): ExpressionRef {
+    let fieldClass = fieldType.getClass();
+    if (fieldClass != null && isGcClass(fieldClass)) {
+      return this.module.ref_null(assert(fieldType.nullableType).toRef());
+    }
+    return this.makeZero(fieldType);
+  }
+
   makeZero(type: Type): ExpressionRef {
     let module = this.module;
     switch (type.kind) {
@@ -15703,6 +15762,21 @@ export class Compiler extends DiagnosticEmitter {
     }
   }
 
+  /**
+   * The wasm type of a class's `this` slot: its GC struct ref, or the pointer
+   * width for every class still on the linear-memory ABI.
+   *
+   * One function because `this` crosses five different emitters (the field
+   * initialisers, the conditional allocation, `compileCallDirect`'s implicit
+   * receiver, the getter/setter bodies and the constructor's own signature) and
+   * a consensus spelled out five times is a consensus that breaks once.
+   */
+  thisSlotTypeRef(classInstance: Class): TypeRef {
+    return isGcClass(classInstance)
+      ? classInstance.type.toRef()
+      : this.options.sizeTypeRef;
+  }
+
   /** Makes a conditional allocation where `this` might not have been initialized yet. */
   makeConditionalAllocation(
     classInstance: Class,
@@ -15716,14 +15790,22 @@ export class Compiler extends DiagnosticEmitter {
     // The `__new` path below keeps its `classTypeRef == sizeTypeRef` assertion
     // because for a pointer-shaped class those two really are the same type.
     if (isGcClass(classInstance)) {
-      // No `ifFalse` and no type argument: `Module#if` takes two branches, and
-      // its result type is the branches' — which for a GC class is the struct
-      // ref, exactly what `struct.new` produces.
+      // **The `if` must be a statement, and `local.set` is not one.** Binaryen
+      // types a `local.set` as the *value* it stores, so an `if` whose then-arm
+      // is a bare `local.set` has a value type — and a value-typed `if` may only
+      // be the last child of a block. Inside a multi-statement function body it
+      // is invalid IR: `validate()` reports it as `local.get must have proper
+      // type` (the condition's operand, first expression it walks), and an
+      // optimization pass asserts in `trapOnNull` because effect analysis finds
+      // a non-ref where a ref must be. Wrapping the arm in a `none`-typed block
+      // makes the `if` a statement, which is what it is for.
       return module.if(
         module.ref_is_null(module.local_get(thisIndex, classTypeRef)),
-        // `false` for `isManaged`: the shadow stack is off under `--wasm-gc`
-        // (the engine's tracer is the root set), so there is no slot to fill.
-        module.local_set(thisIndex, this.makeAllocation(classInstance), false)
+        module.block(null, [
+          // `false` for `isManaged`: the shadow stack is off under `--wasm-gc`
+          // (the engine's tracer is the root set), so there is no slot to fill.
+          module.local_set(thisIndex, this.makeAllocation(classInstance), false)
+        ], TypeRef.None)
       );
     }
     assert(classTypeRef == this.options.sizeTypeRef);
@@ -15751,20 +15833,12 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let classTypeRef = classInstance.type.toRef();
     let operands = new Array<ExpressionRef>();
-    let members = classInstance.members;
-    if (members) {
-      for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-        let member = _values[i];
-        if (member.kind != ElementKind.PropertyPrototype) continue;
-        let property = (<PropertyPrototype>member).instance;
-        if (!property || !property.isField) continue;
-        let fieldType = property.type;
-        if (fieldType.isReference) {
-          operands.push(module.ref_null(assert(fieldType.nullableType).toRef()));
-        } else {
-          operands.push(this.makeZero(fieldType));
-        }
-      }
+    // `struct.new` takes **every** field of the struct, base chain first — the
+    // same list and order the type was declared with (`gcFieldsOf`). The
+    // constructor's field initialisers then run over the same list.
+    let fields = gcFieldsOf(classInstance);
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      operands.push(this.makeFieldZero(unchecked(fields[i]).type));
     }
     return module.struct_new(module.heapType(classTypeRef), operands);
   }
@@ -15783,7 +15857,12 @@ export class Compiler extends DiagnosticEmitter {
     let flow = this.currentFlow;
     let isInline = flow.isInline;
     let thisLocalIndex = isInline ? flow.lookupLocal(CommonNames.this_)!.index : 0;
-    let sizeTypeRef = this.options.sizeTypeRef;
+    // `this`'s slot type: the pointer width for a pointer-shaped class, the
+    // struct's own ref type for a wasm GC class. A setter call passes `this` as
+    // its first operand, so this is both the `local.get`'s type and the call's
+    // first parameter type — and getting it wrong reports as two validator
+    // errors that name the local, not this line.
+    let sizeTypeRef = this.thisSlotTypeRef(classInstance);
     let nonParameterFields: Property[] | null = null;
 
     // TODO: for (let member of members.values()) {
@@ -15900,7 +15979,7 @@ export class Compiler extends DiagnosticEmitter {
           module.local_get(thisLocalIndex, sizeTypeRef),
           initializerNode // use initializer if present, otherwise initialize with zero
             ? this.compileExpression(initializerNode, fieldType, Constraints.ConvImplicit)
-            : this.makeZero(fieldType)
+            : this.makeFieldZero(fieldType)
         ], field.identifierNode, true);
         if (this.currentType != Type.void) { // in case
           expr = module.drop(expr);
@@ -16133,17 +16212,9 @@ function mangleImportName(
  * the right type — so it is worth computing rather than assuming.
  */
 function gcFieldIndex(classInstance: Class, property: Property): i32 {
-  let members = classInstance.members;
-  if (members) {
-    let index = 0;
-    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-      let member = _values[i];
-      if (member.kind != ElementKind.PropertyPrototype) continue;
-      let instance = (<PropertyPrototype>member).instance;
-      if (!instance || !instance.isField) continue;
-      if (instance == property) return index;
-      ++index;
-    }
+  let fields = gcFieldsOf(classInstance);
+  for (let i = 0, k = fields.length; i < k; ++i) {
+    if (unchecked(fields[i]) == property) return i;
   }
   assert(false); // a field that is not among its class's fields is a compiler bug
   return 0;

@@ -9,6 +9,7 @@ import {
 
 import {
   Class,
+  Property,
   PropertyPrototype,
   Program,
   DecoratorFlags,
@@ -199,23 +200,63 @@ export function setGcClassesEnabled(enabled: bool): void {
 }
 
 /**
- * Whether a class is emitted as a wasm GC struct in this slice.
+ * Whether a class is emitted as a wasm GC struct.
  *
- * **Two exclusions, both deliberate.** `~lib/` is the standard library, which
- * still keeps the pointer ABI: `String`, `Array`, `Map`, `Set` and the runtime's
- * own blocks are linear-memory objects and stay that way until the migration
- * reaches them (a `String` literal is in every program, so it is the last thing
- * that can move). A class with a real base class is excluded because inheritance
- * is the next slice, not this one — flat classes only.
+ * **One exclusion, and it is the whole chain.** `~lib/` keeps the pointer ABI:
+ * `String`, `Array`, `Map`, `Set` and the runtime's own blocks are linear-memory
+ * objects and stay that way until the migration reaches them (a `String` literal
+ * is in every program, so it is the last thing that can move). A class is a GC
+ * struct only if **every** class it derives from is one — a `(ref $Derived)` is
+ * a subtype of `(ref $Base)`, so a GC class cannot inherit from a pointer-shaped
+ * one, and `_TypeBuilderSetSubType` refuses it (`InvalidSupertype`).
+ *
+ * The recursion is on `base`, which is `null` for a class whose only ancestor is
+ * the implicit `Object` — that is the common case and it terminates here.
  */
 export function isGcClass(cls: Class): bool {
   if (!gcClassesEnabled) return false;
   if (cls.internalName.startsWith("~lib/")) return false;
-  // A real base class means inheritance, which is the next slice. A class that
-  // only *implicitly* extends `Object` has no fields to inherit and is flat for
-  // this purpose — `Point extends Object` is what every class does.
-  if (!cls.prototype.implicitlyExtendsObject) return false;
+  let base = cls.base;
+  // `implicitlyExtendsObject` distinguishes "extends nothing, so the resolver
+  // gave it `Object`" from an actual `extends Object` in the source. The former
+  // is a flat class — `Object` is not a field of the struct — while the latter
+  // is standard-library rooted and follows `Object`'s ABI. Without this the
+  // recursion reaches `~lib/object/Object`, answers false, and no user class is
+  // ever a GC struct.
+  if (base != null && !cls.prototype.implicitlyExtendsObject) {
+    return isGcClass(base);
+  }
   return true;
+}
+
+/**
+ * A class's fields in **struct order**: the base chain first, then its own.
+ *
+ * That order is a wasm requirement rather than a convention — a subtype's struct
+ * must begin with an exact prefix of its supertype's fields, in order, or
+ * `ref.test` cannot see the relationship and the type builder rejects the
+ * declaration. It is also the order field *indices* come from, so this is the one
+ * place a `struct.get`/`struct.set` index may be computed (`gcFieldIndex`).
+ *
+ * Filtered by `property.parent == classInstance` rather than trusting that
+ * `members` holds only own fields: whether it does is a resolver detail, and a
+ * duplicate would silently shift every index after it.
+ */
+export function gcFieldsOf(classInstance: Class, out: Property[] = []): Property[] {
+  let base = classInstance.base;
+  if (base != null && isGcClass(base)) gcFieldsOf(base, out);
+  let members = classInstance.members;
+  if (members) {
+    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+      let member = _values[i];
+      if (member.kind != ElementKind.PropertyPrototype) continue;
+      let property = (<PropertyPrototype>member).instance;
+      if (!property || !property.isField) continue;
+      if (property.parent != classInstance) continue;
+      out.push(property);
+    }
+  }
+  return out;
 }
 
 /** Represents a resolved type. */

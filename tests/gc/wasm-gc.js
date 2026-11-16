@@ -27,12 +27,11 @@
  * declared. Claiming it here would need that host, so this file says so instead
  * of asserting something weaker and calling it the same thing.
  *
- * **A measured caveat.** Binaryen 131's in-memory `validate()` rejects these
- * modules (`local.get must have proper type` in a constructor body) while its
- * own `wasm-opt --enable-gc` and Node both accept the written binary. The
- * compiler therefore needs `--noValidate` for `--wasmGc` until that is resolved;
- * the modules this file loads are the ones the compiler wrote, so the binary —
- * not the in-memory verdict — is what is under test.
+ * **Validation is on**, and that is itself an assertion: the compile below would
+ * fail at `wasm-validator` if the in-memory IR were inconsistent. It was, until
+ * the constructor's field initialisers passed `this` as a pointer-width `i32`
+ * into a setter that takes a struct ref; the same defect made every
+ * `-O1`/`-O2`/`-O3` build abort inside effect analysis.
  */
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
@@ -80,12 +79,12 @@ function check(name, condition, detail) {
 
 // 1 + 2 --------------------------------------------------------------------
 {
-  const built = compile("fixtures.ts", "gc.wasm", ["--wasmGc", "--noValidate"]);
+  const built = compile("fixtures.ts", "gc.wasm", ["--wasmGc"]);
   check("the fixture compiles with --wasmGc", built.ok, built.output);
   if (built.ok) {
     const wat = readFileSync(join(scratch, "gc.wat"), "utf8");
     check("a struct type is declared for the class",
-      /\(type \$[^ )]*Point[^ )]* \(struct/.test(wat),
+      /\$\S*Point \(sub \(struct/.test(wat),
       wat.split("\n").slice(0, 4).join("\n"));
     check("field read is struct.get, not a load at an offset",
       wat.includes("struct.get") && !/i32\.load offset=\d+\n/.test(wat));
@@ -107,7 +106,7 @@ function check(name, condition, detail) {
 
 // 3 ------------------------------------------------------------------------
 {
-  const built = compile("changetype.ts", "ct.wasm", ["--wasmGc", "--noValidate"]);
+  const built = compile("changetype.ts", "ct.wasm", ["--wasmGc"]);
   check("changetype<usize> of an instance is refused", !built.ok, built.output);
   check("the refusal says a GC reference has no address",
     /has no address/.test(built.output), built.output.split("\n")[0]);
@@ -129,6 +128,91 @@ function check(name, condition, detail) {
       instance.exports.roundTrip(3, 4) === 3400,
       `roundTrip(3,4) = ${instance.exports.roundTrip(3, 4)} (expected 3400)`);
   }
+}
+
+
+// 5 — inheritance, `sub`, and `instanceof` via ref.test -----------------------
+{
+  const built = compile("inherit.ts", "inh.wasm", ["--wasmGc"]);
+  check("the hierarchy compiles with validation on", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "inh.wat"), "utf8");
+    // The supertype must be declared open for `sub` to be legal, and the derived
+    // struct must repeat the base's field as its prefix.
+    // The internal name carries the source path, so match on the tail.
+    check("the base is an open `sub` struct",
+      /\bBase \(sub \(struct \(field \$a/.test(wat));
+    check("the derived struct repeats the base field as its prefix",
+      /\bDerived \(sub \S*Base \(struct \(field \$a.*\(field \$b \(mut i32\)/.test(wat),
+      wat.split("\n").slice(0, 4).join("\n"));
+    check("instanceof is ref.test, not an rtId read",
+      wat.includes("ref.test") && !wat.includes("__instanceof"));
+
+    const bytes = readFileSync(join(scratch, "inh.wasm"));
+    const { instance } = await WebAssembly.instantiate(bytes, imports);
+    const e = instance.exports;
+    // 1 (Base) + 2 (Derived) + 8 (Base) + 32 (Sibling); the sibling bits must be
+    // clear; then a = 7 * 100 and b+1 = 8 * 10000.
+    check("base-only instance satisfies Base",
+      e.isBase(e.makeBase(1)) === 1);
+    check("derived satisfies Base and Derived, not Sibling",
+      e.isBase(e.makeDerived(1, 2)) === 1 &&
+          e.isDerived(e.makeDerived(1, 2)) === 1 &&
+          e.isSibling(e.makeDerived(1, 2)) === 0,
+      `isBase=${e.isBase(e.makeDerived(1,2))} isDerived=${e.isDerived(e.makeDerived(1,2))} isSibling=${e.isSibling(e.makeDerived(1,2))}`);
+    check("a base instance fails a derived test",
+      e.isDerived(e.makeBase(1)) === 0);
+    check("a derived field read/write through a derived reference",
+      e.readB(e.makeDerived(5, 6)) === 6 && e.bumpB(e.makeDerived(5, 6)) === 7);
+    check("a base field read through a base-typed reference (prefix property)",
+      e.readA(e.makeDerived(9, 0)) === 9);
+    // 1 (Base) + 2 (Derived) + 8 (Base) + 32 (Sibling), then `a` 7 * 100 and
+    // `bumpB` = 8 + 1 = 9 * 10000. The sibling bits stay clear.
+    check("the combined probe",
+      e.probe(7) === 1 + 2 + 8 + 32 + 700 + 90000,
+      `probe(7) = ${e.probe(7)} (expected ${1 + 2 + 8 + 32 + 700 + 90000})`);
+  }
+}
+
+// 6 — a class-typed field, acyclic ------------------------------------------
+{
+  const built = compile("classfield.ts", "cf.wasm", ["--wasmGc"]);
+  check("a GC class with a class-typed field compiles", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "cf.wat"), "utf8");
+    check("the field is a nullable ref to the other class",
+      /\(field \$leaf \(mut \(ref null \S*Leaf\)\)\)/.test(wat), wat.split("\n").slice(0, 3).join("\n"));
+    const bytes = readFileSync(join(scratch, "cf.wasm"));
+    const { instance } = await WebAssembly.instantiate(bytes, imports);
+    const e = instance.exports;
+    check("the held value is reachable through the field",
+      e.leafValue(e.make(21)) === 42);
+    check("the field can be replaced",
+      e.retarget(e.make(1), 99) === 99);
+  }
+}
+
+// 7 — optimization levels agree ---------------------------------------------
+//
+// `-O1` and above run passes over the in-memory IR. They used to abort inside
+// effect analysis, because the field initialisers passed `this` as a pointer-width
+// `i32` into a struct-ref setter; the IR validation below is what keeps that from
+// coming back unnoticed.
+{
+  let answers = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("fixtures.ts", `opt${level}.wasm`, ["--wasmGc", level]);
+    check(`${level} compiles`,
+      built.ok && !/wasm-validator|Aborted/.test(built.output), built.output);
+    if (built.ok) {
+      const bytes = readFileSync(join(scratch, `opt${level}.wasm`));
+      const { instance } = await WebAssembly.instantiate(bytes, imports);
+      answers.push(instance.exports.roundTrip(3, 4));
+    }
+  }
+  check("every optimization level answers the same",
+    answers.length === 4 && answers.every((v) => v === 3400),
+    `answers: ${answers.join(", ")}`);
 }
 
 if (failures) {
