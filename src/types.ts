@@ -9,6 +9,7 @@ import {
 
 import {
   Class,
+  ClassPrototype,
   Property,
   PropertyPrototype,
   Program,
@@ -226,6 +227,126 @@ export function isGcClass(cls: Class): bool {
   if (base != null && !cls.prototype.implicitlyExtendsObject) {
     return isGcClass(base);
   }
+  return true;
+}
+
+/**
+ * The **brand id** of a wasm GC class: the value it stores in struct field 0.
+ *
+ * # Why a value and not a type
+ *
+ * wasm GC type identity is *structural*. `class SetX { id: i32; value: f32 }` and
+ * `class SetY { id: i32; value: f32 }` are one wasm type, so `ref.test` answers
+ * true for both and an `instanceof`-dispatched undo system silently applies the
+ * wrong command (`tension-framework/assembly/editor/command.ts:220,259` are
+ * exactly this shape). Adding a brand *field* does not help on its own either —
+ * two structs `(i32, i32, f32)` with different brand *values* are still one type.
+ * The brand has to be **compared by value at runtime**.
+ *
+ * # Derivation: FNV-1a over the qualified class name
+ *
+ * A pure function of `internalName` (the source path plus the declaration path),
+ * so it is reproducible: the same source compiled twice gives the same id, and
+ * nothing depends on resolution order, on which class was touched first, or on
+ * the order classes appear in a file. A counter over "all classes" would depend
+ * on all three, and there is no whole-program class list to iterate anyway.
+ *
+ * Masked to 31 bits and forced non-zero so the value is a plain positive `i32`
+ * and 0 can never be a class's brand (0 is `ref.null`-adjacent in spirit — an
+ * "unset" marker — and a brand of 0 would compare equal to a zeroed field).
+ *
+ * # Collisions
+ *
+ * 2^31 values against a handful of classes in one module. Checked rather than
+ * assumed: `ensureClassType` records each (brand → class) in the module and
+ * throws a diagnostic if two different classes land on one id, so a collision is
+ * a compile error naming both, not a silent aliasing bug.
+ */
+export function gcBrandOf(cls: Class): i32 {
+  return gcBrandOfName(cls.internalName);
+}
+
+/** {@link gcBrandOf} for a name, which is what a `ClassPrototype` has. */
+export function gcBrandOfName(name: string): i32 {
+  let hash: u32 = 0x811c9dc5; // FNV-1a offset basis
+  for (let i = 0, k = name.length; i < k; ++i) {
+    hash = (hash ^ <u32>name.charCodeAt(i)) * 0x01000193; // FNV prime
+  }
+  let brand = <i32>(hash & 0x7fffffff);
+  return brand != 0 ? brand : 1;
+}
+
+/** The struct index of the brand field. Always 0 — first in every struct, and
+ *  therefore inside the base prefix, so inheritance keeps it at a fixed offset. */
+export const GC_BRAND_INDEX: i32 = 0;
+
+/** The struct index of the first declared field (the brand occupies 0). */
+export const GC_FIRST_FIELD_INDEX: i32 = 1;
+
+/** The field name the brand is registered under, for readable `--textFile` output. */
+export const GC_BRAND_NAME: string = "<brand>";
+
+/** The GC class whose struct owns `property`, or `null` when it is not a GC field. */
+export function gcOwnerOf(property: Property): Class | null {
+  let parent = property.parent;
+  if (parent == null || parent.kind != ElementKind.Class) return null;
+  let classInstance = <Class>parent;
+  return isGcClass(classInstance) ? classInstance : null;
+}
+
+/**
+ * Every GC class in `cls`'s subtree — itself and all transitive descendants.
+ *
+ * This is what `instanceof C` means once identity is nominal: "the runtime
+ * object's brand is C's, or one of a class derived from C". The set is built at
+ * compile time, so the emitted test is a chain of `i32.eq` against a literal — as
+ * many compares as the subtree has classes, which for a UI command hierarchy is
+ * one or two.
+ *
+ * A `ref.test` cannot express this, and it is not merely slower: two siblings with
+ * identical layouts share one wasm type, so `ref.test (ref $SetX)` is true for a
+ * `SetY`. The brand chain is the correct primitive; a future slice could compress
+ * it to a range check (contiguous ids per subtree) if a subtree ever grows large.
+ */
+export function gcSubtreeBrands(program: Program, cls: Class): i32[] {
+  let root = cls.prototype;
+  let out = new Array<i32>();
+  // **Walk every declared class and keep the ones under `root`.** Upward, not
+  // downward: `ClassPrototype.basePrototype` is set while the declaration is
+  // parsed, whereas a downward `extenders` set is not maintained at all (measured:
+  // it is empty for every class). And `elementsByDeclaration` is complete once the
+  // program is initialized — before any code is generated — so the answer does not
+  // depend on which class was resolved first, which a walk over resolved
+  // `Class` instances would.
+  let elements = program.elementsByDeclaration;
+  for (let _values = Map_values(elements), i = 0, k = _values.length; i < k; ++i) {
+    let element = unchecked(_values[i]);
+    if (element.kind != ElementKind.ClassPrototype) continue;
+    let prototype = <ClassPrototype>element;
+    if (!isGcPrototype(prototype)) continue;
+    let cursor: ClassPrototype | null = prototype;
+    while (cursor != null) {
+      if (cursor == root) {
+        out.push(gcBrandOfName(prototype.internalName));
+        break;
+      }
+      cursor = cursor.basePrototype;
+    }
+  }
+  return out;
+}
+
+/**
+ * {@link isGcClass} for a prototype: no `~lib/`, and no base that is one.
+ *
+ * Needed because the subtree walk happens over prototypes, and the same
+ * "standard library keeps the pointer ABI" rule has to apply there.
+ */
+export function isGcPrototype(prototype: ClassPrototype): bool {
+  if (!gcClassesEnabled) return false;
+  if (prototype.internalName.startsWith("~lib/")) return false;
+  let base = prototype.basePrototype;
+  if (base != null) return isGcPrototype(base);
   return true;
 }
 

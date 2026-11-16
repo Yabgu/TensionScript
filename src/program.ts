@@ -5101,6 +5101,17 @@ export class Class extends TypedElement {
   typeArguments: Type[] | null;
   /** Base class, if any. */
   base: Class | null = null;
+  /**
+   * This class's **brand**: the id a wasm GC struct stores in its field 0.
+   *
+   * wasm GC type identity is structural, so two classes with the same fields and
+   * the same base are *one* type and `ref.test` cannot tell them apart. The brand
+   * is what makes identity nominal: it is a runtime value compared against a
+   * compile-time set, not a type test against a single type.
+   *
+   * See `gcBrandOf` in `types.ts` for the derivation and why it is reproducible.
+   */
+  gcBrand: i32 = 0;
   /** Directly implemented interfaces, if any. */
   interfaces: Set<Interface> | null = null;
   /** Contextual type arguments for fields and methods. */

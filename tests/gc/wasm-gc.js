@@ -140,14 +140,15 @@ function check(name, condition, detail) {
     // The supertype must be declared open for `sub` to be legal, and the derived
     // struct must repeat the base's field as its prefix.
     // The internal name carries the source path, so match on the tail.
-    check("the base is an open `sub` struct",
-      /\bBase \(sub \(struct \(field \$a/.test(wat));
-    check("the derived struct repeats the base field as its prefix",
-      /\bDerived \(sub \S*Base \(struct \(field \$a.*\(field \$b \(mut i32\)/.test(wat),
+    check("the base is an open `sub` struct with the brand first",
+      /\bBase \(sub \(struct \(field \$<brand> i32\) \(field \$a/.test(wat));
+    check("the derived struct repeats the base's fields as its prefix",
+      /\bDerived \(sub \S*Base \(struct \(field \$<brand> i32\) \(field \$a \(mut i32\)\) \(field \$b/.test(wat),
       wat.split("\n").slice(0, 4).join("\n"));
-    check("instanceof is ref.test, not an rtId read",
-      wat.includes("ref.test") && !wat.includes("__instanceof"));
-
+    // **Not `ref.test`.** Structural typing makes two identically-laid-out classes
+    // one wasm type, so the test is a brand compare; see section 8.
+    check("instanceof reads the brand, not an rtId",
+      wat.includes("$<brand>") && !wat.includes("__instanceof") && !wat.includes("ref.test"));
     const bytes = readFileSync(join(scratch, "inh.wasm"));
     const { instance } = await WebAssembly.instantiate(bytes, imports);
     const e = instance.exports;
@@ -213,6 +214,99 @@ function check(name, condition, detail) {
   check("every optimization level answers the same",
     answers.length === 4 && answers.every((v) => v === 3400),
     `answers: ${answers.join(", ")}`);
+}
+
+
+// 8 — nominal identity: the brand field ---------------------------------------
+//
+// The regression this exists for: `SetX` and `SetY` have identical layouts, so
+// they are one wasm type and `ref.test` cannot tell them apart — which is a live
+// defect in the editor's undo dispatch. `instanceof` therefore reads a **brand
+// value**, not a type.
+{
+  const built = compile("brand.ts", "brand.wasm", ["--wasmGc"]);
+  check("the brand fixture compiles with validation on", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "brand.wat"), "utf8");
+    check("field 0 is an immutable i32 brand",
+      /\(field \$<brand> i32\)/.test(wat) &&
+          !/\(field \$<brand> \(mut i32\)\)/.test(wat),
+      wat.split("\n").slice(0, 4).join("\n"));
+    // The premise, asserted rather than assumed: the two classes really do
+    // canonicalize into one type. If this ever stops being true the brand is
+    // still correct, but the reason it is needed has changed.
+    const structTypes = (wat.match(/\(type \S*Set[XY] \(sub/g) || []).length;
+    check("SetX and SetY share one wasm type (the reason a brand is needed)",
+      structTypes === 1, `found ${structTypes} SetX/SetY struct types`);
+
+    const bytes = readFileSync(join(scratch, "brand.wasm"));
+    const { instance } = await WebAssembly.instantiate(bytes, imports);
+    const e = instance.exports;
+    const p = e.probe();
+    check("isCommand/isX/isY answer by brand",
+      p === 11, `probe() = ${p} (expected 11 = Command|SetX|SetY)`);
+    check("a SetX is NOT a SetY (the editor regression)",
+      (p & 4) === 0 && (p & 16) === 0,
+      `isY(SetX) bit=${(p & 4) !== 0}, isX(SetY) bit=${(p & 16) !== 0}`);
+    check("a branded cast reads the right fields",
+      e.idOf(e.makeX()) === 1 && e.idOf(e.makeY()) === 3,
+      `idOf(x)=${e.idOf(e.makeX())} idOf(y)=${e.idOf(e.makeY())}`);
+  }
+}
+
+// 9 — recursion groups -------------------------------------------------------
+{
+  const built = compile("cycles.ts", "cycles.wasm", ["--wasmGc"]);
+  check("mutually recursive classes compile", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "cycles.wat"), "utf8");
+    const groups = wat.match(/\(rec\s*\n/g) || [];
+    check("three rec groups: a 3-cycle, a 2-cycle and a cycle with a base",
+      groups.length === 3, `found ${groups.length} rec groups`);
+    check("a three-class cycle sits in one group",
+      /\(rec\s*\n\s*\(type \S*A \(sub/.test(wat) &&
+          /\(rec[\s\S]{0,900}?B [\s\S]{0,900}?C /.test(wat));
+    // A plain `(type ...)` at the top level is a type with no group.
+    check("the acyclic pair is NOT in a group",
+      /\(type \S*Node2 \(sub \(struct/.test(wat) &&
+          /\(type \S*Root2 \(sub \(struct/.test(wat));
+    check("a cycle member still carries its supertype",
+      /\(type \S*Leaf \(sub \S*Node2 \(struct/.test(wat));
+
+    const bytes = readFileSync(join(scratch, "cycles.wasm"));
+    const { instance } = await WebAssembly.instantiate(bytes, imports);
+    const e = instance.exports;
+    check("two-class cycle links both ways", e.two() === 3);
+    check("three-class cycle walks the ring", e.three() === 11);
+    check("a cycle mixed with inheritance",
+      e.mixed() === 40 && e.mixedProbe() === 3,
+      `mixed()=${e.mixed()} mixedProbe()=${e.mixedProbe()}`);
+    check("the acyclic pair is unaffected", e.acyclic() === 21);
+  }
+}
+
+// 10 — the standing gate: every optimization level agrees, on the new fixtures --
+{
+  for (const fixture of ["brand", "cycles"]) {
+    const answers = [];
+    for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+      const built = compile(`${fixture}.ts`, `${fixture}${level}.wasm`, ["--wasmGc", level]);
+      check(`${fixture} ${level} compiles`,
+        built.ok && !/wasm-validator|Aborted/.test(built.output), built.output);
+      if (built.ok) {
+        const { instance } = await WebAssembly.instantiate(
+          readFileSync(join(scratch, `${fixture}${level}.wasm`)), imports);
+        const out = fixture === "brand"
+          ? instance.exports.probe()
+          : [instance.exports.two(), instance.exports.three(),
+             instance.exports.mixed(), instance.exports.acyclic()].join(",");
+        answers.push(out);
+      }
+    }
+    check(`${fixture}: -O0..-O3 all agree`,
+      answers.length === 4 && answers.every((v) => v === answers[0]),
+      `answers: ${answers.join(" | ")}`);
+  }
 }
 
 if (failures) {

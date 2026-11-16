@@ -22,7 +22,11 @@ import {
   TypeFlags,
   TypeKind,
   isGcClass,
-  gcFieldsOf
+  gcFieldsOf,
+  gcBrandOf,
+  GC_BRAND_INDEX,
+  GC_BRAND_NAME,
+  GC_FIRST_FIELD_INDEX
 } from "./types";
 import { Class } from "./program";
 import * as binaryen from "./glue/binaryen";
@@ -1392,6 +1396,19 @@ export class Module {
    */
   gcTypeCache: Map<Class, TypeRef> = new Map();
 
+  /** Brand id -> the class that owns it, so a hash collision is caught. */
+  gcBrandOwners: Map<i32, Class> = new Map();
+
+  /**
+   * Heap-type slots allocated but not yet filled, keyed by class.
+   *
+   * Non-empty only while a `rec` group is being built. A field whose type is
+   * another member of that group must reference the member's *temp* heap type —
+   * that is how a cycle closes — so the lookup has to be reachable from
+   * `gcFieldTypeRef`, which is where field types are built.
+   */
+  gcPendingSlots: Map<Class, HeapTypeRef> = new Map();
+
   static create(useShadowStack: bool, sizeType: TypeRef): Module {
     return new Module(binaryen._BinaryenModuleCreate(), useShadowStack, sizeType);
   }
@@ -1494,6 +1511,21 @@ export class Module {
    */
   ref_test(heapType: HeapTypeRef, ref: ExpressionRef): ExpressionRef {
     return binaryen._BinaryenRefTest(this.ref, ref, heapType);
+  }
+
+  /**
+   * `ref.cast $heapType` — narrow a reference's static type.
+   *
+   * **Not a runtime check to be relied on.** Under structural typing two classes
+   * with the same layout share one wasm type, so a cast between them succeeds for
+   * either; what guarantees the cast is correct is the brand test the caller emits
+   * *before* it. This only makes the value's static type match the target, which
+   * the pointer ABI got for free by having one type for everything.
+   */
+  ref_cast(ref: ExpressionRef, type: TypeRef): ExpressionRef {
+    // The C API takes a **heap type**, not a ref type — `ref.cast $T`, and the
+    // result is the non-null `(ref $T)`.
+    return binaryen._BinaryenRefCast(this.ref, ref, this.heapType(type));
   }
 
   /** `struct.get $heapType $index` — a field read by type and index, never by offset. */
@@ -4042,77 +4074,252 @@ export function ensureClassType(classInstance: Class): TypeRef {
   let cached = module.gcTypeCache.get(classInstance);
   if (cached) return cached;
 
-  // The supertype first: `sub` requires it at a lower index.
-  let base = classInstance.base;
-  let baseRef: HeapTypeRef = 0;
-  if (base != null && isGcClass(base)) {
-    baseRef = binaryen._BinaryenTypeGetHeapType(ensureClassType(base));
+  // **The recursion group**, and it is usually just this class. A class that
+  // references itself through another class (`A { b: B }`, `B { a: A }`) cannot be
+  // built one type at a time: each would need the other's heap type before either
+  // exists. All members of a strongly connected component are therefore built in
+  // one builder, as a wasm `rec` group, with every index allocated before any is
+  // filled.
+  let group = gcRecGroup(classInstance);
+
+  let builder = binaryen._TypeBuilderCreate(group.length);
+  // Pass 1 — a slot per member, so every member's heap type exists before any
+  // field or supertype refers to it.
+  let slots = new Array<HeapTypeRef>(group.length);
+  for (let i = 0, k = group.length; i < k; ++i) {
+    slots[i] = binaryen._TypeBuilderGetTempHeapType(builder, i);
+    // Recorded so a field referring to a class *inside* the group finds the slot
+    // instead of recursing into `ensureClassType` and starting a second builder.
+    module.gcPendingSlots.set(unchecked(group[i]), slots[i]);
+  }
+  if (group.length > 1) {
+    // A singleton needs no group; a cycle does. Wrapping only the cycle keeps
+    // every other type canonical, so the structural relationships that are
+    // already correct stay correct.
+    binaryen._TypeBuilderCreateRecGroup(builder, 0, group.length);
   }
 
-  let builder = binaryen._TypeBuilderCreate(1);
-  let fields = gcFieldsOf(classInstance);
+  // Pass 2 — fill each slot. A base that is *not* in the group is already built
+  // (an earlier builder, therefore an earlier index); a base that *is* in the
+  // group has a slot, and `gcRecGroup` has ordered it before its descendants
+  // because the builder refuses a supertype at a higher index.
+  for (let i = 0, k = group.length; i < k; ++i) {
+    fillGcStructType(builder, i, unchecked(group[i]), slots);
+  }
+
+  let out = binaryen._malloc(max(4 * group.length, 8));
+  let built = binaryen._TypeBuilderBuildAndDispose(builder, out, out, out + 4);
+  // The slots are dead either way: built types supersede them, and on failure the
+  // builder has disposed itself.
+  for (let i = 0, k = group.length; i < k; ++i) {
+    module.gcPendingSlots.delete(unchecked(group[i]));
+  }
+  if (!built) {
+    // **A failed build is a diagnostic, never a silent empty module.** The reason
+    // and the index name the member whose slot the builder could not fill.
+    let errorIndex = binaryen.__i32_load(out);
+    let errorReason = binaryen.__i32_load(out + 4);
+    binaryen._free(out);
+    let named = errorIndex >= 0 && errorIndex < group.length
+      ? unchecked(group[errorIndex]).internalName
+      : "(index out of range)";
+    throw new Error(
+      `wasm GC type builder refused ${named} (index ${errorIndex}): ` +
+      TypeBuilderErrorReason.toString(errorReason)
+    );
+  }
+
+  // Assign each slot's heap type to its class.
+  for (let i = 0, k = group.length; i < k; ++i) {
+    let member = unchecked(group[i]);
+    let heapType = <HeapTypeRef>binaryen.__i32_load(out + 4 * i);
+    binaryen._BinaryenModuleSetTypeName(
+      module.ref, heapType, module.allocStringCached(member.internalName)
+    );
+    let fields = gcFieldsOf(member);
+    let numFieldsInType = binaryen._BinaryenStructTypeGetNumFields(heapType);
+    assert(numFieldsInType == fields.length + 1);
+    binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_BRAND_INDEX,
+      module.allocStringCached(GC_BRAND_NAME));
+    for (let j = 0, n = fields.length; j < n; ++j) {
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_FIRST_FIELD_INDEX + j,
+        module.allocStringCached(unchecked(fields[j]).name));
+    }
+
+    // **Brands must be distinct.** A 32-bit hash over a handful of class names
+    // collides with negligible probability, which is not the same as never, and a
+    // collision would make two classes indistinguishable at exactly the dispatch
+    // this field exists to make correct. So it is checked, and a collision is a
+    // compile error naming both classes rather than a silent aliasing bug.
+    let brand = gcBrandOf(member);
+    let owner = module.gcBrandOwners.get(brand);
+    if (owner != null && owner != member) {
+      throw new Error(`wasm GC brand collision: ${owner.internalName} and ` +
+                      `${member.internalName} both hash to ${brand}`);
+    }
+    module.gcBrandOwners.set(brand, member);
+
+    // **Not stored on `member.type.ref`.** That field can be shared with another
+    // class (`Type` is interned by kind and flags), so writing it here would hand
+    // the next class this one's type — the defect this cache exists to avoid.
+    module.gcTypeCache.set(member, binaryen._BinaryenTypeFromHeapType(heapType, true));
+  }
+  binaryen._free(out);
+
+  return assert(module.gcTypeCache.get(classInstance));
+}
+
+/** Fills `builder` slot `index` with `member`'s struct type. */
+function fillGcStructType(
+  builder: binaryen.TypeBuilderRef,
+  index: i32,
+  member: Class,
+  slots: HeapTypeRef[]
+): void {
+  let fields = gcFieldsOf(member);
   let fieldTypes = new Array<TypeRef>();
   let packedTypes = new Array<u32>();
   let fieldMutables = new Array<bool>();
+
+  // **Field 0 is the brand, and it is immutable.** Index 0 puts it inside the
+  // base prefix, so every derived struct repeats it at the same offset and
+  // `struct.get type 0` reads the runtime object's own brand whichever struct it
+  // is. Immutable because nothing may ever change an object's class — and
+  // `struct.new` sets it, so an immutable field costs no store.
+  fieldTypes.push(TypeRef.I32);
+  packedTypes.push(PackedType.NotPacked);
+  fieldMutables.push(false);
+
   for (let i = 0, k = fields.length; i < k; ++i) {
     let fieldType = unchecked(fields[i]).type;
-    fieldTypes.push(gcFieldTypeRef(fieldType));
+    fieldTypes.push(gcFieldTypeRef(fieldType, slots));
     packedTypes.push(determinePackedType(fieldType));
-    // Every field is mutable. A `readonly` field would need the mutability
-    // threaded from the declaration, and a `struct.get` on an immutable field
-    // costs the same — so this waits for a reason to be different.
+    // Every declared field is mutable. A `readonly` field would need the
+    // mutability threaded from the declaration, and a `struct.get` on an
+    // immutable field costs the same — so this waits for a reason to be different.
     fieldMutables.push(true);
   }
   let cArrFT = allocPtrArray(fieldTypes);
   let cArrPT = allocU32Array(packedTypes);
   let cArrFM = allocBoolArray(fieldMutables);
-  binaryen._TypeBuilderSetStructType(builder, 0, cArrFT, cArrPT, cArrFM, fieldTypes.length);
+  binaryen._TypeBuilderSetStructType(builder, index, cArrFT, cArrPT, cArrFM, fieldTypes.length);
   // Open, because a subtype may exist: Binaryen refuses `SetSubType` on a final
   // type, and whether anything extends this class is a fact the type builder is
   // asked for before the extenders are known. `sub` costs nothing.
-  binaryen._TypeBuilderSetOpen(builder, 0);
-  if (baseRef) binaryen._TypeBuilderSetSubType(builder, 0, baseRef);
+  binaryen._TypeBuilderSetOpen(builder, index);
 
-  let out = binaryen._malloc(8);
-  if (!binaryen._TypeBuilderBuildAndDispose(builder, out, out, out + 4)) {
-    let errorIndex = binaryen.__i32_load(out);
-    let errorReason = binaryen.__i32_load(out + 4);
-    binaryen._free(out);
-    throw new Error(`type builder error at index ${errorIndex} for ${classInstance.internalName}: ` +
-                    TypeBuilderErrorReason.toString(errorReason));
+  let base = member.base;
+  if (base != null && isGcClass(base)) {
+    // In the group: its slot. Otherwise: built already, in an earlier builder.
+    let baseHeap = gcSlotOf(base, slots);
+    if (baseHeap) {
+      binaryen._TypeBuilderSetSubType(builder, index, baseHeap);
+    } else {
+      binaryen._TypeBuilderSetSubType(
+        builder, index,
+        binaryen._BinaryenTypeGetHeapType(ensureClassType(base))
+      );
+    }
   }
-  let heapType = <HeapTypeRef>binaryen.__i32_load(out);
-  binaryen._free(out);
   binaryen._free(cArrFM);
   binaryen._free(cArrPT);
   binaryen._free(cArrFT);
+}
 
-  binaryen._BinaryenModuleSetTypeName(
-    module.ref, heapType, module.allocStringCached(classInstance.internalName)
-  );
-  let numFieldsInType = binaryen._BinaryenStructTypeGetNumFields(heapType);
-  assert(numFieldsInType == fields.length);
-  for (let i = 0, k = fields.length; i < k; ++i) {
-    binaryen._BinaryenModuleSetFieldName(module.ref, heapType, i,
-      module.allocStringCached(unchecked(fields[i]).name));
+/** A class's slot in the builder being filled, or 0 when it is not a member. */
+function gcSlotOf(cls: Class, slots: HeapTypeRef[]): HeapTypeRef {
+  let module = cls.program.module;
+  let pending = module.gcPendingSlots.get(cls);
+  if (pending != null) return pending;
+  return 0;
+}
+
+/**
+ * The strongly connected component of `cls` in the class reference graph —
+ * `cls` plus every class that can reach it *and* be reached from it.
+ *
+ * Edges are a class's base and the classes its fields are typed with. A component
+ * of one is the ordinary case and is built as a plain type; anything larger is
+ * mutually recursive and must be built as a `rec` group.
+ *
+ * Ordered **base first**: within a component that also has inheritance, the
+ * supertype's slot must be at a lower index or the builder refuses the reference
+ * (`ForwardSupertypeReference`). A pure cycle has no inheritance edges and any
+ * order works; this one is deterministic anyway.
+ */
+function gcRecGroup(cls: Class): Class[] {
+  let reachable = gcReachableFrom(cls);
+  let group = new Array<Class>();
+  for (let i = 0, k = reachable.length; i < k; ++i) {
+    let candidate = unchecked(reachable[i]);
+    // In the same SCC iff it reaches `cls` back.
+    if (candidate == cls || gcReachableFrom(candidate).includes(cls)) group.push(candidate);
   }
+  // Base-first, by inheritance depth. A stable insertion sort keeps the order
+  // deterministic for equal depths, which two pure-cycle members always have.
+  for (let i = 1, k = group.length; i < k; ++i) {
+    let item = unchecked(group[i]);
+    let depth = gcDepth(item);
+    let j = i - 1;
+    while (j >= 0 && gcDepth(unchecked(group[j])) > depth) {
+      group[j + 1] = unchecked(group[j]);
+      --j;
+    }
+    group[j + 1] = item;
+  }
+  return group;
+}
 
-  // **Deliberately not stored on `classInstance.type.ref`.** That field can be
-  // shared with another class (`Type` is interned by kind and flags), so writing
-  // it here would hand the next class this one's type — the exact defect the
-  // cache below exists to avoid.
-  let nullable = binaryen._BinaryenTypeFromHeapType(heapType, true);
-  module.gcTypeCache.set(classInstance, nullable);
-  return nullable;
+/** A class's inheritance depth, counting only GC ancestors. */
+function gcDepth(cls: Class): i32 {
+  let depth = 0;
+  let cursor = cls.base;
+  while (cursor != null && isGcClass(cursor)) {
+    ++depth;
+    cursor = cursor.base;
+  }
+  return depth;
+}
+
+/** Every GC class reachable from `cls` over base and field-type edges, `cls` included. */
+function gcReachableFrom(cls: Class): Class[] {
+  let seen = new Array<Class>();
+  let queue = new Array<Class>();
+  seen.push(cls);
+  queue.push(cls);
+  while (queue.length) {
+    let current = assert(queue.shift());
+    let base = current.base;
+    if (base != null && isGcClass(base) && !seen.includes(base)) {
+      seen.push(base);
+      queue.push(base);
+    }
+    let fields = gcFieldsOf(current);
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let fieldClass = unchecked(fields[i]).type.classReference;
+      if (fieldClass != null && isGcClass(fieldClass) && !seen.includes(fieldClass)) {
+        seen.push(fieldClass);
+        queue.push(fieldClass);
+      }
+    }
+  }
+  return seen;
 }
 
 /** The `TypeRef` for one struct field. */
-function gcFieldTypeRef(fieldType: Type): TypeRef {
-  // A class-typed field is a nullable ref to that class's struct. Recursing here
-  // is what makes `A { b: B }` work; it is also where a cycle would never
-  // terminate, so cycles are refused by construction rather than by a check.
-  let fieldClass = fieldType.getClass();
+function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[]): TypeRef {
+  // A class-typed field is a nullable ref to that class's struct. **In the group
+  // being built** the slot is already allocated, so the reference is to a temp
+  // heap type and the cycle closes; outside it, the class is built first and its
+  // heap type is final.
+  // `classReference`, not `getClass()`: `getClass()` insists the type is an
+  // *internal reference*, which a `B | null` field is not once the union has been
+  // formed — and a nullable class field is exactly what a cycle needs, since
+  // neither object can be constructed with the other already present.
+  let fieldClass = fieldType.classReference;
   if (fieldClass != null && isGcClass(fieldClass)) {
+    let slot = gcSlotOf(fieldClass, slots);
+    if (slot) return binaryen._BinaryenTypeFromHeapType(slot, true);
     return ensureClassType(fieldClass);
   }
   let basic = tryEnsureBasicType(fieldType);

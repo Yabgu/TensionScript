@@ -1,7 +1,8 @@
 # `--wasm-gc` — user classes as wasm GC structs
 
-**Status:** an opt-in slice, off by default: a class hierarchy (one base, one or
-more derived), `instanceof` by `ref.test`, and a class-typed field (acyclic). It exists because the
+**Status:** an opt-in slice, off by default: a class hierarchy, **nominal
+identity via a brand field**, class-typed fields, and **mutually recursive class
+types** emitted as wasm `rec` groups. It exists because the
 async contract needs it: a suspended WasmFX continuation's frame is not between
 `__stack_pointer` and `__heap_base`, so a guest collector cannot see it, and a
 pinned root set is a workaround for a bug the engine's tracer removes. The
@@ -25,13 +26,18 @@ compiler does today.
 | `i32.load`/`i32.store` at `offsetof` | `struct.get` / `struct.set` |
 | `changetype<usize>(obj)` | refused, with a diagnostic |
 | write barrier (`__link`) | nothing — the tracer owns the edges |
-| `instanceof` reads an `rtId` | `ref.test (ref $C)` |
+| `instanceof` reads an `rtId` | `struct.get` the brand, compare by value |
 | a base's field reached via the vtable walk | the same prefix of the struct |
 
 Scope, deliberately: no arrays, no strings, no `Map`/`Set`, no
-`StaticArray`/`TypedArray`, no host-ABI change, and **no mutually recursive class
-types**. The standard library keeps the pointer ABI, so a program that mixes the
-two worlds must not mix them yet.
+`StaticArray`/`TypedArray`, no host-ABI change. The standard library keeps the
+pointer ABI, so a program that mixes the two worlds must not mix them yet.
+
+**Not attempted:** a class-typed field whose class has not been resolved yet is a
+leaf during type building, so a cycle through an unresolved class would build two
+separate types instead of a group. In practice a cycle's members are resolved
+together (resolving either resolves both, because the field type names the other),
+but the ordering is a dependency, not a guarantee.
 
 ## The hierarchy
 
@@ -53,19 +59,100 @@ fields being the base's — and a `super(…)` call then runs the base's initial
 against the same reference, result dropped. The base's own "allocate if null" arm
 finds it non-null and does nothing. There is no second object and no copying.
 
-**`instanceof` is `ref.test`, in both directions from one emission.** A `Derived`
-passes `Base` (subtype), a `Base` fails `Derived`, a sibling fails both, and a
-null reference fails everything — which is `instanceof`'s answer too.
+## `instanceof` is a brand compare, not `ref.test`
 
-**The sibling negative needs structurally distinct classes.** wasm GC type
-identity is *structural*: two classes with the same supertype and the same field
-types canonicalize to one type, so `ref.test` cannot tell them apart. Measured —
-`Derived { a: i32, b: i32 }` and `Sibling { a: i32, c: i32 }` came out as one
-type, and `x instanceof Sibling` was true for a `Derived`. The fixture gives the
-sibling an `f64` so the test tests what it claims. **This is a real limitation
-of the encoding** (there are no nominal types in wasm GC), and a program that
-relies on distinguishing two structurally identical classes will not get it. A
-later slice could add a per-class brand field; nothing does today.
+**The brand is field 0 of every struct**, immutable, holding a per-class id:
+
+```wat
+(type $…/SetX (sub $…/Command (struct (field $<brand> i32) (field $id (mut i32)) (field $value (mut f32)))))
+```
+
+`instanceof C` reads field 0 and compares it against a literal, once per class in
+C's subtree (itself and every transitive descendant):
+
+```wat
+;; instanceof Command, where Command has SetX and SetY under it
+local.get $0
+struct.get $Command $<brand>
+i32.const <brand of Command>  i32.eq
+local.get …                   i32.eq <brand of SetX>   i32.or
+local.get …                   i32.eq <brand of SetY>   i32.or
+```
+
+**Why not `ref.test`.** wasm GC type identity is *structural*, so two classes with
+the same fields and the same base are one wasm type. Measured: `class SetX { id:
+i32; value: f32 }` and `class SetY { id: i32; value: f32 }` emit **one** struct
+type, and `ref.test (ref $SetX)` answers true for a `SetY`. That is a live defect
+in the editor's undo dispatch
+(`tension-framework/assembly/editor/command.ts:220,259` — `next instanceof SetX`
+and `next instanceof SetY` on structurally identical classes), and it would have
+applied the wrong command silently.
+
+**Why not a brand field alone.** A brand *value* does not defeat canonicalization:
+`(i32, i32, f32)` and `(i32, i32, f32)` with different brand values are still one
+type. The brand has to be **compared at runtime**, which is what the chain above
+is. That is the whole distinction: type identity stays structural, class identity
+becomes nominal by comparing a value.
+
+**Dispatch rule**, one rule for every case:
+
+| situation | emission |
+| --- | --- |
+| class in the module tests another class in the module | brand chain over the target's subtree |
+| a null reference | false (the chain is guarded by `!ref.is_null`) |
+| a downcast `<C>x` | the same brand test, then `ref.cast` |
+| a class and a standard-library type (`String`, `Object`, …) | untouched — the pointer-ABI paths |
+
+There is no `ref.test` in the GC path at all. A brand compare is correct in every
+case; `ref.test` is correct only when no structurally identical sibling exists,
+and "no sibling exists" is not a property anyone can maintain.
+
+## Brand id derivation, and why it is reproducible
+
+FNV-1a over the class's **qualified internal name** (source path + declaration
+path), masked to 31 bits, forced non-zero.
+
+- **Reproducible:** a pure function of the name. The same source compiled twice
+  gives the same ids, and nothing depends on resolution order, on which class was
+  touched first, or on the order classes appear in a file. A counter over "all
+  classes" would depend on all three — and there is no whole-program class list to
+  iterate anyway (measured: `program.managedClasses` is filled at *resolution*
+  time, so it is incomplete during codegen).
+- **Unique:** 2^31 values against a handful of classes. Checked rather than
+  assumed — `ensureClassType` records each brand against its class in the module,
+  and a collision throws a compile error naming both classes.
+- **Never 0**, so a zeroed field cannot read as a class.
+
+## Cost
+
+The brand is **4 bytes**, replacing a 20-byte linear header per object
+(`mmInfo | gcInfo | gcInfo2 | rtId | rtSize`) — **−16 bytes per object** versus
+today, plus one fewer field read on an `instanceof` than the `rtId` walk it
+replaces.
+
+## Recursion groups
+
+A class that holds another which holds it back cannot be built one type at a time:
+each needs the other's heap type before either exists.
+
+- **Pass 1** allocates a slot per member with `_TypeBuilderGetTempHeapType`, so
+  every member's heap type exists before anything refers to it.
+- **Pass 2** fills each slot — `_TypeBuilderSetStructType` and, for a base inside
+  the group, `_TypeBuilderSetSubType` against the base's *slot*.
+- The strongly connected component goes in one `_TypeBuilderCreateRecGroup`;
+  **only the component**, so acyclic classes keep their canonical, ungrouped
+  types. Measured on a fixture with a 3-cycle, a 2-cycle, a cycle with
+  inheritance and an acyclic pair: **three** `rec` groups, and the acyclic pair a
+  plain `(type …)`.
+- A failed build is a **diagnostic naming the class and the builder's reason**,
+  never a silent empty module.
+
+```wat
+(rec
+ (type $…/A (sub (struct (field $<brand> i32) (field $b (mut (ref null $…/B))) …)))
+ (type $…/B (sub (struct (field $<brand> i32) (field $a (mut (ref null $…/A))) …)))
+)
+```
 
 ## What it does not do (and why the test says so)
 

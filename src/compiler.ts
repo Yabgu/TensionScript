@@ -204,6 +204,10 @@ import {
   MemoryModelCode,
   Signature,
   gcFieldsOf,
+  gcSubtreeBrands,
+  gcBrandOf,
+  GC_BRAND_INDEX,
+  GC_FIRST_FIELD_INDEX,
   isGcClass
 } from "./types";
 
@@ -9738,9 +9742,18 @@ export class Compiler extends DiagnosticEmitter {
       case NodeKind.Null: {
         let options = this.options;
         if (contextualType.isReference) {
-          let classReference = contextualType.getClass();
+          // `classReference`, not `getClass()`: a `B | null` contextual type is
+          // nullable and `getClass()` requires an internal reference.
+          let classReference = contextualType.classReference;
           if (classReference) {
             this.currentType = classReference.type.asNullable();
+            // **A wasm GC reference's null is `ref.null`, not `i32(0)`.** The
+            // pointer ABI's zero and a reference's null are the same idea and not
+            // the same value, and a struct-ref setter given `i32.const 0` is a
+            // type error rather than a null field.
+            if (isGcClass(classReference)) {
+              return module.ref_null(this.currentType.toRef());
+            }
             return options.isWasm64 ? module.i64(0) : module.i32(0);
           }
           let signatureReference = contextualType.getSignature();
@@ -10261,10 +10274,27 @@ export class Compiler extends DiagnosticEmitter {
     let expectedClass = expectedType.nonNullableType.getClass();
     if (actualClass != null && expectedClass != null &&
         isGcClass(actualClass) && isGcClass(expectedClass)) {
-      return module.ref_test(
-        module.heapType(expectedType.nonNullableType.toRef()),
-        expr
-      );
+      // **`instanceof` under wasm GC reads the brand, and never `ref.test`.**
+      //
+      // Why not `ref.test`: wasm GC type identity is structural, so two classes
+      // with identical layouts are one type and `ref.test (ref $SetX)` is true
+      // for a `SetY` — a live defect in the editor's undo dispatch
+      // (`tension-framework/assembly/editor/command.ts:220,259`). Why not a single
+      // brand compare either: `instanceof Base` must be true for an instance of
+      // any class derived from Base, and those have their own brands. So the test
+      // is "is the runtime object's brand one of the brands in `expected`'s
+      // subtree" — `makeGcBrandTest`, one compare per class in the subtree. It is
+      // correct in every case, which is the requirement.
+      let test = this.makeGcBrandTest(expectedClass, expr, actualType.nonNullableType.toRef());
+      // A null reference matches no class, which is `instanceof`'s answer too.
+      if (actualType.isNullableReference) {
+        return module.binary(
+          BinaryOp.AndI32,
+          module.unary(UnaryOp.EqzI32, module.ref_is_null(expr)),
+          test
+        );
+      }
+      return test;
     }
 
     // both LHS and RHS are references now
@@ -11516,7 +11546,11 @@ export class Compiler extends DiagnosticEmitter {
       // generate body
       let signature = instance.signature;
       let module = this.module;
-      let sizeTypeRef = this.options.sizeTypeRef;
+      // The type of the `this` local this constructor builds: the struct's own
+      // ref for a wasm GC class, the pointer width otherwise. Used for the
+      // conditional allocation, the base call's first operand, the field
+      // initialisers and the returned `local.get` — all four must agree.
+      let sizeTypeRef = this.thisSlotTypeRef(classInstance);
       let stmts = new Array<ExpressionRef>();
 
       // {
@@ -11529,7 +11563,24 @@ export class Compiler extends DiagnosticEmitter {
       stmts.push(
         this.makeConditionalAllocation(classInstance, 0)
       );
-      if (baseClass) {
+      // **Chain to the base only when the base is a GC struct too.**
+      //
+      // A class with no declared base still has `Object` as its `base`, and
+      // `Object` is standard library — a pointer-ABI class whose constructor
+      // returns an `i32`. Assigning that into a `(ref null $C)` local is an
+      // ill-typed store, which is what a zero-field base class produced before
+      // this guard. There is nothing to chain to in that case: the derived struct
+      // has no `Object` prefix, so the base constructor has no bytes to write.
+      // Under `--wasm-gc` only: a GC class with an implicit `Object` base has no
+      // `Object` prefix in its struct, so there is nothing to chain to. With the
+      // flag off this stays exactly what it was — the `Object#constructor` call is
+      // a no-op, but emitting it is the existing output and a flag that changes
+      // nothing is a flag that changes *nothing*.
+      let baseToChain = (baseClass != null &&
+        !(isGcClass(classInstance) && classInstance.prototype.implicitlyExtendsObject))
+        ? baseClass
+        : null;
+      if (baseToChain) {
         let parameterTypes = signature.parameterTypes;
         let numParameters = parameterTypes.length;
         let operands = new Array<ExpressionRef>(1 + numParameters);
@@ -11537,12 +11588,20 @@ export class Compiler extends DiagnosticEmitter {
         for (let i = 1; i <= numParameters; ++i) {
           operands[i] = module.local_get(i, parameterTypes[i - 1].toRef());
         }
-        stmts.push(
-          module.local_set(0,
-            this.makeCallDirect(assert(baseClass.constructorInstance), operands, reportNode, false),
-            baseClass.type.isManaged
-          )
+        let baseCall = this.makeCallDirect(
+          assert(baseToChain.constructorInstance), operands, reportNode, false
         );
+        if (isGcClass(baseToChain)) {
+          // Same object, same struct prefix: run the base's initialisers against
+          // our reference and drop its result. It answers `(ref $Base)`, which is
+          // not assignable to our `(ref $Derived)` local just because it is the
+          // same object.
+          stmts.push(module.drop(baseCall));
+        } else {
+          stmts.push(
+            module.local_set(0, baseCall, baseToChain.type.isManaged)
+          );
+        }
       }
       this.makeFieldInitializationInConstructor(classInstance, stmts);
       stmts.push(
@@ -15437,7 +15496,9 @@ export class Compiler extends DiagnosticEmitter {
    * no initialiser.
    */
   makeFieldZero(fieldType: Type): ExpressionRef {
-    let fieldClass = fieldType.getClass();
+    // `classReference`, not `getClass()` — the latter requires an *internal
+    // reference*, and a `B | null` field is a nullable class type.
+    let fieldClass = fieldType.classReference;
     if (fieldClass != null && isGcClass(fieldClass)) {
       return this.module.ref_null(assert(fieldType.nullableType).toRef());
     }
@@ -15833,9 +15894,12 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let classTypeRef = classInstance.type.toRef();
     let operands = new Array<ExpressionRef>();
-    // `struct.new` takes **every** field of the struct, base chain first — the
-    // same list and order the type was declared with (`gcFieldsOf`). The
-    // constructor's field initialisers then run over the same list.
+    // **Field 0 is the brand**, a constant of this class — immutable, so this is
+    // the only place it is ever written. Then every declared field of the struct,
+    // base chain first: the same list and order the type was declared with
+    // (`gcFieldsOf`). The constructor's field initialisers then run over the same
+    // list.
+    operands.push(module.i32(gcBrandOf(classInstance)));
     let fields = gcFieldsOf(classInstance);
     for (let i = 0, k = fields.length; i < k; ++i) {
       operands.push(this.makeFieldZero(unchecked(fields[i]).type));
@@ -16044,6 +16108,55 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Makes a runtime non-null check, e.g. on `<Type>possiblyNull` or `possiblyNull!`. */
+  /**
+   * The brand test for `instanceof C` / `<C>x`: is the runtime object's brand one
+   * of the brands in `classInstance`'s subtree?
+   *
+   * **Not `ref.test`.** wasm GC type identity is structural, so two classes with
+   * identical layouts are one type and `ref.test (ref $SetX)` is true for a
+   * `SetY`. A brand compare cannot be fooled by canonicalization. **Not a single
+   * brand compare either.** `instanceof Base` must hold for an instance of any
+   * class derived from `Base`, and those have their own brands — so the test is a
+   * chain over the subtree, one `i32.eq` per class.
+   *
+   * `ref` must be a GC class reference whose static type is a supertype of (or
+   * equal to) every candidate: the brand is field 0 of every struct, so
+   * `struct.get` on the operand's static type reads the right field whichever
+   * concrete struct it holds.
+   */
+  makeGcBrandTest(classInstance: Class, ref: ExpressionRef, refTypeRef: TypeRef = 0): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let operandTypeRef = refTypeRef || classInstance.type.toRef();
+    let subtree = gcSubtreeBrands(this.program, classInstance);
+    assert(subtree.length > 0); // a class is always in its own subtree
+
+    // **The brand is read once into a temp local, and each compare reads it.**
+    // A single `struct.get` ExpressionRef cannot be an operand of two compares:
+    // Binaryen's IR is a tree, not a DAG, so reusing a node puts the same
+    // expression in two places — which validates at `-O0` and makes `LocalCSE`
+    // assert at `-O2` (`LocalCSE.cpp:192`). Measured, on a three-class subtree.
+    let brandLocal = flow.getTempLocal(Type.i32).index;
+    let test: ExpressionRef = module.i32(0);
+    for (let i = 0, k = subtree.length; i < k; ++i) {
+      let isIt = module.binary(
+        BinaryOp.EqI32,
+        module.local_get(brandLocal, TypeRef.I32),
+        module.i32(unchecked(subtree[i]))
+      );
+      test = i == 0 ? isIt : module.binary(BinaryOp.OrI32, test, isIt);
+    }
+    return module.block(null, [
+      module.local_set(brandLocal, module.struct_get(
+        module.heapType(operandTypeRef),
+        GC_BRAND_INDEX,
+        ref,
+        TypeRef.I32
+      ), false),
+      test
+    ], TypeRef.I32);
+  }
+
   makeRuntimeNonNullCheck(
     /** Expression being checked. */
     expr: ExpressionRef,
@@ -16075,6 +16188,15 @@ export class Compiler extends DiagnosticEmitter {
         ),
         staticAbortCallExpr,
         nonNullExpr
+      );
+    } else if (type.classReference != null && isGcClass(type.classReference)) {
+      // **A reference is not a condition.** The pointer ABI tests `local.tee`'s
+      // i32 for zero; a `(ref null $C)` has no truthiness in wasm, so the guard is
+      // `ref.is_null` and this is the arm that a nullable class field needs.
+      expr = module.if(
+        module.ref_is_null(module.local_tee(tempIndex, expr, false)),
+        staticAbortCallExpr,
+        module.local_get(tempIndex, type.toRef())
       );
     } else {
       expr = module.if(
@@ -16108,6 +16230,36 @@ export class Compiler extends DiagnosticEmitter {
       this.ensureStaticString("invalid downcast"),
       reportNode
     ); // TODO: throw
+
+    // A GC class downcast is the same test `instanceof` is: the brand chain over
+    // the target's subtree. `prepareInstanceOf` would emit `__instanceof(id)`,
+    // which reads a linear header a GC struct does not have.
+    let gcTarget = toType.nonNullableType.classReference;
+    let gcSource = type.nonNullableType.classReference;
+    if (gcTarget != null && gcSource != null && isGcClass(gcTarget) && isGcClass(gcSource)) {
+      let temp = flow.getTempLocal(type);
+      let tempIndex = temp.index;
+      // The brand test decides *whether* the cast is legal; `ref.cast` makes the
+      // value's static type the target's, which the pointer ABI did not need
+      // because every reference was one `i32`.
+      //
+      // **`local.set`, then a branch — not `local.tee` inside the condition.**
+      // A ref-typed `local.tee` nested in a condition makes Binaryen's `LocalCSE`
+      // assert at `-O2` (`LocalCSE.cpp:192`, `!(requests && original)`), and a
+      // statement-shaped store is also the more honest description: the value is
+      // stored once and read by both arms.
+      return module.block(null, [
+        module.local_set(tempIndex, expr, false),
+        module.if(
+          this.makeGcBrandTest(gcTarget, module.local_get(tempIndex, type.toRef())),
+          module.ref_cast(
+            module.local_get(tempIndex, type.toRef()),
+            toType.nonNullableType.toRef()
+          ),
+          staticAbortCallExpr
+        )
+      ], toType.nonNullableType.toRef());
+    }
 
     if (!toType.isNullableReference || flow.isNonnull(expr, type)) {
       // Simplify if the value cannot be `null`. If toType is non-nullable, a
@@ -16214,7 +16366,8 @@ function mangleImportName(
 function gcFieldIndex(classInstance: Class, property: Property): i32 {
   let fields = gcFieldsOf(classInstance);
   for (let i = 0, k = fields.length; i < k; ++i) {
-    if (unchecked(fields[i]) == property) return i;
+    // `+ 1` because field 0 is the brand (`GC_BRAND_INDEX`), in every struct.
+    if (unchecked(fields[i]) == property) return GC_FIRST_FIELD_INDEX + i;
   }
   assert(false); // a field that is not among its class's fields is a compiler bug
   return 0;
