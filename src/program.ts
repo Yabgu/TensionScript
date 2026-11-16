@@ -1131,6 +1131,14 @@ export class Program extends DiagnosticEmitter {
       i64_new(options.isWasm64 ? Target.Wasm64 : Target.Wasm32));
     this.registerConstantInteger(CommonNames.ASC_RUNTIME, Type.i32,
       i64_new(options.runtime));
+    // **`ASC_WASM_GC`** — the compile-time switch `std/assembly` branches on to
+    // choose the wasm GC arm. A registered constant integer, like `ASC_RUNTIME`:
+    // the condition folds, so the arm that does not apply is never compiled and
+    // its linear-memory code is never diagnosed under the flag. Measured — a
+    // `changetype<usize>` of a GC class inside a never-taken arm compiles cleanly,
+    // while the same code in a live arm is AS100.
+    this.registerConstantInteger(CommonNames.ASC_WASM_GC, Type.i32,
+      i64_new(options.wasmGc ? 1 : 0));
     this.registerConstantInteger(CommonNames.ASC_NO_ASSERT, Type.bool,
       i64_new(options.noAssert ? 1 : 0, 0));
     this.registerConstantInteger(CommonNames.ASC_MEMORY_BASE, Type.i32,

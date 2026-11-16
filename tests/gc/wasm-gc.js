@@ -383,6 +383,20 @@ function check(name, condition, detail) {
   }
 }
 
+
+// 14 — the flag folds, and the dead arm is never compiled ---------------------
+//
+// The mechanism a `std/assembly` branch on `ASC_WASM_GC` would rest on. Proven by
+// putting code in the dead arm that cannot compile under the active flag, in both
+// directions: a GC class's address under `--wasmGc`, and the linear pointer idiom
+// without it. If the dead arm were compiled, this fixture would not build.
+{
+  const gcOn = compile("fold.ts", "fold-gc.wasm", ["--wasmGc"]);
+  check("flag on: the linear arm's changetype is never diagnosed", gcOn.ok, gcOn.output);
+  const gcOff = compile("fold.ts", "fold-off.wasm", []);
+  check("flag off: the GC arm is never diagnosed", gcOff.ok, gcOff.output);
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);

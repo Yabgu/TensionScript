@@ -573,3 +573,103 @@ a reference into the array with `array.set`, `a[i].v` reads it back with
 `array.get` + `struct.get`, and the engine's tracer follows it — proven at the IR
 level in GC5 (102 MB of garbage reclaimed at 65,536-byte capacity, moving
 collector, null-control trap) and now through the real compiler path.
+
+## Dynamic `Array<T>`: the design is right, the specified mechanism is not
+
+GC8's design — `Array<T>` as `{ <brand>, data: (ref null $arr), length_ }` with
+`array.len data` as capacity and 2× growth via `array.copy` — is sound and
+unchanged. What follows is why the *specified mechanism* (branch in
+`std/assembly/array.ts` on `ASC_WASM_GC`) cannot be built under this round's own
+mandatory constraint, with the measurements.
+
+### The gate passes: a constant-conditional `if` does not compile the dead arm
+
+This was the question the round was built around, and the answer is yes.
+`ASC_WASM_GC` is registered beside `ASC_RUNTIME` (`src/program.ts`, declared in
+`std/assembly/index.d.ts`), so the condition folds and the arm that does not apply
+is never compiled. Proven in **both** directions by putting code in the dead arm
+that cannot compile under the active flag:
+
+```
+$ node bin/tensionscript.js tests/gc/fold.ts --wasmGc   → 0 errors
+$ node bin/tensionscript.js tests/gc/fold.ts            → 0 errors
+```
+
+The dead arm under `--wasmGc` is `<i32>changetype<usize>(gcClassInstance)`, which is
+**AS100** in live code ("a wasm GC reference has no address"); the dead arm with the
+flag off is `changetype<Item>(0)`, the linear idiom. Both build. So the *skip*
+works, and it is now a regression fixture (`tests/gc/fold.ts`, 2 checks).
+
+One correction worth recording: the first attempt at this test wrote
+`declare const ASC_RUNTIME: i32;` in the fixture, which **shadowed the registered
+constant**, so the condition did not fold and the dead arm *was* diagnosed. A
+`declare` in user code defeats the mechanism; using the global as provided does not.
+
+### The gate is not sufficient: the fold still emits the condition
+
+```
+$ cat orig.ts    export function add(a: i32, b: i32): i32 { return a + b; }
+$ cat cost.ts    export function add(a: i32, b: i32): i32 {
+                   if (ASC_WASM_GC) { return b + a; }
+                   return a + b; }
+$ node bin/tensionscript.js orig.ts --outFile orig.wasm      # flag off
+$ node bin/tensionscript.js cost.ts --outFile cost.wasm      # flag off
+```
+
+```
+;; orig.wasm  — 4 instructions
+  local.get $0 / local.get $1 / i32.add / return
+
+;; cost.wasm  — 6 instructions
+  i32.const 0
+  drop                       ← the folded condition, emitted then discarded
+  local.get $0 / local.get $1 / i32.add / return
+```
+
+**Every method wrapped in a flag branch gains `i32.const 0 / drop` in flag-off
+output.** `array.ts` is loaded by every program, so this is a flag-off byte change
+in the most load-bearing file in the tree — and the round states that flag-off byte
+identity is "mandatory, not optional".
+
+### Why the obvious repair is also blocked
+
+Teaching the compiler to elide a constant condition entirely (compile only the taken
+arm, emit nothing for the condition) would make the wrapper free. But it is a global
+change: it would equally elide the condition in array.ts's **existing**
+`ASC_RUNTIME != Runtime.Incremental` branches and in `arraybuffer.ts`,
+`staticarray.ts`, `rt/` and every other constant-conditional `if` in the standard
+library. Those branches emit the condition today (their `i32.const 0 / i32.eq / if`
+shapes are in every program's output), so the repair changes flag-off bytes for
+existing programs — the same violation, from the other side. It is a compiler
+behaviour change across the whole standard library, not a local edit, and it is not
+a decision this round should take alone.
+
+### The shape that is byte-safe, for the next round
+
+Intercepts, not std branches — the mechanism GC7 already built for `StaticArray`:
+
+- The compiler synthesises `Array<T>`'s GC struct (`{ <brand>, data: (ref null
+  $arr), length_ }`) from a fixed description, so **no field is added to the TS
+  declaration** and flag-off layout is untouched.
+- `new Array<T>(n)`, `a.length`, `a[i]`, `a[i] = v`, `push`, `pop` are intercepted
+  in `compiler.ts`, each guard-first on `options.wasmGc` (GC7's lesson: an unguarded
+  `resolveExpression` moved 14 fixtures). Flag-off output changes by nothing.
+- `push` growth is emitted by the compiler: capacity = `array.len data`, 2× with a
+  `MIN_SIZE` floor, `array.copy` the old into the new, swap `data`.
+- `indexOf`/`slice`/`join` and the rest cannot be intercepted cheaply, because they
+  are standard-library method bodies rather than syntax. The byte-safe way to reach
+  them is **one intrinsic that exposes the backing array**, e.g.
+  `__gcArrayData<T>(arr): StaticArray<T>`, after which the GC arm of those methods
+  is ordinary TS over a `StaticArray` — which is already a wasm GC array with
+  working `[]`, `.length` and construction.
+
+That is a coherent next round: one intrinsic, the synthesised layout, six
+intercepts, then the method bodies in TS. It needs the intrinsic because
+`StaticArray` is the only container whose operations are already expressible.
+
+### Status
+
+`ASC_WASM_GC` is registered and folds; `tests/gc/fold.ts` guards it. **`Array<T>`
+is not migrated this round**: the specified mechanism conflicts with the mandatory
+byte-identity constraint, and the two repairs (std branches, or a global
+constant-if elision) each violate it in a different place.
