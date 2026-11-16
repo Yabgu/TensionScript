@@ -350,3 +350,188 @@ The framework adds **80** address-of and **31** `dataStart` sites of its own,
 concentrated in `res.ts`, `runtime/arena.ts`, `2d/buffers.ts` and `anim/reader.ts`
 — all record-layout code over `@unmanaged` memory, which this migration does not
 touch, but they are listed so the count is complete.
+
+## Why `StaticArray` is still not wired: the diagnosis, corrected
+
+The GC5 report blamed a resolver collision — "`getClassOrWrapper` answers
+`~lib/string/String` for any `Usize`-typed receiver, because `String extends
+StaticArray<u16>`". **Measurement does not support that.** This section is the
+correction, with the commands.
+
+### Q1 — what does `new StaticArray<i32>(2)` resolve to?
+
+Instrumented `compileNewExpression` and `resolveIndexSignature`, with the array
+type mapping applied:
+
+```
+[Q1] instance=~lib/staticarray/StaticArray<i32> type=~lib/staticarray/StaticArray<i32>
+     kind=10 classRef=~lib/staticarray/StaticArray<i32> gcElement=i32
+[Q]  idxsig targetType=~lib/staticarray/StaticArray<i32> kind=10
+     classRef=~lib/staticarray/StaticArray<i32>
+     getClassOrWrapper=~lib/staticarray/StaticArray<i32>
+```
+
+Both are **correct**. `getClassOrWrapper` returns the `StaticArray<i32>` class, not
+`String`. The claimed collision does not occur.
+
+### Q2 — is the instantiated `Class` distinguishable from `String`'s?
+
+**Yes, and it is already the thing being returned.** `Type#classReference` for a
+`StaticArray<i32>` type is the resolved `StaticArray<i32>` `Class` (internal name
+`~lib/staticarray/StaticArray<i32>`), which is a different object from
+`~lib/string/String`. Nothing is being discarded.
+
+Why `String` never interferes: the mapping is keyed on **prototype identity**
+(`cls.prototype != program.staticArrayPrototype`), so `String` and the nine
+`TypedArray`s — which all `extends StaticArray<…>` — are excluded. An earlier
+version used `extendsPrototype`, and *that* is what produced the
+`~lib/string/String` errors: it mapped `String` itself onto an array and then read
+`String#length` through array ops. The bug was in the test, not the resolver.
+
+### Q3 — where does the compiler keep the instantiated class?
+
+Three places, all reachable without a lookup:
+
+| where | what | site |
+| --- | --- | --- |
+| `Type#classReference` | the instantiated `Class` for a reference type | `src/types.ts:433` |
+| `Class#type` | back-reference to that `Type` | `src/program.ts` |
+| `resolver.resolveClassInclTypeArguments` | the constructor of the identity | `src/resolver.ts:3695` |
+
+So a caller never *needs* `getClassOrWrapper` for a receiver whose `Type` it
+already has — `type.classReference` is exactly the field `getClassOrWrapper`
+returns for an internal reference (`getClass()` is `isInternalReference ?
+classReference : null`). The `Wrapper` half of the name only matters for value
+types.
+
+### Q4 — how many `getClassOrWrapper` sites are there?
+
+```
+$ grep -rc getClassOrWrapper src/*.ts
+src/builtins.ts:4   src/compiler.ts:22   src/resolver.ts:21   src/types.ts:2
+total: 49
+```
+
+49 (the brief said 51 — same site list, I measure 49 occurrences). **None of them
+needs to change**, because none of them is wrong: the ones reachable from element
+access all answer correctly, as Q1 shows.
+
+### Q5 — does the collision bite today, without the flag?
+
+**No.**
+
+```
+$ node bin/tensionscript.js q5.ts --outFile off.wasm          # flag off
+exit=0                                            # resolves to StaticArray<i32>
+$ grep 'call $~lib/staticarray' off.wat
+  call $~lib/staticarray/StaticArray<i32>#get:length
+  call $~lib/staticarray/StaticArray<i32>#__uset
+```
+
+`new StaticArray<i32>(2)`, `a[0] = 7`, `a[0]` and `a.length` all resolve and emit
+correctly today. The behaviour changes **only** when the mapping is applied, so the
+defect is mapping-induced and not a latent resolver bug.
+
+## What actually breaks, and it is not what the brief describes
+
+With the mapping applied, three distinct things fail, and only one of them is about
+types:
+
+1. **The `StaticArray` class body cannot be compiled.** Its members are
+   linear-memory code — the constructor calls `__new` (an `i32`), `#get:length`
+   reads `rtSize` out of a header, `__get`/`__uset` do `load`/`store` at an
+   offset — so with the instance typed as an array they fail validation:
+
+   ```
+   [wasm-validator error in function ~lib/staticarray/StaticArray<i32>#constructor]
+     local.set's value type must be correct, on (local.set $3 (call $~lib/rt/itcms/__new …))
+   [wasm-validator error in function ~lib/staticarray/StaticArray<i32>#get:length]
+     (ref null $array.0) != i32: binary child types must be equal
+   ```
+
+   **This one is tractable**: intercept every call site (`new`, `.length`, `a[i]`,
+   `a[i] = v`) so the members are never referenced and therefore never compiled.
+   That was built and it works for `a[i]` reads.
+
+2. **`a.length` does not type as `i32` under the mapping.** `return a.length` in a
+   function returning `i32` reports `Type '~lib/staticarray/StaticArray<i32>' is not
+   assignable to type 'i32'` — the property access yields the *receiver's* type.
+   Instrumented `lookupPropertyAccessExpression` and `resolveExpression`'s
+   `ElementKind.Property` arm: **neither fires**, so `a.length` is not resolving as
+   a property at all on this path. Not localised within the round's budget.
+
+3. **An assignment's value types as the receiver.** `a[0] = 5` as an expression
+   reports `Type '~lib/staticarray/StaticArray<i32>' is not assignable to type
+   'u32'`.
+
+So the honest statement: **the blocker is a property-access/assignment typing
+defect that appears only when a class type maps to an array type, and it is not
+localised.** Generic-instantiation identity — the cause the brief names — is
+present and working.
+
+## The two routes, as the brief defined them
+
+Provided as requested, with the correction above attached to each.
+
+**Route 1 — give generic instantiations reliable identity in the resolver**
+(the `Class`-keyed fix, applied wherever `Type` is used as a class key).
+
+- Sites: the 49 `getClassOrWrapper` calls, plus every place a `Type` is compared or
+  used as a `Map` key to reach a class — `types.ts:433` (`classReference`),
+  `program.ts`'s `instances` maps, and `ensureClassType`'s cache in `module.ts`.
+- **Measured status: not necessary for this defect.** The identity is already
+  correct (Q1). This route addresses GC3's shared-`Type` hazard, which was real but
+  is already fixed for the type cache; extending it here would be a refactor
+  looking for a bug.
+- Risk: high. `Type` interning is load-bearing throughout the binder; a
+  `Class`-keyed rewrite touches the hottest path in the compiler, and the GC3
+  `-O2` abort is the precedent for how quietly a change there can go wrong.
+
+**Route 2 — stop making `String` an `extends StaticArray<u16>`.**
+
+- How much depends on it: **very little code, all of it type identity.**
+  `string.ts` declares **31 members** and re-declares every one it shares with
+  `StaticArray` — `length`, `at`, `toString`, `indexOf`, `includes` all exist on
+  both, and `charCodeAt`/`slice`/`concat` exist only on `String` — over its own
+  `#dataStart`-based storage. So the inheritance buys no shared implementation; it
+  buys `String`'s membership in the `StaticArray` family, which is what makes
+  `s[i]` an index-signature read and what the nine `TypedArray`s also rely on. The
+  real weight behind the route is the **238 `dataStart` sites** — `typedarray.ts`
+  (126), `array.ts` (46), `dataview.ts` (28), `util/string.ts` (21), `string.ts`
+  (3) — which is the linear-memory surface the whole family sits on.
+- **Measured status: would not fix the defect either.** Q1 shows `String` was
+  never involved once the test was prototype-exact; the failing case is a
+  `StaticArray<i32>` receiver.
+- Risk: medium — it is a type-hierarchy change in a self-hosted compiler, but it
+  does not touch `Type` interning.
+
+**The architect should know that neither route, as described, is on the path to a
+fix.** The next step that is actually indicated is to localise why `a.length` does
+not resolve as a property when the receiver's `toRef` is an array type — a
+~1-hour investigation with the instrumentation above, before any of these routes
+is chosen.
+
+## The build assertion (a rule this arc earned)
+
+Twice now a measurement has been read from a **stale `dist/`**: GC5 spent three
+runs on a compiler that had failed to build, and GC6 began the same way because a
+source file had been reverted by `git checkout` while `dist/` still held the old
+output. `npm run build` prints its status and exits non-zero on failure, and
+neither was read.
+
+Every measurement in this document was produced through this, so the rule is
+mechanical rather than remembered:
+
+```sh
+/tmp/build-assert.sh          # exit 1 unless src, cli, web AND dts all report SUCCESS
+```
+
+It refuses to measure when the build failed, names the failing stage, and prints
+`BUILD OK` otherwise. Verified both ways: a deliberate syntax error in
+`src/compiler.ts` made it exit 1 with `✘ [ERROR] Unexpected "="`, and the restored
+file made it exit 0.
+
+**It should live in the tree** — `scripts/build-assert.sh`, called by
+`test:gc` before it compiles anything — and it does not yet, because this round
+does not own `scripts/`. Until then it is `/tmp/build-assert.sh`, and every command
+in this document assumes it ran first.
