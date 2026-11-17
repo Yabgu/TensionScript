@@ -218,6 +218,9 @@ import {
   GC_ARRAY_LENGTH_INDEX,
   GC_ARRAY_MIN_SIZE,
   isGcReferenceType,
+  isGcArrayBufferClass,
+  GC_ARRAYBUFFER_DATA_INDEX,
+  GC_ARRAYBUFFER_LENGTH_INDEX,
   gcSubtreeBrands,
   gcBrandOf,
   GC_BRAND_INDEX,
@@ -3223,6 +3226,38 @@ export class Compiler extends DiagnosticEmitter {
       unchecked(typeArgs[0]), this.currentFlow,
       this.currentFlow.sourceFunction.parent, null, ReportMode.Swallow);
     if (type == null) return 0;
+
+    // **`__new(size, idof<ArrayBuffer>())` builds a handle over a linear payload.** This
+    // is the site every buffer in the system goes through — ten of them in
+    // `std/assembly`, all the same shape — so recognising it here is what lets `std/`
+    // stay untouched.
+    //
+    // The payload still comes from the arena (`~gc/linNew`), because it has to be a real
+    // address: `dataStart` is what every ABI site passes to a host verb. What changes is
+    // that the *object* is now a struct holding that address and the length, instead of
+    // the address being the object.
+    if (isGcArrayBufferClass(assert(type.classReference))) {
+      this.emitGcLinearAllocator();
+      let module = this.module;
+      let bufTypeRef = type.toRef();
+      let bufHeap = module.heapType(bufTypeRef);
+      let bufSize = this.compileExpression(args[0], this.options.usizeType, Constraints.ConvImplicit);
+      // One temp for the size: it is read twice (payload length, then field) and the
+      // expression must not be compiled twice — it may have side effects.
+      let bufSizeLocal = this.currentFlow.getTempLocal(this.options.usizeType).index;
+      this.currentType = type;
+      return module.block(null, [
+        module.local_set(bufSizeLocal, bufSize, false),
+        module.struct_new(bufHeap, [
+          module.i32(gcBrandOf(assert(type.classReference))),
+          module.call(this.gcLinearNewName, [
+            module.local_get(bufSizeLocal, this.options.usizeType.toRef()),
+            module.i32(0) // id: the header's rtId, unused by the struct
+          ], TypeRef.I32),
+          module.local_get(bufSizeLocal, this.options.usizeType.toRef())
+        ])
+      ], bufTypeRef);
+    }
 
     let element: Type;
     if (gcStringOf(type)) element = Type.u16;
@@ -9457,6 +9492,28 @@ export class Compiler extends DiagnosticEmitter {
     reportNode: Node,
     immediatelyDropped: bool = false
   ): ExpressionRef {
+    // **`ArrayBuffer#byteLength` is a field, not a header read.** Its declared body is
+    // `changetype<OBJECT>(changetype<usize>(this) - TOTAL_OVERHEAD).rtSize`, which cannot
+    // be emitted for a handle: the struct is not adjacent to the payload, and
+    // `changetype<usize>(this)` on a GC reference is refused. The synthesised layout
+    // carries the length, so this is one `struct.get` — and it is *cheaper* than the
+    // header read it replaces, which is the rare case of a migration that shortens a
+    // method body.
+    if (this.gcActive && instance.prototype.internalName == "~lib/arraybuffer/ArrayBuffer#get:byteLength") {
+      let bufModule = this.module;
+      let bufThisType = instance.signature.thisType;
+      if (bufThisType != null && bufThisType.classReference != null &&
+          isGcArrayBufferClass(assert(bufThisType.classReference))) {
+        this.currentType = Type.i32;
+        return bufModule.struct_get(
+          bufModule.heapType(bufThisType.toRef()),
+          GC_ARRAYBUFFER_LENGTH_INDEX,
+          assert(operands)[0],
+          TypeRef.I32
+        );
+      }
+    }
+
     // **The stdlib string calls that cannot be emitted under wasm GC.**
     //
     // `compareImpl` is the single chokepoint behind `==`, `equals`, `startsWith`,

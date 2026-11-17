@@ -57,8 +57,12 @@ import {
   MemoryModelCode,
   isGcClass,
   gcStringOf,
+  gcUniform,
   gcArrayElementOf,
-  gcDynamicArrayElementOf
+  gcDynamicArrayElementOf,
+  isGcArrayBufferClass,
+  GC_ARRAYBUFFER_DATA_INDEX,
+  GC_ARRAYBUFFER_LENGTH_INDEX
 } from "./types";
 
 import {
@@ -3813,6 +3817,34 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
       operands[0], compiler.currentFlow
     );
     let sourceClass = sourceType ? sourceType.classReference : null;
+    // **`changetype<usize>(anArrayBuffer)` is `dataStart`, not the handle's address.**
+    // The handle is a GC struct with no address; the *payload* has one, and it is the
+    // address every ABI site depends on — 55 mentions in `tension-framework` alone, and
+    // ten sites inside `std/assembly` that pass a buffer straight to `memory.copy`.
+    // Answering the payload's address is what keeps those untouched, and it is the whole
+    // reason the handle is allowed to be a GC object at all.
+    let sourceNonNull = sourceType != null ? sourceType.nonNullableType : null;
+    // **`isGcClass` as well as the identity test.** `isGcArrayBufferClass` answers
+    // "is this the buffer class", not "is it a reference right now": on a program whose
+    // latch is off a buffer is still an `i32` pointer, and asking for a heap type of it
+    // aborts inside Binaryen (`Assertion failed: isRef()`) — measured on a program that
+    // holds a function value, which makes the whole program non-uniform.
+    if (sourceNonNull != null && sourceNonNull.classReference != null &&
+        isGcArrayBufferClass(assert(sourceNonNull.classReference)) &&
+        isGcClass(assert(sourceNonNull.classReference))) {
+      let bufRef = compiler.compileExpression(
+        operands[0], sourceNonNull, Constraints.ConvImplicit
+      );
+      // `usize`, so on a 64-bit target this widens; the field is an `i32` because the
+      // address is wasm32-sized, the same as `dataStart` on a view.
+      compiler.currentType = compiler.options.usizeType;
+      return module.struct_get(
+        module.heapType(sourceNonNull.toRef()),
+        GC_ARRAYBUFFER_DATA_INDEX,
+        bufRef,
+        TypeRef.I32
+      );
+    }
     // **And a GC *array* has no address either.** `isGcClass` answers false for
     // everything under `~lib/` by design (GC10), so a `String` or a
     // `StaticArray<T>` — both `(array (mut T))` under the flag — fell through this

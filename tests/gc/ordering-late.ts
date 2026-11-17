@@ -12,13 +12,12 @@
 const seed: Array<i32> = new Array<i32>(0);
 seed.push(40);
 
-class HoldsArrayBufferLate {
-  data: ArrayBuffer;
-  constructor() { this.data = new ArrayBuffer(2); }
-  first(): i32 { return this.data.byteLength; }
+class HoldsFunctionLate {
+  cb: (x: i32) => i32 = (x: i32): i32 => 2;
+  first(): i32 { return this.cb(0); }
 }
 
 export function probe(): i32 {
-  let late = new HoldsArrayBufferLate();
+  let late = new HoldsFunctionLate();
   return seed[0] + late.first(); // 40 + 2
 }

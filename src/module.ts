@@ -34,6 +34,9 @@ import {
   gcMixedAbiReferrer,
   gcStringOf,
   isLinearBufferField,
+  isGcArrayBufferClass,
+  GC_ARRAYBUFFER_DATA_INDEX,
+  GC_ARRAYBUFFER_LENGTH_INDEX,
   gcFieldRefusal
 } from "./types";
 import { Class, Property } from "./program";
@@ -4415,7 +4418,15 @@ export function ensureClassType(classInstance: Class): TypeRef {
     let numFieldsInType = binaryen._BinaryenStructTypeGetNumFields(heapType);
     binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_BRAND_INDEX,
       module.allocStringCached(GC_BRAND_NAME));
-    if (gcDynamicArrayElementOf(member.type) != null) {
+    if (isGcArrayBufferClass(member)) {
+      // The synthesised `ArrayBuffer` layout: `dataStart`, `byteLength`. Not its declared
+      // fields — it declares none.
+      assert(numFieldsInType == 3);
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_ARRAYBUFFER_DATA_INDEX,
+        module.allocStringCached("dataStart"));
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_ARRAYBUFFER_LENGTH_INDEX,
+        module.allocStringCached("byteLength"));
+    } else if (gcDynamicArrayElementOf(member.type) != null) {
       // The synthesised `Array` layout: `data`, then `length_`. Not its declared
       // fields — those are the linear-memory ones and are not in the struct.
       assert(numFieldsInType == 3);
@@ -4475,6 +4486,24 @@ function fillGcStructType(
   fieldTypes.push(TypeRef.I32);
   packedTypes.push(PackedType.NotPacked);
   fieldMutables.push(false);
+
+  // **`ArrayBuffer` gets a synthesised layout too, and for a sharper reason: it
+  // declares no fields at all.** `byteLength` is an accessor over `rtSize` in the object
+  // header and the object pointer *is* the payload start, so there is nothing to
+  // synthesise *from* — the layout is `{ <brand>, dataStart, byteLength }`, the handle,
+  // and the payload stays where `__new` put it.
+  if (isGcArrayBufferClass(member)) {
+    fieldTypes.push(TypeRef.I32); // dataStart: the payload's address
+    packedTypes.push(PackedType.NotPacked);
+    // Mutable: `ArrayBuffer#slice` and the typed-array constructors build the handle and
+    // then write its fields, and `struct.new` at that point has no payload address yet.
+    fieldMutables.push(true);
+    fieldTypes.push(TypeRef.I32); // byteLength
+    packedTypes.push(PackedType.NotPacked);
+    fieldMutables.push(true);
+    finishStructType(builder, index, member, slots, fieldTypes, packedTypes, fieldMutables);
+    return;
+  }
 
   // **A dynamic `Array<T>` gets a synthesised layout**, not its declared fields.
   // `{ <brand>, data: (ref null (array (mut T))), length_ i32 }` — capacity is

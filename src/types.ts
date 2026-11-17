@@ -523,6 +523,12 @@ export function gcFieldRefusal(fieldType: Type, field: Property | null): GcField
  */
 export function isLinearBufferField(field: Property): bool {
   if (field.name != "buffer") return false;
+  // **Not when the buffer is itself a GC handle.** Then the field is an ordinary traced
+  // reference to a struct, and `gcFieldTypeRef`'s class branch emits it. Kept as a
+  // separate question from `isGcBufferViewClass` so the two answers cannot drift.
+  if (field.type.classReference != null && isGcArrayBufferClass(field.type.classReference)) {
+    return false;
+  }
   // `parent` is an `Element`; a field's declaring class is what the shape test needs.
   let parent = field.parent;
   if (parent == null || parent.kind != ElementKind.Class) return false;
@@ -1309,6 +1315,10 @@ export function isGcPrototype(prototype: ClassPrototype): bool {
     // what tells them apart, and it exists for all of them (none is generic).
     let program = prototype.program;
     if (prototype == program.arrayPrototype) return true;
+    // `ArrayBuffer` has no brand subtree of its own (`ArrayBuffer.isView` does not list
+    // it), but its prototype reaches this walk whenever a brand test is built over a
+    // supertype, so the answer has to be the same one `isGcClass` gives.
+    if (prototype == program.arrayBufferInstance.prototype) return true;
     let cls = prototype.getResolvedInstance("");
     if (cls == null) return false;
     if (isGcBufferViewClass(cls)) return true;
@@ -1359,6 +1369,33 @@ export function ownFieldsOf(cls: Class, out: Property[] = []): Property[] {
  * and `changetype<usize>(aGCReference)` — the only thing that could smuggle a
  * reference into a blob — is already refused by name (AS100).
  */
+/**
+ * Whether `cls` is the standard library's **`ArrayBuffer`**: a linear payload with a GC
+ * handle.
+ *
+ * The test is identity, and it has to be: an `ArrayBuffer` declares **zero** instance
+ * fields, so the shape test that finds a buffer view (three named fields) cannot tell it
+ * apart from `Object`. Identity is free here — `program.arrayBufferInstance` is resolved
+ * during `Program#initialize` (`assert(this.arrayBufferInstance.id == 1)`), so this asks
+ * about a class the program already has.
+ *
+ * The layout it gets is synthesised by the compiler, `{ <brand>, dataStart, byteLength }`,
+ * because the declared class has no fields to synthesise from: `byteLength` is an
+ * accessor that reads `rtSize` out of the object header, and the object pointer *is* the
+ * payload start. So the GC object can only be the handle.
+ */
+export function isGcArrayBufferClass(cls: Class): bool {
+  if (!gcClassesEnabled) return false;
+  let program = cls.program;
+  let instance = program.arrayBufferInstance;
+  return instance != null && cls == instance;
+}
+
+/** Struct field index of an `ArrayBuffer`'s payload address in the GC layout. */
+export const GC_ARRAYBUFFER_DATA_INDEX: i32 = 1;
+/** Struct field index of an `ArrayBuffer`'s length in the GC layout. */
+export const GC_ARRAYBUFFER_LENGTH_INDEX: i32 = 2;
+
 export function isGcBufferViewClass(cls: Class): bool {
   if (!gcClassesEnabled) return false;
   // Standard library only, and that is not a limitation: a class of this shape
@@ -1375,10 +1412,17 @@ export function isGcBufferViewClass(cls: Class): bool {
     let type = property.type;
     switch (property.name) {
       case "buffer": {
-        // A **pointer-shaped** class, which is what makes the field's bits a linear
-        // address rather than a reference the engine has to trace.
+        // An `ArrayBuffer`, either way. **"Pointer-shaped" was once the test**, because a
+        // buffer was a linear block; now it is a GC handle, so the field holds a
+        // reference and the engine traces it — which is better, because a view then
+        // keeps its own buffer alive instead of relying on the arena. Both spellings are
+        // accepted so the view stays a view whichever way the latch went.
         let bufferClass = type.classReference;
-        if (bufferClass == null || isGcClass(bufferClass)) return false;
+        if (bufferClass == null) return false;
+        if (bufferClass.prototype != bufferClass.program.arrayBufferInstance.prototype &&
+            isGcClass(bufferClass)) {
+          return false; // some other GC class called `buffer`: not this shape
+        }
         sawBuffer = true;
         break;
       }
@@ -1410,9 +1454,25 @@ function isStdlibGcClass(cls: Class): bool {
   let program = cls.program;
   // `Array<T>`: a synthesised layout, `{ brand, data, length_ }`.
   if (cls.prototype == program.arrayPrototype) return true;
+  // `ArrayBuffer`: a synthesised layout, `{ brand, dataStart, byteLength }` — the handle,
+  // with the payload left in the never-free arena.
+  if (isGcArrayBufferClass(cls)) return true;
   // A buffer view: a synthesised layout, `{ brand, buffer, dataStart, byteLength }`
   // where `buffer` is the linear address of the payload rather than a reference.
   if (isGcBufferViewClass(cls)) return true;
+  // **`Map` and `Set`, whose only managed field is an `ArrayBuffer`.** Identity, not
+  // shape: their layouts are `{ buckets: ArrayBuffer, bucketsMask, entries: ArrayBuffer,
+  // entriesCapacity, entriesOffset, entriesCount }` and the same with `value` only, and a
+  // shape test for those names would be a name list with extra steps. The guard is real
+  // rather than decorative — if a future field stops being storable the class quietly
+  // stops being a GC struct instead of emitting a bad type.
+  //
+  // **Their `MapEntry<K,V>` storage is a separate question**, and deliberately not
+  // answered here: entries are `@unmanaged` and hold `K`/`V` in linear memory, which no
+  // analysis of a class's *declared* fields can see. See the note in `docs/wasm-gc.md`.
+  if (cls.prototype == program.mapPrototype || cls.prototype == program.setPrototype) {
+    return gcStructFieldsSupported(cls, true);
+  }
   // **A subclass of a buffer view** — the eleven typed arrays. It declares nothing
   // of its own (`Uint8Array` is an empty body over the base), so its struct is the
   // base's prefix exactly, and it is one exactly when the base is.

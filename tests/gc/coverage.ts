@@ -10,25 +10,22 @@
 // reports INFO TS6413 `N of N`; this file is not uniform and reports WARNING TS6414
 // naming the cause.
 //
-// The cause here is an **`ArrayBuffer` field**, and it is the honest one: a dynamic
-// array and a typed array both have a synthesised GC layout now, but `ArrayBuffer`
-// itself is still a linear-memory block with an `rtSize` header, so a class holding
-// one directly cannot be a struct. (`Uint8Array` no longer blocks anything — GC16
-// gave the buffer views a synthesised layout — which is why this fixture uses the
-// raw buffer.)
-class HoldsArrayBuffer {
-  data: ArrayBuffer;
-  constructor(n: i32) { this.data = new ArrayBuffer(n); }
-  size(): i32 { return this.data.byteLength; }
+// The cause here is a **function value**, and it is the last fixable one: `String`,
+// `StaticArray`, `Array`, the typed arrays, `ArrayBuffer`, `Map` and `Set` all have a
+// synthesised GC layout now, so what is left is a field whose representation has not
+// been decided. (A function value could be `ref func` or a table index; that is a design
+// question, not a missing emitter case.)
+class HoldsFunction {
+  cb: (x: i32) => i32 = (x: i32): i32 => x;
+  n: i32 = 0;
 }
 
-class HoldsArrayBufferToo {
-  other: ArrayBuffer;
-  constructor() { this.other = new ArrayBuffer(4); }
+class HoldsFunctionToo {
+  other: (x: i32) => i32 = (x: i32): i32 => x + 1;
 }
 
 export function reportBlocked(): i32 {
-  let a = new HoldsArrayBuffer(3);
-  let b = new HoldsArrayBufferToo();
-  return a.size() + b.other.byteLength; // 3 + 4
+  let a = new HoldsFunction();
+  let b = new HoldsFunctionToo();
+  return a.cb(3) + b.other(4); // 3 + 5
 }

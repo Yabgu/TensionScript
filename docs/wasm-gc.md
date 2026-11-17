@@ -1833,3 +1833,125 @@ its 5 pre-existing mismatches, flag-off output is **byte-identical on all 22 fix
 and on `hello-sprites`**, and nothing under `std/` changed. `ArrayBuffer` did **not**
 drop out of the guest's list — see the section above — so the round's Task 2 is a
 recorded stop, not a delivery, and the guest's coverage is still zero.
+
+## `ArrayBuffer` as a GC handle: the payload stays, the object moves
+
+`ArrayBuffer` declares **zero instance fields**. `byteLength` is an accessor reading
+`rtSize` out of the object header at `-TOTAL_OVERHEAD`, and the object pointer *is* the
+payload start. So "the GC object is the handle, never the payload" is not a design choice
+here — it is the only shape available.
+
+### The layout, and where it is decided
+
+```
+ArrayBuffer  { <brand> i32, dataStart (mut i32), byteLength (mut i32) }
+```
+
+- **Field 0 is the brand**, as in every struct.
+- **`dataStart`** is the payload address, and it is what every ABI site already uses.
+- **`byteLength` is a field read now.** The declared getter is
+  `changetype<OBJECT>(changetype<usize>(this) - TOTAL_OVERHEAD).rtSize`, which cannot be
+  emitted for a handle (the struct is not adjacent to the payload, and
+  `changetype<usize>(this)` on a GC reference is refused), so the compiler intercepts
+  `~lib/arraybuffer/ArrayBuffer#get:byteLength` and emits `struct.get`. This is the rare
+  migration that makes a method **shorter**.
+
+Decided by `isGcArrayBufferClass` in `types.ts`, and it is an **identity** test —
+`cls == program.arrayBufferInstance` — not a shape test. A shape test cannot work here:
+the class declares no fields, so it is indistinguishable from `Object` by shape. The
+identity is free: `Program#initialize` already asserts `arrayBufferInstance.id == 1`.
+`isStdlibGcClass` stays the single answer, now covering `Array`, `ArrayBuffer`, the
+buffer views and their subclasses, and `Map`/`Set`.
+
+**The layout is synthesised in the compiler and `std/` is untouched** — `git diff --stat`
+lists nothing under `std/`, which is what keeps the flag-off module identical by
+construction rather than by care.
+
+### Task 2: which of the three mechanisms
+
+**`idof<ArrayBuffer>()` allocations are intercepted generally**, in
+`compileGcTypedNew` — the same function that already turns `__new(size, idof<T>())` into
+`array.new` for a GC array type. There is no separate recogniser for
+`changetype<ArrayBuffer>(__new(...))`, because every one of the ten sites in
+`std/assembly` goes through `__new` and the type is written at the call site:
+
+```
+arraybuffer.ts:20,53,69   rt.ts:38   array.ts:73,465   string.ts:698,818   typedarray.ts:1676,1698
+```
+
+The narrower option (recognise the `changetype` *around* the call) would miss nothing today
+but would put the type logic in two places; the general one is one branch. What it emits
+is: allocate the payload from the arena (`~gc/linNew`, so it is a real address in never-free
+memory), then `struct.new` the handle over `{brand, dataStart, byteLength}`.
+
+### `changetype<usize>(aBuffer)` is `dataStart`
+
+Every consumer that hands a buffer to a host verb means the **payload**, not the handle, so
+`changetype<usize>(buf)` answers `struct.get $ArrayBuffer $dataStart`. That is implemented
+in `builtin_changetype`, gated on both `isGcArrayBufferClass` **and** `isGcClass`: on a
+program whose latch is off a buffer is still an `i32` pointer and asking for a heap type of
+it aborts inside Binaryen (`Assertion failed: isRef()`) — measured on a program holding a
+function value, which makes the whole program non-uniform.
+
+That one answer is what keeps 55 `ArrayBuffer` mentions in `tension-framework` and ten
+sites in `std/assembly` working unmodified.
+
+### The view's `buffer` field changed shape, and for the better
+
+GC16 stored a view's `buffer` as an **`i32` address**, because a buffer was a linear block
+and a pointer-shaped class could not be a field of a reference type. Now the buffer is a GC
+handle, so the field is an ordinary traced reference:
+
+```
+(type $~lib/dataview/DataView (sub (struct (field $<brand> i32)
+  (field $buffer (mut (ref null $~lib/arraybuffer/ArrayBuffer)))
+  (field $dataStart (mut i32)) (field $byteLength (mut i32)))))
+```
+
+A view now keeps its own buffer alive instead of relying on the arena — a strict
+improvement, and the reason the assertion in `tests/gc/wasm-gc.js` that pins the view
+layout changed shape rather than being re-baselined quietly.
+
+### `Map` and `Set` become eligible, and their entries do NOT block them
+
+`Map`'s declared fields are two `ArrayBuffer`s and four scalars, so a buffer was the only
+thing between it and a struct. Measured, not assumed:
+
+- `Map<i32, i32>` round-trips on migrated storage (`tests/gc/wasm-gc.js` §52:
+  `set`/`get`/`size` all correct), and `Set<i32>` likewise.
+- `Map<string, i32>` is **eligible** — the report says `1 of 1` — and fails to compile at
+  **`hashStr`** (`std/assembly/util/hash.ts:72,76,97,104`), which reads
+  `load<u32>(changetype<usize>(key))`. That is GC12's named item, and it is the whole
+  remaining blocker for string keys: it is about hashing a string, not about how `Map`
+  stores entries.
+- `MapEntry<K,V>` is `@unmanaged` and holds `K`/`V` in linear memory, which no analysis of
+  declared fields can see. Measured rather than guessed: it does not block the scalar case,
+  because the only reference it would hold is a string, and a string cannot be stored in
+  linear memory **at all** under the flag (`changetype<usize>` of one is refused) — so the
+  entry representation becomes a question only once `hashStr` is solved, and it will have
+  to be solved *with* it.
+
+So: `Map`'s round is the round after this one, and it starts at `hashStr`.
+
+### Cost, measured
+
+- A payload's linear span, at three sizes: `stride` between consecutive payloads is
+  **32 B for an 8-byte buffer, 96 B for 64, 1056 B for 1024** — i.e. the same
+  `(20 header + payload + 15) & -16` reservation a payload always got.
+- 10 000 × `ArrayBuffer(64)` takes **17 pages = 111 B per buffer** of linear memory,
+  including alignment slack.
+- The **handle** is a 12-byte GC struct held by the engine, so it is not linear memory and
+  is traced and collected normally.
+
+### Result
+
+`test:gc` 325 → **362 checks**, 0 failures, 0 expected failures. `test:compiler` stays at
+its 5 pre-existing mismatches. `-O0..-O3` agree on all **20** positive fixtures. Flag-off
+output is **byte-identical on all 23 fixtures and on `hello-sprites`**, and nothing under
+`std/` changed.
+
+On the guest: `ArrayBuffer` and `Map` drop out of the fixable list, eligible classes go
+**131 → 133**, and coverage is still `0 of 141` because two classes remain — `SolverCallbacks`
+(holds a function value) and `drive$State` (extends `TaskState`) — plus the six permanent
+`ogre.generated.*` records that hold an inline `Vec3fValue`. Named by measurement, not by
+reading the line.

@@ -812,13 +812,13 @@ function xfail(name, condition, reason, detail) {
     blocked.output.split("\n").find((l) => /TS641/.test(l)) ?? "(no coverage line)");
   const blockedLine = (blocked.output.match(/WARNING TS6414: [^\n]*/) ?? [""])[0];
   check("non-uniform program says 0 of N and names the cause",
-    /0 of \d+ managed class/.test(blockedLine) && /holding an? ArrayBuffer/.test(blockedLine),
+    /0 of \d+ managed class/.test(blockedLine) && /holding a function value/.test(blockedLine),
     blockedLine);
   if (blocked.ok) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, "covb.wasm")), imports);
-    check("non-uniform program still answers", instance.exports.reportBlocked() === 7,
-      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 7)`);
+    check("non-uniform program still answers", instance.exports.reportBlocked() === 8,
+      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 3 + 5)`);
   }
 
   // (c) flag off -> no coverage diagnostic of any kind, and the same answers.
@@ -828,8 +828,8 @@ function xfail(name, condition, reason, detail) {
   if (plain.ok) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, "covp.wasm")), imports);
-    check("flag off: the same answers", instance.exports.reportBlocked() === 7,
-      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 7)`);
+    check("flag off: the same answers", instance.exports.reportBlocked() === 8,
+      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 3 + 5)`);
   }
 }
 
@@ -877,8 +877,13 @@ function xfail(name, condition, reason, detail) {
     // supertype reads `$~lib/dataview/DataView`). That is the GC4 structural-identity
     // hazard, and it is benign here for the reason the brand field exists: dispatch
     // is a value compare, never `ref.test`.
-    check("a buffer view is a struct of scalars",
-      /\(type \S+ \(sub \(struct \(field \$<brand> i32\) \(field \$buffer \(mut i32\)\) \(field \$dataStart \(mut i32\)\) \(field \$byteLength \(mut i32\)\)\)\)\)/.test(wat),
+    // **The `buffer` field is a reference now.** GC16 gave it an `i32` address because a
+    // buffer was a linear block; GC21 made the buffer a GC handle, so the view holds a
+    // traced `(ref null $ArrayBuffer)` and keeps its own buffer alive — strictly better
+    // than relying on the arena, and it is why this assertion changed shape rather than
+    // being re-baselined quietly.
+    check("a buffer view holds a traced reference to its buffer",
+      /\(type \S+ \(sub \(struct \(field \$<brand> i32\) \(field \$buffer \(mut \(ref null \$\S*ArrayBuffer\)\)\) \(field \$dataStart \(mut i32\)\) \(field \$byteLength \(mut i32\)\)\)\)\)/.test(wat),
       (wat.match(/\(type \S+ \(sub \(struct[^\n]*/) ?? ["absent"])[0]);
     // The typed arrays declare nothing of their own, so they canonicalise onto that
     // same struct type rather than each getting a named one — asserted as the fact it
@@ -999,9 +1004,11 @@ function xfail(name, condition, reason, detail) {
     ["a StaticArray", "a: StaticArray<i32> = new StaticArray<i32>(1);", true],
     ["a dynamic Array", "a: Array<i32> = new Array<i32>(0);", true],
     ["a TypedArray", "t: Uint8Array = new Uint8Array(1);", true],
-    ["an ArrayBuffer", "b: ArrayBuffer = new ArrayBuffer(1);", false],
-    ["a function value", "cb: (x: i32) => void;", false],
-    ["a Map", "m: Map<i32, i32> = new Map<i32, i32>();", false],
+    ["an ArrayBuffer", "b: ArrayBuffer = new ArrayBuffer(1);", true],
+    ["a Map", "m: Map<i32, i32> = new Map<i32, i32>();", true],
+    ["a Set", "s: Set<i32> = new Set<i32>();", true],
+    ["an unmanaged array address", "a: @unmanaged [u32 * 4];", false],
+    ["a function value", "cb: (x: i32) => void = (x: i32): void => {};", false],
     ["an inline value array", "v: @inline [u32 * 4];", false, 6415],
   ];
   for (const [label, field, storable, permanentCode] of kinds) {
@@ -1085,22 +1092,22 @@ function xfail(name, condition, reason, detail) {
 {
   writeFileSync(join(scratch, "mixed-reasons.ts"),
     `class ValueHolder { v: @inline [u32 * 4]; }\n` +
-    `class MapHolder { m: Map<i32, i32> = new Map<i32, i32>(); }\n` +
-    `export function run(): i32 { let a = new ValueHolder(); let b = new MapHolder(); return 1; }\n`);
+    `class FnHolder { cb: (x: i32) => i32 = (x: i32): i32 => x; }\n` +
+    `export function run(): i32 { let a = new ValueHolder(); let b = new FnHolder(); return 1; }\n`);
   const built = compile("mixed-reasons.ts", "mixr.wasm", ["--wasmGc"]);
   const line = (built.output.match(/WARNING TS6414: [^\n]*/) ?? [""])[0];
   check("the report separates permanent obstacles from fixable ones",
     /permanent, not a work item/.test(line) && /holding a value array/.test(line) &&
-    /holding a Map/.test(line),
+    /holding a function value/.test(line),
     line);
   check("the fixable list leads, the permanent one follows",
-    line.indexOf("holding a Map") < line.indexOf("permanent, not a work item"), line);
+    line.indexOf("holding a function value") < line.indexOf("permanent, not a work item"), line);
   check("permanently refused classes get their own diagnostic (TS6415)",
     /WARNING TS6415: wasm-gc: \d+ class/.test(built.output),
     built.output.split("\n").find((l) => /TS6415/.test(l)) ?? "(none)");
   check("the permanent class is not counted as a fixable reason",
     !/^: 1 holding a value array/.test(line.slice(line.indexOf(": "))) &&
-    /1 holding a Map/.test(line), line);
+    /1 holding a function value/.test(line), line);
 }
 
 // 40 — the ladder, and the whole payload, not its first two bytes ------------
@@ -1254,9 +1261,13 @@ function xfail(name, condition, reason, detail) {
 // Map; permanent, not a work item: 1 holding a value array (…) (and 1 blocked …, 1
 // eligible …)`.
 {
+  // **The fixable bucket is an `@unmanaged [T * N]` address**, not a `Map`: `Map` is
+  // eligible from GC21 on, so it is in the *free* bucket now. An unmanaged array address
+  // is the honest remaining fixable shape — an address is storable in principle, and the
+  // emitter for it is what GC21 did not build.
   writeFileSync(join(scratch, "buckets.ts"),
     `class Perm { v: @inline [u32 * 4]; }\n` +
-    `class Fix { m: Map<i32, i32> = new Map<i32, i32>(); }\n` +
+    `class Fix { u: @unmanaged [u32 * 4]; }\n` +
     `class Blocked { p: Perm = new Perm(); }\n` +
     `class Free { x: i32 = 0; }\n` +
     `export function run(): i32 { let a = new Perm(); let b = new Fix(); let c = new Blocked(); let d = new Free(); return 1; }\n`);
@@ -1274,7 +1285,7 @@ function xfail(name, condition, reason, detail) {
     check("the four buckets sum to the class total", sum === +total,
       `${fixable} + ${permanent} + ${blocked} + ${eligible} = ${sum}, total ${total}`);
     check("the permanent class is not counted among the fixable reasons",
-      /1 holding a Map/.test(line) && !/^$/.test(fixable), line);
+      /1 holding an array address/.test(line) && !/^$/.test(fixable), line);
   }
   check("a permanently refused class is reported as permanent, never as a reason",
     /WARNING TS6415: wasm-gc: 1 class can never be on the GC ABI/.test(built.output),
@@ -1461,20 +1472,26 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
-// 52 — `Map` and `Set` become eligible, and their entries do not block them --
+// 52 — `Map` and `Set` become eligible, and their entries do NOT block them --
 //
-// `Map`'s declared fields are two `ArrayBuffer`s and four scalars, so a buffer is the
+// `Map`'s declared fields are two `ArrayBuffer`s and four scalars, so a buffer was the
 // only thing standing between it and a struct. Its *entries* are a different question:
-// `MapEntry` is `@unmanaged` and holds managed `K`/`V` in linear memory, which no
-// analysis of declared fields would see. This asserts the outcome rather than the
-// reasoning — the round-trip either works or the finding is that entries block it.
+// `MapEntry` is `@unmanaged` and holds `K`/`V` in linear memory, which no analysis of a
+// class's declared fields can see. Measured rather than guessed, and the answer is that
+// scalar entries work: `Map<i32,i32>` round-trips on the migrated storage.
+//
+// What blocks a **string**-keyed `Map` is not the entries, it is `hashStr`
+// (`std/assembly/util/hash.ts:72,76,97,104`) reading `load<u32>(changetype<usize>(key))`
+// — GC12's named item. Asserted below as the named reason, so it is not rediscovered as
+// "Map does not work".
 {
   writeFileSync(join(scratch, "mapholder.ts"),
-    `class H { m: Map<string, i32> = new Map<string, i32>(); }\n` +
-    `export function probe(): i32 { let h = new H(); h.m.set("a", 1); h.m.set("b", 2); return h.m.get("b"); }\n`);
+    `class H { m: Map<i32, i32> = new Map<i32, i32>(); }\n` +
+    `export function probe(): i32 { let h = new H(); h.m.set(1, 10); h.m.set(2, 20); ` +
+    `return h.m.get(2) + h.m.size; }\n`);
   const built = compile("mapholder.ts", "maph.wasm", ["--wasmGc"]);
   const line = (built.output.match(/(?:INFO TS6413|WARNING TS6414): [^\n]*/) ?? [""])[0];
-  check("a class holding a Map<string,i32> is reported on the GC ABI",
+  check("a class holding a Map is reported on the GC ABI",
     /INFO TS6413: wasm-gc: 1 of 1/.test(built.output), line);
   if (built.ok) {
     const wat = readFileSync(join(scratch, "maph.wat"), "utf8");
@@ -1482,9 +1499,22 @@ function xfail(name, condition, reason, detail) {
       (wat.match(/\(type \S*H[^\n]*/) ?? ["absent"])[0]);
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, "maph.wasm")), imports);
-    check("Map<string,i32> set/get round-trips", instance.exports.probe() === 2,
-      `got ${instance.exports.probe()} (expect 2)`);
+    check("Map<i32,i32> set/get round-trips on migrated storage",
+      instance.exports.probe() === 22,
+      `got ${instance.exports.probe()} (expect 20 + 2)`);
   }
+
+  // The string-keyed case: eligible, refused at `hashStr`, and named.
+  writeFileSync(join(scratch, "mapstr.ts"),
+    `class H { m: Map<string, i32> = new Map<string, i32>(); }\n` +
+    `export function probe(): i32 { let h = new H(); h.m.set("a", 1); return h.m.get("a"); }\n`);
+  const str = compile("mapstr.ts", "mapstr.wasm", ["--wasmGc"]);
+  check("a string-keyed Map is eligible (its declared fields are fine)",
+    /INFO TS6413: wasm-gc: 1 of 1/.test(str.output),
+    (str.output.match(/(?:INFO|WARNING) TS641[34]: [^\n]*/) ?? [""])[0]);
+  check("...and is refused by name at hashStr, not silently miscompiled",
+    !str.ok && /changetype<usize> of a wasm GC array \(String\)/.test(str.output),
+    str.output.split("\n").find((l) => /AS100/.test(l)) ?? "(compiled)");
 }
 
 if (failures) {
