@@ -1685,6 +1685,104 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
+// 58 — the partition: a trace-free record is exempt, not refused -------------
+//
+// `gcUniform` was all-or-nothing, so six correct C-ABI records blocked 135 classes. A
+// record the C side reads through a pointer must have the layout the C declaration
+// describes, and a GC reference has no place in one — they are trace-free, so the
+// collector has no business with them. The exemption keeps them linear and stops them
+// counting against uniformity.
+//
+// **The round's whole risk is two ABIs in one module.** The existing comment says a
+// program holding both aborts in Binaryen; the reading tested here is that the abort is a
+// *crossing* hazard (one field stored two ways), not a coexistence one. So: one GC class,
+// one trace-free record, both allocated and used, no field between them.
+{
+  const built = compile("exempt.ts", "ex.wasm", ["--wasmGc"]);
+  check("coexistence: a GC class and a trace-free record compile together", built.ok,
+    built.output.split("\n").filter((l) => /ERROR|Assertion/.test(l))[0] ?? built.output.slice(0, 300));
+  const line = (built.output.match(/wasm-gc: [^\n]*\d+ of \d+ managed classes[^\n]*/) ?? [""])[0];
+  check("the report counts the exempt record apart from the GC ones",
+    /\d+ of \d+ managed classes on the GC ABI; \d+ exempt \(C-ABI record/.test(built.output), line);
+  check("the arithmetic closes: GC + exempt + refused = total",
+    (() => {
+      const m = built.output.match(/(\d+) of (\d+) managed classes on the GC ABI; (\d+) exempt \(C-ABI record/);
+      return m != null && (+m[1]) + (+m[3]) === (+m[2]);
+    })(), line);
+
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "ex.wat"), "utf8");
+    check("the GC class is a struct...", /Named \(sub \(struct/.test(wat),
+      (wat.match(/\(type \S*Named[^\n]*/) ?? ["absent"])[0]);
+    check("...and the exempt record is NOT a struct", !/Vec3fLike \(sub \(struct/.test(wat),
+      (wat.match(/\(type \S*Vec3fLike[^\n]*/) ?? ["absent: it stays linear"])[0]);
+
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "ex.wasm")), imports);
+    const e = instance.exports;
+    const want = {
+      coexist: 44,      // the GC class and the record, both allocated and read
+      sanctioned: 42,   // `@unmanaged` is the sanctioned crossing
+      owner: 42,        // slots, free list, slot reuse, stale handle reports dead
+      flatLayout: 48,   // the record's own layout: `y` at 4, `z` at 8
+    };
+    for (const name of Object.keys(want)) {
+      const got = e[name]();
+      check(`exempt: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
+    }
+  }
+}
+
+// 59 — both crossings are named errors, not miscompiled modules ---------------
+//
+// A plain field from a GC class to a linear record is one representation stored in the
+// other; a reference inside a linear record is a pointer the collector cannot see and a
+// layout the C side cannot describe. Both were *compiling* before this round — measured —
+// which is the defect this section pins.
+{
+  const crossing = compile("exempt-crossing.ts", "exc.wasm", ["--wasmGc"]);
+  check("a GC class holding an exempt record as a plain field is refused",
+    !crossing.ok, crossing.output.split("\n")[0]);
+  check("the refusal names both classes and says what to use instead",
+    /GC class .* cannot hold .*C-ABI record/.test(crossing.output) &&
+    /@unmanaged/.test(crossing.output),
+    crossing.output.split("\n").find((l) => /AS100/.test(l)) ?? "(no diagnostic)");
+
+  const gcref = compile("exempt-gcref.ts", "exg.wasm", ["--wasmGc"]);
+  check("a linear record holding a GC reference is refused", !gcref.ok,
+    gcref.output.split("\n")[0]);
+  check("...and the refusal names the field and the reason",
+    /C-ABI record .* holds a GC reference/.test(gcref.output),
+    gcref.output.split("\n").find((l) => /AS100/.test(l)) ?? "(no diagnostic)");
+
+  // Both are *flag* restrictions: the same sources compile without it.
+  for (const [file, out] of [["exempt-crossing", "excoff.wasm"], ["exempt-gcref", "exgoff.wasm"]]) {
+    const plain = compile(`${file}.ts`, out, []);
+    check(`flag off: ${file} compiles`, plain.ok, plain.output.split("\n")[0]);
+  }
+}
+
+// 60 — the exemption changes nothing when the flag is off --------------------
+//
+// Asserted as a test rather than eyeballed, because "the exemption must change nothing off
+// the flag" is a claim about every fixture at once. The exemption is a property of the
+// flag's decision procedure, so with the flag off no output can depend on it — this pins
+// that with a fixture that has an exempt record, a GC class, and an owner.
+{
+  const off = compile("exempt.ts", "exoff.wasm", []);
+  check("the exemption fixture compiles without the flag", off.ok, off.output.split("\n")[0]);
+  if (off.ok) {
+    const wat = readFileSync(join(scratch, "exoff.wat"), "utf8");
+    check("flag off: no struct type is emitted at all", !/struct\.new|struct\.get/.test(wat),
+      (wat.match(/.*struct\.(new|get).*/) ?? ["absent"])[0]);
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "exoff.wasm")), imports);
+    const e = instance.exports;
+    check("flag off: the same answers",
+      e.coexist() === 44 && e.sanctioned() === 42 && e.owner() === 42 && e.flatLayout() === 48);
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);
