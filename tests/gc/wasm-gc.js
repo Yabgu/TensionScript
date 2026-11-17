@@ -1631,6 +1631,60 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
+// 56 — `hashStr` under the flag, and it must produce the SAME numbers -------
+//
+// The stdlib walks a string as bytes at an address. Under the flag a `String` is
+// `(array (mut u16))`: no address, no byte loads, no integer null test. The replacement
+// reads elements instead — byte `2k` is the low byte of element `k`, byte `2k+1` its high
+// byte — so it can reproduce the byte-level loop exactly, including the `u32`-at-a-time
+// fast path (`element[2k] | element[2k+1] << 16`).
+//
+// **Equivalence is the assertion**, not merely "a hash": the bucket index comes from these
+// numbers, so a different hash would mean the flag changes behaviour. The same source is
+// compiled both ways and the four hashes compared.
+{
+  const on = compile("hashmap.ts", "hm.wasm", ["--wasmGc"]);
+  const off = compile("hashmap.ts", "hmoff.wasm", []);
+  check("the hash fixture compiles under the flag", on.ok,
+    on.output.split("\n").filter((l) => /ERROR|Assertion/.test(l))[0] ?? on.output.slice(0, 300));
+  check("...and without it", off.ok, off.output.slice(0, 300));
+  if (on.ok && off.ok) {
+    const a = (await WebAssembly.instantiate(readFileSync(join(scratch, "hm.wasm")), imports)).instance.exports;
+    const b = (await WebAssembly.instantiate(readFileSync(join(scratch, "hmoff.wasm")), imports)).instance.exports;
+    for (const name of ["hashOf", "hashEmpty", "hashLong", "hashNonAscii"]) {
+      const underFlag = a[name]() >>> 0;
+      const pointerAbi = b[name]() >>> 0;
+      check(`hashStr: ${name} is identical both ways`, underFlag === pointerAbi,
+        `flag on 0x${underFlag.toString(16)}, flag off 0x${pointerAbi.toString(16)}`);
+    }
+  }
+}
+
+// 57 — `Map<string,i32>` and `Set<string>` end to end ------------------------
+{
+  const built = compile("hashmap.ts", "hmr.wasm", ["--wasmGc"]);
+  if (built.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "hmr.wasm")), imports);
+    const e = instance.exports;
+    const want = {
+      mapStr: 356,   // set, get, has, size on three string keys
+      setStr: 2,     // add, has, size, with a duplicate
+      mapMany: 780,  // 40 distinct keys, forcing bucket and entry growth
+    };
+    for (const name of Object.keys(want)) {
+      const got = e[name]();
+      check(`hashmap: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
+    }
+  } else {
+    // **A skipped section is not a passing one.** GC14's lesson: a green signal that does
+    // not measure the thing it claims to. If the fixture does not compile, that is a
+    // failure of the feature this section exists to certify, so it says so.
+    check("hashmap: Map<string,i32> and Set<string> round-trip on the flag", false,
+      built.output.split("\n").filter((l) => /ERROR|Assertion/.test(l))[0] ?? "(no diagnostic)");
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);
