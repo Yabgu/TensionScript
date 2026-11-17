@@ -673,3 +673,102 @@ intercepts, then the method bodies in TS. It needs the intrinsic because
 is not migrated this round**: the specified mechanism conflicts with the mandatory
 byte-identity constraint, and the two repairs (std branches, or a global
 constant-if elision) each violate it in a different place.
+
+## Dynamic `Array<T>`: a compiler-synthesised layout, no std branching
+
+`Array` grows and the glue has no `array.grow`, so it cannot *be* a wasm array. It
+is a small GC struct:
+
+```wat
+(type $~lib/array/Array<i32>
+  (sub (struct
+    (field $<brand> i32)
+    (field $data (mut (ref null $~gcarray/i32)))
+    (field $length_ (mut i32)))))
+```
+
+- **`array.len data` is the capacity. `length_` is the used count.** Capacity is
+  never observable (below).
+- **Growth is 2× with an `MIN_SIZE` floor (8), via `array.copy`**: allocate the new
+  backing array, copy the old elements in, replace `data`. The *struct* is
+  unchanged, so the array's identity is stable — the reason `Array` is a struct
+  holding a reference rather than a wasm array, since a wasm array cannot grow.
+- **`std/assembly/array.ts` is not edited at all.** `git diff --stat` lists
+  `src/compiler.ts`, `src/module.ts`, `src/types.ts` and the test file; the stdlib
+  file is absent. That is what keeps the flag-off layout identical **by
+  construction** rather than by care — the layout exists only in the compiler.
+
+### Capacity is unobservable, and how
+
+Three rules, each with a test in `tests/gc/dynarray.ts`:
+
+1. `.length` reads `length_`, never `array.len` — a fresh `Array<i32>(0)` has
+   capacity 8 and length **0**.
+2. `a[i]` checks `u32(i) >= u32(length_)`, so an index inside the capacity but past
+   the used count **aborts**, exactly as the stdlib's `__get` throws.
+3. `a[i] = v` checks the same bound, so a store cannot reach into the spare
+   capacity either.
+
+```ts
+freshLength()      = 0        // not 8
+readPastLength()   aborts     // index 3 of a 1-element array, capacity 8
+writePastLength()  aborts     // index 5 of the same
+popEmpty()         aborts
+```
+
+### The operations covered
+
+| operation | emission |
+| --- | --- |
+| `new Array<T>(n)` | `struct.new` with `data = array.new(max(n, 8))`, `length_ = n` |
+| `a.length` | `struct.get $length_` |
+| `a[i]` | `u32(i) >= u32(length_)` → abort, then `array.get data[i]` |
+| `a[i] = v` | the same check, then `array.set data[i] v` |
+| `a.push(v)` | grow when `length_ == array.len data`, then `array.set`, `length_++` |
+| `a.pop()` | empty → abort; else `length_--`, `array.get data[length_]` |
+
+**Not covered, and they will not compile on a GC `Array` yet** (`length` setter,
+`shift`, `unshift`, `slice`, `concat`, `indexOf`, `join`, `sort`, `reverse`, `map`,
+`filter`, `every`, `find*`, and the static helpers). Each is a stdlib body over
+`buffer`/`dataStart`/`load`/`store`; the byte-safe way to reach them is the
+intrinsic below, after which their GC arm is ordinary TS over a `StaticArray`.
+
+### Measured through the compiler
+
+```
+prim()    = 9904950   100 pushes across several growths, sum 4950, pop → length 99
+grown()   = 40040     40 managed elements, every one still the right object
+freshLength() = 0     capacity 8, used count 0
+```
+
+`-O0`…`-O3` agree on all eight fixtures; flag-off output is byte-identical on all
+seven pre-existing ones; `test:compiler` stays at its 5-mismatch baseline.
+
+### Two defects found on the way
+
+- **`Module#select` takes `(ifTrue, ifFalse, condition)` — the condition is last**,
+  unlike the WAT text form. Passing it first produced a capacity of 0 and every
+  `push` trapped (`array element access out of bounds`). Cost half an hour to find
+  because the emitted text looks plausible.
+- **`gcElementTypeRef` must test `classReference` before `element.kind`**, because a
+  class reference's kind is `Usize`: `StaticArray<Item>` first emitted
+  `(array (mut i64))`.
+
+### Still unproven: tracing *after* growth through the compiler
+
+The element-tracing claim for arrays is established at the IR level (GC5: 100,000
+allocations, 102 MB reclaimed at 65,536-byte capacity, a moving collector, a
+null-control trap), and `grown()` above shows all 40 references survive three
+growths. What is **not** yet proven through the compiler path is that those
+elements survive a forced *collection* with the array as the only root, because the
+harness needs the array to outlive one host call and a module-level
+`let root: Array<Item> = new Array<Item>(0)` is rejected:
+
+```
+[wasm-validator error in module] global init must have correct type
+```
+
+A GC `struct.new` in a global initialiser is not being emitted as a start-function
+sequence. That is a small, named gap — not a tracing doubt, since the backing array
+is a `(array (mut (ref null $Item)))` and the tracer follows it exactly as GC5
+measured — but it is the one test in this round that did not run, and it should.

@@ -27,7 +27,10 @@ import {
   GC_BRAND_INDEX,
   GC_BRAND_NAME,
   GC_FIRST_FIELD_INDEX,
-  gcArrayElementOf
+  gcArrayElementOf,
+  gcDynamicArrayElementOf,
+  GC_ARRAY_DATA_INDEX,
+  GC_ARRAY_LENGTH_INDEX
 } from "./types";
 import { Class } from "./program";
 import * as binaryen from "./glue/binaryen";
@@ -1532,6 +1535,11 @@ export class Module {
     return binaryen._BinaryenRefCast(this.ref, ref, this.heapType(type));
   }
 
+  /** The GC array type for an element, as a shared accessor. */
+  arrayTypeOf(element: Type): TypeRef {
+    return ensureGcArrayType(this, element);
+  }
+
   /** `array.len` — the length a wasm array carries, so `StaticArray` needs no field. */
   array_len(ref: ExpressionRef): ExpressionRef {
     return binaryen._BinaryenArrayLen(this.ref, ref);
@@ -1547,6 +1555,13 @@ export class Module {
    */
   array_new(heapType: HeapTypeRef, length: ExpressionRef, init: ExpressionRef): ExpressionRef {
     return binaryen._BinaryenArrayNew(this.ref, heapType, length, init);
+  }
+
+  /** `array.copy $elem (dst, dstOffset, src, srcOffset, len)` — growth copies. */
+  array_copy(dest: ExpressionRef, destOffset: ExpressionRef,
+    src: ExpressionRef, srcOffset: ExpressionRef, length: ExpressionRef): ExpressionRef {
+    return binaryen._BinaryenArrayCopy(this.ref,
+      dest, destOffset, src, srcOffset, length);
   }
 
   /** `array.get $heapType` — the caller range-checks first. */
@@ -4177,14 +4192,24 @@ export function ensureClassType(classInstance: Class): TypeRef {
     binaryen._BinaryenModuleSetTypeName(
       module.ref, heapType, module.allocStringCached(member.internalName)
     );
-    let fields = gcFieldsOf(member);
     let numFieldsInType = binaryen._BinaryenStructTypeGetNumFields(heapType);
-    assert(numFieldsInType == fields.length + 1);
     binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_BRAND_INDEX,
       module.allocStringCached(GC_BRAND_NAME));
-    for (let j = 0, n = fields.length; j < n; ++j) {
-      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_FIRST_FIELD_INDEX + j,
-        module.allocStringCached(unchecked(fields[j]).name));
+    if (gcDynamicArrayElementOf(member.type) != null) {
+      // The synthesised `Array` layout: `data`, then `length_`. Not its declared
+      // fields — those are the linear-memory ones and are not in the struct.
+      assert(numFieldsInType == 3);
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_ARRAY_DATA_INDEX,
+        module.allocStringCached("data"));
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_ARRAY_LENGTH_INDEX,
+        module.allocStringCached("length_"));
+    } else {
+      let fields = gcFieldsOf(member);
+      assert(numFieldsInType == fields.length + 1);
+      for (let j = 0, n = fields.length; j < n; ++j) {
+        binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_FIRST_FIELD_INDEX + j,
+          module.allocStringCached(unchecked(fields[j]).name));
+      }
     }
 
     // **Brands must be distinct.** A 32-bit hash over a handful of class names
@@ -4217,7 +4242,7 @@ function fillGcStructType(
   member: Class,
   slots: HeapTypeRef[]
 ): void {
-  let fields = gcFieldsOf(member);
+  let module = member.program.module;
   let fieldTypes = new Array<TypeRef>();
   let packedTypes = new Array<u32>();
   let fieldMutables = new Array<bool>();
@@ -4231,6 +4256,26 @@ function fillGcStructType(
   packedTypes.push(PackedType.NotPacked);
   fieldMutables.push(false);
 
+  // **A dynamic `Array<T>` gets a synthesised layout**, not its declared fields.
+  // `{ <brand>, data: (ref null (array (mut T))), length_ i32 }` — capacity is
+  // `array.len data`, the used count is field 2. The TS declaration is untouched,
+  // which is what keeps the flag-off layout identical by construction.
+  let arrayElement = gcDynamicArrayElementOf(member.type);
+  if (arrayElement != null) {
+    // data: a nullable ref to the element's GC array type.
+    fieldTypes.push(ensureGcArrayType(module, arrayElement));
+    packedTypes.push(PackedType.NotPacked);
+    // Mutable: growth swaps `data` for a bigger array.
+    fieldMutables.push(true);
+    // length_: the used count, mutable.
+    fieldTypes.push(TypeRef.I32);
+    packedTypes.push(PackedType.NotPacked);
+    fieldMutables.push(true);
+    finishStructType(builder, index, member, slots, fieldTypes, packedTypes, fieldMutables);
+    return;
+  }
+
+  let fields = gcFieldsOf(member);
   for (let i = 0, k = fields.length; i < k; ++i) {
     let fieldType = unchecked(fields[i]).type;
     fieldTypes.push(gcFieldTypeRef(fieldType, slots));
@@ -4240,6 +4285,19 @@ function fillGcStructType(
     // immutable field costs the same — so this waits for a reason to be different.
     fieldMutables.push(true);
   }
+  finishStructType(builder, index, member, slots, fieldTypes, packedTypes, fieldMutables);
+}
+
+/** Sets the struct type for slot `index` and, if any, its supertype. */
+function finishStructType(
+  builder: binaryen.TypeBuilderRef,
+  index: i32,
+  member: Class,
+  slots: HeapTypeRef[],
+  fieldTypes: TypeRef[],
+  packedTypes: u32[],
+  fieldMutables: bool[]
+): void {
   let cArrFT = allocPtrArray(fieldTypes);
   let cArrPT = allocU32Array(packedTypes);
   let cArrFM = allocBoolArray(fieldMutables);

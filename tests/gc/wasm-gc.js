@@ -397,6 +397,71 @@ function check(name, condition, detail) {
   check("flag off: the GC arm is never diagnosed", gcOff.ok, gcOff.output);
 }
 
+
+// 15 — dynamic `Array<T>` on the GC heap --------------------------------------
+{
+  const built = compile("dynarray.ts", "dyn.wasm", ["--wasmGc"]);
+  check("the dynamic-array fixture compiles with validation on", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "dyn.wat"), "utf8");
+    check("Array<T> is a struct with brand, data and length_",
+      /\(type \S*Array<i32> \(sub \(struct \(field \$<brand> i32\) \(field \$data \(mut \(ref null \S*gcarray\/i32\)\)\) \(field \$length_ \(mut i32\)\)\)\)\)/.test(wat),
+      wat.split("\n").slice(0, 5).join("\n"));
+    check("growth copies with array.copy",
+      wat.includes("array.copy"), "growth must copy, not drop, the old elements");
+    check("the stdlib Array body is never emitted",
+      !wat.includes("Array<i32>#__uset") && !wat.includes("~lib/array/Array<i32>#push"));
+
+    const { instance } = await WebAssembly.instantiate(readFileSync(join(scratch, "dyn.wasm")), imports);
+    const e = instance.exports;
+    check("100 pushes across several growths, read back, pop shrinks",
+      e.prim() === 9904950, `prim() = ${e.prim()} (expected 9904950)`);
+    check("growth preserves references (40 managed elements)",
+      e.grown() === 40040, `grown() = ${e.grown()} (expected 40040)`);
+    check("length is the used count, not the capacity",
+      e.freshLength() === 0, `freshLength() = ${e.freshLength()} (a fresh array has capacity 8)`);
+    let aborted = false;
+    try { e.readPastLength(); } catch (error) { aborted = /abort/.test(String(error)); }
+    check("capacity is unobservable: read past length aborts", aborted);
+    aborted = false;
+    try { e.writePastLength(); } catch (error) { aborted = /abort/.test(String(error)); }
+    check("capacity is unobservable: write past length aborts", aborted);
+    aborted = false;
+    try { e.popEmpty(); } catch (error) { aborted = /abort/.test(String(error)); }
+    check("popping an empty array aborts", aborted);
+  }
+}
+
+// 16 — the standing gate on the dynamic-array fixture
+{
+  const answers = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("dynarray.ts", `dyn${level}.wasm`, ["--wasmGc", level]);
+    check(`dynarray ${level} compiles`, built.ok && !/wasm-validator|Aborted/.test(built.output), built.output);
+    if (built.ok) {
+      const { instance } = await WebAssembly.instantiate(readFileSync(join(scratch, `dyn${level}.wasm`)), imports);
+      answers.push(`${instance.exports.prim()},${instance.exports.grown()}`);
+    }
+  }
+  check("dynarray: -O0..-O3 all agree",
+    answers.length === 4 && answers.every((v) => v === answers[0]),
+    `answers: ${answers.join(" | ")}`);
+}
+
+// 17 — flag off: Array is still linear memory
+{
+  const built = compile("dynarray.ts", "dyn-plain.wasm", []);
+  check("dynarray compiles without the flag", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "dyn-plain.wat"), "utf8");
+    check("flag off: no wasm GC struct or array for Array", !wat.includes("$length_"));
+    const { instance } = await WebAssembly.instantiate(readFileSync(join(scratch, "dyn-plain.wasm")), imports);
+    check("flag off: the same answers",
+      instance.exports.prim() === 9904950 && instance.exports.grown() === 40040,
+      `prim=${instance.exports.prim()} grown=${instance.exports.grown()}`);
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);

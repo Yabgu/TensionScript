@@ -205,6 +205,10 @@ import {
   Signature,
   gcFieldsOf,
   gcArrayElementOf,
+  gcDynamicArrayElementOf,
+  GC_ARRAY_DATA_INDEX,
+  GC_ARRAY_LENGTH_INDEX,
+  GC_ARRAY_MIN_SIZE,
   gcSubtreeBrands,
   gcBrandOf,
   GC_BRAND_INDEX,
@@ -6652,6 +6656,17 @@ export class Compiler extends DiagnosticEmitter {
       let gcWriteType = this.options.wasmGc
         ? resolver.resolveExpression(elementAccess.expression, flow)
         : null;
+      let gcWriteDynamic = gcDynamicArrayElementOf(gcWriteType);
+      if (gcWriteDynamic != null) {
+        let value = this.compileExpression(valueExpression, gcWriteDynamic);
+        let valueRefType = this.currentType;
+        return this.compileGcDynamicArraySet(
+          elementAccess.expression, elementAccess.elementExpression,
+          assert(gcWriteType), gcWriteDynamic,
+          this.convertExpression(value, valueRefType, gcWriteDynamic, false, valueExpression),
+          contextualType != Type.void
+        );
+      }
       let gcWriteElement = gcArrayElementOf(gcWriteType);
       if (gcWriteElement != null) {
         let value = this.compileExpression(valueExpression, gcWriteElement);
@@ -7264,6 +7279,42 @@ export class Compiler extends DiagnosticEmitter {
 
     let module = this.module;
     let flow = this.currentFlow;
+
+    // **`push`/`pop` on a GC `Array<T>`.** Their stdlib bodies are linear-memory
+    // code (`ensureCapacity`, `__renew`, `store<T>` at an offset), and `push` is the
+    // one that grows — which is the whole reason `Array` is a struct holding a
+    // reference rather than a wasm array. Intercepted before resolution, and only
+    // for a method call whose receiver is a dynamic `Array` on the GC heap.
+    if (this.options.wasmGc && expression.expression.kind == NodeKind.PropertyAccess) {
+      let access = <PropertyAccessExpression>expression.expression;
+      let receiverType = this.resolver.resolveExpression(
+        access.expression, flow, Type.auto, ReportMode.Swallow
+      );
+      let element = gcDynamicArrayElementOf(receiverType);
+      if (element != null) {
+        let method = access.property.text;
+        if (method == "push") {
+          if (expression.args.length != 1) {
+            this.error(DiagnosticCode.Expected_0_arguments_but_got_1, expression.range,
+              "1", expression.args.length.toString());
+            return module.unreachable();
+          }
+          return this.compileGcDynamicArrayPush(
+            access.expression, expression.args[0], assert(receiverType), element
+          );
+        }
+        if (method == "pop") {
+          if (expression.args.length != 0) {
+            this.error(DiagnosticCode.Expected_0_arguments_but_got_1, expression.range,
+              "0", expression.args.length.toString());
+            return module.unreachable();
+          }
+          return this.compileGcDynamicArrayPop(
+            access.expression, assert(receiverType), element
+          );
+        }
+      }
+    }
 
     // handle call to super
     if (expression.expression.kind == NodeKind.Super) {
@@ -9435,6 +9486,14 @@ export class Compiler extends DiagnosticEmitter {
           expression, targetType, false, contextualType, constraints
         );
       }
+      // **A dynamic `Array<T>` indexed: `array.get data[i]`**, checked against
+      // `length_`. Before the generic `__get`, which is linear-memory code.
+      let gcReadDynamic = gcDynamicArrayElementOf(targetType);
+      if (gcReadDynamic != null) {
+        return this.compileGcDynamicArrayGet(
+          targetExpression, expression.elementExpression, targetType, gcReadDynamic
+        );
+      }
       // **`StaticArray<T>` indexed under `--wasm-gc`: `array.get`.** Before the
       // generic `__get` overload, which is linear-memory code.
       let gcReadElement = gcArrayElementOf(targetType);
@@ -11484,6 +11543,17 @@ export class Compiler extends DiagnosticEmitter {
     if (!classInstance) return module.unreachable();
     if (contextualType == Type.void) constraints |= Constraints.WillDrop;
 
+    // **`new Array<T>(n)` on the GC heap.** The constructor body allocates an
+    // `ArrayBuffer` into `this`, which cannot type-check once `this` is a GC struct,
+    // so it is never compiled: this emits the struct directly.
+    let gcDynamicElement = gcDynamicArrayElementOf(classInstance.type);
+    if (gcDynamicElement != null) {
+      return this.compileGcDynamicArrayNew(
+        classInstance, gcDynamicElement,
+        expression.args.length ? expression.args[0] : null, expression
+      );
+    }
+
     // **`new StaticArray<T>(n)` is `array.new`.**
     let gcNewElement = gcArrayElementOf(classInstance.type);
     if (gcNewElement != null) {
@@ -11808,6 +11878,23 @@ export class Compiler extends DiagnosticEmitter {
       let gcLengthReceiver = resolver.resolveExpression(
         expression.expression, flow, Type.auto, ReportMode.Swallow
       );
+      // **A dynamic `Array<T>`: `length_`, the used count.** Capacity lives in the
+      // backing array and must stay invisible; see `compileGcDynamicArrayLength`.
+      if (gcLengthReceiver != null && gcDynamicArrayElementOf(gcLengthReceiver) != null) {
+        if (expression.property.text != "length") {
+          this.error(
+            DiagnosticCode.Property_0_does_not_exist_on_type_1,
+            expression.property.range, expression.property.text, gcLengthReceiver.toString()
+          );
+          return module.unreachable();
+        }
+        // Receiver first: `compileExpression` overwrites `currentType` on entry.
+        let receiver = this.compileExpression(
+          expression.expression, gcLengthReceiver, Constraints.ConvImplicit
+        );
+        this.currentType = Type.i32;
+        return this.compileGcDynamicArrayLength(receiver, gcLengthReceiver.toRef());
+      }
       if (gcLengthReceiver != null && gcArrayElementOf(gcLengthReceiver) != null) {
         if (expression.property.text != "length") {
           this.error(
@@ -16188,6 +16275,280 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Makes a runtime non-null check, e.g. on `<Type>possiblyNull` or `possiblyNull!`. */
+  /**
+   * `new Array<T>(n)`: a GC struct `{ <brand>, data, length_ }` whose backing array
+   * has capacity `max(n, MIN_SIZE)` and whose used count is `n`.
+   *
+   * **Capacity is never observable** — see `compileGcDynamicArrayLength`. It is a
+   * property of the backing array alone; every read, write and length goes through
+   * `length_`, so a caller cannot tell a capacity-8 array holding 3 elements from a
+   * capacity-3 one.
+   */
+  private compileGcDynamicArrayNew(
+    classInstance: Class,
+    element: Type,
+    lengthExpression: Expression | null,
+    reportNode: Node
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = classInstance.type.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let length = lengthExpression != null
+      ? this.compileExpression(lengthExpression, Type.i32, Constraints.ConvImplicit)
+      : module.i32(0);
+    let lengthLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(lengthLocal, length, false));
+    stmts.push(module.if(
+      module.binary(BinaryOp.GtU32, module.local_get(lengthLocal, TypeRef.I32),
+        module.i32(0x7ffffff0)),
+      this.makeStaticAbort(this.ensureStaticString("Invalid length"), reportNode)
+    ));
+    // Capacity: `max(n, MIN_SIZE)`, the floor the stdlib constructor uses.
+    // `Module#select` takes `(ifTrue, ifFalse, condition)` — the condition is
+    // **last**, unlike the WAT text form. Passing it first silently produced a
+    // capacity of 0 and every `push` trapped: measured.
+    let capacity = module.select(
+      module.local_get(lengthLocal, TypeRef.I32),          // if n > MIN_SIZE
+      module.i32(GC_ARRAY_MIN_SIZE),                       // else the floor
+      module.binary(BinaryOp.GtU32, module.local_get(lengthLocal, TypeRef.I32),
+        module.i32(GC_ARRAY_MIN_SIZE))
+    );
+    stmts.push(module.struct_new(module.heapType(classTypeRef), [
+      module.i32(gcBrandOf(classInstance)),
+      module.array_new(module.heapType(arrayTypeRef), capacity, this.makeFieldZero(element)),
+      module.local_get(lengthLocal, TypeRef.I32)
+    ]));
+    this.currentType = classInstance.type;
+    return module.block(null, stmts, classTypeRef);
+  }
+
+  /**
+   * `a.length` on a GC `Array<T>`: **field `length_`, never `array.len`.**
+   *
+   * This is how capacity stays unobservable. Capacity lives in the backing array;
+   * the used count lives in the struct. Every read, write and length goes through
+   * `length_`, so a capacity-8 array holding 3 elements is indistinguishable from a
+   * capacity-3 one — which is the reason a separate field exists at all.
+   */
+  private compileGcDynamicArrayLength(ref: ExpressionRef, classTypeRef: TypeRef): ExpressionRef {
+    return this.module.struct_get(
+      this.module.heapType(classTypeRef), GC_ARRAY_LENGTH_INDEX, ref, TypeRef.I32
+    );
+  }
+
+  /** The backing array out of the struct. */
+  private gcDynamicArrayData(ref: ExpressionRef, classTypeRef: TypeRef, element: Type): ExpressionRef {
+    return this.module.struct_get(
+      this.module.heapType(classTypeRef), GC_ARRAY_DATA_INDEX, ref,
+      this.module.arrayTypeOf(element)
+    );
+  }
+
+  /**
+   * The AS `Type` for a backing array of `element` — `StaticArray<element>`.
+   *
+   * `StaticArray<T>`'s `toRef` is `(ref null (array (mut T)))`, exactly the type
+   * this struct's `data` field carries, so its `Type` is the one thing the compiler
+   * can hand `getTempLocal` for a correctly-typed slot — there is no AS-side `Type`
+   * for a bare wasm array otherwise.
+   */
+  private gcBackingArrayType(element: Type): Type {
+    let arrayClass = this.resolver.resolveClass(this.program.staticArrayPrototype, [ element ]);
+    assert(arrayClass != null);
+    return assert(arrayClass).type;
+  }
+
+  /** The range check both `a[i]` and `a[i] = v` use: `u32(i) >= u32(length_)`. */
+  private makeGcDynamicArrayBoundsCheck(
+    indexLocal: i32, refLocal: i32, classTypeRef: TypeRef
+  ): ExpressionRef {
+    return this.module.if(
+      this.module.binary(BinaryOp.GeU32, this.module.local_get(indexLocal, TypeRef.I32),
+        this.compileGcDynamicArrayLength(
+          this.module.local_get(refLocal, classTypeRef), classTypeRef)),
+      this.makeStaticAbort(this.ensureStaticString("Index out of range"),
+        this.currentFlow.sourceFunction.identifierNode)
+    );
+  }
+
+  /**
+   * `a[i]` on a GC `Array<T>`: a range check against **`length_`**, then
+   * `array.get data[i]`.
+   *
+   * Against the used count, not the capacity — that is the second half of keeping
+   * capacity invisible, and the same unsigned compare the stdlib's `__get` uses, so
+   * a negative index is out of range without a second test.
+   */
+  private compileGcDynamicArrayGet(
+    targetExpression: Expression,
+    indexExpression: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let indexLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(targetExpression, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(indexLocal,
+      this.compileExpression(indexExpression, Type.i32, Constraints.ConvImplicit), false));
+    if (!flow.is(FlowFlags.UncheckedContext)) {
+      stmts.push(this.makeGcDynamicArrayBoundsCheck(indexLocal, refLocal, classTypeRef));
+    }
+    stmts.push(module.array_get(module.heapType(arrayTypeRef),
+      this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+      module.local_get(indexLocal, TypeRef.I32), element.toRef()));
+    this.currentType = element;
+    return module.block(null, stmts, element.toRef());
+  }
+
+  /** `a[i] = v`: range check against `length_`, then `array.set data[i] v`. */
+  private compileGcDynamicArraySet(
+    targetExpression: Expression | null,
+    indexExpression: Expression | null,
+    targetType: Type,
+    element: Type,
+    valueExpr: ExpressionRef,
+    tee: bool
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let indexLocal = flow.getTempLocal(Type.i32).index;
+    let valueLocal = flow.getTempLocal(element).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(assert(targetExpression), targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(indexLocal,
+      this.compileExpression(assert(indexExpression), Type.i32, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(valueLocal, valueExpr, element.isManaged));
+    if (!flow.is(FlowFlags.UncheckedContext)) {
+      stmts.push(this.makeGcDynamicArrayBoundsCheck(indexLocal, refLocal, classTypeRef));
+    }
+    stmts.push(module.array_set(module.heapType(arrayTypeRef),
+      this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+      module.local_get(indexLocal, TypeRef.I32), module.local_get(valueLocal, element.toRef())));
+    if (tee) stmts.push(module.local_get(valueLocal, element.toRef()));
+    this.currentType = tee ? element : Type.void;
+    return module.block(null, stmts, tee ? element.toRef() : TypeRef.None);
+  }
+
+  /**
+   * `a.push(v)`: grow when full, then store at `length_` and increment it.
+   *
+   * **Growth is 2× with a `MIN_SIZE` floor, via `array.copy`.** The old elements are
+   * copied into the new array, `data` is replaced, and the *struct* — therefore the
+   * array's identity — is unchanged. That identity stability is why `Array` is a
+   * struct holding a reference rather than being a wasm array: a wasm array cannot
+   * grow, so a push would have to replace the array object wherever a caller held
+   * it.
+   */
+  private compileGcDynamicArrayPush(
+    receiver: Expression,
+    value: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let valueLocal = flow.getTempLocal(element).index;
+    let lenLocal = flow.getTempLocal(Type.i32).index;
+    let newLocal = flow.getTempLocal(this.gcBackingArrayType(element)).index;
+    let capLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(receiver, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(valueLocal,
+      this.compileExpression(value, element, Constraints.ConvImplicit), element.isManaged));
+    stmts.push(module.local_set(lenLocal,
+      this.compileGcDynamicArrayLength(module.local_get(refLocal, classTypeRef), classTypeRef), false));
+
+    // if (length_ == array.len data) { cap = len(data); new = array.new(max(cap<<1,
+    //                                 MIN_SIZE)); copy; data = new }
+    let grow = module.block(null, [
+      module.local_set(capLocal, module.array_len(this.gcDynamicArrayData(
+        module.local_get(refLocal, classTypeRef), classTypeRef, element)), false),
+      module.local_set(newLocal, module.array_new(module.heapType(arrayTypeRef),
+        module.select(
+          module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)),
+          module.i32(GC_ARRAY_MIN_SIZE),
+          module.binary(BinaryOp.GtU32,
+            module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)),
+            module.i32(GC_ARRAY_MIN_SIZE))),
+        this.makeFieldZero(element)), false),
+      module.array_copy(module.local_get(newLocal, arrayTypeRef), module.i32(0),
+        this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+        module.i32(0), module.local_get(capLocal, TypeRef.I32)),
+      module.struct_set(module.heapType(classTypeRef), GC_ARRAY_DATA_INDEX,
+        module.local_get(refLocal, classTypeRef), module.local_get(newLocal, arrayTypeRef))
+    ], TypeRef.None);
+    stmts.push(module.if(
+      module.binary(BinaryOp.EqI32, module.local_get(lenLocal, TypeRef.I32),
+        module.array_len(this.gcDynamicArrayData(
+          module.local_get(refLocal, classTypeRef), classTypeRef, element))),
+      grow
+    ));
+
+    stmts.push(module.array_set(module.heapType(arrayTypeRef),
+      this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+      module.local_get(lenLocal, TypeRef.I32), module.local_get(valueLocal, element.toRef())));
+    // `push` answers the new length, as the stdlib's does.
+    stmts.push(module.local_set(lenLocal,
+      module.binary(BinaryOp.AddI32, module.local_get(lenLocal, TypeRef.I32), module.i32(1)), false));
+    stmts.push(module.struct_set(module.heapType(classTypeRef), GC_ARRAY_LENGTH_INDEX,
+      module.local_get(refLocal, classTypeRef), module.local_get(lenLocal, TypeRef.I32)));
+    stmts.push(module.local_get(lenLocal, TypeRef.I32));
+    this.currentType = Type.i32;
+    return module.block(null, stmts, TypeRef.I32);
+  }
+
+  /** `a.pop()`: `length_--`, then the element that was last. */
+  private compileGcDynamicArrayPop(
+    receiver: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let lenLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(receiver, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(lenLocal,
+      this.compileGcDynamicArrayLength(module.local_get(refLocal, classTypeRef), classTypeRef), false));
+    // An empty array cannot be popped: the stdlib's `pop` would return a hole, so
+    // throwing is the honest equivalent and matches `__get`'s out-of-range.
+    stmts.push(module.if(
+      module.binary(BinaryOp.EqI32, module.local_get(lenLocal, TypeRef.I32), module.i32(0)),
+      this.makeStaticAbort(this.ensureStaticString("Index out of range"),
+        this.currentFlow.sourceFunction.identifierNode)
+    ));
+    stmts.push(module.struct_set(module.heapType(classTypeRef), GC_ARRAY_LENGTH_INDEX,
+      module.local_get(refLocal, classTypeRef),
+      module.binary(BinaryOp.SubI32, module.local_get(lenLocal, TypeRef.I32), module.i32(1))));
+    stmts.push(module.array_get(module.heapType(arrayTypeRef),
+      this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+      module.binary(BinaryOp.SubI32, module.local_get(lenLocal, TypeRef.I32), module.i32(1)),
+      element.toRef()));
+    this.currentType = element;
+    return module.block(null, stmts, element.toRef());
+  }
+
   /**
    * `new StaticArray<T>(n)` as `array.new $Elem (n) (zero)`.
    *

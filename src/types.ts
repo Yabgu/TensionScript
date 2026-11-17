@@ -216,7 +216,13 @@ export function setGcClassesEnabled(enabled: bool): void {
  */
 export function isGcClass(cls: Class): bool {
   if (!gcClassesEnabled) return false;
-  if (cls.internalName.startsWith("~lib/")) return false;
+  if (cls.internalName.startsWith("~lib/")) {
+    // **One exception, and it is the whole standard library's `Array`.** A dynamic
+    // `Array<T>` gets a compiler-synthesised GC layout (`gcDynamicArrayElementOf`),
+    // so it must be a GC struct — while `String`, the `TypedArray`s and everything
+    // else in `~lib/` keep the pointer ABI until their own rounds.
+    return cls.prototype == cls.program.arrayPrototype;
+  }
   let base = cls.base;
   // `implicitlyExtendsObject` distinguishes "extends nothing, so the resolver
   // gave it `Object`" from an actual `extends Object` in the source. The former
@@ -229,6 +235,42 @@ export function isGcClass(cls: Class): bool {
   }
   return true;
 }
+
+/**
+ * The element type when `type` is a **dynamic** `Array<T>` emitted on the GC heap,
+ * else `null`.
+ *
+ * `Array` grows, and the glue has no `array.grow`, so it cannot *be* a wasm array.
+ * Its GC layout is a small struct the compiler synthesises — `{ <brand>, data:
+ * (mut (ref null (array (mut T)))), length_ i32 }` — where `array.len data` is the
+ * **capacity** and `length_` the used count. The declaration in
+ * `std/assembly/array.ts` is not edited: the layout exists only in the compiler, so
+ * flag-off code is untouched by construction.
+ */
+export function gcDynamicArrayElementOf(type: Type | null): Type | null {
+  if (type == null || !gcClassesEnabled) return null;
+  let cls = type.classReference;
+  if (cls == null) return null;
+  let program = cls.program;
+  if (cls.prototype != program.arrayPrototype) return null;
+  let typeArguments = cls.getTypeArgumentsTo(program.arrayPrototype);
+  if (typeArguments == null || !typeArguments.length) return null;
+  let element = unchecked(typeArguments[0]);
+  return gcArrayElementSupported(element) ? element : null;
+}
+
+/**
+ * The floor the stdlib's `Array` constructor puts on capacity (`MIN_SIZE` in
+ * `std/assembly/array.ts`). Kept here so the synthesised layout and the emitted
+ * constructor agree; a mismatch would be an extra growth on the first push, which
+ * is invisible but wasteful.
+ */
+export const GC_ARRAY_MIN_SIZE: i32 = 8;
+
+/** Struct field index of an `Array<T>`'s backing array in the GC layout. */
+export const GC_ARRAY_DATA_INDEX: i32 = 1;
+/** Struct field index of an `Array<T>`'s used count in the GC layout. */
+export const GC_ARRAY_LENGTH_INDEX: i32 = 2;
 
 /**
  * The element type when `type` is a `StaticArray<T>` emitted as a wasm GC array,
