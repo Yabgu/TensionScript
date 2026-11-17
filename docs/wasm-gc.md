@@ -1667,13 +1667,26 @@ Under the GC ABI a view's payload is linear memory that **nothing traces**. Befo
 which is disabled under the flag (it is the pointer ABI's root set). So a buffer could
 in principle be swept while a live view points into it.
 
-Not exercised by the fixture — Node exposes no forced GC, and a text fixture allocates
-too little to trigger a step — so this is a **named risk, not a measured one**, and the
-harness that would measure it is the one GC1 and GC5 used (`wasmtime` + `Store::gc`,
-in `/tmp`). Three candidate answers, none chosen here: pin the payload for the
-program's lifetime under the flag; give `ArrayBuffer` a GC-struct handle of its own so
-the view's field is a reference again; or make the payload a `(array (mut u8))` for
-victims that need tracing and keep linear memory only for the ones that do not.
+**This was a risk when it was written and it is now measured: the payload is lost.**
+GC18's ladder (`tests/gc/linearheap.ts`) writes two bytes into a heap-held view's
+payload, allocates 200 000 times, and reads back `60` where the source says `49`;
+without the flag the same fixture answers `49`. So the sentence above was right and the
+word "in principle" was too generous.
+
+The mechanism, measured rather than assumed, is in `docs/memory-model.md`: the root set
+under the flag is provably empty in three pieces (`__visit_globals` compiles to a nop,
+`pinSpace` is empty because `__pin` is lowered away, and `visitStack`'s window is
+zero-width because `__stack_pointer == __heap_base` in the emitted module), so every
+`__new` object is garbage at the next collection. It is also worse than a lost payload:
+`DEBUG = true` means a program that allocates enough **traps**, at `itcms.ts:229` in
+the sweep or `tlsf.ts:268` in `allocateBlock`. And the obvious repair — turn the shadow
+stack back on — is not available: `Module#tostack` requires an `i32` and asserts on a
+GC reference.
+
+Three candidate answers, none chosen here: pin the payload for the program's lifetime
+under the flag; give `ArrayBuffer` a GC-struct handle of its own so the view's field is
+a reference again; or make the payload a `(array (mut u8))` for victims that need
+tracing and keep linear memory only for the ones that do not.
 
 ### Result
 

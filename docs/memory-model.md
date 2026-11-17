@@ -59,40 +59,110 @@ integer field so an ABI site passing a raw address is untouched.
 
 **The first half of that reasoning is correct and the second half is not.** See the next section.
 
-## The linear heap is unrooted under the flag — measured
+## The linear heap is unrooted under the flag — and what actually reclaims it
 
-`--wasmGc` drops the shadow stack, because `hasShadowStack = !gcActive && stackSize > 0`. The shadow
-stack was the linear heap's **only** root set. So under the flag:
+`--wasmGc` drops the shadow stack (`src/program.ts:463` builds the `Module` with
+`!options.wasmGc && stackSize > 0`). The shadow stack was the linear heap's **only root
+set**, so under the flag:
 
-- GC structs are traced by wasmtime's collector;
-- anything allocated from linear memory by `__new` has **no root at all**.
+- GC structs are traced by the engine;
+- anything `__new` allocated from linear memory has **no root at all**.
 
-Measured, both from the same source with `--wasmGc`, run on Node:
+Measured, same source, run on Node, `--wasmGc`:
 
 ```
 class Box { v: Uint8Array = new Uint8Array(16); tag: i32 = 0; }
+let box: Box = new Box();                       // heap-held, so the handle is alive
 
-no churn    write 42 and 7, read back                     -> 49   correct
-8 allocs    write 42 and 7, then 8 x Uint8Array(64)       -> 49   correct
-200k allocs write 42 and 7, then 200k x Uint8Array(64)    -> 9    wrong
+write 42 and 7, read back                       -> 49   correct
+write 42 and 7, 8 x Uint8Array(64), read back    -> 49   correct
+write 42 and 7, 200 000 x Uint8Array(64)         -> 60   WRONG (expect 49)
 
-same program without --wasmGc
-200k allocs                                               -> 49   correct
+without --wasmGc, 200 000 allocations           -> 49   correct
 ```
 
-It is pressure-dependent, which is what identifies it as a collection rather than a stale field:
-with no churn and with eight allocations the value is correct, and it is only after enough
-allocation to reach a threshold that it is not. `9` is the churn's own first byte: the payload was
-freed and its memory handed to the next allocation. The view handle is alive and correctly traced;
-the bytes it points at are not.
+`60` is whatever the churn left in the reused bytes; it differs between builds
+(measured 63, 60 and 55 in different runs and optimisation levels), which is the point
+— it is *not* a stale field and it is not a wrong constant, it is bytes that stopped
+belonging to this object. `tests/gc/linearheap.ts` pins all three rungs, and §40 of
+`tests/gc/wasm-gc.js` marks the third as a visible expected failure.
 
-The existing GC suite does not catch this. Every runtime assertion in it reads its values immediately,
-before a threshold is reached, so no collection happens between a write and its read. It is a genuine
-test gap: the suite proves values *current*, never values *live*.
+### What `__new` actually is under the flag
 
-**So no buffer payload may live in linear memory under the flag until the linear heap has a root
-story.** That includes `ArrayBuffer`, which is why it was not migrated: the blocker is not `__new`
-mechanics, it is rooting. Compiling it would have produced modules that run and then corrupt.
+Four questions, each answered by a file or a measurement rather than by reading the
+prose above:
+
+**1. Which runtime.** `--runtime` selects it and the flag does not touch it:
+`cli/index.js:707` resolves `rt/index-${runtime}`, the default is `incremental`, and
+`std/assembly/rt/index-incremental.ts` imports **`tlsf` and `itcms`**. So `__new` is
+`~lib/rt/itcms/__new` (`std/assembly/rt/itcms.ts:260`) under the flag exactly as
+without it.
+
+**2. Is there a collector in the module?** **Yes.** In the `--wasmGc` module:
+`itcms/__new`, `itcms/step`, `itcms/interrupt`, `visitRoots`, `visitStack`,
+`pinSpace`, `threshold`, `tlsf/__alloc`, `tlsf/allocateBlock`. Absent: `__collect`
+(unreferenced, so dropped by `remove-unused-module-elements`), `__link` and
+`__visit_members` (their call sites are lowered to `nop` under the flag, GC12), and
+`__visit_globals` (its body is empty, because every class-typed global is skipped).
+
+**3. What is the wrap region? There is none — and that matters, because the
+obvious reading of the reuse number is wrong.** Apropos of nothing but the number:
+18181 of 200000 allocations return the *first* address under the flag, and 19999 do
+without it. **Reuse is not a flag behaviour**: it is 9–10 % either way, so it
+identifies tlsf's free list after an itcms sweep, not an arena. Two further
+measurements settle it:
+
+- The **period moves with the allocation size** — measured 26 allocations at 16 bytes,
+  11 at 64 — which a fixed-slot arena could not do, and which is what
+  `GRANULARITY = 1024` (`itcms.ts:385`) over tlsf's rounded block sizes predicts.
+- The address sequence is monotone (stride = payload + 32 bytes of object and block
+  overhead) and then **jumps back to a low address** mid-run — a free list restarting,
+  not a rotating cursor.
+
+**4. Why does the flag-off build not grow memory over 200 000 × 64 B?** Because itcms
+reclaims. The reuse period is 25–40 allocations of 96–112 bytes ≈ 2.4–4.5 KB per
+cycle, which is `GRANULARITY 1024` plus `IDLEFACTOR 200` (`itcms.ts:385,391`). Nothing
+else in the tree frees: the flag-off run has the same `tlsf` and the same `itcms`, and
+its only difference is that the shadow stack roots what is still reachable.
+
+### The root set is provably empty, in three pieces
+
+1. **Globals.** `__visit_globals` is compiled from `compileVisitGlobals`
+   (`src/builtins.ts`), which skips every GC-typed global (GC12) and every class-typed
+   global under the flag; with none left its body is `module.nop()`. In the measured
+   module the function is gone entirely.
+2. **Pins.** `pinSpace` is in the module but empty: `__pin` and `__unpin` call sites
+   are lowered to `nop` under the flag (GC12), so nothing is ever pinned.
+3. **The shadow stack.** `visitStack` walks `__stack_pointer .. __heap_base`, and in
+   the emitted module both globals hold the **same constant** — measured
+   `(i32.const 33388)` for each — so the loop body never runs. The compiler does not
+   push managed operands (GC11's `needToStack` gate), and the region is zero-filled
+   anyway.
+
+Three empty pieces make an empty root set, so every `__new` object is garbage at the
+next collection — including one a live handle still points at through `dataStart`.
+
+### It is worse than a lost payload: the collector breaks its own invariants
+
+With `DEBUG = true` compiled in (`std/assembly/rt/common.ts:13`), a program that
+allocates enough **traps**:
+
+```
+p2on.wasm d288 n=100 : assert@229:20   itcms.ts:229  assert(obj.color == i32(!white))  // sweep
+p2on.wasm d288 n=600 : assert@268:14   tlsf.ts:268   assert(blockInfo & FREE)           // allocateBlock
+```
+
+Both are this flag's, and neither is the `__link`/`__pin` lowering: measured, the same
+traps reproduce with those four lowerings disabled. So the allocator and the sweep
+reach a state they consider impossible, and a release build without `DEBUG` would
+corrupt quietly instead.
+
+**And the obvious fix is not available.** Turning the shadow stack back on under the
+flag makes the **compiler** assert: `Module#tostack` (`src/module.ts:1850`) requires
+the value to be `i32`, and a `(ref null $C)` local is not. Measured by forcing
+`useShadowStack` on for a flagged build — `AssertionError at n.tostack`. The shadow
+stack is structurally incompatible with ref-typed locals, so "put the root set back"
+is not a flag; it is the rest of the migration.
 
 ### The three candidate answers
 
@@ -105,6 +175,12 @@ mechanics, it is rooting. Compiling it would have produced modules that run and 
    zero-copy; makes lifetime a discipline that has to be enforced rather than a property.
 
 This choice is architectural and changes the memory model. It is not made here.
+
+Two facts from the section above narrow it. The internal corruption (the sweep and
+free-list asserts) is not merely a lost payload: it means the collector's bookkeeping
+is being applied to a heap whose reachability it can no longer compute, so *any* answer
+that leaves `itcms` running over graphless objects keeps the corruption. And option 3
+is not reachable by toggling the shadow stack — `Module#tostack` refuses a reference.
 
 ## The report separates fixable from permanent
 
