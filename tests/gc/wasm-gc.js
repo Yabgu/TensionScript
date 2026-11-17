@@ -1781,6 +1781,28 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
+// 61 — a refused class is not a migrated class ------------------------------
+//
+// Reproduced before this was fixed: the build failed with AS100 and the coverage line still
+// read `2 of 2 managed classes on the GC ABI`. That is the fourth member of one family —
+// GC14's silent report, GC23's unnamed latch, and now a count that contradicts the exit
+// status. The invariant: **a class the compiler refused is not a class it migrated**, and a
+// program with any refusal may never report full coverage.
+{
+  const built = compile("refused-report.ts", "rr.wasm", ["--wasmGc"]);
+  check("the refusal fires", !built.ok && /AS100/.test(built.output), built.output.split("\n")[0]);
+  const line = (built.output.match(/(?:INFO TS6413|WARNING TS6414): [^\n]*/) ?? [""])[0];
+  check("a build with a refusal does not claim full coverage",
+    !/INFO TS6413: wasm-gc: \d+ of \d+ managed class(es)? on the GC ABI\s*$/.test(built.output) &&
+    !/INFO TS6413: wasm-gc: (\d+) of \1 managed/.test(built.output),
+    line);
+  check("...and the count says it did not migrate",
+    /(?:INFO TS6413|WARNING TS6414): wasm-gc: 0 of \d+/.test(built.output), line);
+  check("...and it names the cause rather than the latch",
+    /holding a reference|holds a GC reference/.test(built.output),
+    line || (built.output.split("\n").find((l) => /AS100/.test(l)) ?? "(none)"));
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);
