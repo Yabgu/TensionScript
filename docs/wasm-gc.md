@@ -1671,7 +1671,10 @@ in principle be swept while a live view points into it.
 now closed in the flag's own allocator.** A view payload no longer lives in a heap that
 anything sweeps: `--wasmGc` allocates from a never-free bump arena, so the read-back in
 `tests/gc/linearheap.ts` answers `49` and no address is ever handed out twice
-(measured: `firstAddressReuse(200000) == 0`, memory 1 → 490 pages). The paragraphs below
+(measured: `firstAddressReuse(200000) == 0`, memory 1 → 295 pages for 200 000 payloads
+of 64 bytes; GC19's 490 was a 400 000-payload measurement and is corrected in
+`docs/memory-model.md`, along with the reservation bug that lost the last 4 bytes of
+every payload until GC20). The paragraphs below
 record the defect and the costing of the real answer, which is still open.
 
 ### The defect as measured (GC18)

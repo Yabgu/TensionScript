@@ -3042,12 +3042,22 @@ export class Compiler extends DiagnosticEmitter {
         bumpStart,
         module.block(null, [
           module.local_set(2, module.global_get(nextName, TypeRef.I32), false), // object
+          // **`(object + TOTAL + size + 15) & -16`, and the `+ 15` is load-bearing.**
+          // `& -16` floors, so without it the reservation lands *below* the payload's
+          // last byte and the next block's header — or its zero-fill — begins inside
+          // this payload. Measured, with the `+ 15` missing: the last 4 bytes of every
+          // payload were zeroed by the very next allocation, and at an 8-byte payload,
+          // where the floored end fell before the payload even began, all 8. A
+          // 16-byte payload with `+ 15` reserves 48 bytes of span for 36 bytes of
+          // contents (20 header + 16 payload), so 12 bytes of slack.
           module.local_set(3,
             module.binary(BinaryOp.AndI32,
               module.binary(BinaryOp.AddI32,
                 module.binary(BinaryOp.AddI32,
-                  module.local_get(2, TypeRef.I32), module.i32(TOTAL)),
-                module.local_get(0, TypeRef.I32)),
+                  module.binary(BinaryOp.AddI32,
+                    module.local_get(2, TypeRef.I32), module.i32(TOTAL)),
+                  module.local_get(0, TypeRef.I32)),
+                module.i32(15)),
               module.i32(-16)), false),                                          // end
           // **Grow to cover `end`, before a single byte is written.** `ge_u` and not
           // `gt_u`: a block that ends exactly on the boundary must still grow, because

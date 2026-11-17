@@ -192,8 +192,36 @@ onto it, so:
 - `__free`, `__collect`, `__visit`, `__visit_members` and `__visit_globals` lower to
   nothing, so the guest collector cannot run over objects it did not allocate;
 - linear memory **grows and is never reclaimed** — 200 000 × 64-byte payloads take
-  `memory.size()` from 1 page to 490, and the same address is never returned twice
-  (`firstAddressReuse(200000) == 0`, measured).
+  `memory.size()` to **295 pages (18 MiB, 96.7 B of span per payload)**, and the same
+  address is never returned twice (`firstAddressReuse(200000) == 0`, measured).
+
+  (GC19 quoted 490 pages here. That was measured after *two* 200 000-allocation loops
+  in one instance — the ladder's churn and then the reuse probe — so it was a number for
+  400 000 payloads, not 200 000. The figure above is one defined workload,
+  `tests/gc/workload`-shaped: exactly 200 000 payloads, in a fresh instance.)
+
+**The reservation arithmetic, and the bug it had.** A block's span is
+`(object + 20 + size + 15) & -16` — header, payload, rounded **up** to the 16-byte
+alignment. GC19 shipped it without the `+ 15`, and `& -16` floors, so the span ended
+*below* the payload's last byte and the next block's header landed inside the payload.
+Measured before the fix, filling a payload with `0xA5` and allocating once:
+
+```
+payload  8 B: survivor mask 0x00000000   the whole payload (the floored end landed
+                                         before the payload even began)
+payload 16 B: survivor mask 0x00000fff   last 4 bytes
+payload 32 B: survivor mask 0x0fffffff   last 4 bytes
+payload 64 B: 60 of 64 bytes
+```
+
+After the fix every one of those is all-ones, and the cost is visible: a 16-byte
+payload's span went from 32 bytes to 48 (overhead 16 → 32 bytes per block). That is
+the delta, and it is also why the 200 000-payload figure moved from 247 to 295 pages.
+
+`tests/gc/linearheap.ts` now fills the **whole** payload with a sentinel and checks a
+mask of survivors, writes the last byte explicitly, and checks two consecutive blocks in
+both directions. Its header says the durable part: a two-byte-front-of-buffer assertion
+is not a liveness proof — what a wrong reservation damages is the tail.
 
 The cost is exact for a sandbox guest whose arena dies with its instance, and the
 change is reversible: it is a stopgap, not the answer below. Measured cost per frame

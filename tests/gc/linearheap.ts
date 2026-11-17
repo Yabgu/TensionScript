@@ -46,11 +46,13 @@ function survivors(size: i32): i32 {
   let b = new Uint8Array(64);
   b[0] = 1;
   let mask: i32 = 0;
-  for (let i = 0, n = a.length; i < n && i < 31; ++i) {
+  // All 32 bits, bit 31 included — which makes the result **negative** as an `i32` and
+  // is why the caller compares it unsigned. Stopping at 31 measured 31 of 32 bytes and
+  // reported `0x7fffffff` for a payload that was intact: a test that cannot express
+  // "byte 31 survived" is not measuring it.
+  for (let i = 0, n = a.length; i < n && i < 32; ++i) {
     if (a[i] == 0xA5) mask |= 1 << i;
   }
-  // Byte 31 cannot fit a 32-bit mask; `honest()` below covers the long payloads by
-  // counting rather than masking.
   return mask;
 }
 

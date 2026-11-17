@@ -1326,8 +1326,12 @@ function xfail(name, condition, reason, detail) {
     const masks = [["p8", 8, 0xFF], ["p16", 16, 0xFFFF], ["p32", 32, 0xFFFFFFFF]];
     for (const [name, size, want] of masks) {
       const got = e[name]();
+      // **Unsigned.** A 32-byte payload's all-ones mask has bit 31 set, so the value is
+      // negative as an `i32` — and comparing it to `0xffffffff` signed reports a
+      // failure for an intact payload. Measured: `0x7fffffff` was the *loop limit*, not
+      // a lost byte.
       check(`every byte of a ${size}-byte payload survives one more allocation`,
-        got === want,
+        (got >>> 0) === want,
         `mask 0x${(got >>> 0).toString(16).padStart(size <= 8 ? 2 : size <= 16 ? 4 : 8, "0")}, expected 0x${(want >>> 0).toString(16)}`);
     }
     // Beyond 31 bytes a mask cannot express the answer, so they are counted.
