@@ -1468,11 +1468,22 @@ answer independent of source order.
 Every behavioural gate on `--wasmGc` goes through `Compiler#gcActive`
 (`options.wasmGc && gcUniform(program)`), and the three representation predicates
 (`gcStringOf`, `gcArrayElementOf`, `gcDynamicArrayElementOf`) answer "pointer" when
-the latch is off. So a non-uniform program is compiled by **exactly** the code the
-flag-off compiler runs, plus one diagnostic. That matters beyond tidiness: the flag's
-other effect is to drop the shadow stack, which is the pointer ABI's only root set for
-a moving collector, so a half-applied flag would be a module with no root set at all.
-`module.useShadowStack` is put back explicitly for that reason.
+the latch is off. So a non-uniform program keeps the **pointer representation** by
+the mechanism, rather than by 14 separate checks. That matters beyond tidiness: the
+flag's other effect is to drop the shadow stack, which is the pointer ABI's only root
+set for a moving collector, so a half-applied flag would be a module with no root set
+at all. `module.useShadowStack` is put back explicitly for that reason.
+
+**"The pointer representation", not "byte-identical to a flag-off build", and the
+difference is measured rather than assumed.** `prepareGcLatch` resolves every declared
+managed class so it can read their fields, and a resolved class gets its `~visit`
+function emitted. On `examples/2d/hello-sprites`: **180,791 bytes** under the flag
+against **178,582** without it, and three `~visit` functions the flag-off build does
+not emit (`Map<string,Frame>`, `AnimationSeries`, `Array<u8>`). They are unreachable —
+nothing else differs, and the module carries no `(struct …)` type — so this is dead
+code rather than a behaviour change. Suppressing visitor emission for classes resolved
+only by the latch is a named TODO: a latch that cannot read fields cannot decide
+anything, so the resolution cannot simply be skipped.
 
 ### The report is gated on the flag, not on the latch
 

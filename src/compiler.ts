@@ -673,9 +673,19 @@ export class Compiler extends DiagnosticEmitter {
    *
    * `--wasmGc` *and* the program-wide latch. Every behavioural gate on the flag goes
    * through this and not through `options.wasmGc`, so a program that stays on the
-   * pointer ABI is compiled by exactly the code the flag-off compiler runs — the
-   * guarantee is the mechanism rather than 14 separate checks that each have to
-   * remember GC14.
+   * pointer ABI is compiled to **the pointer representation by the mechanism** —
+   * rather than by 14 separate checks that each have to remember GC14.
+   *
+   * **Not byte-identical to a flag-off build, and the difference is measured.**
+   * `prepareGcLatch` resolves every declared managed class to read its fields, and a
+   * resolved class gets its `~visit` function emitted. On
+   * `examples/2d/hello-sprites`: 180,791 bytes against the flag-off 178,582, and
+   * three `~visit` functions that the flag-off build does not emit
+   * (`Map<string,Frame>`, `AnimationSeries`, `Array<u8>`). They are unreachable — the
+   * representation is the pointer ABI and the collector walks what it always did — so
+   * this is dead code, not a behaviour change. Suppressing visitor emission for
+   * classes resolved only by the latch is a named TODO; it is not done here because a
+   * latch that cannot read fields cannot decide anything.
    */
   get gcActive(): bool {
     return this.options.wasmGc && gcUniform(this.program);
