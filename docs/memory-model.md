@@ -257,38 +257,123 @@ Because the two kinds of refusal are not the same kind of problem:
 - **`TS6415` — permanent.** Refused by the memory model itself. An inline value field in a GC class
   cannot become migratable without becoming a different type.
 
-A report that lists both together tells a reader every refusal is the same kind of work item, and the
-natural next step from that reading breaks the C ABI. The split is load-bearing.
+A third category is owed and not yet reported: **exempt**. A generated wire record is linear by
+contract and trace-free by measurement (see below), so it is neither a work item nor a rule refusal —
+it is the C ABI, and the report should say so rather than counting it against the program.
 
-## The ceiling, and it reaches the 2D guests
+A report that lists any two of these three together tells a reader every refusal is the same kind of
+work item, and the natural next step from that reading breaks the C ABI. The split is load-bearing.
 
-`--wasmGc` is all-or-nothing: one ineligible class puts the whole program back on the pointer ABI.
+## Graphics handles: who owns what, and why that is the right shape
 
-`examples/2d/hello-sprites` reports:
+The engine-side ownership ruling, in the user's words:
+
+> "Graphic units should own these objects, they must create them and destroy them … the representing
+> values in client naturally has to be non-gc objects. What we can do in wasm client side is only
+> this: we can put them as GC objects holding these unmanaged pointers and they may call graphic
+> interface to free them when they fell from DOM model, and dom model is completely lives in wasm
+> client."
+
+Three tiers, and they are not interchangeable:
+
+- **GPU/native objects** — owned by the graphics unit (the Ogre DSO, `tension-2d`). Only the graphics
+  API knows how they were allocated or how to deallocate them. They are **not represented in wasm
+  memory at all**.
+- **Handles** — an integer naming such an object: a slot index, or an unmanaged pointer. Unmanaged by
+  definition.
+- **DOM objects** — client-side, wasm-resident, GC-eligible. They hold handles as scalars and never
+  the object itself.
+
+The tree already implements exactly this:
 
 ```
-WARNING TS6415: wasm-gc: 6 classes can never be on the GC ABI - 6 holding an inline record
-(a Vec3fValue). A value has no address, so it cannot be a field of a reference type; this is the
-memory model's rule, not a work item.
-
-WARNING TS6414: wasm-gc: no class migrated - 0 of 141 managed classes on the GC ABI - the program
-is not uniform: 1 holding an ArrayBuffer, 1 holding a function value, 1 extending a class that is not
-GC (TaskState), 1 more reason; permanent, not a work item: 6 holding an inline record (a Vec3fValue)
-(and 131 eligible, held back only by the latch)
+Sprite  { scene: Scene; index: i32 }     // `index` is the handle; Scene owns the slot arrays
+Node    { doc: Document; id: i32 }       // every property reads through `Document`
 ```
 
-`Vec3fValue` is a generated wire record (`ogre/generated/ogre.generated.ts`), 12 bytes, three `f32`s,
-declared as a plain `struct` — inline **because the C side needs it inline**. Those six classes can
-never be GC, so this guest can never be uniform, so **the 2D guest path is permanently outside the
-wasm GC arc** in its present shape.
+- `Scene.destroy(index)` marks the slot dead and pushes it to `freeSlots` — **the free list belongs to
+  the owner, not to the handle**. `Document` has the same shape with its slot arrays.
+- `Sprite.isValid()` / `Node.isValid()` are the "does this handle still name a live node" test, which
+  is what makes a stale handle detectable instead of a dangling pointer.
 
-That is a collision between two designs that were each right on their own:
+Why the user chose this, and both reasons are structural rather than stylistic:
 
-- the framework's records are inline values **for the C ABI**;
-- wasm GC uniformity forbids inline values in managed classes.
+1. **Most graphics objects are hints of objects that live in the GPU.** A wasm-side object could only
+   ever describe one; it could never be one.
+2. **The 4 GiB wasm32 limit.** Keeping payloads out of the guest address space is what makes a scene
+   of a given size possible at all.
 
-Nothing in this repository resolves it, and a round spent trying to migrate those six classes would
-break the interop property the records exist for.
+### The consequence for the GC arc
+
+**A DOM class holding an `i32` handle is GC-eligible today**, the same way a function value and an
+`ArrayBuffer` are. The handle is a scalar; nothing about it needs tracing, and nothing about the
+graphics model forbids the class from being a struct. So `Sprite`/`Node`-shaped classes crossing to GC
+is not blocked by the ownership design — it is helped by it, because the design already keeps every
+managed reference out of the class.
+
+## Wire records are linear by contract, and trace-free by measurement
+
+The six classes the report calls permanent are the generated Ogre wire records, and the reason is not
+that they failed to migrate. Every field type in `ogre/generated/ogre.generated.ts`, counted:
+
+```
+43 f32   41 u32   10 Vec3fValue   6 u64   5 QuatfValue   3 i32
+```
+
+**108 fields. Zero references.** Not one `string`, `Array`, `Map`, or class-typed field.
+
+That is by construction, not by luck: a record the C side reads through a pointer must have a layout
+the C struct declaration describes, and a GC reference has no place in such a layout. Every one of
+those records is trace-free — which means it needs no tracing. The collector has no business with it.
+
+So these are not classes that failed a test. They are **linear by contract**, and the honest category
+for them is a third one: **exempt**, not refused.
+
+## The latch should be a partition, not a global switch
+
+`gcUniform` is all-or-nothing: one ineligible class and the whole program keeps the pointer ABI. That
+is what turns six correct wire records into a total block on 135 other classes.
+
+The reported reason for the switch is real — mixing aborts inside Binaryen
+(`isBasic() && "Basic type expected"`) — but that abort is a **crossing** hazard, not a coexistence
+one. It happens when one field is stored two ways: a pointer-shaped class holding a field whose class
+is GC, so the field is an `i32` offset in one layout and a `(ref null $C)` in the other. A linear
+record that holds only scalars and inline values never borrows a GC reference, so there is nothing to
+store two ways.
+
+The partition that follows:
+
+- **ABI-fixed** — a generated wire record, or more generally a class whose fields are all
+  value/scalar and which crosses the C boundary. Stays linear, always, and is not a refusal.
+- **GC** — fields storable, by the existing predicate.
+- **Pointer** — holds something neither representation can carry.
+- **The invariant: a linear class may not hold a GC reference.** That is the only thing that has to
+  be enforced, and it is exactly what Binaryen already refuses.
+
+Under that rule the 2D guest is 135 GC classes and 6 linear ones, and neither borrows the other.
+
+**Not implemented.** Recorded because the current switch is the only reason the arc has a ceiling at
+all, and the ceiling is an artefact of the switch rather than of the design or of the C ABI.
+
+## Lifetime is DOM-driven, never GC-driven
+
+"Call the graphics interface to free them when they fall from the DOM" is not a GC finalizer, and it
+must not be. Two reasons, the first of them hard:
+
+- **The wasm GC proposal has no finalizer.** There is no hook the engine calls when a struct becomes
+  unreachable; a collection happens and returns. A design that depends on the collector telling us
+  cannot be built on wasm GC.
+- **This system has no such hook either.** `__finalize` exists in the itcms runtime
+  (`std/assembly/rt/itcms.ts:249`) and is called on sweep — but under `--wasmGc` the arena lowers
+  `__free` and `__collect` to nothing, so nothing is swept and `__finalize` never fires. And no file
+  under `std/` defines it, so nothing in the framework relies on it today.
+
+So reclamation is an **event in the DOM**, not an observation of the collector: removal from the tree
+calls `destroy`, which returns the slot to the owner's free list. `Scene.destroy` and `Document`'s
+slot arrays are already that shape.
+
+Deterministic release is also the right default for GPU resources independently of wasm: no one wants
+a VRAM allocation's lifetime decided by when a collector happens to run.
 
 ## Why this reaches the async plan
 
