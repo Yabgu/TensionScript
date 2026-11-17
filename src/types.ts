@@ -26,6 +26,8 @@ import {
   ensureType
 } from "./module";
 
+import { DeclarationStatement } from "./ast";
+import { CharCode } from "./util";
 import * as binaryen from "./glue/binaryen";
 import { getMapEntry } from "./util/collections";
 
@@ -195,9 +197,84 @@ export const enum TypeFlags {
  */
 export let gcClassesEnabled: bool = false;
 
+/**
+ * How deep the compiler is inside an **intrinsic** eligibility query.
+ *
+ * The three representation predicates (`gcStringOf`, `gcArrayElementOf`,
+ * `gcDynamicArrayElementOf`) answer "is this type a GC reference", which depends on
+ * the program-wide latch — but an eligibility question ("could this class be a GC
+ * struct?") has to be answered *as if the latch were on*, or every reason it reports
+ * is circular: with the latch off, `String` is not an array, so every class holding
+ * one looks ineligible and the report blames strings for a decision strings did not
+ * cause. Non-zero here means "ignore the latch".
+ */
+let gcIntrinsicDepth: i32 = 0;
+
 /** Sets {@link gcClassesEnabled}. Called once, from the compiler's constructor. */
 export function setGcClassesEnabled(enabled: bool): void {
   gcClassesEnabled = enabled;
+}
+
+/** The subdirectories directly under `std/assembly`, used by {@link isStdlibPath}. */
+const stdSubdirectories: string[] = ["bindings", "rt", "shared", "util"];
+
+/**
+ * Whether a **source file path** names a file of the compiler's own standard
+ * library.
+ *
+ * The shape of the path is not the answer: `~lib/` means "parsed from a library
+ * root", so the standard library, a user package under `node_modules`, and this
+ * repo's own `tension-framework` all sit under it. `std/assembly`'s flat files are
+ * `~lib/array.ts`, its submodules are `~lib/rt/itcms.ts`, and a dependency is
+ * `~lib/<package>/…` — so after the prefix, no slash (or one of the four known
+ * subdirectories) means std.
+ *
+ * **A file path, not a class's internal name.** `~lib/string/TemplateStringsArray`
+ * is a class named `TemplateStringsArray` in `string.ts`, and reading it as a path
+ * made `string` look like a package directory — which classified a standard-library
+ * class as a managed one (measured: it manufactured a `TemplateStringsArray`/`Array`
+ * crossing in a fixture that has no template literal).
+ */
+export function isStdlibPath(internalPath: string): bool {
+  let prefix = "~lib/";
+  if (!internalPath.startsWith(prefix)) return false;
+  let rest = internalPath.substring(prefix.length);
+  let slash = rest.indexOf("/");
+  if (slash < 0) return true;
+  let dir = rest.substring(0, slash);
+  for (let i = 0, k = stdSubdirectories.length; i < k; ++i) {
+    if (unchecked(stdSubdirectories[i]) == dir) return true;
+  }
+  return false;
+}
+
+/** Whether a declaration's source file is the compiler's own standard library. */
+function isStdlibSource(program: Program, declaration: DeclarationStatement | null): bool {
+  if (declaration == null) return false;
+  let source = declaration.range.source;
+  // `program.stdSources` is authoritative: the CLI marks it at the two std parse
+  // sites, before `--lib` merges user libraries into the same file map.
+  if (program.stdSources.has(source)) return true;
+  return isStdlibPath(source.internalPath);
+}
+
+/** Whether `prototype` was declared by the compiler's own standard library. */
+export function isStdlibPrototype(prototype: ClassPrototype): bool {
+  return isStdlibSource(prototype.program, prototype.declaration);
+}
+
+/**
+ * Whether `cls` was declared by the compiler's own standard library.
+ *
+ * **This replaced `internalName.startsWith("~lib/")`, and the difference is the
+ * whole of GC14.** That test answered "was this parsed from a library", which is
+ * *also* true of every class in `tension-framework` and of every example's own
+ * `~lib/`-mounted dependencies — 111 framework classes in a real program. Treating
+ * them as standard library meant the uniformity latch skipped them, so a framework
+ * class holding an `Array<T>` was a mixed-ABI crossing the latch could not see.
+ */
+export function isStdlibClass(cls: Class): bool {
+  return isStdlibSource(cls.program, cls.prototype.declaration);
 }
 
 /**
@@ -223,11 +300,16 @@ export function isGcClass(cls: Class): bool {
   // declared user class is eligible; one `String` field anywhere means the program
   // keeps the pointer ABI, exactly as it does today. `gcUniform` decides once.
   if (!gcUniform(cls.program)) return false;
-  if (cls.internalName.startsWith("~lib/")) {
+  if (isStdlibClass(cls)) {
     // **One exception, and it is the whole standard library's `Array`.** A dynamic
     // `Array<T>` gets a compiler-synthesised GC layout (`gcDynamicArrayElementOf`),
     // so it must be a GC struct — while `String`, the `TypedArray`s and everything
     // else in `~lib/` keep the pointer ABI until their own rounds.
+    //
+    // **And it is conditional on the program, which is GC14's rule.** `Array` is a
+    // GC struct only when the program is uniform *given* that `Array` is one; see
+    // {@link gcUniform} for why that is the fixed point, and for what happens when
+    // it is not — `Array` goes back to the pointer ABI and the whole program with it.
     return cls.prototype == cls.program.arrayPrototype;
   }
   let base = cls.base;
@@ -274,10 +356,13 @@ export function gcMixedAbiReferrer(cls: Class): Class | null {
     let fields = gcFieldsOf(other);
     for (let j = 0, n = fields.length; j < n; ++j) {
       let fieldClass = unchecked(fields[j]).type.classReference;
-      if (fieldClass != null && isGcClass(fieldClass) && fieldClass.program == cls.program) {
-        // Only report when the *field's* class is a GC struct, i.e. a real crossing.
-        if (fieldClass == cls || isGcClass(fieldClass)) return other;
-      }
+      // **`fieldClass == cls`, not "holds some GC class".** The crossing this
+      // refuses is a pointer-shaped class holding a reference to *this* struct
+      // type; `other` holding a different GC class is a crossing of its own and is
+      // refused when that class is typed. The looser test reported the wrong
+      // referrer — measured: typing `Point` blamed `~lib/string/TemplateStringsArray`
+      // for holding an `Array`, which has nothing to do with `Point`.
+      if (fieldClass == cls) return other;
     }
   }
   return null;
@@ -292,20 +377,36 @@ export function gcMixedAbiReferrer(cls: Class): Class | null {
  * is correct — a cycle of otherwise-fine classes becomes one `rec` group, and a
  * cycle containing a bad field is caught when that field's own class is checked.
  */
-function gcStructFieldsSupported(cls: Class): bool {
+function gcStructFieldsSupported(cls: Class, intrinsic: bool = false): bool {
   if (gcStructCheckPath.includes(cls)) return true;
   gcStructCheckPath.push(cls);
   let ok = true;
   let fields = gcFieldsOf(cls);
   for (let i = 0, k = fields.length; i < k; ++i) {
-    if (!gcStructFieldSupported(unchecked(fields[i]).type)) { ok = false; break; }
+    if (!gcStructFieldSupported(unchecked(fields[i]).type, intrinsic)) { ok = false; break; }
   }
   gcStructCheckPath.pop();
   return ok;
 }
 
-/** Whether one field's type can be a wasm struct field in this slice. */
-function gcStructFieldSupported(fieldType: Type): bool {
+/**
+ * Whether one field's type can be a wasm struct field in this slice.
+ *
+ * `intrinsic` asks the question as if the program-wide latch were on, so the answer
+ * is "could this field be a reference" rather than "is it one right now".
+ */
+function gcStructFieldSupported(fieldType: Type, intrinsic: bool = false): bool {
+  if (intrinsic) {
+    ++gcIntrinsicDepth;
+    let ok = gcStructFieldSupportedImpl(fieldType, intrinsic);
+    --gcIntrinsicDepth;
+    return ok;
+  }
+  return gcStructFieldSupportedImpl(fieldType, intrinsic);
+}
+
+/** {@link gcStructFieldSupported}'s body. */
+function gcStructFieldSupportedImpl(fieldType: Type, intrinsic: bool): bool {
   // **A `String` field is storable now.** `String` is an `(array (mut u16))` under
   // the flag, so a class holding one has a reference-typed field like any other and
   // needs no exclusion. Before this round it was the single reason a real program
@@ -313,8 +414,17 @@ function gcStructFieldSupported(fieldType: Type): bool {
   // `gcUniform` is all-or-nothing, one such field put the *whole* module back on the
   // pointer ABI, which is where the parked-frame problem lives.
   if (gcStringOf(fieldType)) return true;
+  // A `StaticArray<T>` is a wasm array under the flag, so a field of that class is a
+  // reference like a `String` field is — and `isGcClass` answers false for it (it is
+  // standard library, and it is not `Array`), so the class test below would call it
+  // unstorable and refuse a class that could migrate.
+  if (gcArrayElementOf(fieldType) != null) return true;
   let cls = fieldType.classReference;
-  if (cls != null) return isGcClass(cls);
+  // The two oracles differ only in whether the program-wide latch applies: the
+  // latch asks "may we", eligibility asks "could we". A query that used the latch
+  // would make every managed class look ineligible whenever the latch said no, and
+  // the refusal reason would be a tautology instead of a cause.
+  if (cls != null) return intrinsic ? isGcEligible(cls) : isGcClass(cls);
   switch (fieldType.kind) {
     case TypeKind.Bool:
     case TypeKind.I8: case TypeKind.I16: case TypeKind.I32: case TypeKind.I64:
@@ -328,54 +438,387 @@ function gcStructFieldSupported(fieldType: Type): bool {
 /** Classes on the current {@link gcStructFieldsSupported} path, for cycles. */
 let gcStructCheckPath: Class[] = [];
 
-/** Per-program answer to "is every declared class GC-eligible?". */
-let gcUniformByProgram: Map<Program, bool> = new Map();
+/**
+ * Could this class be a GC struct, **ignoring the program-wide latch**?
+ *
+ * The latch's question is "is the whole program uniform"; this one is "is this
+ * class itself the obstacle". The coverage report needs the second, because in a
+ * non-uniform program the latch refuses everything and every reason would read
+ * "the program is not uniform" — which names no cause.
+ *
+ * `Array` answers `true` here unconditionally, and that is the optimistic
+ * assumption the fixed point is built on; see {@link gcUniform}.
+ */
+export function isGcEligible(cls: Class): bool {
+  ++gcIntrinsicDepth;
+  let ok = isGcEligibleImpl(cls);
+  --gcIntrinsicDepth;
+  return ok;
+}
+
+/** {@link isGcEligible}'s body, with the intrinsic depth raised by the caller. */
+function isGcEligibleImpl(cls: Class): bool {
+  if (isStdlibClass(cls)) return cls.prototype == cls.program.arrayPrototype;
+  let base = cls.base;
+  if (base != null && !cls.prototype.implicitlyExtendsObject) {
+    if (!isGcEligibleImpl(base)) return false;
+  }
+  return gcStructFieldsSupported(cls, true);
+}
+
+/** One program's latch answer, with the class count it was computed at. */
+class GcUniformAnswer {
+  constructor(
+    /** What the latch answered. */
+    public result: bool,
+    /** `program.nextClassId` when it was computed. */
+    public classCount: i32,
+    /** Whether the answer is final: it was computed before any type was emitted. */
+    public frozen: bool = false
+  ) {}
+}
+
+/** Per-program latch answers, invalidated when the program resolves a new class. */
+let gcUniformByProgram: Map<Program, GcUniformAnswer> = new Map();
+
+/** Programs whose latch is being computed right now (see {@link gcUniform}). */
+let gcUniformComputing: Set<Program> = new Set();
 
 /**
- * Whether **every** declared class in `program` is eligible to be a GC struct.
+ * Whether **every** managed class in `program` could be a GC struct — the latch
+ * that decides whether *anything* is, `Array` included.
  *
- * Computed once, over the classes resolved at that moment. An incomplete scan (a
- * multi-file program whose later files are still unparsed) can only answer `true`
- * too early, and that case is caught by `gcMixedAbiReferrer`'s diagnostic — it
- * cannot produce a mixed-ABI module.
+ * ## The fixed point, and why `Array` is the variable
+ *
+ * `Array<T>` is the only standard-library class whose GC-ness is a choice: a
+ * dynamic array is a compiler-synthesised GC struct when the program is uniform
+ * (GC9), and a linear-memory block otherwise. Write `A` for "`Array` is a GC
+ * struct" and `U(A)` for "every managed class is eligible given `A`".
+ *
+ * - A class with an `Array<T>` field is a `(ref null $Array)` field when `A`, and
+ *   an unstorable pointer-shaped class reference when `¬A`. So `U` is **monotone**:
+ *   `U(A) ⟹ U(¬A)`.
+ * - A monotone predicate on a two-point lattice has a greatest fixed point, and it
+ *   is `U(A)`: if the program can be uniform at all, it can be uniform with `Array`
+ *   migrated, and the choice that leaves more of the program on the GC ABI is the
+ *   one to take.
+ *
+ * So the decision is: **`A` iff `U(A)`** — computed by asking the optimistic
+ * question, which is what {@link isGcEligible} answers for `Array`. `Array`'s own
+ * eligibility is not assumed, it is the assumption whose consequences are then
+ * checked over every class in the program; and every other class's eligibility
+ * *does* participate, through `gcStructFieldsSupported`'s recursion into its fields.
+ *
+ * ## What happens when the answer is `false`
+ *
+ * Nothing in the program is a GC struct — `isGcClass` consults this latch first —
+ * and `Array` is a linear-memory block like everything else. That is the honest
+ * state of the migration on a real program today: it compiles, and it does not
+ * migrate. {@link gcCoverage} is what makes that visible instead of silent.
+ *
+ * ## The cache
+ *
+ * Keyed on `program.nextClassId`, which increments for every class instance the
+ * program resolves, so a class discovered after the latch was first asked forces a
+ * recomputation rather than leaving a stale `true` behind. A recomputation can only
+ * ever flip `true → false` (a new class can only add an obstacle), and that flip
+ * after a type has been emitted is exactly what `gcMixedAbiReferrer` refuses by
+ * name — a diagnostic, never a mixed module.
  */
-function gcUniform(program: Program): bool {
+export function gcUniform(program: Program): bool {
   let known = gcUniformByProgram.get(program);
-  if (known != null) return known;
+  if (known != null && (known.frozen || known.classCount == program.nextClassId)) {
+    return known.result;
+  }
+  // Re-entry means a field's class is being asked about while this program's latch
+  // is still open; answering "yes" is the optimistic side of the same fixed point,
+  // and the enclosing computation is the one that reports.
+  if (gcUniformComputing.has(program)) return true;
+  gcUniformComputing.add(program);
   let result = true;
+  let classes = managedClassesOf(program);
+  for (let i = 0, k = classes.length; i < k; ++i) {
+    if (!isGcEligible(unchecked(classes[i]))) { result = false; break; }
+  }
+  gcUniformComputing.delete(program);
+  gcUniformByProgram.set(program, new GcUniformAnswer(result, program.nextClassId));
+  return result;
+}
+
+/**
+ * Computes the latch **once**, from the classes the program declared, and freezes
+ * it.
+ *
+ * ## Why the freeze, and what it prevents
+ *
+ * `Array`'s representation is program-wide, so it cannot be re-decided after a type
+ * has been emitted: a string literal registered as an `(array (mut u16))` global
+ * cannot become a data-segment pointer when a class discovered later flips the
+ * answer. Measured, before the freeze: `examples/2d/hello-sprites` registered its
+ * literals with the latch optimistic-`true`, a class found later made the program
+ * non-uniform, and `emitGcStringBuilds` aborted inside Binaryen with
+ * `Assertion failed: isRef()` — a crash with no location.
+ *
+ * The compiler therefore resolves every **non-generic** class before emitting
+ * anything (a generic class has no fields until it is instantiated, so it is judged
+ * per instance), and this function turns that set into the final answer.
+ *
+ * A generic instance discovered afterwards can still turn out ineligible. That is
+ * not a crash and not a mixed module: `isGcClass` checks per-class eligibility
+ * *after* the latch, so such a class is simply pointer-shaped, and any GC class that
+ * refers to it is refused by `gcMixedAbiReferrer` with both names. The latch says
+ * "the program may use the GC ABI"; it has never been a claim that every class does.
+ */
+export function prepareGcLatch(program: Program): bool {
+  let known = gcUniformByProgram.get(program);
+  if (known != null && known.frozen) return known.result;
+  gcUniformByProgram.delete(program);
+  let result = gcUniform(program);
+  gcUniformByProgram.set(program, new GcUniformAnswer(result, program.nextClassId, true));
+  return result;
+}
+
+/**
+ * Every **managed** class the program has resolved, standard library excluded.
+ *
+ * Both sources are needed and they overlap: `instancesByName` holds the concrete
+ * classes the compile has resolved (including generic instantiations, whose
+ * prototypes answer nothing on their own), while a flat class declared but not yet
+ * instantiated is reachable only through its prototype. Duplicates are collapsed,
+ * because a class reached both ways is one class and must be counted once.
+ *
+ * `~lib/`-mounted **dependencies** are included: they are managed classes of this
+ * program, and a framework class holding an `Array` is precisely the crossing that
+ * GC13 measured. See {@link isStdlibClass}.
+ */
+function managedClassesOf(program: Program): Class[] {
+  let out = new Array<Class>();
+  let seen = new Set<Class>();
+  let instances = program.instancesByName;
+  for (let _values = Map_values(instances), i = 0, k = _values.length; i < k; ++i) {
+    let element = unchecked(_values[i]);
+    if (element.kind != ElementKind.Class) continue;
+    let cls = <Class>element;
+    if (isStdlibClass(cls) || seen.has(cls)) continue;
+    seen.add(cls);
+    out.push(cls);
+  }
   let elements = program.elementsByDeclaration;
   for (let _values = Map_values(elements), i = 0, k = _values.length; i < k; ++i) {
     let element = unchecked(_values[i]);
     if (element.kind != ElementKind.ClassPrototype) continue;
     let cls = (<ClassPrototype>element).getResolvedInstance("");
-    if (cls == null) continue;
-    if (cls.internalName.startsWith("~lib/")) continue;   // not ours to migrate
-    if (cls.prototype.implicitlyExtendsObject) {
-      if (!gcStructFieldsSupported(cls)) { result = false; break; }
-    } else if (!isGcBaseChainUsable(cls)) {
-      result = false; break;
-    }
+    if (cls == null || isStdlibClass(cls) || seen.has(cls)) continue;
+    seen.add(cls);
+    out.push(cls);
   }
-  gcUniformByProgram.set(program, result);
-  return result;
+  return out;
 }
 
 /**
- * Whether a class's **declared** base chain can be GC structs all the way up.
+ * One program's GC-ABI coverage: what landed on it, what did not, and why.
  *
- * Walks only while a base is *declared*: a class whose base is the implicit
- * `Object` is flat, and `Object` itself is standard library — walking past the
- * implicit edge would reject every class in every program.
+ * A **report**, not a gate. The flag claims to move classes to a different
+ * representation; a flag that claims something must say what it did, and a
+ * migration where that number silently stays at zero is indistinguishable from one
+ * that works.
  */
-function isGcBaseChainUsable(cls: Class): bool {
-  let cursor = cls;
-  while (!cursor.prototype.implicitlyExtendsObject) {
-    let base = cursor.base;
-    if (base == null) return false;
-    if (base.internalName.startsWith("~lib/")) return false;
-    cursor = base;
+export class GcCoverage {
+  /** Managed classes emitted as GC structs. */
+  onGc: i32 = 0;
+  /** Managed classes the program resolved, standard library excluded. */
+  total: i32 = 0;
+  /** Whether the program-wide latch is on (i.e. anything at all could be GC). */
+  uniform: bool = false;
+  /** Distinct **obstacle** reasons, most classes first. */
+  reasons: string[] = [];
+  /** How many classes each obstacle reason accounts for, parallel to {@link reasons}. */
+  counts: i32[] = [];
+  /** Classes with no obstacle of their own, held back by the program-wide latch. */
+  heldBack: i32 = 0;
+  /** Classes whose obstacle is another managed class that is itself not GC. */
+  blocked: i32 = 0;
+
+  /** Records one refused class under `reason`, or as latch-held-back when empty. */
+  refuse(reason: string): void {
+    if (reason.length == 0) {
+      ++this.heldBack;
+      return;
+    }
+    let at = this.reasons.indexOf(reason);
+    if (at < 0) {
+      this.reasons.push(reason);
+      this.counts.push(1);
+    } else {
+      this.counts[at] += 1;
+    }
+    // Keep the list ordered by count, descending: the report shows three and the
+    // zero-coverage warning shows the first, so both must lead with what blocks the
+    // most classes. Insertion-sort-sized lists (a handful of reasons), so the
+    // simplicity is free.
+    for (let i = 1, k = this.reasons.length; i < k; ++i) {
+      let j = i;
+      while (j > 0 && unchecked(this.counts[j]) > unchecked(this.counts[j - 1])) {
+        let reasonAt = unchecked(this.reasons[j]);
+        this.reasons[j] = this.reasons[j - 1];
+        this.reasons[j - 1] = reasonAt;
+        let countAt = unchecked(this.counts[j]);
+        this.counts[j] = this.counts[j - 1];
+        this.counts[j - 1] = countAt;
+        --j;
+      }
+    }
   }
-  return true;
+
+  /** The obstacle covering the most classes, or the latch when there is none. */
+  get dominantReason(): string {
+    if (this.reasons.length) return unchecked(this.reasons[0]);
+    return "the program is not uniform";
+  }
+
+  /** The report line, without the `wasm-gc:` prefix. */
+  toString(): string {
+    let out = this.onGc.toString() + " of " + this.total.toString() +
+      " managed class" + (this.total == 1 ? "" : "es") + " on the GC ABI";
+    if (this.onGc == this.total) return out;
+    let parts = new Array<string>();
+    let shown = this.reasons.length < 3 ? this.reasons.length : 3;
+    for (let i = 0; i < shown; ++i) {
+      parts.push(unchecked(this.counts[i]).toString() + " " + unchecked(this.reasons[i]));
+    }
+    if (this.reasons.length > shown) {
+      let more = this.reasons.length - shown;
+      parts.push(more.toString() + (more == 1 ? " more reason" : " more reasons"));
+    }
+    let detail = parts.length ? ": " + parts.join(", ") : "";
+    let line = out + " - the program is not uniform" + detail;
+    // The transitive and latch counts are **not** reasons. A class blocked because it
+    // holds another class that is blocked names no cause a migration can act on, and
+    // letting it into the reason list would let chains out-count the cause at their
+    // root — which is what makes the list a work order instead of a symptom list.
+    let tails = new Array<string>();
+    if (this.blocked) {
+      tails.push(this.blocked.toString() + " blocked by a class that is not GC");
+    }
+    if (this.heldBack) {
+      tails.push(this.heldBack.toString() + " eligible, held back only by the latch");
+    }
+    if (tails.length) line += " (and " + tails.join(", ") + ")";
+    return line;
+  }
+}
+
+/**
+ * Records why `cls` is not on the GC ABI.
+ *
+ * Three outcomes, and the difference is what makes the report actionable:
+ *
+ * - **A root obstacle** — an unmigrated standard-library type in a field
+ *   (`holding a TypedArray`), or a base class that cannot be GC. This is a work
+ *   item, and the count is how many classes it blocks.
+ * - **Blocked transitively** — a field whose type is another managed class that is
+ *   itself refused. Acting on it is impossible until that class migrates, and
+ *   listing it as a reason would let chains out-count the cause at their root.
+ * - **Held back by the latch** — no obstacle at all; the program-wide answer is no
+ *   because of other classes.
+ */
+function recordGcRefusal(coverage: GcCoverage, cls: Class): void {
+  let base = cls.base;
+  if (base != null && !cls.prototype.implicitlyExtendsObject && !isGcEligible(base)) {
+    coverage.refuse("extending a class that is not GC (" + base.name + ")");
+    return;
+  }
+  let fields = gcFieldsOf(cls);
+  for (let i = 0, k = fields.length; i < k; ++i) {
+    let fieldType = unchecked(fields[i]).type;
+    if (gcStructFieldSupported(fieldType, true)) continue;
+    let fieldClass = fieldType.classReference;
+    if (fieldClass != null && !isStdlibClass(fieldClass)) {
+      ++coverage.blocked;
+      return;
+    }
+    coverage.refuse("holding " + gcFieldLabel(fieldType));
+    return;
+  }
+  ++coverage.heldBack;
+}
+
+/**
+ * Whether `cls` is one of the standard library's typed arrays.
+ *
+ * By **declaring file**, not by base class: in this standard library the nine
+ * typed arrays are declared in `typedarray.ts` and extend `ArrayBufferView`
+ * individually — there is no `TypedArray` class to walk up to (measured: the first
+ * attempt walked bases for a class of that name and matched nothing).
+ */
+function isTypedArrayClass(cls: Class): bool {
+  if (!isStdlibClass(cls)) return false;
+  // A class's internal name is `~lib/<file stem>/<Class>`, so the declaring file is
+  // the path segment before the class name. `source.internalPath` would be the
+  // other way to say it, but it is not what the parser recorded (measured: the
+  // comparison against `~lib/typedarray.ts` matched nothing).
+  let name = cls.prototype.internalName;
+  let prefix = "~lib/typedarray/";
+  return name.startsWith(prefix);
+}
+
+/** `"an "` or `"a "`, so a reason reads as English (`an ArrayBuffer`). */
+function gcArticle(preceding: string): string {
+  if (!preceding.length) return "a ";
+  switch (preceding.charCodeAt(0) | 32) {
+    case CharCode.a:
+    case CharCode.e:
+    case CharCode.i:
+    case CharCode.o:
+    case CharCode.u: return "an ";
+  }
+  return "a ";
+}
+
+/** A short name for a field type in a refusal reason. */
+function gcFieldLabel(fieldType: Type): string {
+  let cls = fieldType.classReference;
+  if (cls != null) {
+    // The nine `TypedArray`s are one cause, not nine: a count split across
+    // `Uint8Array`, `Float64Array` and the rest tells a reader nothing that
+    // "TypedArray" does not, and the migration that fixes them is one item.
+    if (isTypedArrayClass(cls)) return "a TypedArray";
+    let name = cls.name;
+    // The base name, not the instantiation: the reader needs to know it is a `Map`,
+    // and the specific `Map<string,i32>` adds nothing to a reason count.
+    let lt = name.indexOf("<");
+    if (lt > 0) name = name.substring(0, lt);
+    return gcArticle(name) + name;
+  }
+  return gcArticle(fieldType.toString()) + fieldType.toString();
+}
+
+/**
+ * Measures {@link GcCoverage} for `program`.
+ *
+ * Counted over the same set {@link gcUniform} decides on, so the two can never
+ * disagree about which classes exist — and a class that is eligible but not GC
+ * because the latch is off is reported as refused with the latch's own reason, not
+ * as absent.
+ */
+export function gcCoverage(program: Program): GcCoverage {
+  let coverage = new GcCoverage();
+  coverage.uniform = gcUniform(program);
+  let classes = managedClassesOf(program);
+  for (let i = 0, k = classes.length; i < k; ++i) {
+    let cls = unchecked(classes[i]);
+    coverage.total++;
+    if (coverage.uniform && isGcEligible(cls)) {
+      coverage.onGc++;
+    } else if (isGcEligible(cls)) {
+      ++coverage.heldBack; // eligible; only the program-wide answer refuses it
+    } else {
+      ++gcIntrinsicDepth;
+      recordGcRefusal(coverage, cls);
+      --gcIntrinsicDepth;
+    }
+  }
+  return coverage;
 }
 
 /**
@@ -392,8 +835,19 @@ export function gcStringOf(type: Type | null): bool {
   if (type == null || !gcClassesEnabled) return false;
   let cls = type.classReference;
   if (cls == null) return false;
-  let instance = cls.program.stringInstance;
-  return instance != null && cls == instance;
+  let program = cls.program;
+  let instance = program.stringInstance;
+  if (instance == null || cls != instance) return false;
+  // **Conditional on the program-wide latch, and this is the line that makes
+  // `--wasmGc` inert rather than broken on a non-uniform program.** A `String` is a
+  // wasm array *or* a linear-memory block, never both: a pointer-shaped class stores
+  // its `String` field as an `i32` and cannot hold an array reference, so a program
+  // where any class must stay pointer-shaped has to keep strings there too. With the
+  // latch off every predicate here answers "pointer", every GC lowering stands down,
+  // and the module is the flag-off module — which is what the coverage report then
+  // says out loud. An intrinsic query (`gcIntrinsicDepth`) skips the latch: it is
+  // asking what the type *would* be, not what it is.
+  return gcIntrinsicDepth > 0 || gcUniform(program);
 }
 
 /** The leaf `String` operators that need a GC-specific body. */
@@ -465,6 +919,9 @@ export function gcDynamicArrayElementOf(type: Type | null): Type | null {
   let cls = type.classReference;
   if (cls == null) return null;
   let program = cls.program;
+  // Same latch as `gcStringOf`: on a non-uniform program a `Array` is the linear-memory
+  // block it was before this migration, whole and consistent. See `gcUniform`.
+  if (gcIntrinsicDepth == 0 && !gcUniform(program)) return null;
   if (cls.prototype != program.arrayPrototype) return null;
   let typeArguments = cls.getTypeArgumentsTo(program.arrayPrototype);
   if (typeArguments == null || !typeArguments.length) return null;
@@ -499,6 +956,9 @@ export function gcArrayElementOf(type: Type | null): Type | null {
   let cls = type.classReference;
   if (cls == null) return null;
   let program = cls.program;
+  // Same latch as `gcStringOf`: on a non-uniform program a `StaticArray` is the linear-memory
+  // block it was before this migration, whole and consistent. See `gcUniform`.
+  if (gcIntrinsicDepth == 0 && !gcUniform(program)) return null;
   if (cls.prototype != program.staticArrayPrototype) return null;
   let typeArguments = cls.getTypeArgumentsTo(program.staticArrayPrototype);
   if (typeArguments == null || !typeArguments.length) return null;
@@ -641,14 +1101,16 @@ export function gcSubtreeBrands(program: Program, cls: Class): i32[] {
 }
 
 /**
- * {@link isGcClass} for a prototype: no `~lib/`, and no base that is one.
+ * {@link isGcClass} for a prototype: not the standard library, and no base that is.
  *
- * Needed because the subtree walk happens over prototypes, and the same
- * "standard library keeps the pointer ABI" rule has to apply there.
+ * Needed because the subtree walk happens over prototypes, and the same "standard
+ * library keeps the pointer ABI" rule has to apply there. The test is
+ * {@link isStdlibClass}'s path shape, not the `~lib/` prefix: a framework class is
+ * a managed class of this program even though it was parsed from a library root.
  */
 export function isGcPrototype(prototype: ClassPrototype): bool {
   if (!gcClassesEnabled) return false;
-  if (prototype.internalName.startsWith("~lib/")) return false;
+  if (isStdlibPrototype(prototype)) return false;
   let base = prototype.basePrototype;
   if (base != null) return isGcPrototype(base);
   return true;

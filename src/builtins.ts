@@ -3588,7 +3588,7 @@ function builtin_memory_copy(ctx: BuiltinFunctionContext): ExpressionRef {
   // methods write `memory.copy(changetype<usize>(out), changetype<usize>(this) + k,
   // n)` — byte addresses on both sides — and a wasm array has none. Recognised
   // before the operands are compiled, because the *shape* is what identifies it.
-  if (compiler.options.wasmGc) {
+  if (compiler.gcActive) {
     let gcCopy = compiler.compileGcMemoryCopy(operands[0], operands[1], operands[2]);
     if (gcCopy != 0) return gcCopy;
   }

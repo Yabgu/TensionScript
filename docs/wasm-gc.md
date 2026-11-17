@@ -1401,3 +1401,127 @@ at its 5 pre-existing mismatches, flag-off output **byte-identical on all 13
 pre-existing fixtures**, and **no file under `std/assembly` was touched** — every
 change is compiler-side. One commit: the triage and the fixes are the same work,
 because the measurement is what justified the fixes.
+
+## The latch, the fixed point, and a report that cannot lie
+
+GC13 ended on an unusable flag: 0 of 19 real examples compiled under `--wasmGc`,
+and the refusal that stopped them was a *policy* contradiction rather than a missing
+feature. `isGcClass` made `Array<T>` a GC struct unconditionally, while `gcUniform`
+skipped every `~lib/`-mounted class when deciding whether the program could use the
+GC ABI — and a framework class is exactly such a class. So the latch could not see
+the crossing that every real program creates.
+
+Two things had to change, and they are separable.
+
+### `~lib/` is not "the standard library"
+
+`~lib/` means "parsed from a library root". It is true of `std/assembly`, of this
+repo's own `tension-framework`, and of every `node_modules` dependency. Reading it as
+"standard library" made 111 framework classes invisible to the latch.
+
+The test is now the **path shape** (`isStdlibPath`): after `~lib/`, no slash — or one
+of `bindings`, `rt`, `shared`, `util` — means std. A path, not a class's internal
+name: `~lib/string/TemplateStringsArray` is a class named `TemplateStringsArray`
+*declared in* `string.ts`, and reading the internal name as a path made `string` look
+like a package directory (measured: it manufactured a `TemplateStringsArray`/`Array`
+crossing in a fixture that has no template literal). `program.stdSources` is checked
+first, because the CLI marks it at the two std parse sites.
+
+### The latch is a fixed point, and `Array` is its variable
+
+`Array`'s representation is program-wide: a dynamic array is a compiler-synthesised
+GC struct when the program is uniform, and a linear-memory block otherwise. So write
+`A` for "`Array` is a GC struct" and `U(A)` for "every managed class is eligible
+given `A`":
+
+- a class with an `Array<T>` field has a `(ref null $Array)` field when `A`, and an
+  unstorable pointer-shaped class reference when `¬A` — so `U` is **monotone**:
+  `U(A) ⟹ U(¬A)`;
+- a monotone predicate on a two-point lattice has a greatest fixed point, and it is
+  `U(A)`. If the program can be uniform at all, it can be uniform with `Array`
+  migrated.
+
+So the rule is `A` iff `U(A)`, computed optimistically: `isGcEligible` answers `true`
+for `Array` unbounded, and then every class's consequences are checked through
+`gcStructFieldsSupported`'s recursion into its fields. `Array`'s eligibility is not
+*assumed*; it is the assumption whose consequences are verified.
+
+**Frozen, not lazily discovered.** The compiler resolves every non-generic managed
+class before emitting anything (`prepareGcLatch`), because a type emitted as
+`(ref null $C)` cannot be re-decided afterwards. Measured before the freeze:
+`hello-sprites` registered its string-literal globals with the latch
+optimistic-`true`, a class found later made the program non-uniform, and
+`emitGcStringBuilds` aborted inside Binaryen with `Assertion failed: isRef()` — a
+crash with no location. A generic instance discovered afterwards can still turn out
+ineligible; that is not a crash and not a mixed module, because `isGcClass` checks
+per-class eligibility after the latch, so such a class is pointer-shaped and any GC
+class referring to it is refused by name.
+
+**Tested as a fixed point, not as an order.** `tests/gc/ordering-late.ts` types an
+`Array<i32>` at module scope *before* the class that turns out ineligible exists;
+`ordering-early.ts` swaps them. Both must report the identical coverage line — and
+they do (`0 of 1 managed class`, `1 holding a TypedArray`), which is what makes the
+answer independent of source order.
+
+### When the latch is off, the flag is inert rather than broken
+
+Every behavioural gate on `--wasmGc` goes through `Compiler#gcActive`
+(`options.wasmGc && gcUniform(program)`), and the three representation predicates
+(`gcStringOf`, `gcArrayElementOf`, `gcDynamicArrayElementOf`) answer "pointer" when
+the latch is off. So a non-uniform program is compiled by **exactly** the code the
+flag-off compiler runs, plus one diagnostic. That matters beyond tidiness: the flag's
+other effect is to drop the shadow stack, which is the pointer ABI's only root set for
+a moving collector, so a half-applied flag would be a module with no root set at all.
+`module.useShadowStack` is put back explicitly for that reason.
+
+### The report is gated on the flag, not on the latch
+
+The first version called `reportGcCoverage()` inside `if (this.gcActive)` — which is
+false in exactly the case the report exists to explain. Measured on
+`examples/2d/hello-sprites`:
+
+```
+WARNING TS6414: wasm-gc: no class migrated - 0 of 141 managed classes on the GC ABI
+- the program is not uniform: 16 holding a TypedArray, 1 holding an ArrayBuffer,
+1 extending a class that is not GC (TaskState), 1 holding a Map
+(and 12 blocked by a class that is not GC, 110 eligible, held back only by the latch)
+```
+
+before that fix the same command printed nothing, exit 0, 180,791 bytes and zero
+`(struct …)` types.
+
+The report is a **reader** of program state and resolves nothing: `gcFieldsOf` reads
+resolved members, `isStdlibClass` reads a declaration's source, the predicate
+questions run under `gcIntrinsicDepth` so they answer "could this be a reference"
+rather than "is it one". That is deliberate — an earlier attempt at a truthful
+coverage line resolved receivers that compilation had not resolved and moved 14
+compiler fixtures. Nothing is left unresolved to keep it safe, because the latch
+freeze means every class it needs is already resolved. Flag off emits no coverage
+diagnostic of any kind, which keeps the flag-off diagnostic stream — not just the
+bytes — unchanged.
+
+Three counts are kept **out** of the reason list: `blocked` (a field whose type is
+another refused managed class) and `heldBack` (eligible, refused only by the latch).
+Neither names a cause a migration can act on, and letting chains into the reason list
+would let them out-count the cause at their root — which is what makes the list a
+work order rather than a symptom list. The nine typed arrays are likewise one cause
+(`a TypedArray`), not nine.
+
+### What the examples do now
+
+All 19 compile under the flag (exit 0). None migrates: the latch is false on every
+one of them. So the honest statement is `--wasmGc` is currently **inert on real
+programs**, and the report says so on every build instead of leaving a reader to
+discover it in the module. The remaining-work list from GC13 is unchanged in content
+and now has a visible zero to move.
+
+### Result
+
+`test:gc` 181 → **192 checks** (three for the uniform report, three for the
+non-uniform one, two for flag-off silence, three for the ordering proof), and
+`spawnSync` replaces `execFileSync` in the harness so a check can read the
+diagnostics the compiler writes to stderr — measured: `execFileSync` returned stdout
+only, so every coverage assertion read `(no coverage line)` from a build that printed
+one. `-O0..-O3` agree on every GC fixture, `test:compiler` stays at its five
+pre-existing mismatches, flag-off output is **byte-identical on all 15 fixtures that
+predate this round**, and no file under `std/assembly` was touched.

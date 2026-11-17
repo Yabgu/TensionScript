@@ -33,7 +33,7 @@
  * into a setter that takes a struct ref; the same defect made every
  * `-O1`/`-O2`/`-O3` build abort inside effect analysis.
  */
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -57,21 +57,28 @@ const imports = {
   },
 };
 
+/**
+ * Compiles with this repo's CLI and returns **both** streams.
+ *
+ * `spawnSync`, not `execFileSync`: the latter hands back stdout on success and
+ * discards stderr, and the compiler writes its diagnostics to stderr. That is fine
+ * for a check that only asks "did it fail", and useless for one that asks "what did
+ * it say" — measured: the coverage assertions saw `(no coverage line)` for a build
+ * that printed one.
+ */
 function compile(entry, out, extraArgs, env) {
   const args = [cli, join(here, entry), "--outFile", join(scratch, out),
     "--textFile", join(scratch, out.replace(/\.wasm$/, ".wat")),
     ...extraArgs];
-  try {
-    return {
-      ok: true,
-      output: execFileSync(process.execPath, args, {
-        encoding: "utf8", stdio: "pipe",
-        env: env ? { ...process.env, ...env } : process.env,
-      }),
-    };
-  } catch (error) {
-    return { ok: false, output: `${error.stdout ?? ""}${error.stderr ?? ""}` };
-  }
+  const result = spawnSync(process.execPath, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: env ? { ...process.env, ...env } : process.env,
+  });
+  return {
+    ok: result.status === 0,
+    output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+  };
 }
 
 function check(name, condition, detail) {
@@ -745,6 +752,81 @@ function check(name, condition, detail) {
     check("a null string is falsy and a present one is truthy",
       instance.exports.probe() === 29,
       `probe() = ${instance.exports.probe()} (expect 29)`);
+  }
+}
+
+// 31 — the coverage report, in all three cases ---------------------------------
+//
+// The flag promises to move managed classes to another representation, so it has to
+// say what it did — and it has to say it in the case that matters, a program where
+// nothing migrated. That case used to be silent because the report sat behind the
+// latch (`--wasmGc && gcUniform`), which is exactly false when coverage is zero:
+// `examples/2d/hello-sprites` compiled to 180,791 bytes with zero struct types and
+// not one diagnostic.
+{
+  // (a) uniform -> INFO 6413, `N of N`.
+  const uniform = compile("coverage-uniform.ts", "covu.wasm", ["--wasmGc"]);
+  check("uniform program reports INFO 6413", /INFO TS6413: wasm-gc: /.test(uniform.output),
+    uniform.output.split("\n").find((l) => /TS641/.test(l)) ?? "(no coverage line)");
+  const uniformLine = (uniform.output.match(/INFO TS6413: wasm-gc: [^\n]*/) ?? [""])[0];
+  check("uniform program says N of N, with N > 1",
+    /\b(\d+) of \1 managed class/.test(uniformLine) && !/\b0 of 0\b/.test(uniformLine),
+    uniformLine);
+  if (uniform.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "covu.wasm")), imports);
+    check("uniform program still answers", instance.exports.probe() === 13);
+  }
+
+  // (b) not uniform -> WARNING 6414, naming the dominant reason.
+  const blocked = compile("coverage.ts", "covb.wasm", ["--wasmGc"]);
+  check("non-uniform program reports WARNING 6414",
+    /WARNING TS6414: wasm-gc: no class migrated - /.test(blocked.output),
+    blocked.output.split("\n").find((l) => /TS641/.test(l)) ?? "(no coverage line)");
+  const blockedLine = (blocked.output.match(/WARNING TS6414: [^\n]*/) ?? [""])[0];
+  check("non-uniform program says 0 of N and names the cause",
+    /0 of \d+ managed class/.test(blockedLine) && /holding an? TypedArray/.test(blockedLine),
+    blockedLine);
+  if (blocked.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "covb.wasm")), imports);
+    check("non-uniform program still answers", instance.exports.reportBlocked() === 3);
+  }
+
+  // (c) flag off -> no coverage diagnostic of any kind, and the same answers.
+  const plain = compile("coverage.ts", "covp.wasm", []);
+  check("flag off: no coverage diagnostic at all", !/TS641[34]/.test(plain.output),
+    plain.output.split("\n").find((l) => /TS641/.test(l)) ?? "(none, as required)");
+  if (plain.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "covp.wasm")), imports);
+    check("flag off: the same answers", instance.exports.reportBlocked() === 3);
+  }
+}
+
+// 32 — the latch is a fixed point, not a discovery order ----------------------
+//
+// `ordering-late.ts` types an `Array<i32>` at module scope *before* the class that
+// turns out ineligible exists; `ordering-early.ts` is the same program with the two
+// swapped. If the answer were decided at the first `isGcClass` query it would be
+// `true` in the first file and flip to `false` after `Array` had been emitted as a
+// GC struct — the mixed module GC10 refuses, and a crash before that refusal
+// existed. Both files must report the *same* line, which is what makes the answer
+// independent of source order.
+{
+  const late = compile("ordering-late.ts", "ordl.wasm", ["--wasmGc"]);
+  const early = compile("ordering-early.ts", "orde.wasm", ["--wasmGc"]);
+  check("both discovery orders compile", late.ok && early.ok,
+    `${late.ok ? "" : late.output.slice(0, 200)} ${early.ok ? "" : early.output.slice(0, 200)}`);
+  const line = (r) => ((r.output.match(/(?:INFO TS6413|WARNING TS6414): [^\n]*/) ?? [""])[0]);
+  check("both discovery orders report the same coverage",
+    line(late).length > 0 && line(late) === line(early),
+    `late: ${line(late)} | early: ${line(early)}`);
+  if (late.ok && early.ok) {
+    const l = (await WebAssembly.instantiate(readFileSync(join(scratch, "ordl.wasm")), imports)).instance;
+    const e = (await WebAssembly.instantiate(readFileSync(join(scratch, "orde.wasm")), imports)).instance;
+    check("both discovery orders answer", l.exports.probe() === 40 && e.exports.probe() === 40,
+      `late=${l.exports.probe()} early=${e.exports.probe()} (expect 40 both)`);
   }
 }
 

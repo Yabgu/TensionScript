@@ -207,6 +207,10 @@ import {
   gcFieldsOf,
   gcArrayElementOf,
   gcStringOf,
+  gcCoverage,
+  gcUniform,
+  prepareGcLatch as prepareGcLatchOf,
+  isStdlibPrototype,
   gcStringOperator,
   GcStringOp,
   gcDynamicArrayElementOf,
@@ -664,13 +668,25 @@ export class Compiler extends DiagnosticEmitter {
     this.shadowStack = new ShadowStackPass(this);
   }
 
+  /**
+   * Whether the GC ABI is in force for this program.
+   *
+   * `--wasmGc` *and* the program-wide latch. Every behavioural gate on the flag goes
+   * through this and not through `options.wasmGc`, so a program that stays on the
+   * pointer ABI is compiled by exactly the code the flag-off compiler runs — the
+   * guarantee is the mechanism rather than 14 separate checks that each have to
+   * remember GC14.
+   */
+  get gcActive(): bool {
+    return this.options.wasmGc && gcUniform(this.program);
+  }
+
   /** Performs compilation of the underlying {@link Program} to a {@link Module}. */
   compile(): Module {
     let options = this.options;
     let module = this.module;
     let program = this.program;
     let resolver = this.resolver;
-    let hasShadowStack = !options.wasmGc && options.stackSize > 0; // implies runtime=incremental
 
     // Register a dummy memory so Binaryen's EffectAnalyzer can read
     // memory.shared on loads/stores emitted during compilation. The real
@@ -681,6 +697,23 @@ export class Compiler extends DiagnosticEmitter {
 
     // initialize lookup maps, built-ins, imports, exports, etc.
     this.program.initialize();
+
+    // **Decide the program's GC ABI now**, before a single type is emitted: which
+    // classes may be GC structs decides whether `Array`, `StaticArray` and `String`
+    // are references or pointers, and that answer cannot change afterwards. See
+    // `Compiler#prepareGcLatch` and `prepareGcLatch` in `types.ts`.
+    if (options.wasmGc) this.prepareGcLatch();
+
+    // **The flag only acts when it migrated something.** `--wasmGc` on a program
+    // that stays on the pointer ABI must produce the flag-off module *exactly*, or
+    // "opt-in" is a lie and — worse — the module is neither representation: the
+    // flag's other effect is to drop the shadow stack, which is the pointer ABI's
+    // only root set for a moving collector. Measured before this: every one of the
+    // 19 examples compiled 19 different bytes with the flag on at 0 % coverage.
+    if (options.wasmGc && !this.gcActive) {
+      module.useShadowStack = options.stackSize > 0; // put back what the flag removed
+    }
+    let hasShadowStack = !this.gcActive && options.stackSize > 0; // implies runtime=incremental
 
     // Binaryen treats all function references as being leaked to the outside world when
     // the module isn't marked as closed-world (see WebAssembly/binaryen#7135). Therefore,
@@ -864,13 +897,29 @@ export class Compiler extends DiagnosticEmitter {
     // start-function assignment of `global.get(~gcstr/N)`, so the literal's own
     // global has to be built before the initialiser that reads it, or the constant
     // is assigned `ref.null` and dereferences as a null pointer on first use.
-    if (this.options.wasmGc) {
+    if (this.gcActive) {
       let literalBuilds = new Array<ExpressionRef>();
       this.emitGcStringBuilds(literalBuilds);
       for (let i = literalBuilds.length - 1; i >= 0; --i) {
         startFunctionBody.unshift(unchecked(literalBuilds[i]));
       }
     }
+
+    // **The coverage report is gated on the flag, not on the latch.** The latch is
+    // `--wasmGc && gcUniform`, so gating on it made the report silent in the one
+    // case it exists to explain: a program that is *not* uniform migrated nothing,
+    // and a reader who asked for `--wasmGc` has to be told that. Measured by the
+    // architect on `examples/2d/hello-sprites`: 180,791 bytes, zero `(struct …)`
+    // types, and not one diagnostic.
+    //
+    // It runs **after** the literal builds above and before the start function is
+    // added, because by then every class the compile will resolve has been resolved
+    // (see `prepareGcLatch`), so the count is final.
+    //
+    // Flag off stays completely silent: this is inside the flag's own branch and
+    // `reportGcCoverage` is never reached, which is what keeps the flag-off output
+    // byte-identical — including its diagnostic stream.
+    if (this.options.wasmGc) this.reportGcCoverage();
 
     let startIsEmpty = !startFunctionBody.length;
     let exportStart = options.exportStart;
@@ -1245,6 +1294,69 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   // files
+
+  /**
+   * Resolves every non-generic class, then freezes the program's GC answer.
+   *
+   * The resolution is the point: a class's *fields* are what make it ineligible, and
+   * they only exist once the class is resolved. A generic one has no fields until it
+   * is instantiated with type arguments, so it is left to `isGcClass`, which judges
+   * each instance — and a late one that turns out ineligible is pointer-shaped and
+   * caught by `gcMixedAbiReferrer` if it crosses, never by a crash.
+   *
+   * Diagnostics are swallowed here: a class that fails to resolve will report the
+   * same error at its real use site, and reporting it twice would be noise.
+   */
+  private prepareGcLatch(): void {
+    let program = this.program;
+    let resolver = this.resolver;
+    let elements = program.elementsByDeclaration;
+    for (let _values = Map_values(elements), i = 0, k = _values.length; i < k; ++i) {
+      let element = unchecked(_values[i]);
+      if (element.kind != ElementKind.ClassPrototype) continue;
+      let prototype = <ClassPrototype>element;
+      if (prototype.typeParameterNodes != null) continue; // judged per instance
+      // **Managed classes only.** Resolving the standard library's own classes here
+      // would drag in ones the program never uses — `TemplateStringsArray` holds an
+      // `Array`, so eagerly resolving it manufactures a crossing out of a template
+      // literal that does not appear in the source. The stdlib's classes are
+      // resolved by use, and a real crossing there is still refused when it happens.
+      if (isStdlibPrototype(prototype)) continue;
+      resolver.resolveClass(prototype, null, new Map(), ReportMode.Swallow);
+    }
+    prepareGcLatchOf(program);
+  }
+
+  /**
+   * Says what `--wasmGc` actually did to this program.
+   *
+   * A report, not a gate: it never fails a build. But a flag that claims to move
+   * managed classes to a different representation has to say how many it moved, and
+   * a migration where that number silently stays at zero is indistinguishable from
+   * one that works. GC13 measured 0 of 19 real examples compiling under the flag;
+   * GC14's rule makes them compile on the pointer ABI instead, and this line is what
+   * stops that from being a silent success.
+   *
+   * Coverage zero with classes present is a **warning** naming the dominant reason,
+   * because "the flag is on and nothing migrated" is the state a reader most needs
+   * to be told, not the state to bury in an informational line.
+   */
+  private reportGcCoverage(): void {
+    let coverage = gcCoverage(this.program);
+    if (coverage.total > 0 && coverage.onGc == 0) {
+      this.warning(
+        DiagnosticCode.wasm_gc_no_class_migrated_0,
+        null,
+        coverage.toString()
+      );
+    } else {
+      this.info(
+        DiagnosticCode.wasm_gc_0,
+        null,
+        coverage.toString()
+      );
+    }
+  }
 
   /** Compiles the file matching the specified path. */
   compileFileByPath(normalizedPathWithoutExtension: string, reportNode: Node): void {
@@ -1633,7 +1745,7 @@ export class Compiler extends DiagnosticEmitter {
         // inlined) and the decorator has nothing left to inline. Refusing it here
         // would make every program that can throw fail to compile under the flag.
         // Flag-off keeps the error: there a string constant *is* a constant.
-        if (this.options.wasmGc && type.classReference != null) {
+        if (this.gcActive && type.classReference != null) {
           global.unset(CommonFlags.Inlined);
         } else {
           this.error(
@@ -6356,7 +6468,7 @@ export class Compiler extends DiagnosticEmitter {
       //
       // Measured: this omission is 2 of the 7 blockers that block 16 of the 18
       // real examples in `examples/` — the highest-leverage site in the tree.
-      if (this.options.wasmGc && arrayType != null) {
+      if (this.gcActive && arrayType != null) {
         let gcCompoundDynamic = gcDynamicArrayElementOf(arrayType);
         if (gcCompoundDynamic != null) {
           return this.compileGcDynamicArraySet(
@@ -7275,7 +7387,7 @@ export class Compiler extends DiagnosticEmitter {
     // **`a.length = n` on a GC `Array<T>`.** The declared setter calls
     // `ensureCapacity`, which is linear-memory code (`__renew`, `store<usize>`), so
     // it cannot be emitted for a wasm-array-backed `Array`.
-    if (this.options.wasmGc && expression.kind == NodeKind.PropertyAccess) {
+    if (this.gcActive && expression.kind == NodeKind.PropertyAccess) {
       let access = <PropertyAccessExpression>expression;
       if (access.property.text == "length") {
         let setLengthType = resolver.resolveExpression(access.expression, flow, Type.auto, ReportMode.Swallow);
@@ -7313,7 +7425,7 @@ export class Compiler extends DiagnosticEmitter {
       //
       // Flag-guarded: the extra `resolveExpression` below must not run in a
       // program that never asked for wasm GC.
-      let gcWriteType = this.options.wasmGc
+      let gcWriteType = this.gcActive
         ? resolver.resolveExpression(elementAccess.expression, flow)
         : null;
       let gcWriteDynamic = gcDynamicArrayElementOf(gcWriteType);
@@ -7945,7 +8057,7 @@ export class Compiler extends DiagnosticEmitter {
     // one that grows — which is the whole reason `Array` is a struct holding a
     // reference rather than a wasm array. Intercepted before resolution, and only
     // for a method call whose receiver is a dynamic `Array` on the GC heap.
-    if (this.options.wasmGc && expression.expression.kind == NodeKind.PropertyAccess) {
+    if (this.gcActive && expression.expression.kind == NodeKind.PropertyAccess) {
       let access = <PropertyAccessExpression>expression.expression;
       let receiverType = this.resolver.resolveExpression(
         access.expression, flow, Type.auto, ReportMode.Swallow
@@ -7978,7 +8090,7 @@ export class Compiler extends DiagnosticEmitter {
 
     // **`charCodeAt` / `at` / `charAt` / `concat` / `==` on a GC `String`.** The
     // stdlib bodies read `dataStart`/`load<u16>`, which a wasm array does not have.
-    if (this.options.wasmGc && expression.expression.kind == NodeKind.PropertyAccess) {
+    if (this.gcActive && expression.expression.kind == NodeKind.PropertyAccess) {
       let strAccess = <PropertyAccessExpression>expression.expression;
       let strReceiver = this.resolver.resolveExpression(
         strAccess.expression, flow, Type.auto, ReportMode.Swallow
@@ -8091,7 +8203,7 @@ export class Compiler extends DiagnosticEmitter {
         // module supplies it (`~lib/rt/itcms/__new` today), so the name is matched
         // on the last segment — measured: a strict `== "__new"` never fired.
         let gcNewName = functionInstance.prototype.internalName;
-        if (this.options.wasmGc &&
+        if (this.gcActive &&
             (gcNewName == "__new" || gcNewName.endsWith("/__new"))) {
           let gcNew = this.compileGcTypedNew(expression);
           if (gcNew != 0) return gcNew;
@@ -8112,7 +8224,7 @@ export class Compiler extends DiagnosticEmitter {
         // `changetype<usize>(…)` of a reference, which would be a diagnostic, and
         // emitting them for their side effects would be wrong — these are pure
         // bookkeeping.
-        if (this.options.wasmGc && (
+        if (this.gcActive && (
           gcNewName == "__link" || gcNewName.endsWith("/__link") ||
           gcNewName == "__pin" || gcNewName.endsWith("/__pin") ||
           gcNewName == "__unpin" || gcNewName.endsWith("/__unpin") ||
@@ -9002,7 +9114,7 @@ export class Compiler extends DiagnosticEmitter {
     // because the engine's tracer is the root set. Without this, a managed
     // operand is handed to `needToStack`, which reads it as an integer constant
     // and aborts on a `ref.null`.
-    if (!this.options.stackSize || this.options.wasmGc) return;
+    if (!this.options.stackSize || this.gcActive) return;
     let module = this.module;
     let operandIndex = 0;
     let thisType = signature.thisType;
@@ -9122,14 +9234,20 @@ export class Compiler extends DiagnosticEmitter {
     // `compileCallExpression`: `a == b` is lowered by `compileCommutativeBinaryOverload`,
     // which calls `makeCallDirect` directly. One check here covers the binary
     // operators, the unary ones, and ordinary `compareImpl(...)` calls.
-    if (this.options.wasmGc && operands != null) {
+    if (this.gcActive && operands != null) {
       let gcName = instance.prototype.internalName;
       let gcParamTypes = instance.signature.parameterTypes;
-      if (gcName == "~lib/util/string/compareImpl") {
+      // **`gcStringOf`, not just the name.** Whether a `String` is a wasm array is
+      // the program's decision (GC14): on a non-uniform program strings are linear
+      // memory, the operands here are `i32`, and these replacements would take a
+      // heap type from a non-reference — `Assertion failed: isRef()` inside
+      // Binaryen. Measured on a program whose only ineligible class holds a `Map`.
+      let gcStringsAreArrays = gcParamTypes.length != 0 && gcStringOf(gcParamTypes[0]);
+      if (gcStringsAreArrays && gcName == "~lib/util/string/compareImpl") {
         this.currentType = Type.i32;
         return this.compileGcStringCompare(operands, gcParamTypes);
       }
-      let gcOp = gcStringOperator(gcName);
+      let gcOp = gcStringsAreArrays ? gcStringOperator(gcName) : null;
       if (gcOp != null) {
         // `currentType` is the *result* type of whatever was just compiled, and an
         // early return here does not pass through the assignment `makeCallDirect`
@@ -12622,7 +12740,7 @@ export class Compiler extends DiagnosticEmitter {
     // an early resolution changes what later resolutions see — measured: it moved
     // 14 compiler fixtures that have nothing to do with arrays. With the flag off
     // this block must not run at all.
-    if (this.options.wasmGc) {
+    if (this.gcActive) {
       let gcLengthReceiver = resolver.resolveExpression(
         expression.expression, flow, Type.auto, ReportMode.Swallow
       );
@@ -13329,7 +13447,7 @@ export class Compiler extends DiagnosticEmitter {
       // into `ensureCapacity`. The post-increment's *result* is the old value, so
       // the store's own value is discarded (`Type.void`) and the answer comes from
       // `tempLocal`, exactly as the dynamic-array arm above does it.
-      if (this.options.wasmGc && arrayType != null) {
+      if (this.gcActive && arrayType != null) {
         let gcPostDynamic = gcDynamicArrayElementOf(arrayType);
         if (gcPostDynamic != null) {
           // **Which `tee` depends on who consumes it.** In statement position
@@ -13785,7 +13903,7 @@ export class Compiler extends DiagnosticEmitter {
       // therefore resolved `Array#__set`, whose `changetype<usize>(this)` cannot
       // exist under the flag. A prefix operator's own value *is* the new one, so
       // the store's value is the expression's value.
-      if (this.options.wasmGc && arrayType != null) {
+      if (this.gcActive && arrayType != null) {
         let gcPreDynamic = gcDynamicArrayElementOf(arrayType);
         if (gcPreDynamic != null) {
           this.currentType = gcPreDynamic;
