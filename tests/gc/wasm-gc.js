@@ -812,13 +812,13 @@ function xfail(name, condition, reason, detail) {
     blocked.output.split("\n").find((l) => /TS641/.test(l)) ?? "(no coverage line)");
   const blockedLine = (blocked.output.match(/WARNING TS6414: [^\n]*/) ?? [""])[0];
   check("non-uniform program says 0 of N and names the cause",
-    /0 of \d+ managed class/.test(blockedLine) && /holding a function value/.test(blockedLine),
+    /0 of \d+ managed class/.test(blockedLine) && /holding an array address/.test(blockedLine),
     blockedLine);
   if (blocked.ok) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, "covb.wasm")), imports);
-    check("non-uniform program still answers", instance.exports.reportBlocked() === 8,
-      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 3 + 5)`);
+    check("non-uniform program still answers", instance.exports.reportBlocked() === 7,
+      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 0 + 7)`);
   }
 
   // (c) flag off -> no coverage diagnostic of any kind, and the same answers.
@@ -828,8 +828,8 @@ function xfail(name, condition, reason, detail) {
   if (plain.ok) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, "covp.wasm")), imports);
-    check("flag off: the same answers", instance.exports.reportBlocked() === 8,
-      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 3 + 5)`);
+    check("flag off: the same answers", instance.exports.reportBlocked() === 7,
+      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 0 + 7)`);
   }
 }
 
@@ -1007,8 +1007,8 @@ function xfail(name, condition, reason, detail) {
     ["an ArrayBuffer", "b: ArrayBuffer = new ArrayBuffer(1);", true],
     ["a Map", "m: Map<i32, i32> = new Map<i32, i32>();", true],
     ["a Set", "s: Set<i32> = new Set<i32>();", true],
-    ["an unmanaged array address", "a: @unmanaged [u32 * 4];", false],
-    ["a function value", "cb: (x: i32) => void = (x: i32): void => {};", false],
+    ["an unmanaged array address", "a: @unmanaged [u32 * 4] = changetype<@unmanaged [u32 * 4]>(0);", false],
+    ["a function value", "cb: (x: i32) => void = (x: i32): void => {};", true],
     ["an inline value array", "v: @inline [u32 * 4];", false, 6415],
   ];
   for (const [label, field, storable, permanentCode] of kinds) {
@@ -1053,33 +1053,37 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
-// 38 — a function-typed field: refused, not asserted --------------------------
+// 38 — a function-typed field is reported AND buildable ----------------------
 //
-// The exact repro from the round's brief, in both forms. `f1` never constructs the
-// class and used to answer `1 of 1 managed class on the GC ABI` — a report that
-// lied. `f2` constructs it and used to kill the compiler. Both must name the cause.
+// GC17's repro, in both forms. `f1` never constructs the class and used to answer
+// `1 of 1 managed class on the GC ABI` — a report that lied, because `f2` (which does
+// construct it) killed the compiler at `gcFieldTypeRef`. Both now hold the same truth:
+// the class is on the GC ABI and an instance of it runs.
 {
-  // `cb` is **initialised**, unlike the brief's repro: an uninitialised field is
-  // `TS2564` under strict property initialisation and fails flag-off too, which would
-  // make the fixture evidence about something else. A closure is the same field kind
-  // and is the shape a program actually writes.
   writeFileSync(join(scratch, "fnfield-never.ts"),
     `class H { cb: (x: i32) => void = (x: i32): void => {}; n: i32 = 0; }\n` +
     `export function run(): i32 { return 1; }\n`);
   writeFileSync(join(scratch, "fnfield-construct.ts"),
-    `class H { cb: (x: i32) => void = (x: i32): void => {}; n: i32 = 0; }\n` +
-    `export function run(): i32 { let h = new H(); return 1; }\n`);
+    `class H { cb: (x: i32) => i32 = (x: i32): i32 => x + 1; n: i32 = 0; }\n` +
+    `export function run(): i32 { let h = new H(); return h.cb(h.n); }\n`);
 
-  for (const [file, what] of [["fnfield-never", "never constructed"], ["fnfield-construct", "constructed"]]) {
+  for (const [file, what, want] of [
+    ["fnfield-never", "never constructed", 1],
+    ["fnfield-construct", "constructed", 1],
+  ]) {
     const built = compile(`${file}.ts`, `${file}.wasm`, ["--wasmGc"]);
-    check(`function field (${what}): no INFO claiming the class is GC`,
-      !/INFO TS6413: wasm-gc: [1-9]/.test(built.output), built.output.split("\n")[0]);
+    check(`function field (${what}): reported on the GC ABI`,
+      /INFO TS6413: wasm-gc: 1 of 1/.test(built.output),
+      (built.output.match(/(?:INFO|WARNING) TS641[34]: [^\n]*/) ?? [""])[0]);
     check(`function field (${what}): no compiler crash`,
       !/AssertionError|gcFieldTypeRef/.test(built.output), built.output.split("\n")[0]);
-    check(`function field (${what}): the refusal names a function value`,
-      /WARNING TS6414: .*holding a function value/.test(built.output),
-      built.output.split("\n").find((l) => /TS6414/.test(l)) ?? "(none)");
-    check(`function field (${what}): it still compiles on the pointer ABI`, built.ok);
+    check(`function field (${what}): it compiles`, built.ok, built.output);
+    if (built.ok) {
+      const { instance } = await WebAssembly.instantiate(
+        readFileSync(join(scratch, `${file}.wasm`)), imports);
+      check(`function field (${what}): and an instance runs`, instance.exports.run() === want,
+        `run() = ${instance.exports.run()} (expect ${want})`);
+    }
   }
 }
 
@@ -1092,22 +1096,22 @@ function xfail(name, condition, reason, detail) {
 {
   writeFileSync(join(scratch, "mixed-reasons.ts"),
     `class ValueHolder { v: @inline [u32 * 4]; }\n` +
-    `class FnHolder { cb: (x: i32) => i32 = (x: i32): i32 => x; }\n` +
-    `export function run(): i32 { let a = new ValueHolder(); let b = new FnHolder(); return 1; }\n`);
+    `class AddrHolder { u: @unmanaged [u32 * 4] = changetype<@unmanaged [u32 * 4]>(0); }\n` +
+    `export function run(): i32 { let a = new ValueHolder(); let b = new AddrHolder(); return 1; }\n`);
   const built = compile("mixed-reasons.ts", "mixr.wasm", ["--wasmGc"]);
   const line = (built.output.match(/WARNING TS6414: [^\n]*/) ?? [""])[0];
   check("the report separates permanent obstacles from fixable ones",
     /permanent, not a work item/.test(line) && /holding a value array/.test(line) &&
-    /holding a function value/.test(line),
+    /holding an array address/.test(line),
     line);
   check("the fixable list leads, the permanent one follows",
-    line.indexOf("holding a function value") < line.indexOf("permanent, not a work item"), line);
+    line.indexOf("holding an array address") < line.indexOf("permanent, not a work item"), line);
   check("permanently refused classes get their own diagnostic (TS6415)",
     /WARNING TS6415: wasm-gc: \d+ class/.test(built.output),
     built.output.split("\n").find((l) => /TS6415/.test(l)) ?? "(none)");
   check("the permanent class is not counted as a fixable reason",
     !/^: 1 holding a value array/.test(line.slice(line.indexOf(": "))) &&
-    /1 holding a function value/.test(line), line);
+    /1 holding an array address/.test(line), line);
 }
 
 // 40 — the ladder, and the whole payload, not its first two bytes ------------
@@ -1267,7 +1271,7 @@ function xfail(name, condition, reason, detail) {
   // emitter for it is what GC21 did not build.
   writeFileSync(join(scratch, "buckets.ts"),
     `class Perm { v: @inline [u32 * 4]; }\n` +
-    `class Fix { u: @unmanaged [u32 * 4]; }\n` +
+    `class Fix { u: @unmanaged [u32 * 4] = changetype<@unmanaged [u32 * 4]>(0); }\n` +
     `class Blocked { p: Perm = new Perm(); }\n` +
     `class Free { x: i32 = 0; }\n` +
     `export function run(): i32 { let a = new Perm(); let b = new Fix(); let c = new Blocked(); let d = new Free(); return 1; }\n`);
@@ -1534,7 +1538,7 @@ function xfail(name, condition, reason, detail) {
   check("the function-value fixture compiles", built.ok, built.output);
   const line = (built.output.match(/(?:INFO TS6413|WARNING TS6414): [^\n]*/) ?? [""])[0];
   check("every class holding a function value is on the GC ABI",
-    /INFO TS6413: wasm-gc: 6 of 6/.test(built.output), line);
+    /INFO TS6413: wasm-gc: 3 of 3/.test(built.output), line);
 
   if (built.ok) {
     const wat = readFileSync(join(scratch, "fv.wat"), "utf8");
@@ -1551,9 +1555,7 @@ function xfail(name, condition, reason, detail) {
     const want = {
       singleCall: 42,     // a function value in a field, called through it
       twoFields: 302,     // two fields, so a wrong index shows
-      capturedEnv: 42,    // an arrow capturing a local, called after its frame returned
-      capturedThis: 42,   // an arrow capturing `this`
-      afterChurn: 42,     // called after 200 000 allocations: the env block survived
+      afterChurn: 42,     // called after 200 000 allocations
       resumeShape: 42,    // `resume!: (s: X) => void`, the shape TaskState declares
     };
     for (const name of Object.keys(want)) {
@@ -1573,10 +1575,10 @@ function xfail(name, condition, reason, detail) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, `fv${level}.wasm`)), imports);
     const e = instance.exports;
-    answers.push([e.singleCall(), e.twoFields(), e.capturedEnv(), e.capturedThis(), e.afterChurn(), e.resumeShape()].join(","));
+    answers.push([e.singleCall(), e.twoFields(), e.afterChurn(), e.resumeShape()].join(","));
   }
   check("functionvalue: -O0..-O3 all agree",
-    new Set(answers).size === 1 && answers[0] === "42,302,42,42,42,42", answers.join(" | "));
+    new Set(answers).size === 1 && answers[0] === "42,302,42,42", answers.join(" | "));
 
   const plain = compile("functionvalue.ts", "fvoff.wasm", []);
   check("the function-value fixture compiles without the flag", plain.ok, plain.output);
@@ -1589,8 +1591,43 @@ function xfail(name, condition, reason, detail) {
       readFileSync(join(scratch, "fvoff.wasm")), imports);
     const e = instance.exports;
     check("flag off: the same answers",
-      e.singleCall() === 42 && e.twoFields() === 302 && e.capturedEnv() === 42 &&
-      e.capturedThis() === 42 && e.afterChurn() === 42 && e.resumeShape() === 42);
+      e.singleCall() === 42 && e.twoFields() === 302 &&
+      e.afterChurn() === 42 && e.resumeShape() === 42);
+  }
+}
+
+// 55 — a capturing closure is refused by name, and says what it would take ----
+//
+// `Function<T>`'s `_env` is an `i32` address because `call_indirect` hands a callee's
+// environment over through an `i32` global. A capturing closure's environment is a heap
+// object — a reference under the GC ABI, with no address for the field. Handling it means
+// `_env` becoming a reference *and* the hand-over becoming ref-typed: `Function<T>`'s
+// layout and the call contract change together, which is a round of its own.
+//
+// Both spellings of "captures" are asserted, because they take different paths into the
+// same wall: an arrow capturing a local (`EnvKind.Struct`) and an arrow capturing `this`
+// (`capturesThis`). The refusal is reported **before** any emission, because the closure
+// transform's synthesized `$Env` class extends `TaskEnv` and has already made the program
+// non-uniform by then — measured: the old failure read "1 extending a class that is not GC
+// (TaskEnv)", which describes the symptom and not the cause.
+{
+  const built = compile("functionvalue-capture.ts", "fvc.wasm", ["--wasmGc"]);
+  check("a capturing closure is refused under the flag", !built.ok, built.output.split("\n")[0]);
+  check("the refusal names the environment and the address field",
+    /a capturing closure under --wasmGc: its environment is a heap object/.test(built.output) &&
+    /`Function<T>`'s `_env` is an `i32` address/.test(built.output),
+    built.output.split("\n").find((l) => /AS100/.test(l)) ?? "(no diagnostic)");
+  check("the refusal says what does work",
+    /A non-capturing function value/.test(built.output),
+    built.output.split("\n").find((l) => /non-capturing/.test(l)) ?? "(none)");
+  // And it is a *flag* restriction: the same source compiles and runs without it.
+  const plain = compile("functionvalue-capture.ts", "fvcoff.wasm", []);
+  check("flag off: the same capturing closures compile and run", plain.ok, plain.output);
+  if (plain.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "fvcoff.wasm")), imports);
+    check("flag off: captured local and captured `this` both answer 42",
+      instance.exports.capturedEnv() === 42 && instance.exports.capturedThis() === 42);
   }
 }
 

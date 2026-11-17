@@ -447,12 +447,39 @@ function gcClassFieldStorable(cls: Class): bool {
   return isGcClass(cls);
 }
 
+/**
+ * Whether a **function-typed field** can be a reference to `Function<T>` here.
+ *
+ * Answered from the *prototype* plus the latch rather than by resolving the wrapper
+ * class, deliberately: this is asked by the coverage report, and GC14's rule is that the
+ * report resolves nothing compilation would not. `Function<T>` is a stdlib GC class
+ * unconditionally (see {@link isStdlibGcClass}), so the question reduces to whether this
+ * program may use the GC ABI at all.
+ */
+export function gcFunctionValueUsable(type: Type): bool {
+  if (!gcClassesEnabled) return false;
+  let signature = type.signatureReference;
+  if (signature == null) return false;
+  if (gcIntrinsicDepth > 0) return true;
+  return gcUniform(signature.program);
+}
+
 /** Whether a field can be stored in a GC struct — `null` when it can. */
 export function gcFieldRefusal(fieldType: Type, field: Property | null): GcFieldRefusal | null {
   // **A buffer view's `buffer` (or a buffer's `dataStart`) is an address**, and an
   // address is a value. Checked first because these fields' *declared* types are the
   // one place the declared type is deliberately not the stored one.
   if (field != null && isLinearBufferField(field)) return null;
+
+  // **A function-typed field.** Its `classReference` is null — a signature type carries
+  // only a `signatureReference` — so every branch below would fall through to the
+  // "no GC representation yet" refusal. It has one now: `Function<T>` is a GC struct of
+  // two scalars, and the field holds a reference to it.
+  if (fieldType.signatureReference != null) {
+    return gcFunctionValueUsable(fieldType)
+      ? null
+      : new GcFieldRefusal(false, "holding a function value");
+  }
 
   let cls = fieldType.classReference;
 
@@ -1319,6 +1346,7 @@ export function isGcPrototype(prototype: ClassPrototype): bool {
     // it), but its prototype reaches this walk whenever a brand test is built over a
     // supertype, so the answer has to be the same one `isGcClass` gives.
     if (prototype == program.arrayBufferInstance.prototype) return true;
+    if (prototype == program.functionPrototype) return true;
     let cls = prototype.getResolvedInstance("");
     if (cls == null) return false;
     if (isGcBufferViewClass(cls)) return true;
@@ -1460,6 +1488,20 @@ function isStdlibGcClass(cls: Class): bool {
   // A buffer view: a synthesised layout, `{ brand, buffer, dataStart, byteLength }`
   // where `buffer` is the linear address of the payload rather than a reference.
   if (isGcBufferViewClass(cls)) return true;
+  // **`Function<T>`, whose two fields are both scalars.** `_index` is a table index and
+  // `_env` an address into the never-free arena, so the struct `{ <brand>, _index, _env }`
+  // is **untraced** — correctly: `_env` points at linear memory nothing traces, and a
+  // reference here would be a lie the collector would act on.
+  //
+  // No synthesised layout is needed, unlike `Array`/`ArrayBuffer`: the declared fields are
+  // already the right shape and `call_indirect` keeps using `_index`. What changes is only
+  // that the *object* is a struct rather than a linear block, so `_index`/`_env` are
+  // reached by `struct.get`/`struct.set` instead of `load`/`store` at an offset — and the
+  // contract `assertFunctionLayout` enforces (`_index` at 0, `_env` at pointer width) is
+  // replaced by the field *indices*, which the type builder fixes.
+  if (cls.prototype == program.functionPrototype) {
+    return gcStructFieldsSupported(cls, true);
+  }
   // **`Map` and `Set`, whose only managed field is an `ArrayBuffer`.** Identity, not
   // shape: their layouts are `{ buckets: ArrayBuffer, bucketsMask, entries: ArrayBuffer,
   // entriesCapacity, entriesOffset, entriesCount }` and the same with `value` only, and a
@@ -2320,6 +2362,12 @@ export class Type {
     if (gcStringOf(this)) return ensureType(this);
 
     if (gcArrayElementOf(this) != null) return ensureType(this);
+
+    // **A function value is a reference to its `Function<T>` struct.** A signature type's
+    // `kind` is `usizeType.kind`, so without this arm `toRef()` answers `I32` for it and
+    // every site that moves a function value — a field's setter signature, a
+    // `struct.new` operand, a local — disagrees with the field it is stored in.
+    if (this.signatureReference != null && gcFunctionValueUsable(this)) return ensureType(this);
 
     if (gcClassesEnabled && this.isInternalReference) {
       let cls = this.classReference;

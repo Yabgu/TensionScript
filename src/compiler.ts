@@ -212,6 +212,7 @@ import {
   prepareGcLatch as prepareGcLatchOf,
   isStdlibPrototype,
   gcStringOperator,
+  gcFunctionValueUsable,
   GcStringOp,
   gcDynamicArrayElementOf,
   GC_ARRAY_DATA_INDEX,
@@ -512,6 +513,15 @@ export const runtimeGlobals = [ "__rtti_base" ];
 const FUNCTION_INDEX_OFFSET: u32 = 0;
 
 /**
+ * The same field by **index**, for the GC path: `Function<T>`'s synthesised struct is
+ * `{ <brand> at 0, _index at 1, _env at 2 }`, so the brand pushes both offsets along by
+ * one. The constant above stays for the linear block, where `_index` really is at 0.
+ */
+const FUNCTION_INDEX_FIELD: u32 = 1;
+/** `_env`'s index in the same struct. */
+const FUNCTION_ENV_INDEX: u32 = 2;
+
+/**
  * The local the closure transform gives a `Struct` closure for the environment
  * it was handed (`docs/closures-plan.md` §6.1). It is the first statement of
  * the function's body, and the prologue below overwrites the zero the
@@ -715,7 +725,22 @@ export class Compiler extends DiagnosticEmitter {
     // classes may be GC structs decides whether `Array`, `StaticArray` and `String`
     // are references or pointers, and that answer cannot change afterwards. See
     // `Compiler#prepareGcLatch` and `prepareGcLatch` in `types.ts`.
-    if (options.wasmGc) this.prepareGcLatch();
+    if (options.wasmGc) {
+      // **A capturing closure is refused here, before anything is emitted.** `_env` is an
+      // `i32` address because `call_indirect` hands a callee's environment over through an
+      // `i32` global, and a capturing closure's environment is a heap object — a reference
+      // under the GC ABI, with no address to put in the field. Handling it means `_env`
+      // becoming a reference *and* the hand-over becoming ref-typed: a change to
+      // `Function<T>`'s layout and to the call contract together.
+      //
+      // Reported up front rather than at the creation site because the closure transform
+      // has already made the program non-uniform by then (its synthesized `$Env` class
+      // extends `TaskEnv`, a pointer-shaped stdlib class), so a check gated on `gcActive`
+      // would never fire — measured: the program reported "1 extending a class that is not
+      // GC (TaskEnv)" with no hint that a closure was the cause.
+      this.refuseCapturingClosures();
+      this.prepareGcLatch();
+    }
 
     // **The flag only acts when it migrated something.** `--wasmGc` on a program
     // that stays on the pointer ABI must produce the flag-off module *exactly*, or
@@ -1320,6 +1345,36 @@ export class Compiler extends DiagnosticEmitter {
    * Diagnostics are swallowed here: a class that fails to resolve will report the
    * same error at its real use site, and reporting it twice would be noise.
    */
+  /**
+   * Reports, once, that a capturing closure cannot be a GC function value.
+   *
+   * One diagnostic per program rather than per closure: the reason is the same for all of
+   * them, and a file with ten arrows would otherwise produce ten copies of it.
+   */
+  private refuseCapturingClosures(): void {
+    // The closure transform records what each function expression's `_env` will mean,
+    // keyed by the expression node (`closure/ir.ts`), because the `FunctionPrototype` is
+    // created later, at compile time, from a *clone* of the declaration. So this asks the
+    // transform's own table rather than the prototypes — measured: every
+    // `prototype.envKind` was still `None` at this point.
+    let infos = envInfoOf();
+    for (let _values = Map_values(infos), i = 0, k = _values.length; i < k; ++i) {
+      let info = unchecked(_values[i]);
+      if (info.kind == EnvKind.None) continue;
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        this.currentFlow != null && this.currentFlow.sourceFunction != null
+          ? this.currentFlow.sourceFunction.identifierNode.range
+          : null,
+        "a capturing closure under --wasmGc: its environment is a heap object, and " +
+        "`Function<T>`'s `_env` is an `i32` address (the `call_indirect` hand-over is an " +
+        "`i32` global). A non-capturing function value — a named function, or a synthesized " +
+        "one like `f$resume` — works."
+      );
+      return;
+    }
+  }
+
   private prepareGcLatch(): void {
     let program = this.program;
     let resolver = this.resolver;
@@ -3686,6 +3741,30 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   // === Table ====================================================================================
+
+  /**
+   * A function value as a **GC struct**: `{ <brand>, _index, _env: 0 }`.
+   *
+   * The static instance `ensureRuntimeFunction` builds is a data segment — a linear block
+   * with the index at offset 0 — and a field holding a function value is now a
+   * `(ref null $Function<T>)`, so the value has to be a struct. Allocating it at the use
+   * site rather than caching one per signature is deliberate: it costs one `struct.new`,
+   * and a cached global would have to be built in `__start` before anything could compare
+   * two function values anyway. Identity comparisons read `_index`, which is the same
+   * table index in every copy — a function value's identity genuinely is an integer.
+   */
+  private makeGcFunctionValue(instance: Function): ExpressionRef {
+    let module = this.module;
+    let rtInstance = assert(this.resolver.resolveClass(
+      this.program.functionPrototype, [ instance.type ]));
+    let typeRef = rtInstance.type.toRef();
+    let heapType = module.heapType(typeRef);
+    return module.struct_new(heapType, [
+      module.i32(gcBrandOf(rtInstance)),
+      module.i32(this.ensureFunctionTableIndex(instance)),
+      module.i32(0) // _env: nothing captured
+    ]);
+  }
 
   /** Ensures that a runtime counterpart of the specified function exists and returns its address. */
   ensureRuntimeFunction(instance: Function): i64 {
@@ -9816,7 +9895,17 @@ export class Compiler extends DiagnosticEmitter {
     // a call and is read twice, which breaks every build at optimizeLevel >= 2,
     // i.e. release. Evaluating the callee before the operands is what the
     // non-trivial case already did.
-    let functionArgLocal = this.currentFlow.getTempLocal(this.options.usizeType);
+    // **Under the flag the callee is a reference**, so it is bound into a local of *its*
+    // type and its two fields are `struct.get`s. `_index` stays an `i32` and `_env` stays
+    // an address, so the table index and the environment hand-over below are unchanged.
+    // The callee's type is the signature's own type, so no expression-type inspection is
+    // needed: a function value is a GC struct exactly when one can be (`gcFunctionValueUsable`).
+    let calleeIsGc = this.gcActive && gcFunctionValueUsable(signature.type);
+    let calleeTypeRef = calleeIsGc ? signature.type.asNullable().toRef() : 0;
+    let functionArgLocal = calleeIsGc
+      ? this.currentFlow.getTempLocal(signature.type)
+      : this.currentFlow.getTempLocal(this.options.usizeType);
+    let calleeHeap = calleeIsGc ? module.heapType(calleeTypeRef) : 0;
 
     // Deliver the callee's environment. An arrow function that captures `this`
     // was created with the receiver of its creating function stored in `_env`,
@@ -9832,13 +9921,17 @@ export class Compiler extends DiagnosticEmitter {
       module.global_get(envGlobal, sizeTypeRef),
       false
     ));
+    let calleeRefForLocal = calleeIsGc ? calleeTypeRef : sizeTypeRef;
     stmts.push(module.global_set(envGlobal,
-      module.load(envBytes, false,
-        module.local_tee(functionArgLocal.index, functionArg, true),
-        sizeTypeRef, envOffset
-      )
+      calleeIsGc
+        ? module.struct_get(calleeHeap, FUNCTION_ENV_INDEX,
+            module.local_tee(functionArgLocal.index, functionArg, true), TypeRef.I32)
+        : module.load(envBytes, false,
+            module.local_tee(functionArgLocal.index, functionArg, true),
+            sizeTypeRef, envOffset
+          )
     ));
-    functionArg = module.local_get(functionArgLocal.index, sizeTypeRef);
+    functionArg = module.local_get(functionArgLocal.index, calleeRefForLocal);
 
     // We might be calling a varargs stub here, even if all operands have been
     // provided, so we must set `argumentsLength` in any case. Inject setting it
@@ -9847,7 +9940,10 @@ export class Compiler extends DiagnosticEmitter {
     let argumentsLength = this.ensureArgumentsLength();
     let functionArgWithVararg = module.block(null, [
       module.global_set(argumentsLength, module.i32(numArguments)),
-      module.load(4, false, functionArg, TypeRef.I32, FUNCTION_INDEX_OFFSET) // ._index
+      // `._index` — a `struct.get` under the flag, a load at offset 0 otherwise.
+      calleeIsGc
+        ? module.struct_get(calleeHeap, FUNCTION_INDEX_FIELD, functionArg, TypeRef.I32)
+        : module.load(4, false, functionArg, TypeRef.I32, FUNCTION_INDEX_OFFSET)
     ], sizeTypeRef);
 
     if (operands) this.operandsTostack(signature, operands);
@@ -10837,10 +10933,22 @@ export class Compiler extends DiagnosticEmitter {
     // function value keeps the static instance with `_env = 0` (plan D6).
     let valueType = this.currentType;
     let expr: ExpressionRef;
+    // **A capturing closure is refused by name under the flag, and it is a design
+    // question rather than a missing case.** `_env` is an `i32` address because
+    // `call_indirect`'s environment hand-over is an `i32` global, and the environment a
+    // capturing closure needs is a heap object — a reference under the GC ABI, with no
+    // address to store. Making `_env` a reference instead changes `Function<T>`'s layout
+    // and the hand-over contract together, which is a round of its own.
+    //
+    // Refused *here* rather than left to fail downstream, so the message names the cause:
+    // otherwise the program is non-uniform for a reason ("extends a class that is not GC
+    // (TaskEnv)") that describes the symptom.
     if (instance.prototype.envKind == EnvKind.Struct) {
       expr = this.makeEnvFunctionValue(instance, assert(creationEnvOf().get(expression)));
     } else if (instance.prototype.capturesThis) {
       expr = this.makeCapturingFunctionValue(instance);
+    } else if (this.gcActive && gcFunctionValueUsable(valueType)) {
+      expr = this.makeGcFunctionValue(instance);
     } else {
       let offset = this.ensureRuntimeFunction(instance); // reports
       expr = this.options.isWasm64
@@ -11292,8 +11400,14 @@ export class Compiler extends DiagnosticEmitter {
           this.currentType = Type.func;
           return module.ref_func(functionInstance.internalName, ensureType(functionInstance.type));
         }
-        let offset = this.ensureRuntimeFunction(functionInstance);
+        // **A function value is a GC struct under the flag**, so a field that holds one
+        // can receive it. Same rule as the declaration path above: the static data
+        // segment is a linear block and a `(ref null $Function<T>)` field cannot take it.
         this.currentType = functionInstance.signature.type;
+        if (this.gcActive && gcFunctionValueUsable(this.currentType)) {
+          return this.makeGcFunctionValue(functionInstance);
+        }
+        let offset = this.ensureRuntimeFunction(functionInstance);
         return this.options.isWasm64
           ? module.i64(i64_low(offset), i64_high(offset))
           : module.i32(i64_low(offset));
@@ -16906,7 +17020,8 @@ export class Compiler extends DiagnosticEmitter {
   makeFieldZero(fieldType: Type): ExpressionRef {
     // `classReference`, not `getClass()` — the latter requires an *internal
     // reference*, and a `B | null` field is a nullable class type.
-    if (isGcReferenceType(fieldType)) {
+    if (isGcReferenceType(fieldType) ||
+        (fieldType.signatureReference != null && gcFunctionValueUsable(fieldType))) {
       return this.module.ref_null(assert(fieldType.nullableType).toRef());
     }
     return this.makeZero(fieldType);

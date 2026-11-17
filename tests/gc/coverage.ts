@@ -10,22 +10,23 @@
 // reports INFO TS6413 `N of N`; this file is not uniform and reports WARNING TS6414
 // naming the cause.
 //
-// The cause here is a **function value**, and it is the last fixable one: `String`,
-// `StaticArray`, `Array`, the typed arrays, `ArrayBuffer`, `Map` and `Set` all have a
-// synthesised GC layout now, so what is left is a field whose representation has not
-// been decided. (A function value could be `ref func` or a table index; that is a design
-// question, not a missing emitter case.)
-class HoldsFunction {
-  cb: (x: i32) => i32 = (x: i32): i32 => x;
+// The cause here is an **`@unmanaged [T * N]` array address**, which is the shape that is
+// fixable and *not* yet emitted: an address is storable in principle (`@unmanaged` is
+// erased and allocates nothing), and the emitter for a fixed-length view is what has not
+// been built. Every class the migration has taken — `String`, `StaticArray`, `Array`, the
+// typed arrays, `ArrayBuffer`, `Map`, `Set`, function values — is eligible now, so the
+// fixable bucket has to name the one that is left.
+class HoldsAddress {
+  view: @unmanaged [u32 * 4] = changetype<@unmanaged [u32 * 4]>(0);
   n: i32 = 0;
 }
 
-class HoldsFunctionToo {
-  other: (x: i32) => i32 = (x: i32): i32 => x + 1;
+class HoldsAddressToo {
+  other: @unmanaged [u32 * 8] = changetype<@unmanaged [u32 * 8]>(0);
 }
 
 export function reportBlocked(): i32 {
-  let a = new HoldsFunction();
-  let b = new HoldsFunctionToo();
-  return a.cb(3) + b.other(4); // 3 + 5
+  let a = new HoldsAddress();
+  let b = new HoldsAddressToo();
+  return a.n + 7; // 7
 }

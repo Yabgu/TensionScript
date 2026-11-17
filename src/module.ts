@@ -35,6 +35,7 @@ import {
   gcStringOf,
   isLinearBufferField,
   isGcArrayBufferClass,
+  gcFunctionValueUsable,
   GC_ARRAYBUFFER_DATA_INDEX,
   GC_ARRAYBUFFER_LENGTH_INDEX,
   gcFieldRefusal
@@ -4226,6 +4227,22 @@ export function ensureType(type: Type): TypeRef {
     if (owner != null) return ensureGcArrayType(owner.program.module, Type.u16);
   }
 
+  // **A function value is a reference to its `Function<T>` struct.** The wrapper is
+  // resolved per signature — the same resolution `getClassOrWrapper` performs wherever a
+  // function value is used — so the type builder has one struct type per signature.
+  if (type.signatureReference != null && gcFunctionValueUsable(type)) {
+    let fnWrapper = type.getClassOrWrapper(type.signatureReference.program);
+    if (fnWrapper != null && isGcClass(fnWrapper)) {
+      // **Always nullable, whatever variant asked.** `Binaryen` derives a `struct.get`
+      // result from the field's own type, which is `(ref null $F)`; a non-nullable
+      // request therefore makes the getter's body and its declared result disagree
+      // (`function body type must match, if function returns` — measured). Nullability
+      // here is also the honest static type: a `(x) => y` field's zero is `ref.null`, and
+      // nothing proves it is assigned before it is read.
+      return ensureClassType(fnWrapper);
+    }
+  }
+
   // **`StaticArray<T>` is a wasm GC array.** Answered here because the array type
   // needs this module's builder cache, and `types.ts` is imported by this file.
   {
@@ -4769,6 +4786,18 @@ function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[], field: Property |
         `${field.name} cannot be emitted: ${refusal.reason}${refusal.permanent ? " (permanent: a value has no address, so it cannot be a field of a reference type)" : ""}. ` +
         `Eligibility said it could be a struct, so the two answers disagree — that is a compiler defect.`
       );
+    }
+  }
+  // **A function-typed field is a reference to its `Function<T>` struct.** The wrapper
+  // class is resolved per signature — the same resolution `getClassOrWrapper` does
+  // wherever a function value is used, so this adds no resolution the compile would not
+  // do anyway — and it is a plain struct of two scalars, so there is no cycle to guard.
+  if (fieldType.signatureReference != null) {
+    let wrapper = fieldType.getClassOrWrapper(fieldType.signatureReference.program);
+    if (wrapper != null && isGcClass(wrapper)) {
+      let slot = gcSlotOf(wrapper, slots);
+      if (slot) return binaryen._BinaryenTypeFromHeapType(slot, true);
+      return ensureClassType(wrapper);
     }
   }
   // **A `StaticArray<T>` field is a reference to a wasm array.** Its class is not a

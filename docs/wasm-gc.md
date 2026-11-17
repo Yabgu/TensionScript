@@ -1955,3 +1955,108 @@ On the guest: `ArrayBuffer` and `Map` drop out of the fixable list, eligible cla
 (holds a function value) and `drive$State` (extends `TaskState`) — plus the six permanent
 `ogre.generated.*` records that hold an inline `Vec3fValue`. Named by measurement, not by
 reading the line.
+
+## Function values as GC structs
+
+`std/assembly/function.ts` declares two fields, and the compiler already treats their
+layout as a contract (`FUNCTION_INDEX_OFFSET = 0`, `assertFunctionLayout` verifying
+`_index` at 0 and `_env` at pointer width wherever an instance is materialised):
+
+```
+Function<T>  { <brand> i32, _index (mut i32), _env (mut i32) }
+```
+
+- **`_index` stays a table index.** `call_indirect` is unchanged: a function value's
+  identity genuinely is an integer and always was, so identity comparison reads the same
+  field it always did.
+- **`_env` stays an address** into the never-free arena. Neither field is a reference, so
+  the struct is **untraced** — correctly, because `_env` points at linear memory nothing
+  traces, and a reference field here would be a lie the collector would act on.
+- **No synthesised layout was needed**, unlike `Array` and `ArrayBuffer`: the declared
+  fields are already the right shape. What changes is that `_index`/`_env` are reached by
+  `struct.get`/`struct.set` rather than `load`/`store` at an offset.
+
+Decided in `isStdlibGcClass` (prototype identity against `program.functionPrototype`), so
+`isGcClass`, `isGcEligible` and `isGcPrototype` cannot disagree.
+
+### What had to change to make a field hold one
+
+Four things, and the third is the one that would have been missed:
+
+1. **A static function value is a `struct.new`, not a data segment.** `ensureRuntimeFunction`
+   builds a linear block with the index at offset 0; a `(ref null $Function<T>)` field
+   cannot take that, so both expression paths now emit
+   `struct.new $Function<T> (brand, index, 0)`. A fresh struct per evaluation is
+   deliberate: it costs one `struct.new`, and identity is `_index`, which is the same
+   table index in every copy.
+2. **`gcFieldRefusal` and `gcFieldTypeRef` learned the signature case.** A function-typed
+   field's `classReference` is **null** — a signature type carries only a
+   `signatureReference` — so every branch in both fell through. The field is storable
+   exactly when `Function<T>` is a GC class (`gcFunctionValueUsable`), and it is emitted as
+   the wrapper class resolved per signature, which is the resolution `getClassOrWrapper`
+   performs wherever a function value is used.
+3. **`Type#toRef` had to answer a reference for a signature type**, or every site that
+   *moves* a function value disagreed with the field it went into: the setter's parameter
+   was `i32` while the field was a `(ref null $F)`. This surfaced as
+   `struct.set value must have the proper type` and `struct.new operand 1 must have
+   proper type`, and the fix is one arm in `toRef` plus one in `ensureType`.
+4. **`makeCallIndirect` reads through `struct.get`**, at field indices 1 and 2 (the brand
+   pushes both offsets along by one), with the callee bound into a local of *its* type.
+   The environment hand-over is unchanged in shape: `_env` is still an `i32` travelling
+   through the same hidden global.
+
+`makeFieldZero` also had to answer `ref.null` for a function-typed field: the constructor's
+`struct.new` was being handed `i32.const 0` for it.
+
+### A capturing closure is refused, and that is a finding rather than a gap
+
+`_env` is an `i32` address, and a capturing closure's environment is a **heap object** —
+a reference under the GC ABI, with no address to put in the field. Handling it means
+`_env` becoming a reference *and* `call_indirect`'s hand-over becoming a ref-typed global:
+`Function<T>`'s layout and the call contract change together.
+
+So it is refused **by name**, once per program, before any emission:
+
+```
+Not implemented: a capturing closure under --wasmGc: its environment is a heap object, and
+`Function<T>`'s `_env` is an `i32` address (the `call_indirect` hand-over is an `i32`
+global). A non-capturing function value — a named function, or a synthesized one like
+`f$resume` — works.
+```
+
+Reported up front rather than at the creation site because the closure transform's
+synthesized `$Env` class extends `TaskEnv` and has already made the program non-uniform by
+then: a check gated on `gcActive` would never fire. Measured: the earlier behaviour was
+"1 extending a class that is not GC (TaskEnv)", which names the symptom.
+
+**The consequence for the environment test:** a non-capturing value's `_env` is `0`, so
+there is no environment block to sweep and "a stored function value survives 200 000
+allocations" tests the handle, not the environment. The environment question is the
+capturing case, and a test cannot exercise a feature that is refused. Stated in the
+fixture rather than papered over. This also matters for the async plan: `f$resume` is a
+top-level synthesized function, so `TaskState.resume` is precisely the shape that does
+work — but any state machine whose *entry* closes over something will need the reference
+`_env` first.
+
+### Result, and the guest's ceiling
+
+`test:gc` 362 → **383 checks**, 0 failures. `test:compiler` stays at its 5 pre-existing
+mismatches. `-O0..-O3` agree on all **21** positive fixtures. Flag-off output is
+**byte-identical on all 25 fixtures and on `hello-sprites`**; nothing under `std/` changed.
+
+`hello-sprites` under the flag:
+
+```
+WARNING TS6414: wasm-gc: no class migrated - 0 of 141 managed classes on the GC ABI
+- the program is not uniform: 1 extending a class that is not GC (TaskState);
+permanent, not a work item: 6 holding an inline record (a Vec3fValue)
+(and 134 eligible, held back only by the latch)
+```
+
+**Function values are gone from the fixable list**, and eligible classes go 133 → **134**.
+The brief expected 135; measured 134, and the difference is one class rather than a count
+to shrug at: `drive$State extends TaskState`, and `TaskState` (a) is a standard-library
+class outside the migrated set and (b) holds `record: TaskRecord`, which is also a stdlib
+carrier. So `TaskState` cannot become a GC struct without `TaskRecord`, and both belong to
+the async runtime — the round the brief put out of scope. **134 of 141 is this round's
+real ceiling**, and 135 needs `TaskState`+`TaskRecord`, not another emitter case.

@@ -53,43 +53,28 @@ export function twoFields(): i32 {
   return t.sum(1); // 101 + 201 = 302
 }
 
-/// An arrow capturing a **local**. The creating frame returns before the call, so the
-/// environment has to outlive it — which is exactly what `_env` is for, and what a bare
-/// table index would break.
-export function capturedEnv(): i32 {
-  let base = 40;
-  let f = (x: i32): i32 => x + base;
-  return f(2); // 42
-}
+// **Capturing closures are refused under the flag** and live in
+// `functionvalue-capture.ts`, which asserts the diagnostic and says why. A
+// non-capturing function value — the shape `TaskState.resume` has — is what this file
+// proves, together with the environment block that a *plain* value never needs.
 
-/// An arrow capturing **`this`**. This is the other environment shape: `_env` holds the
-/// receiver of the creating function rather than a block.
-class Counter {
-  start: i32;
-  constructor(start: i32) { this.start = start; }
-  maker(): (x: i32) => i32 {
-    return (x: i32): i32 => x + this.start;
-  }
-}
-
-export function capturedThis(): i32 {
-  let c = new Counter(40);
-  let f = c.maker();
-  return f(2); // 42
-}
-
-/// A stored function value called after 200 000 allocations. An environment block is
-/// linear memory; the arena is never-free, so it must still be there.
-let stored: (x: i32) => i32 = (x: i32): i32 => x + 1;
+/// A stored function value called after 200 000 allocations.
+///
+/// **`_env` is 0 here, and saying so is the honest part.** A non-capturing value has no
+/// environment block, so there is nothing for a sweep to steal and this rung is about the
+/// *handle* surviving 200 000 allocations rather than about an environment surviving them.
+/// The environment question is the capturing case, which is refused by name this round
+/// (`tests/gc/functionvalue-capture.ts`) — a swept env block cannot be tested through a
+/// feature that does not exist yet.
+function bump(x: i32): i32 { return x + 1; }
+let stored: (x: i32) => i32 = bump;
 
 export function afterChurn(): i32 {
-  let base = 41;
-  stored = (x: i32): i32 => x + base;
   for (let i = 0; i < 200000; ++i) {
     let a = new Uint8Array(64);
     a[0] = <u8>i;
   }
-  return stored(1); // 42
+  return stored(41); // 42
 }
 
 /// The shape `TaskState` declares: `resume!: (state: X) => void`, assigned after
