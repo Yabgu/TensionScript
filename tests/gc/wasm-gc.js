@@ -94,6 +94,29 @@ function check(name, condition, detail) {
   }
 }
 
+/**
+ * A check that is **known to fail**, and says so out loud.
+ *
+ * Used only where a defect is established and the fix is a design decision this
+ * round did not take. Two properties matter and both are enforced here:
+ *
+ * - It is **not skipped**. A quietly disabled test is worse than no test, so the
+ *   line prints `xfail`, the reason travels with it, and the closing line of the
+ *   run names the count.
+ * - It **fails the suite if it starts passing** (`XPASS`), because that means the
+ *   defect is gone and the marking is now a lie.
+ */
+const expectedFailures = [];
+function xfail(name, condition, reason, detail) {
+  if (condition) {
+    console.log(`not ok  XPASS: ${name}\n          expected failure now passes — remove the xfail (${reason})`);
+    ++failures;
+    return;
+  }
+  console.log(`xfail   ${name}${detail ? `\n          ${detail}` : ""}\n          known: ${reason}`);
+  expectedFailures.push(name);
+}
+
 // 1 + 2 --------------------------------------------------------------------
 {
   const built = compile("fixtures.ts", "gc.wasm", ["--wasmGc"]);
@@ -1080,8 +1103,219 @@ function check(name, condition, detail) {
     /1 holding a Map/.test(line), line);
 }
 
+// 40 — the ladder: values must be LIVE, not merely CURRENT --------------------
+//
+// The gap this round closes. Every runtime assertion before this section read its
+// values immediately after writing them, so a collection never fell between a write
+// and its read — the suite proved values *current*. This writes two bytes into a
+// payload held by a module-scope `Box`, allocates, and reads them back.
+//
+// `many()` is an **expected failure** under the flag: the payload a live handle still
+// points at is swept and its bytes reused. Without the flag all three rungs pass,
+// which is §41 — that control is what makes this evidence about the flag rather than
+// about the fixture.
+{
+  const built = compile("linearheap.ts", "lh.wasm", ["--wasmGc"]);
+  check("the linear-heap fixture compiles", built.ok, built.output);
+  if (built.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "lh.wasm")), imports);
+    const e = instance.exports;
+    check("ladder rung 1 (no churn): 42 + 7 reads back as 49", e.noChurn() === 49,
+      `got ${e.noChurn()}`);
+    check("ladder rung 2 (8 allocations, below the threshold): still 49", e.eight() === 49,
+      `got ${e.eight()}`);
+    const many = e.many();
+    xfail("ladder rung 3 (200k allocations): 42 + 7 reads back as 49", many === 49,
+      "the payload of a live GC handle was swept and reused (GC18)",
+      `got ${many} after 200000 allocations of 64 bytes under --wasmGc`);
+  }
+}
+
+// 41 — the same fixture without the flag: the control ------------------------
+//
+// If this section failed too, §40 would be evidence about the fixture and not about
+// the flag. It passes, on the same source and the same driver.
+{
+  const built = compile("linearheap.ts", "lhoff.wasm", []);
+  check("the linear-heap fixture compiles without the flag", built.ok, built.output);
+  if (built.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "lhoff.wasm")), imports);
+    const e = instance.exports;
+    check("flag off: rung 1", e.noChurn() === 49, `got ${e.noChurn()}`);
+    check("flag off: rung 2", e.eight() === 49, `got ${e.eight()}`);
+    check("flag off: rung 3 (200k allocations) still 49", e.many() === 49,
+      `got ${e.many()}`);
+  }
+}
+
+// 42 — address reuse, as a number -------------------------------------------
+//
+// The measurement that decides *what the mechanism is*. Reuse being large under the
+// flag is not enough to call it an arena: it is equally large without the flag, which
+// is what identifies a **collector's free list** rather than a wrapping region. The
+// period also moves with the allocation size (`GRANULARITY / size`), which a fixed-slot
+// arena could not do.
+//
+// `eqFirst` — how often the *first* churn address recurs — is reported but not
+// asserted: measured 18 181 in one history and 0 in another, and a number that depends
+// on what was allocated before is not a mechanism. `backsteps` is.
+{
+  const on = compile("linearheap.ts", "lhro.wasm", ["--wasmGc"]);
+  const off = compile("linearheap.ts", "lhro2.wasm", []);
+  if (on.ok && off.ok) {
+    const a = (await WebAssembly.instantiate(readFileSync(join(scratch, "lhro.wasm")), imports)).instance.exports;
+    const b = (await WebAssembly.instantiate(readFileSync(join(scratch, "lhro2.wasm")), imports)).instance.exports;
+    const onBack = a.reuseBacksteps(200000);
+    const offBack = b.reuseBacksteps(200000);
+    const onEq = a.firstAddressReuse(200000);
+    const offEq = b.firstAddressReuse(200000);
+    check("addresses are reused many times under the flag", onBack > 500,
+      `${onBack} backward steps in 200000 allocations (first-address recurrences: ${onEq})`);
+    check("...and about as often without it, so reuse is not the defect",
+      offBack > onBack / 2 && offBack < onBack * 2,
+      `flag on ${onBack}, flag off ${offBack} (first-address: ${onEq} / ${offEq})`);
+    check("neither run grows linear memory, so growth is not the explanation",
+      a.pages() <= 4 && b.pages() <= 4, `on ${a.pages()} pages, off ${b.pages()} pages`);
+  } else {
+    check("both reuse probes compile", false, `${on.ok ? "" : on.output.slice(0, 200)}${off.ok ? "" : off.output.slice(0, 200)}`);
+  }
+}
+
+// 43 — `__collect` reachability, and what an explicit collection does ---------
+//
+// The brief asked for an explicit collection between the write and the read. It is
+// reachable: with no local `declare`, `__collect()` resolves to the runtime's own
+// function and the module imports nothing for it. And the value survives it — because
+// one collection frees the payload but nothing has reused the bytes yet, so this is
+// **not** a reproduction of the defect. Recorded so nobody mistakes a green check here
+// for a working root set; the ladder is the reproduction.
+{
+  const built = compile("linearheap.ts", "lhc.wasm", ["--wasmGc"]);
+  if (built.ok) {
+    const mod = new WebAssembly.Module(readFileSync(join(scratch, "lhc.wasm")));
+    const imported = WebAssembly.Module.imports(mod).map((i) => `${i.module}.${i.name}`);
+    check("`__collect` is the runtime's function, not a host import",
+      !imported.some((name) => /__collect$/.test(name)), imported.join(", ") || "(none)");
+    // `instantiate(module, imports)` resolves to an **Instance**, not to
+    // `{module, instance}` — the pair form is for the bytes overload. Measured.
+    const instance = await WebAssembly.instantiate(mod, imports);
+    check("a payload survives one explicit collection (nothing has reused it yet)",
+      instance.exports.writeThenCollect() === 49,
+      `got ${instance.exports.writeThenCollect()}`);
+  }
+}
+
+// 44 — the value family is one category, in every spelling --------------------
+//
+// The user's taxonomy: `[T*N]`, `T[N]` and `@inline [T*N]` are the *same* storage — a
+// C-compatible value with no address — so all three are permanent, and the tests say so
+// in all three spellings rather than only the one a fixture happened to use. The fourth
+// line is the boundary: `@unmanaged [T*N]` is an **address**, which is storable in
+// principle, so it is a fixable refusal and must not be called permanent.
+{
+  const spellings = [
+    ["[u32 * 4]", "bracket-mult"],
+    ["u32[4]", "bracket-count"],
+    ["@inline [u32 * 4]", "inline-bracket"],
+  ];
+  for (const [decl, slug] of spellings) {
+    const name = `value-${slug}`;
+    writeFileSync(join(scratch, `${name}.ts`),
+      `class Holder { v: ${decl}; }\n` +
+      `export function run(): i32 { let h = new Holder(); return 1; }\n`);
+    const built = compile(`${name}.ts`, `${name}.wasm`, ["--wasmGc"]);
+    check(`value field ${decl}: refused as permanent (TS6415)`,
+      /WARNING TS6415: wasm-gc: \d+ class can never be on the GC ABI/.test(built.output),
+      built.output.split("\n").find((l) => /TS641/.test(l)) ?? "(none)");
+    check(`value field ${decl}: named as a value array, not as an unknown kind`,
+      /holding a value array/.test(built.output),
+      built.output.split("\n").find((l) => /TS6415/.test(l)) ?? "(none)");
+  }
+  // The boundary. An address is not a value.
+  writeFileSync(join(scratch, "value-unmanaged.ts"),
+    `class Holder { v: @unmanaged [u32 * 4]; }\n` +
+    `export function run(): i32 { let h = new Holder(); return 1; }\n`);
+  const unmanaged = compile("value-unmanaged.ts", "value-unmanaged.wasm", ["--wasmGc"]);
+  check("@unmanaged [u32 * 4] is a fixable refusal, not a permanent one",
+    /WARNING TS6414: /im.test(unmanaged.output) && !/TS6415/.test(unmanaged.output),
+    unmanaged.output.split("\n").find((l) => /TS641/.test(l)) ?? "(none)");
+  check("@unmanaged [u32 * 4] is named as an array address",
+    /holding an array address/.test(unmanaged.output),
+    unmanaged.output.split("\n").find((l) => /TS6414/.test(l)) ?? "(none)");
+}
+
+// 45 — the split report's arithmetic ----------------------------------------
+//
+// A report that splits is only useful if the parts add up. One program with one class
+// in each of the four buckets — permanent, fixable, blocked, eligible — must name all
+// four, and the four counts must equal the class total. Measured: `0 of 4 … 1 holding a
+// Map; permanent, not a work item: 1 holding a value array (…) (and 1 blocked …, 1
+// eligible …)`.
+{
+  writeFileSync(join(scratch, "buckets.ts"),
+    `class Perm { v: @inline [u32 * 4]; }\n` +
+    `class Fix { m: Map<i32, i32> = new Map<i32, i32>(); }\n` +
+    `class Blocked { p: Perm = new Perm(); }\n` +
+    `class Free { x: i32 = 0; }\n` +
+    `export function run(): i32 { let a = new Perm(); let b = new Fix(); let c = new Blocked(); let d = new Free(); return 1; }\n`);
+  const built = compile("buckets.ts", "buckets.wasm", ["--wasmGc"]);
+  const line = (built.output.match(/WARNING TS6414: [^\n]*/) ?? [""])[0];
+  const fixable = (line.match(/^WARNING TS6414: wasm-gc: no class migrated - 0 of \d+ managed class(?:es)? on the GC ABI - the program is not uniform: (\d+)/) ?? [])[1];
+  const permanent = (line.match(/permanent, not a work item: (\d+)/) ?? [])[1];
+  const blocked = (line.match(/(\d+) blocked by a class that is not GC/) ?? [])[1];
+  const eligible = (line.match(/(\d+) eligible, held back/) ?? [])[1];
+  const total = (line.match(/0 of (\d+) managed class/) ?? [])[1];
+  check("every bucket is named in one line",
+    !!fixable && !!permanent && !!blocked && !!eligible && !!total, line);
+  if (fixable && permanent && blocked && eligible && total) {
+    const sum = +fixable + +permanent + +blocked + +eligible;
+    check("the four buckets sum to the class total", sum === +total,
+      `${fixable} + ${permanent} + ${blocked} + ${eligible} = ${sum}, total ${total}`);
+    check("the permanent class is not counted among the fixable reasons",
+      /1 holding a Map/.test(line) && !/^$/.test(fixable), line);
+  }
+  check("a permanently refused class is reported as permanent, never as a reason",
+    /WARNING TS6415: wasm-gc: 1 class can never be on the GC ABI/.test(built.output),
+    built.output.split("\n").find((l) => /TS6415/.test(l)) ?? "(none)");
+}
+
+// 46 — the defect is not an optimisation artifact ----------------------------
+//
+// The `-O0..-O3` gate exists because a re-used `ExpressionRef` used to be correct at
+// `-O0` and wrong above it. This defect is the opposite shape and must not be mistaken
+// for that one: the **wrong** value is wrong at every level, and only its exact digits
+// differ (measured 60 at `-O0`/`-O1`, 55 at `-O2`/`-O3` — the byte the churn happened
+// to leave there). The defined values agree exactly, so the gate is split: agreement on
+// what is defined, and "not 49" on the rung that is broken at *every* level.
+{
+  const defined = [];
+  const broken = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("linearheap.ts", `lho${level}.wasm`, ["--wasmGc", level]);
+    check(`linearheap ${level} compiles`, built.ok, built.output);
+    if (!built.ok) continue;
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, `lho${level}.wasm`)), imports);
+    const e = instance.exports;
+    defined.push([e.noChurn(), e.eight(), e.writeThenCollect()].join(","));
+    broken.push(e.many());
+  }
+  check("linearheap: the defined values agree across -O0..-O3",
+    new Set(defined).size === 1, defined.join(" | "));
+  check("linearheap: the broken rung is broken at every level",
+    broken.length === 4 && broken.every((v) => v !== 49), broken.join(", "));
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);
 }
-console.log("\nwasm-gc: OK");
+if (expectedFailures.length) {
+  console.log(`\nwasm-gc: OK (${expectedFailures.length} expected failure(s): the linear heap is`);
+  console.log("  unrooted under --wasmGc, so a live payload is swept and reused — GC18;");
+  console.log("  see docs/memory-model.md)");
+} else {
+  console.log("\nwasm-gc: OK");
+}
