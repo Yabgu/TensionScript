@@ -1103,19 +1103,16 @@ function xfail(name, condition, reason, detail) {
     /1 holding a Map/.test(line), line);
 }
 
-// 40 — the ladder: values must be LIVE, not merely CURRENT --------------------
+// 40 — the ladder, and the whole payload, not its first two bytes ------------
 //
-// The gap GC18 closed. Every runtime assertion before that section read its values
-// immediately after writing them, so a collection never fell between a write and its
-// read — the suite proved values *current*. This writes two bytes into a payload held
-// by a module-scope `Box`, allocates, and reads them back.
+// Every runtime assertion before GC18 read its values immediately after writing them,
+// so a collection never fell between a write and its read: the suite proved values
+// *current*. GC18 added the ladder that closed that gap — and wrote only `v[0]` and
+// `v[1]`, which certified a fix while being blind to the bytes still being lost.
 //
-// GC18 marked the third rung an expected failure: under `--wasmGc` the payload of a
-// live handle was swept and its bytes reused. GC19 replaced the flag's linear
-// allocator with a **never-free arena**, so a payload is never handed to another
-// allocation, and all three rungs pass. The `xfail` mechanism stays in this file —
-// it is how a known defect is kept visible instead of skipped — but there is no
-// entry using it now, which the closing line reports.
+// **A two-byte-front-of-buffer assertion is not a liveness proof.** What a wrong
+// reservation damages is the tail, so every rung here reads the last byte too, and
+// §47 fills the entire payload with a sentinel.
 {
   const built = compile("linearheap.ts", "lh.wasm", ["--wasmGc"]);
   check("the linear-heap fixture compiles", built.ok, built.output);
@@ -1123,12 +1120,14 @@ function xfail(name, condition, reason, detail) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, "lh.wasm")), imports);
     const e = instance.exports;
-    check("ladder rung 1 (no churn): 42 + 7 reads back as 49", e.noChurn() === 49,
-      `got ${e.noChurn()}`);
-    check("ladder rung 2 (8 allocations, below the threshold): still 49", e.eight() === 49,
-      `got ${e.eight()}`);
-    check("ladder rung 3 (200k allocations): the live payload still reads 49",
-      e.many() === 49, `got ${e.many()} after 200000 allocations of 64 bytes`);
+    // `check()` answers 49, or a negative code naming which of first/middle/**last**
+    // failed to read back — so a tail loss is distinguishable from a length loss.
+    check("ladder rung 1 (no churn): first, middle and last byte all read back",
+      e.noChurn() === 49, `got ${e.noChurn()} (-1 first, -2 middle, -3 tail)`);
+    check("ladder rung 2 (8 allocations): still 49", e.eight() === 49,
+      `got ${e.eight()} (-1 first, -2 middle, -3 tail)`);
+    check("ladder rung 3 (200k allocations): still 49", e.many() === 49,
+      `got ${e.many()} (-1 first, -2 middle, -3 tail)`);
     check("a payload survives an explicit collection", e.writeThenCollect() === 49,
       `got ${e.writeThenCollect()}`);
   }
@@ -1306,6 +1305,69 @@ function xfail(name, condition, reason, detail) {
     new Set(answers).size === 1 && answers[0] === "49,49,49,49", answers.join(" | "));
   check("linearheap: no address is reused at any level",
     pages.every((v) => v === "no-reuse"), pages.join(", "));
+}
+
+// 47 — a block's reservation must cover the whole payload --------------------
+//
+// GC19's arena reserved `end = (object + TOTAL_OVERHEAD + size) & -16`, and `& -16`
+// **floors**. So the block ended below the payload's last byte and the next block's
+// header — or its zero-fill — landed inside the payload: measured, the last 4 bytes at
+// 16/32/64-byte payloads, and the entire payload at 8, where the floored end fell
+// before the payload even began.
+//
+// The masks below are the test that would have caught it. All-ones, for every size.
+{
+  const built = compile("linearheap.ts", "lhp.wasm", ["--wasmGc"]);
+  check("the payload-pattern fixture compiles", built.ok, built.output);
+  if (built.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "lhp.wasm")), imports);
+    const e = instance.exports;
+    const masks = [["p8", 8, 0xFF], ["p16", 16, 0xFFFF], ["p32", 32, 0xFFFFFFFF]];
+    for (const [name, size, want] of masks) {
+      const got = e[name]();
+      check(`every byte of a ${size}-byte payload survives one more allocation`,
+        got === want,
+        `mask 0x${(got >>> 0).toString(16).padStart(size <= 8 ? 2 : size <= 16 ? 4 : 8, "0")}, expected 0x${(want >>> 0).toString(16)}`);
+    }
+    // Beyond 31 bytes a mask cannot express the answer, so they are counted.
+    for (const [name, size] of [["kept8", 8], ["kept16", 16], ["kept32", 32], ["kept64", 64]]) {
+      check(`${size} of ${size} payload bytes survive (counted)`, e[name]() === size,
+        `${e[name]()} of ${size}`);
+    }
+    // The one-line version, and the shape a real guest writes.
+    check("the LAST byte of a payload survives one more allocation",
+      e.tailSentinel() === 0x5A, `got ${e.tailSentinel()} (expect 90)`);
+    check("two blocks do not clobber each other, in either direction",
+      e.bothDirections() === 15,
+      `got ${e.bothDirections()} (bit 1 = first block intact, 2 = second, 4/8 = headers)`);
+    // The invariant behind all of the above: a block's span covers its payload plus the
+    // header the stdlib reads. 16-byte payloads, so the stride must exceed 16.
+    const stride = e.stride();
+    check("consecutive same-size blocks are farther apart than their payload",
+      stride > 16, `${stride} bytes for a 16-byte payload`);
+  }
+}
+
+// 48 — the same sentinel patterns without the flag: the control --------------
+//
+// If these failed too, §47 would be evidence about the fixture. They pass, on the same
+// source and the same driver: `itcms` over `tlsf` reserves correctly, so the defect is
+// the arena's arithmetic and not the measurement.
+{
+  const built = compile("linearheap.ts", "lhpoff.wasm", []);
+  check("the payload-pattern fixture compiles without the flag", built.ok, built.output);
+  if (built.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "lhpoff.wasm")), imports);
+    const e = instance.exports;
+    check("flag off: all 16 payload bytes survive", e.p16() === 0xFFFF,
+      `mask 0x${(e.p16() >>> 0).toString(16)}`);
+    check("flag off: the last byte survives", e.tailSentinel() === 0x5A,
+      `got ${e.tailSentinel()}`);
+    check("flag off: two blocks do not clobber each other", e.bothDirections() === 15,
+      `got ${e.bothDirections()}`);
+  }
 }
 
 if (failures) {
