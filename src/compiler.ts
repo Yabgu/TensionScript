@@ -219,6 +219,9 @@ import {
   GC_ARRAY_LENGTH_INDEX,
   GC_ARRAY_MIN_SIZE,
   isGcReferenceType,
+  isGcExempt,
+  ownFieldsOf,
+  managedClassesOf,
   isGcArrayBufferClass,
   GC_ARRAYBUFFER_DATA_INDEX,
   GC_ARRAYBUFFER_LENGTH_INDEX,
@@ -739,7 +742,13 @@ export class Compiler extends DiagnosticEmitter {
       // would never fire — measured: the program reported "1 extending a class that is not
       // GC (TaskEnv)" with no hint that a closure was the cause.
       this.refuseCapturingClosures();
+      // **After the latch is prepared, not before.** The crossing check walks resolved
+      // classes, and before `prepareGcLatch` nothing is resolved — `getResolvedInstance("")`
+      // answers null, so the walk found no classes at all and no crossing was ever
+      // reported (measured: the debug line never printed). The latch itself is unaffected:
+      // it is computed from the same set and a crossing class is ineligible either way.
       this.prepareGcLatch();
+      this.refuseGcExemptCrossings();
     }
 
     // **The flag only acts when it migrated something.** `--wasmGc` on a program
@@ -1351,6 +1360,63 @@ export class Compiler extends DiagnosticEmitter {
    * One diagnostic per program rather than per closure: the reason is the same for all of
    * them, and a file with ten arrows would otherwise produce ten copies of it.
    */
+  /**
+   * Refuses the two crossings the exemption creates, **by name and before emission**.
+   *
+   * The partition gives managed classes two representations: a GC struct, and a linear
+   * C-ABI record. Two things must then be impossible rather than miscompiled, and both
+   * compiled before this check existed (measured):
+   *
+   * 1. **A GC class holding a C-ABI record as a plain field.** The record has no reference
+   *    for the field to hold — it is an address — so this is one representation stored in
+   *    the other. `@unmanaged` is the sanctioned crossing, because an address is not a
+   *    reference and nothing traces it.
+   * 2. **A linear record holding a GC reference.** A reference has no place in a record
+   *    whose layout is the C declaration's: the engine would trace a pointer the C side
+   *    cannot see, and the record would not be the size the header describes.
+   *
+   * An inline `@inline struct` field is *not* this: it is a value stored by value, and its
+   * refusal is the older permanent one ("a value has no address"), which names the memory
+   * model rather than a crossing.
+   */
+  private refuseGcExemptCrossings(): void {
+    // **The crossing rule is one-directional, and the other direction is not a bug.**
+    //
+    // A GC class holding an exempt record is *fine*: the record is linear, so the field is
+    // an address, and an address is untraced — the same shape as a buffer view's
+    // `dataStart`. `@unmanaged` is what declares the record, so every such field is through
+    // `@unmanaged` by definition, which is the sanctioned form.
+    //
+    // What is left is the direction that has no representation at all: a reference inside a
+    // record whose layout is the C declaration's. See below.
+    let program = this.program;
+    // An `@unmanaged` record must not hold a GC reference.
+    let instances = program.instancesByName;
+    for (let _v = Map_values(instances), i = 0, k = _v.length; i < k; ++i) {
+      let element = unchecked(_v[i]);
+      if (element.kind != ElementKind.Class) continue;
+      let cls = <Class>element;
+      if (!cls.hasDecorator(DecoratorFlags.Unmanaged)) continue;
+      let own = ownFieldsOf(cls);
+      for (let f = 0, fn = own.length; f < fn; ++f) {
+        let field = unchecked(own[f]);
+        let type = field.type;
+        // A GC reference, not merely "a class": a `usize` or a plain pointer is the whole
+        // point of an unmanaged record.
+        if (!isGcReferenceType(type)) continue;
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          field.identifierNode != null ? field.identifierNode.range : null,
+          `the C-ABI record ${cls.name} holds a GC reference in field \`${field.name}\`: ` +
+          `a wasm GC reference has no place in a record whose layout is the C declaration's ` +
+          `(the engine would trace a pointer the C side cannot see). Store the address as an ` +
+          `\`usize\`, or make the holder a GC class and drop \`@unmanaged\`.`
+        );
+        return;
+      }
+    }
+  }
+
   private refuseCapturingClosures(): void {
     // The closure transform records what each function expression's `_env` will mean,
     // keyed by the expression node (`closure/ir.ts`), because the `FunctionPrototype` is

@@ -1702,12 +1702,13 @@ function xfail(name, condition, reason, detail) {
   check("coexistence: a GC class and a trace-free record compile together", built.ok,
     built.output.split("\n").filter((l) => /ERROR|Assertion/.test(l))[0] ?? built.output.slice(0, 300));
   const line = (built.output.match(/wasm-gc: [^\n]*\d+ of \d+ managed classes[^\n]*/) ?? [""])[0];
-  check("the report counts the exempt record apart from the GC ones",
-    /\d+ of \d+ managed classes on the GC ABI; \d+ exempt \(C-ABI record/.test(built.output), line);
-  check("the arithmetic closes: GC + exempt + refused = total",
+  check("the report counts exempt records apart from the GC classes",
+    /INFO TS6413: wasm-gc: 4 of 6 managed classes on the GC ABI; 2 exempt \(C-ABI records, trace-free: 1 <Vec3fLike>, 1 <BlobLike>/.test(built.output),
+    line);
+  check("the arithmetic closes: GC + exempt = total, with nothing refused",
     (() => {
-      const m = built.output.match(/(\d+) of (\d+) managed classes on the GC ABI; (\d+) exempt \(C-ABI record/);
-      return m != null && (+m[1]) + (+m[3]) === (+m[2]);
+      const m = built.output.match(/(\d+) of (\d+) managed classes on the GC ABI; (\d+) exempt/);
+      return m != null && (+m[1]) + (+m[3]) === (+m[2]) && !/not uniform/.test(line);
     })(), line);
 
   if (built.ok) {
@@ -1733,33 +1734,30 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
-// 59 — both crossings are named errors, not miscompiled modules ---------------
+// 59 — the crossing that has no representation is refused; the other is not a
+// crossing at all -----------------------------------------------------------
 //
-// A plain field from a GC class to a linear record is one representation stored in the
-// other; a reference inside a linear record is a pointer the collector cannot see and a
-// layout the C side cannot describe. Both were *compiling* before this round — measured —
-// which is the defect this section pins.
+// Direction matters, and getting it wrong in either direction is a defect:
+//
+// - **A GC class holding an exempt record is fine.** The record is linear, so the field is
+//   an address, and an address is untraced — the same shape as a buffer view's `dataStart`.
+//   `@unmanaged` declares the record, so every such field is sanctioned by definition;
+//   §58's `sanctioned` exercises it end to end.
+// - **A linear record holding a GC reference has no representation at all**: the record's
+//   layout is the C declaration's, and the engine would have to trace a pointer the C side
+//   cannot see. That must be a named error, and it was compiling before this round.
 {
-  const crossing = compile("exempt-crossing.ts", "exc.wasm", ["--wasmGc"]);
-  check("a GC class holding an exempt record as a plain field is refused",
-    !crossing.ok, crossing.output.split("\n")[0]);
-  check("the refusal names both classes and says what to use instead",
-    /GC class .* cannot hold .*C-ABI record/.test(crossing.output) &&
-    /@unmanaged/.test(crossing.output),
-    crossing.output.split("\n").find((l) => /AS100/.test(l)) ?? "(no diagnostic)");
-
   const gcref = compile("exempt-gcref.ts", "exg.wasm", ["--wasmGc"]);
-  check("a linear record holding a GC reference is refused", !gcref.ok,
+  check("a C-ABI record holding a GC reference is refused", !gcref.ok,
     gcref.output.split("\n")[0]);
   check("...and the refusal names the field and the reason",
-    /C-ABI record .* holds a GC reference/.test(gcref.output),
+    /C-ABI record .* holds a GC reference/.test(gcref.output) &&
+    /the C side cannot see/.test(gcref.output),
     gcref.output.split("\n").find((l) => /AS100/.test(l)) ?? "(no diagnostic)");
-
-  // Both are *flag* restrictions: the same sources compile without it.
-  for (const [file, out] of [["exempt-crossing", "excoff.wasm"], ["exempt-gcref", "exgoff.wasm"]]) {
-    const plain = compile(`${file}.ts`, out, []);
-    check(`flag off: ${file} compiles`, plain.ok, plain.output.split("\n")[0]);
-  }
+  // It is a *flag* restriction: the same source compiles without it, where a `string` is
+  // an `i32` pointer and the record is still the size the C declaration describes.
+  const plain = compile("exempt-gcref.ts", "exgoff.wasm", []);
+  check("flag off: the same record compiles", plain.ok, plain.output.split("\n")[0]);
 }
 
 // 60 — the exemption changes nothing when the flag is off --------------------

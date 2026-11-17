@@ -26,14 +26,17 @@
 //                 this answers how many of each it expects.
 //   flatLayout    the exempt record's own layout is untouched — `y` at 4, `z` at 8.
 
-/// A C-ABI record: three `f32`s, no references. Exempt.
-class Vec3fLike {
+/// A C-ABI record: three `f32`s, no references. **Exempt** — and `@unmanaged` is what makes
+/// it a record rather than an ordinary class, which is the half of the predicate that keeps
+/// the exemption from splitting the framework's own object graph (see `docs/wasm-gc.md`).
+@unmanaged class Vec3fLike {
   x: f32 = 1.5;
   y: f32 = 2.5;
   z: f32 = 3.5;
 }
 
-/// A GC class: it holds a `String`, which is a reference, so it is not trace-free.
+/// A GC class: it holds a `String`, which is a reference, so it is not trace-free — and it
+/// is not `@unmanaged`, so it is an ordinary heap object the engine collects.
 class Named {
   label: string = "held";
   n: i32 = 0;

@@ -40,7 +40,7 @@ import {
   GC_ARRAYBUFFER_LENGTH_INDEX,
   gcFieldRefusal
 } from "./types";
-import { Class, Property } from "./program";
+import { Class, Property, DecoratorFlags } from "./program";
 import * as binaryen from "./glue/binaryen";
 import { synthesize as synthesizeDwarf } from "./dwarf";
 
@@ -4787,6 +4787,16 @@ function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[], field: Property |
         `Eligibility said it could be a struct, so the two answers disagree — that is a compiler defect.`
       );
     }
+  }
+  // **An `@unmanaged` record is an address.** It declares its own linear layout, so a GC
+  // struct holds a pointer to it, exactly as under the pointer ABI — the same shape as a
+  // buffer view's `dataStart`. Without this the field reached the `assert(false)` at the
+  // bottom of this function: measured, `class HoldsBlob { blob: BlobLike }` with
+  // `@unmanaged class BlobLike` crashed the compiler at `gcFieldTypeRef` even though
+  // `gcFieldRefusal` had (correctly) called the field storable.
+  if (fieldType.classReference != null &&
+      fieldType.classReference.hasDecorator(DecoratorFlags.Unmanaged)) {
+    return fieldType.size == 64 ? TypeRef.I64 : TypeRef.I32;
   }
   // **A function-typed field is a reference to its `Function<T>` struct.** The wrapper
   // class is resolved per signature — the same resolution `getClassOrWrapper` does

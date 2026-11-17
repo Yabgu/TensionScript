@@ -2159,3 +2159,97 @@ function I read — which an `-O0` dump of both bodies would settle in one pass.
 
 `Map<string,V>` stays on the pointer ABI until then, and that is correct rather than
 convenient: the pointer path's `hashStr` is the one with a known-good body.
+
+## The partition: a trace-free C record is exempt, not refused
+
+`gcUniform` was all-or-nothing, so six correct C-ABI records blocked 135 classes. They are
+not failures: a record the C side reads through a pointer must have the layout the C
+declaration describes, a GC reference has no place in one, and they are **trace-free** — so
+the collector has no business with them.
+
+### The predicate, and the half the brief did not have
+
+The brief's rule was "a managed class is exempt when it is trace-free at every depth". Taken
+literally it is **too wide, and the guest measures that**: 85 of its 141 classes are
+trace-free, and **8 of them are held by classes that also hold references** —
+
+```
+World.solver            (Solver)      Painter.theme   (Theme)
+AppShell.canvas         (Canvas)      Layer.frame     (Frame)
+drive$State.canvas      (Canvas)      WidgetTree.defaultPage (FontPage)
+Ui.tree / Dispatcher.tree (WidgetTree)
+```
+
+Under the literal rule those eight become crossings and the framework stops compiling — for
+classes that never needed a C layout at all. `Solver` is an ordinary object that merely
+happens to hold no references.
+
+So the exemption is for records whose **layout is a contract**:
+
+> A class is **exempt** when it is declared `@unmanaged` (which `export struct` implies in
+> this dialect) **and** every field is trace-free at every depth — including the base
+> chain's, which `gcFieldsOf` walks.
+
+An ordinary trace-free class stays a GC struct: it is a heap object with no references,
+which is exactly what the engine is good at. That keeps the island closed, which is the
+user's own phrasing — *a record the C side reads through a pointer*.
+
+**This is a deviation from the brief's literal predicate, and it is the round's main
+finding.** Measured both ways: the literal rule gives 85 exempt / 8 crossings / the
+framework does not build; the narrowed rule gives **25 exempt / 0 refused / 116 eligible**.
+
+### One direction of the crossing rule is vacuous, and the other is not
+
+- **A GC class holding an exempt record is fine.** The record is linear, so the field is an
+  address, and an address is untraced — the same shape as a buffer view's `dataStart`.
+  `@unmanaged` declares the record, so every such field is sanctioned by definition. (This
+  needed one emitter branch: `gcFieldTypeRef` had no `@unmanaged` case and hit its
+  `assert(false)`, so `class HoldsBlob { blob: BlobLike }` crashed the compiler even though
+  the field was correctly called storable.)
+- **A linear record holding a GC reference has no representation at all**, and is refused by
+  name: the engine would have to trace a pointer the C side cannot see, and the record would
+  not be the size the header describes. It compiled before this round.
+
+### Two ABIs in one module: coexistence is safe, crossing is not
+
+The existing comment said a program holding both aborts inside Binaryen. Measured — one GC
+class with a `string` field, one `@unmanaged` record with three `f32`s, both allocated, used,
+no field between them — **it compiles, carries `(struct …)` for the first, omits it for the
+second, and runs** (`coexist` = 44). The abort is a crossing hazard, not a coexistence one.
+
+### The report gained its third category
+
+```
+INFO TS6413: wasm-gc: 4 of 6 managed classes on the GC ABI; 2 exempt (C-ABI records, trace-free: 1 <Vec3fLike>, 1 <BlobLike>)
+```
+
+GC + exempt = total, and an exempt record is never called "refused". The arithmetic is
+asserted as a test, and so is the flag-off side: **the exemption changes nothing when the
+flag is off** — byte-identical on all 29 fixtures and on the guest, and no struct opcode
+appears at all.
+
+One report defect surfaced while measuring and is fixed: a reference-keyed `Map` holds the
+latch off, but nothing in the class walk could see it, so the guest's line read *"116
+eligible, held back only by the latch"* — true of every class, silent about the one thing
+blocking all of them. It now names the container, and the check behind it is latch-free
+(`gcReferenceShaped`), because a predicate that decides *whether the program can be uniform*
+cannot use `gcStringOf`, which answers "is this a reference *right now*".
+
+### The guest
+
+```
+WARNING TS6414: wasm-gc: no class migrated - 0 of 141 managed classes on the GC ABI - the
+program is not uniform: 1 holding a Map with a reference key or value (and 116 eligible, held
+back only by the latch); 25 exempt (C-ABI records, trace-free: 1 <ArenaControl>, 1
+<SessionInfo>, 1 <ManifestEntry>, 22 more)
+```
+
+**The six permanent refusals are gone and 25 C records are exempt — but the latch still does
+not turn on, because of `Map<string, Frame>`**, which is GC23's blocker and explicitly out of
+this round's scope. So the module carries no `(struct …)` types and is byte-identical to the
+flag-off build, and the harness passes (10,240 non-black pixels) for the same reason.
+
+That is the honest state: this round removed the last *record* obstacle and revealed that the
+last obstacle is the container one. `Map<string,V>` is now the single thing between the guest
+and a uniform program — which is a smaller and better-defined blocker than six, but it is not
+zero.

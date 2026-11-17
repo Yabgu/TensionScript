@@ -293,6 +293,10 @@ export function isStdlibClass(cls: Class): bool {
  */
 export function isGcClass(cls: Class): bool {
   if (!gcClassesEnabled) return false;
+  // **An exempt class stays linear.** It is trace-free, so it needs no collector; giving it
+  // a struct would be representing a C record as a heap object, which is the opposite of
+  // what the exemption is for.
+  if (isGcExempt(cls)) return false;
   // **The whole program is uniform or it is not.** A pointer-shaped class stores a
   // field at a byte offset as an `i32`, a GC struct stores the same field as a
   // `(ref null $C)`, and a program holding both aborts inside Binaryen
@@ -522,6 +526,13 @@ export function gcFieldRefusal(fieldType: Type, field: Property | null): GcField
     return null;
   }
   if (cls != null) {
+    // **A plain field from a GC struct to a linear record is a crossing.** The record has
+    // no reference for the field to hold, so this is not a missing emitter case — it is one
+    // representation stored in the other, and it must be a named error.
+    if (isGcExempt(cls) && !gcStructCheckPath.includes(cls)) {
+      return new GcFieldRefusal(false,
+        "holding the C-ABI record " + gcFieldLabel(fieldType));
+    }
     // A class field is storable exactly when the class is a GC struct.
     return gcClassFieldStorable(cls) ? null : new GcFieldRefusal(false, "holding " + gcFieldLabel(fieldType));
   }
@@ -743,7 +754,12 @@ export function gcUniform(program: Program): bool {
   }
   let classes = result ? managedClassesOf(program) : [];
   for (let i = 0, k = classes.length; i < k; ++i) {
-    if (!isGcEligible(unchecked(classes[i]))) { result = false; break; }
+    let cls = unchecked(classes[i]);
+    // **An exempt class does not count.** It is trace-free, so it stays linear and the
+    // collector never sees it; its own fields are not the latch's question. This is the
+    // partition: `gcUniform` asks whether every class *that needs the GC ABI* can have it.
+    if (isGcExempt(cls)) continue;
+    if (!isGcEligible(cls)) { result = false; break; }
   }
   gcUniformComputing.delete(program);
   gcUniformByProgram.set(program, new GcUniformAnswer(result, program.nextClassId));
@@ -796,7 +812,7 @@ export function prepareGcLatch(program: Program): bool {
  * program, and a framework class holding an `Array` is precisely the crossing that
  * GC13 measured. See {@link isStdlibClass}.
  */
-function managedClassesOf(program: Program): Class[] {
+export function managedClassesOf(program: Program): Class[] {
   let out = new Array<Class>();
   let seen = new Set<Class>();
   let instances = program.instancesByName;
@@ -904,6 +920,15 @@ export class GcCoverage {
     return "the program is not uniform";
   }
 
+  /**
+   * Classes that are **exempt**: trace-free C-ABI records, which stay linear by design.
+   * Neither migrating nor refused — the third line of the report.
+   */
+  exempt: i32 = 0;
+  /** How many exempt classes each record shape accounts for, for the reason text. */
+  exemptReasons: string[] = [];
+  exemptCounts: i32[] = [];
+
   /** How many classes are refused **permanently** — never a work item. */
   get permanentTotal(): i32 {
     let out = 0;
@@ -915,7 +940,24 @@ export class GcCoverage {
   toString(): string {
     let out = this.onGc.toString() + " of " + this.total.toString() +
       " managed class" + (this.total == 1 ? "" : "es") + " on the GC ABI";
-    if (this.onGc == this.total) return out;
+    // **The third category, and it is not a blocker.** An exempt class is a trace-free
+    // C-ABI record: it stays linear by design, so calling it "refused" would send a reader
+    // looking for a fix that does not exist, and counting it as migrated would be a lie.
+    let exemptClause = "";
+    if (this.exempt > 0) {
+      let exemptParts = new Array<string>();
+      let exemptShown = this.exemptReasons.length < 3 ? this.exemptReasons.length : 3;
+      for (let i = 0; i < exemptShown; ++i) {
+        exemptParts.push(unchecked(this.exemptCounts[i]).toString() + " " +
+          unchecked(this.exemptReasons[i]));
+      }
+      if (this.exemptReasons.length > exemptShown) {
+        let more = this.exemptReasons.length - exemptShown;
+        exemptParts.push(more.toString() + " more");
+      }
+      exemptClause = "; " + this.exempt.toString() + " exempt (C-ABI record" +
+        (this.exempt == 1 ? "" : "s") + ", trace-free: " + exemptParts.join(", ") + ")";
+    }
     let parts = new Array<string>();
     let shown = this.reasons.length < 3 ? this.reasons.length : 3;
     for (let i = 0; i < shown; ++i) {
@@ -945,7 +987,6 @@ export class GcCoverage {
       detail += (detail.length ? "; " : ": ") +
         "permanent, not a work item: " + permParts.join(", ");
     }
-    let line = out + " - the program is not uniform" + detail;
     // The transitive and latch counts are **not** reasons. A class blocked because it
     // holds another class that is blocked names no cause a migration can act on, and
     // letting it into the reason list would let chains out-count the cause at their
@@ -957,8 +998,13 @@ export class GcCoverage {
     if (this.heldBack) {
       tails.push(this.heldBack.toString() + " eligible, held back only by the latch");
     }
+    // **A program that is uniform with exemptions is not "not uniform".** The phrase only
+    // belongs on a line that has something to explain, and the whole point of the
+    // partition is that a trace-free record is not a reason.
+    if (!detail.length && !tails.length) return out + exemptClause;
+    let line = out + " - the program is not uniform" + detail;
     if (tails.length) line += " (and " + tails.join(", ") + ")";
-    return line;
+    return line + exemptClause;
   }
 }
 
@@ -976,6 +1022,24 @@ export class GcCoverage {
  * - **Held back by the latch** — no obstacle at all; the program-wide answer is no
  *   because of other classes.
  */
+/**
+ * Records one exempt class under its shape, for the report's third line.
+ *
+ * Grouped by shape rather than by name, because the point of the line is "six C records",
+ * not "six names the reader has never heard of" — and a codegen'd name is not something a
+ * reader can act on.
+ */
+function recordGcExemption(coverage: GcCoverage, cls: Class): void {
+  let label = "<" + cls.name + ">";
+  let at = coverage.exemptReasons.indexOf(label);
+  if (at < 0) {
+    coverage.exemptReasons.push(label);
+    coverage.exemptCounts.push(1);
+  } else {
+    coverage.exemptCounts[at] += 1;
+  }
+}
+
 function recordGcRefusal(coverage: GcCoverage, cls: Class): void {
   // A reference-keyed `Map`/`Set` is refused for its *entries*, which no field walk can
   // see, so it is named here rather than reported as "eligible, held back by the latch".
@@ -1077,10 +1141,37 @@ function gcFieldLabel(fieldType: Type): string {
 export function gcCoverage(program: Program): GcCoverage {
   let coverage = new GcCoverage();
   coverage.uniform = gcUniform(program);
+  // **A reference-keyed `Map`/`Set` holds the latch off, and it must be named.** It is a
+  // property of the program rather than of any class's declared fields, so nothing in the
+  // class walk would report it: measured, the line read "116 eligible, held back only by the
+  // latch" — true of every class and silent about the one thing blocking all of them.
+  let latchRefusal = "";
+  let instances = program.instancesByName;
+  for (let _v = Map_values(instances), i = 0, k = _v.length; i < k; ++i) {
+    let element = unchecked(_v[i]);
+    if (element.kind != ElementKind.Class) continue;
+    let container = <Class>element;
+    let proto = container.prototype;
+    if (proto != program.mapPrototype && proto != program.setPrototype) continue;
+    if (gcContainerHoldsReference(container)) {
+      latchRefusal = "holding a " + (proto == program.mapPrototype ? "Map" : "Set") +
+        " with a reference key or value";
+      break;
+    }
+  }
   let classes = managedClassesOf(program);
   for (let i = 0, k = classes.length; i < k; ++i) {
     let cls = unchecked(classes[i]);
     coverage.total++;
+    // **The third category.** An exempt class is not migrating and is not refused: it is a
+    // trace-free C record that stays linear by design, and a reader must be able to tell
+    // that from the report alone — "refused" would send them looking for a fix that does
+    // not exist, and "on the GC ABI" would be a lie.
+    if (isGcExempt(cls)) {
+      coverage.exempt++;
+      recordGcExemption(coverage, cls);
+      continue;
+    }
     if (coverage.uniform && isGcEligible(cls)) {
       coverage.onGc++;
     } else if (isGcEligible(cls)) {
@@ -1091,6 +1182,7 @@ export function gcCoverage(program: Program): GcCoverage {
       --gcIntrinsicDepth;
     }
   }
+  if (latchRefusal.length && coverage.onGc == 0) coverage.refuse(latchRefusal);
   return coverage;
 }
 
@@ -1522,6 +1614,96 @@ export function isGcBufferViewClass(cls: Class): bool {
 }
 
 /**
+ * A managed class that is **trace-free at every depth**, and so is *exempt* from the GC
+ * ABI rather than refused by it.
+ *
+ * ## Why this is a property of the fields and not a list or an annotation
+ *
+ * The user's ruling is that graphics units own their objects and the client's
+ * representation is naturally a non-GC handle; a record the C side reads through a pointer
+ * must have the layout the C declaration describes. **A GC reference has no place in one** —
+ * so a record built only from scalars needs no tracing, and the collector has no business
+ * with it. That is a fact about the fields, and it is why this is derived rather than
+ * declared: the C boundary decides, and a generated record cannot be relied on to carry an
+ * annotation (the six in `ogre.generated.ts` are emitted by a codegen tool).
+ *
+ * Counted on the framework's own generated records: 108 fields, 0 references — 43 `f32`,
+ * 41 `u32`, 10 `Vec3fValue`, 6 `u64`, 5 `QuatfValue`, 3 `i32`.
+ *
+ * ## The rule
+ *
+ * A class is exempt when **it is declared as a C record** (`@unmanaged`, which
+ * `export struct` implies in this dialect) **and every field is trace-free** — including
+ * the base chain's, which `gcFieldsOf` walks.
+ *
+ * ## Why the `@unmanaged` half is load-bearing, measured
+ *
+ * "Trace-free" alone is far too wide, and the guest proves it: 85 of its 141 classes are
+ * trace-free, and **8 of them are held by classes that also hold references** —
+ * `World.solver` (`Solver`), `AppShell.canvas` (`Canvas`), `Painter.theme` (`Theme`),
+ * `Layer.frame` (`Frame`), `WidgetTree.defaultPage` (`FontPage`). Making every trace-free
+ * class exempt turns those eight into crossings and the framework stops compiling, for
+ * classes that never needed a C layout at all — `Solver` is an ordinary object that merely
+ * happens to hold no references.
+ *
+ * So the exemption is for records whose **layout is a contract**: a `struct` the C side
+ * reads. An ordinary trace-free class stays a GC struct — it is a heap object with no
+ * references, which is exactly what the engine is good at. That is what keeps the island
+ * closed, and it is the user's own phrasing: a record the C side reads through a pointer.
+ *
+ * Note the recursion: an exempt class's field of another exempt class is a **linear
+ * pointer**, so a chain or even a cycle of trace-free classes is exempt as a whole and
+ * stays entirely in linear memory. That is why the cycle guard answers `true`: a cycle of
+ * scalars is still a cycle of scalars, and refusing it would split an island that is
+ * internally consistent.
+ */
+export function isGcExempt(cls: Class): bool {
+  if (!gcClassesEnabled) return false;
+  if (gcExemptPath.includes(cls)) return true; // a cycle of trace-free classes
+  gcExemptPath.push(cls);
+  let exempt = isGcExemptImpl(cls);
+  gcExemptPath.pop();
+  return exempt;
+}
+
+/** Classes currently being tested for exemption, so a cycle answers instead of overflowing. */
+let gcExemptPath: Class[] = [];
+
+function isGcExemptImpl(cls: Class): bool {
+  // A record the program declares as `@unmanaged` is already linear by declaration, and it
+  // has its own invariant (no references) enforced separately.
+  // **A C record by declaration, or nothing.** `@unmanaged` is what says "the layout is
+  // the C declaration's"; without it a trace-free class is an ordinary heap object that
+  // the engine can collect and that nothing needs to be linear.
+  if (!cls.hasDecorator(DecoratorFlags.Unmanaged)) return false;
+  // A synthesised layout is not a C record: `Array<T>`/`ArrayBuffer` are handles whose
+  // fields the compiler invents, so "trace-free fields" is not the question to ask.
+  if (isStdlibClass(cls)) return false;
+  // `Object` is the root of the pointer-shaped world and declares nothing; it is not a
+  // C record, and exempting it would take the whole tree with it.
+  if (cls.prototype == cls.program.objectPrototype) return false;
+  // An `@inline struct` is a *value*: it has no identity and cannot be allocated on its
+  // own. Exempting it is harmless and correct — it is stored inline wherever it appears.
+  let fields = gcFieldsOf(cls);
+  for (let i = 0, k = fields.length; i < k; ++i) {
+    if (!gcTraceFreeType(unchecked(fields[i]).type)) return false;
+  }
+  return true;
+}
+
+/** Whether a field type can live in a linear record: a scalar, or a trace-free record. */
+export function gcTraceFreeType(type: Type): bool {
+  let nonNullable = type.nonNullableType;
+  if (nonNullable.isValue) return true;
+  let cls = nonNullable.classReference;
+  if (cls == null) return false;
+  // An inline record is stored by value, so it is trace-free exactly when its fields are.
+  if (cls.hasDecorator(DecoratorFlags.InlineStruct)) return isGcExempt(cls);
+  // A pointer to another exempt class is a linear pointer: not traced.
+  return isGcExempt(cls);
+}
+
+/**
  * Whether a `Map`/`Set` instantiation stores a **GC reference** as its key or value.
  *
  * `MapEntry<K,V>` is `@unmanaged` — a linear record — so a reference in `K` or `V` has no
@@ -1533,15 +1715,37 @@ function gcContainerHoldsReference(cls: Class): bool {
   let arguments_ = cls.typeArguments;
   if (arguments_ == null) return false;
   for (let i = 0, k = arguments_.length; i < k; ++i) {
-    let arg = unchecked(arguments_[i]).nonNullableType;
-    if (gcStringOf(arg) || gcArrayElementOf(arg) != null ||
-        gcDynamicArrayElementOf(arg) != null) {
-      return true;
-    }
-    let argClass = arg.classReference;
-    if (argClass != null && isGcClass(argClass)) return true;
+    if (gcReferenceShaped(unchecked(arguments_[i]))) return true;
   }
   return false;
+}
+
+/**
+ * Whether a type **would be** a GC reference if the program were uniform — answered
+ * without consulting the latch.
+ *
+ * The latch-free half matters in both directions and for the same reason: `gcStringOf`
+ * answers "is this a wasm array *right now*", and when the program is non-uniform nothing
+ * is. So a check that decides *whether the program can be uniform* cannot use it: measured
+ * twice, once as a `Map<string,i32>` program taking the GC ABI trivially, and once as a
+ * report that said "116 eligible, held back only by the latch" while the one thing holding
+ * the latch off was the `Map` it could not see.
+ */
+export function gcReferenceShaped(type: Type): bool {
+  if (!gcClassesEnabled) return false;
+  let nonNullable = type.nonNullableType;
+  let cls = nonNullable.classReference;
+  if (cls == null) return false;
+  let program = cls.program;
+  // A `String` is `(array (mut u16))`; an `Array<T>` is a synthesised struct; a
+  // `StaticArray<T>` is a wasm array. All three are references under the flag.
+  if (cls.prototype == program.stringInstance.prototype) return true;
+  if (cls.prototype == program.arrayPrototype) return true;
+  if (cls.prototype == program.objectPrototype) return false;
+  if (isStdlibClass(cls)) return isStdlibGcClass(cls);
+  // A user class: a reference exactly when it is a GC struct rather than an exempt record.
+  if (cls.hasDecorator(DecoratorFlags.Unmanaged)) return false;
+  return !isGcExempt(cls);
 }
 
 /**
