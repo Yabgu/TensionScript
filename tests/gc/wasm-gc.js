@@ -462,6 +462,48 @@ function check(name, condition, detail) {
   }
 }
 
+
+// 18 — module-scope globals with non-constant initialisers --------------------
+//
+// `const app = new Editor()` is in every app; four `new AtlasFrame(...)` are in
+// stiff-boxes. A GC `struct.new` is not a wasm global's init expression, so the
+// global is zeroed and assigned in the start function.
+{
+  const built = compile("globalinit.ts", "gi.wasm", ["--wasmGc"]);
+  check("globals with non-constant initialisers compile", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "gi.wat"), "utf8");
+    check("the global is zeroed, not initialised in place",
+      /global \S*(GROUND|RAMP)[^\n]*\(ref\.null/.test(wat),
+      wat.split("\n").filter((l) => l.includes("global $")).slice(0, 3).join("\n"));
+    check("the start function assigns it",
+      /func \$start:[^\n]*\n[\s\S]{0,200}global\.set \S*(GROUND|RAMP)/.test(wat));
+
+    const { instance } = await WebAssembly.instantiate(readFileSync(join(scratch, "gi.wasm")), imports);
+    const e = instance.exports;
+    check("a GC-struct global holds the object it was given",
+      e.groundX() === 0 && e.rampX() === 64,
+      `groundX=${e.groundX()} rampX=${e.rampX()}`);
+    check("a class held by a global may have a String field (pointer fallback)",
+      e.namedLen() === 8, `namedLen=${e.namedLen()} (expect 8)`);
+  }
+}
+
+// 19 — the `length` setter ---------------------------------------------------
+{
+  const built = compile("dynarray.ts", "dyn2.wasm", ["--wasmGc"]);
+  if (built.ok) {
+    const { instance } = await WebAssembly.instantiate(readFileSync(join(scratch, "dyn2.wasm")), imports);
+    const e = instance.exports;
+    check("length setter: grows within capacity, allows the slot, truncates",
+      e.setLength() === 5091, `setLength() = ${e.setLength()} (expect 5091)`);
+    check("length setter: grows past capacity",
+      e.setLengthGrows() === 10007, `setLengthGrows() = ${e.setLengthGrows()} (expect 10007)`);
+  } else {
+    check("length setter fixture compiles", false, built.output);
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);

@@ -772,3 +772,115 @@ A GC `struct.new` in a global initialiser is not being emitted as a start-functi
 sequence. That is a small, named gap — not a tracing doubt, since the backing array
 is a `(array (mut (ref null $Item)))` and the tracer follows it exactly as GC5
 measured — but it is the one test in this round that did not run, and it should.
+
+## Module-scope globals: the site, and the two rules it needed
+
+`const app = new Editor()` is in every app (`apps/editor/src/main.ts:2051`,
+`apps/docs/src/main.ts:1335`); four `new AtlasFrame(...)` are in
+`examples/2d/stiff-boxes/src/atlas_info.ts:27-30`. A GC `struct.new` is not a wasm
+global's init expression, so such a global must be zeroed and assigned in the start
+function.
+
+**That machinery already existed** — `compileGlobal`'s `initializeInStart` path
+(`src/compiler.ts:1588`) handles every non-constant initialiser, because
+`const x = someCall()` works in linear mode. Two things were wrong on the GC path:
+
+1. **The zero was `i32(0)`.** `module.addGlobal(…, this.makeZero(internalType))`
+   answers an `i32` constant for a class — right under the pointer ABI, where a
+   class *is* an `i32`; wrong for a `(ref null $C)`:
+
+   ```
+   [wasm-validator error in module] global init must have correct type
+   (i32.const 0) (on global app)
+   ```
+
+   `makeFieldZero` (which GC3 introduced for struct fields) answers `ref.null` for a
+   GC reference. One word changed.
+
+2. **The guest collector visited them.** `compileVisitGlobals` read every managed
+   global and handed it to `__visit` as an `i32`:
+
+   ```
+   [wasm-validator error in function ~lib/rt/__visit_globals]
+     i32 != (ref null $struct.0): global.get must have right type
+   ```
+
+   A GC global is now skipped there. That is not an omission: `__visit_globals` is
+   precisely the guest scanner this migration replaces, and the engine traces what
+   it cannot see.
+
+The emitted start sequence for `const GROUND = new Frame(0, 768)`:
+
+```wat
+(global $…/GROUND (mut (ref null $…/Frame)) (ref.null none))
+(func $start:… 
+  ref.null none            ;; `this`
+  i32.const 0  i32.const 768
+  call $…/Frame#constructor
+  global.set $…/GROUND)
+```
+
+### The ABI must not mix, and how that is enforced
+
+A pointer-shaped class stores a field at a byte offset as an `i32`; a GC struct
+stores the same field as a `(ref null $C)`. A program holding both aborts inside
+Binaryen — `Aborted(Assertion failed: isBasic() && "Basic type expected")`,
+`wasm-type.h` — which is the worst failure mode there is: a crash with no
+diagnostic. Measured on a `main.ts`-shaped file where `Editor` carries a `String`
+field and another class does not.
+
+Two layers, cheapest first:
+
+- **Eligibility is checked per class**: every field must be a value type or a GC
+  struct, and the declared base chain must be GC-usable. A class with a `String`
+  field is simply not a GC struct — the same "unsupported means unchanged" rule
+  `StaticArray`'s element check uses.
+- **A program-level latch** (`gcUniform`) demands that *every* declared class be
+  eligible before any of them is a GC struct, so one `String` field keeps the whole
+  program on the pointer ABI — which is exactly what it does today.
+- **A hard check** (`gcMixedAbiReferrer`) refuses a GC struct that a pointer-shaped
+  class holds a field of, by name, both classes in the message. That is the
+  guarantee: the latch is best-effort (it scans the classes resolved at that
+  moment), the diagnostic is not, and no mixed-ABI module can be produced.
+
+**What this means for a real program**: `examples/2d/stiff-boxes/src/atlas_info.ts`
+— the smallest of the eight sites — compiles and runs under the flag (verified).
+A `main.ts`-shaped file (`const app = new Editor()`, where `Editor` has `String`
+fields) also compiles, on the pointer ABI. **No real app gets GC classes yet**,
+because every one of them has a `String` somewhere; the flag is a fixture-scale
+feature until `String` migrates. That is the honest state.
+
+## Traced after growth — now measured through the compiler
+
+`/tmp/gc8r` (wasmtime 50.0.1, `Store::gc`). A module-level
+`let root: Array<Item> = new Array<Item>(0)` is filled with 40 `Item`s (three 2×
+growths), then collected:
+
+```
+A: no forced collection            total=820 count=40
+B: 5 collections after growth      total=820 count=40
+C: gc + 100000x1KiB garbage + gc   total=820 count=40 capacity=65536
+D: same, moving collector          total=820 count=40
+E: control, root cleared after fill  total=0
+verdict: elements after growth ARE traced
+```
+
+820 is `1+…+40`. C is the load-bearing line: 102 MB allocated and reclaimed while
+heap capacity stayed at 65,536 bytes, with the elements still correct — so the
+collector ran and the grown array's elements survived it. D repeats it under a
+**moving** collector, where a stale `data` field or a mistyped element would leave
+a reference pointing at the old arena. E proves `total` really reads through the
+global rather than returning a cached number.
+
+## `Array` operations covered
+
+`new`, `.length` get, **`.length` set** (grows to `max(n, cap<<1, MIN_SIZE)` in one
+allocation, or truncates by moving `length_` alone), `a[i]`, `a[i] = v`, `push`,
+`pop`.
+
+**Remaining**: `shift`, `unshift`, `slice`, `indexOf`, `join`, `concat`, then
+`sort`/`reverse`/`map`/`filter` (a separate pass, out of scope). The `__gcArrayData`
+intrinsic was **not** built this round — `length`'s setter turned out to need the
+same growth sequence `push` already emits, so interception was cheaper than an
+intrinsic for it; the remaining methods are the ones that genuinely want the
+intrinsic, because they are stdlib bodies rather than syntax.

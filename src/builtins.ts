@@ -11429,9 +11429,17 @@ export function compileVisitGlobals(compiler: Compiler): void {
     let global = <Global>element;
     let globalType = global.type;
     let classReference = globalType.getClass();
+    // **A wasm GC global is traced by the engine, not by this visitor.** The
+    // visitor reads a global and hands it to `__visit` as an `i32`; a GC-struct
+    // global's type is a `(ref null $C)`, so `global.get` there is a type error
+    // (`i32 != (ref null $struct.0): global.get must have right type`). Skipping it
+    // is not an omission: the whole reason the migration exists is that the engine
+    // sees what `__visit_globals` cannot, and `__visit_globals` is exactly the
+    // guest-scanner this flag is replacing.
     if (
       classReference &&
       !classReference.hasDecorator(DecoratorFlags.Unmanaged) &&
+      !isGcClass(classReference) &&
       global.is(CommonFlags.Compiled)
     ) {
       if (global.is(CommonFlags.Inlined)) {

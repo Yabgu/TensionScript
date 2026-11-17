@@ -30,7 +30,8 @@ import {
   gcArrayElementOf,
   gcDynamicArrayElementOf,
   GC_ARRAY_DATA_INDEX,
-  GC_ARRAY_LENGTH_INDEX
+  GC_ARRAY_LENGTH_INDEX,
+  gcMixedAbiReferrer
 } from "./types";
 import { Class } from "./program";
 import * as binaryen from "./glue/binaryen";
@@ -4129,6 +4130,22 @@ export function ensureClassType(classInstance: Class): TypeRef {
   let module = classInstance.program.module;
   let cached = module.gcTypeCache.get(classInstance);
   if (cached) return cached;
+
+  // **A GC struct cannot be referenced from a pointer-shaped class.** The two ABIs
+  // store a field of this type differently, and emitting the pair aborts inside
+  // Binaryen with `isBasic() && "Basic type expected"` — a crash with no
+  // diagnostic. Refuse by name instead, naming both classes and the field's owner,
+  // so the reader knows which class has to migrate (usually one carrying a
+  // `String`).
+  let mixedReferrer = gcMixedAbiReferrer(classInstance);
+  if (mixedReferrer != null) {
+    throw new Error(
+      `${classInstance.internalName} is a wasm GC struct but ${mixedReferrer.internalName} ` +
+      `holds a field of its type and is not one: a pointer-shaped class cannot reference a ` +
+      `GC struct. Migrate ${mixedReferrer.internalName} (its own fields must all be value ` +
+      `types or GC structs) or keep ${classInstance.internalName} pointer-shaped.`
+    );
+  }
 
   // **The recursion group**, and it is usually just this class. A class that
   // references itself through another class (`A { b: B }`, `B { a: A }`) cannot be

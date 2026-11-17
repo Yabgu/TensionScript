@@ -1599,7 +1599,17 @@ export class Compiler extends DiagnosticEmitter {
         global.set(CommonFlags.InternallyNullable);
         internalType = type.asNullable();
       }
-      module.addGlobal(internalName, internalType.toRef(), true, this.makeZero(internalType));
+      // **`makeFieldZero`, not `makeZero`.** A wasm GC reference's zero is
+      // `ref.null`; `makeZero` answers `i32(0)` for a class (correct under the
+      // pointer ABI, where a class *is* an `i32`), and as a global's init
+      // expression that is the wrong type:
+      //
+      //     [wasm-validator error in module] global init must have correct type
+      //     (i32.const 0) (on global app)
+      //
+      // This is the path for every non-constant initialiser — `const app = new
+      // Editor()` — so it gates every real program under the flag, not just a test.
+      module.addGlobal(internalName, internalType.toRef(), true, this.makeFieldZero(internalType));
       this.currentBody.push(
         module.global_set(internalName, initExpr)
       );
@@ -6628,6 +6638,22 @@ export class Compiler extends DiagnosticEmitter {
     // a `T[N]` is inline storage and has no class to hang an operator on -- the
     // lookup below would report "index signature missing" for a target that is
     // perfectly writable.
+    // **`a.length = n` on a GC `Array<T>`.** The declared setter calls
+    // `ensureCapacity`, which is linear-memory code (`__renew`, `store<usize>`), so
+    // it cannot be emitted for a wasm-array-backed `Array`.
+    if (this.options.wasmGc && expression.kind == NodeKind.PropertyAccess) {
+      let access = <PropertyAccessExpression>expression;
+      if (access.property.text == "length") {
+        let setLengthType = resolver.resolveExpression(access.expression, flow, Type.auto, ReportMode.Swallow);
+        let setLengthElement = gcDynamicArrayElementOf(setLengthType);
+        if (setLengthElement != null) {
+          return this.compileGcDynamicArraySetLength(
+            access.expression, valueExpression, assert(setLengthType), setLengthElement
+          );
+        }
+      }
+    }
+
     if (expression.kind == NodeKind.ElementAccess) {
       let elementAccess = <ElementAccessExpression>expression;
       let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
@@ -16512,6 +16538,84 @@ export class Compiler extends DiagnosticEmitter {
     stmts.push(module.local_get(lenLocal, TypeRef.I32));
     this.currentType = Type.i32;
     return module.block(null, stmts, TypeRef.I32);
+  }
+
+  /**
+   * `a.length = n` on a GC `Array<T>`: grow if `n` exceeds the capacity, then set
+   * `length_`.
+   *
+   * **Truncation needs no work** — the used count is the only thing that shrinks,
+   * and the spare elements stay in the backing array as unreachable slots the
+   * collector may still see. That is the same behaviour the stdlib has (it keeps
+   * the buffer and lowers `length_`), so nothing observable changes.
+   *
+   * Growth reuses `push`'s sequence: allocate `max(cap<<1, MIN_SIZE)` — repeating
+   * until it fits `n` is *not* done, because a single 2× step that is still short
+   * would leave `length_ > capacity`. Instead the new capacity is
+   * `max(n, cap<<1, MIN_SIZE)`, one allocation.
+   */
+  private compileGcDynamicArraySetLength(
+    receiver: Expression,
+    lengthExpression: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let newLenLocal = flow.getTempLocal(Type.i32).index;
+    let capLocal = flow.getTempLocal(Type.i32).index;
+    let newLocal = flow.getTempLocal(this.gcBackingArrayType(element)).index;
+    let stmts = new Array<ExpressionRef>();
+
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(receiver, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(newLenLocal,
+      this.compileExpression(lengthExpression, Type.i32, Constraints.ConvImplicit), false));
+
+    // `u32(n) > BLOCK_MAXSIZE` → the stdlib's RangeError(E_INVALIDLENGTH). Unsigned,
+    // so a negative length is refused here rather than becoming a huge allocation.
+    stmts.push(module.if(
+      module.binary(BinaryOp.GtU32, module.local_get(newLenLocal, TypeRef.I32),
+        module.i32(0x7ffffff0)),
+      this.makeStaticAbort(this.ensureStaticString("Invalid length"),
+        this.currentFlow.sourceFunction.identifierNode)
+    ));
+
+    // if (n > array.len data) grow to max(n, cap<<1, MIN_SIZE)
+    let grow = module.block(null, [
+      module.local_set(capLocal, module.array_len(this.gcDynamicArrayData(
+        module.local_get(refLocal, classTypeRef), classTypeRef, element)), false),
+      module.local_set(newLocal, module.array_new(module.heapType(arrayTypeRef),
+        module.select(module.local_get(newLenLocal, TypeRef.I32),
+          module.select(
+            module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)),
+            module.i32(GC_ARRAY_MIN_SIZE),
+            module.binary(BinaryOp.GtU32,
+              module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)),
+              module.i32(GC_ARRAY_MIN_SIZE))),
+          module.binary(BinaryOp.GtU32, module.local_get(newLenLocal, TypeRef.I32),
+            module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)))),
+        this.makeFieldZero(element)), false),
+      module.array_copy(module.local_get(newLocal, arrayTypeRef), module.i32(0),
+        this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+        module.i32(0), module.local_get(capLocal, TypeRef.I32)),
+      module.struct_set(module.heapType(classTypeRef), GC_ARRAY_DATA_INDEX,
+        module.local_get(refLocal, classTypeRef), module.local_get(newLocal, arrayTypeRef))
+    ], TypeRef.None);
+    stmts.push(module.if(
+      module.binary(BinaryOp.GtU32, module.local_get(newLenLocal, TypeRef.I32),
+        module.array_len(this.gcDynamicArrayData(
+          module.local_get(refLocal, classTypeRef), classTypeRef, element))),
+      grow
+    ));
+
+    stmts.push(module.struct_set(module.heapType(classTypeRef), GC_ARRAY_LENGTH_INDEX,
+      module.local_get(refLocal, classTypeRef), module.local_get(newLenLocal, TypeRef.I32)));
+    this.currentType = Type.void;
+    return module.block(null, stmts, TypeRef.None);
   }
 
   /** `a.pop()`: `length_--`, then the element that was last. */

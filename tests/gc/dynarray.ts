@@ -48,3 +48,26 @@ export function writePastLength(): void {
 }
 
 export function popEmpty(): i32 { return new Array<i32>(0).pop(); }
+
+// --- the `length` setter ----------------------------------------------------
+
+/** Grow via the setter past capacity, then truncate. */
+export function setLength(): i32 {
+  let a = new Array<i32>(0);
+  a.push(1);
+  a.push(2);
+  a.length = 5;              // within capacity 8: only `length_` moves
+  let l1 = a.length;
+  a[4] = 9;                  // now inside the length, so allowed
+  let v = a[4];
+  a.length = 1;              // truncate: no reallocation, `length_` only
+  return l1 * 1000 + v * 10 + a.length;
+}
+
+/** Grow the setter well past capacity, then write the last element. */
+export function setLengthGrows(): i32 {
+  let a = new Array<i32>(0);
+  a.length = 100;
+  a[99] = 7;
+  return a.length * 100 + a[99];
+}

@@ -216,6 +216,13 @@ export function setGcClassesEnabled(enabled: bool): void {
  */
 export function isGcClass(cls: Class): bool {
   if (!gcClassesEnabled) return false;
+  // **The whole program is uniform or it is not.** A pointer-shaped class stores a
+  // field at a byte offset as an `i32`, a GC struct stores the same field as a
+  // `(ref null $C)`, and a program holding both aborts inside Binaryen
+  // (`isBasic() && "Basic type expected"`). So GC classes are used only when *every*
+  // declared user class is eligible; one `String` field anywhere means the program
+  // keeps the pointer ABI, exactly as it does today. `gcUniform` decides once.
+  if (!gcUniform(cls.program)) return false;
   if (cls.internalName.startsWith("~lib/")) {
     // **One exception, and it is the whole standard library's `Array`.** A dynamic
     // `Array<T>` gets a compiler-synthesised GC layout (`gcDynamicArrayElementOf`),
@@ -232,6 +239,134 @@ export function isGcClass(cls: Class): bool {
   // ever a GC struct.
   if (base != null && !cls.prototype.implicitlyExtendsObject) {
     return isGcClass(base);
+  }
+  // **Every field must be storable in a struct.** `String`, `ArrayBuffer` and the
+  // other unmigrated `~lib/` types are linear-memory objects with no heap type, so
+  // a class holding one cannot be a struct — and a program that has one
+  // (`class App { name: string }`) must keep the pointer ABI rather than crash in
+  // `gcFieldTypeRef`'s assertion. The same rule `StaticArray`'s element check uses:
+  // unsupported means unchanged, not refused.
+  return gcStructFieldsSupported(cls);
+}
+
+/**
+ * The **pointer-ABI class holding a field of this GC class's type**, or `null`.
+ *
+ * The two ABIs cannot mix: a pointer-shaped class stores a field at a byte offset
+ * with `store<T>` where `T`'s ref is an `i32`, while a GC struct's field of the
+ * same class is a `(ref null $C)`. Emitting the pair aborts inside Binaryen
+ * (`isBasic() && "Basic type expected"`, `wasm-type.h`), which is the worst kind of
+ * failure: a crash with no diagnostic. This is the check that turns it into a
+ * message naming both classes.
+ *
+ * The mixed case is reachable whenever *any* class in the program is ineligible for
+ * GC — most commonly because one of its fields is a `String`, which this migration
+ * has not reached yet.
+ */
+export function gcMixedAbiReferrer(cls: Class): Class | null {
+  let elements = cls.program.elementsByDeclaration;
+  for (let _values = Map_values(elements), i = 0, k = _values.length; i < k; ++i) {
+    let element = unchecked(_values[i]);
+    if (element.kind != ElementKind.ClassPrototype) continue;
+    let other = (<ClassPrototype>element).getResolvedInstance("");
+    if (other == null || other == cls) continue;
+    if (isGcClass(other)) continue;             // both GC: fine
+    let fields = gcFieldsOf(other);
+    for (let j = 0, n = fields.length; j < n; ++j) {
+      let fieldClass = unchecked(fields[j]).type.classReference;
+      if (fieldClass != null && isGcClass(fieldClass) && fieldClass.program == cls.program) {
+        // Only report when the *field's* class is a GC struct, i.e. a real crossing.
+        if (fieldClass == cls || isGcClass(fieldClass)) return other;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether every field of `cls` can be a wasm struct field.
+ *
+ * Recursive through class-typed fields, because a struct can only hold a `ref` to
+ * another struct. `gcStructCheckPath` guards the cycle case (`A { b: B }`,
+ * `B { a: A }`): a class already being checked answers "yes" optimistically, which
+ * is correct — a cycle of otherwise-fine classes becomes one `rec` group, and a
+ * cycle containing a bad field is caught when that field's own class is checked.
+ */
+function gcStructFieldsSupported(cls: Class): bool {
+  if (gcStructCheckPath.includes(cls)) return true;
+  gcStructCheckPath.push(cls);
+  let ok = true;
+  let fields = gcFieldsOf(cls);
+  for (let i = 0, k = fields.length; i < k; ++i) {
+    if (!gcStructFieldSupported(unchecked(fields[i]).type)) { ok = false; break; }
+  }
+  gcStructCheckPath.pop();
+  return ok;
+}
+
+/** Whether one field's type can be a wasm struct field in this slice. */
+function gcStructFieldSupported(fieldType: Type): bool {
+  let cls = fieldType.classReference;
+  if (cls != null) return isGcClass(cls);
+  switch (fieldType.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8: case TypeKind.I16: case TypeKind.I32: case TypeKind.I64:
+    case TypeKind.Isize: case TypeKind.U8: case TypeKind.U16:
+    case TypeKind.U32: case TypeKind.U64: case TypeKind.Usize:
+    case TypeKind.F32: case TypeKind.F64: return true;
+  }
+  return false;
+}
+
+/** Classes on the current {@link gcStructFieldsSupported} path, for cycles. */
+let gcStructCheckPath: Class[] = [];
+
+/** Per-program answer to "is every declared class GC-eligible?". */
+let gcUniformByProgram: Map<Program, bool> = new Map();
+
+/**
+ * Whether **every** declared class in `program` is eligible to be a GC struct.
+ *
+ * Computed once, over the classes resolved at that moment. An incomplete scan (a
+ * multi-file program whose later files are still unparsed) can only answer `true`
+ * too early, and that case is caught by `gcMixedAbiReferrer`'s diagnostic — it
+ * cannot produce a mixed-ABI module.
+ */
+function gcUniform(program: Program): bool {
+  let known = gcUniformByProgram.get(program);
+  if (known != null) return known;
+  let result = true;
+  let elements = program.elementsByDeclaration;
+  for (let _values = Map_values(elements), i = 0, k = _values.length; i < k; ++i) {
+    let element = unchecked(_values[i]);
+    if (element.kind != ElementKind.ClassPrototype) continue;
+    let cls = (<ClassPrototype>element).getResolvedInstance("");
+    if (cls == null) continue;
+    if (cls.internalName.startsWith("~lib/")) continue;   // not ours to migrate
+    if (cls.prototype.implicitlyExtendsObject) {
+      if (!gcStructFieldsSupported(cls)) { result = false; break; }
+    } else if (!isGcBaseChainUsable(cls)) {
+      result = false; break;
+    }
+  }
+  gcUniformByProgram.set(program, result);
+  return result;
+}
+
+/**
+ * Whether a class's **declared** base chain can be GC structs all the way up.
+ *
+ * Walks only while a base is *declared*: a class whose base is the implicit
+ * `Object` is flat, and `Object` itself is standard library — walking past the
+ * implicit edge would reject every class in every program.
+ */
+function isGcBaseChainUsable(cls: Class): bool {
+  let cursor = cls;
+  while (!cursor.prototype.implicitlyExtendsObject) {
+    let base = cursor.base;
+    if (base == null) return false;
+    if (base.internalName.startsWith("~lib/")) return false;
+    cursor = base;
   }
   return true;
 }
