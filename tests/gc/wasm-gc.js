@@ -785,12 +785,13 @@ function check(name, condition, detail) {
     blocked.output.split("\n").find((l) => /TS641/.test(l)) ?? "(no coverage line)");
   const blockedLine = (blocked.output.match(/WARNING TS6414: [^\n]*/) ?? [""])[0];
   check("non-uniform program says 0 of N and names the cause",
-    /0 of \d+ managed class/.test(blockedLine) && /holding an? TypedArray/.test(blockedLine),
+    /0 of \d+ managed class/.test(blockedLine) && /holding an? ArrayBuffer/.test(blockedLine),
     blockedLine);
   if (blocked.ok) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, "covb.wasm")), imports);
-    check("non-uniform program still answers", instance.exports.reportBlocked() === 3);
+    check("non-uniform program still answers", instance.exports.reportBlocked() === 7,
+      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 7)`);
   }
 
   // (c) flag off -> no coverage diagnostic of any kind, and the same answers.
@@ -800,7 +801,8 @@ function check(name, condition, detail) {
   if (plain.ok) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, "covp.wasm")), imports);
-    check("flag off: the same answers", instance.exports.reportBlocked() === 3);
+    check("flag off: the same answers", instance.exports.reportBlocked() === 7,
+      `reportBlocked() = ${instance.exports.reportBlocked()} (expect 7)`);
   }
 }
 
@@ -825,9 +827,125 @@ function check(name, condition, detail) {
   if (late.ok && early.ok) {
     const l = (await WebAssembly.instantiate(readFileSync(join(scratch, "ordl.wasm")), imports)).instance;
     const e = (await WebAssembly.instantiate(readFileSync(join(scratch, "orde.wasm")), imports)).instance;
-    check("both discovery orders answer", l.exports.probe() === 40 && e.exports.probe() === 40,
-      `late=${l.exports.probe()} early=${e.exports.probe()} (expect 40 both)`);
+    check("both discovery orders answer", l.exports.probe() === 42 && e.exports.probe() === 42,
+      `late=${l.exports.probe()} early=${e.exports.probe()} (expect 42 both)`);
   }
+}
+
+// 33 — TypedArray views as GC structs: the synthesised layout -----------------
+//
+// The rule is the user's: a byte buffer holds no GC references, so its storage needs
+// no tracing, so it may stay in **linear memory** and be addressable while the *view*
+// becomes a GC struct of scalars. `{ <brand>, buffer, dataStart, byteLength }`, and
+// `buffer` is stored as an `i32` address rather than a reference — the one field
+// whose declared type is deliberately not its stored type.
+{
+  const built = compile("typedarray.ts", "ta.wasm", ["--wasmGc"]);
+  check("the typed-array fixture compiles with validation on", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "ta.wat"), "utf8");
+    // **Asserted on the shape, not on the type's name.** `ArrayBufferView` and
+    // `DataView` declare identical layouts, so wasm canonicalises them into ONE
+    // type — whichever was built first supplies the name (measured: the printed
+    // supertype reads `$~lib/dataview/DataView`). That is the GC4 structural-identity
+    // hazard, and it is benign here for the reason the brand field exists: dispatch
+    // is a value compare, never `ref.test`.
+    check("a buffer view is a struct of scalars",
+      /\(type \S+ \(sub \(struct \(field \$<brand> i32\) \(field \$buffer \(mut i32\)\) \(field \$dataStart \(mut i32\)\) \(field \$byteLength \(mut i32\)\)\)\)\)/.test(wat),
+      (wat.match(/\(type \S+ \(sub \(struct[^\n]*/) ?? ["absent"])[0]);
+    // The typed arrays declare nothing of their own, so they canonicalise onto that
+    // same struct type rather than each getting a named one — asserted as the fact it
+    // is, because a reader who expects twelve named types will otherwise think the
+    // migration failed. `viewBrands` is what proves dispatch still separates them.
+    check("no view pays for a linear header any more: no __new for a view class",
+      !/call \$~lib\/rt\/itcms\/__new\b/.test(wat.split("(func $~lib/typedarray/Int32Array#constructor")[1] ?? ""),
+      (wat.match(/.*__new.*/) ?? ["absent"])[0]);
+    check("views share one canonical struct type (declared fields are identical)",
+      (wat.match(/\(type \S+ \(sub \(struct \(field \$<brand> i32\) \(field \$buffer/g) ?? []).length === 1,
+      `${(wat.match(/\(type \S+ \(sub \(struct \(field \$<brand> i32\) \(field \$buffer/g) ?? []).length} such types`);
+    // A wasm GC struct is traced by the engine, so the guest scanner must not be
+    // asked to walk one: `compileVisitMembers` used to emit `call $C~visit` for every
+    // managed class, and `Array<i32>~visit` reads `this.buffer` — a field the
+    // synthesised layout does not have (measured: TS2339 on `array.ts:524`).
+    check("no visitor is emitted for a GC struct",
+      !/call \$~lib\/(array|arraybuffer|typedarray|dataview)\/[^ ]*~visit/.test(wat),
+      (wat.match(/call \$~lib\/(array|arraybuffer|typedarray|dataview)\/[^ ]*~visit/) ?? ["absent"])[0]);
+    check("the view is not allocated by the guest allocator",
+      !/call \$~lib\/rt\/itcms\/__new\b[^\n]*\n[^\n]*Uint8Array/.test(wat) && wat.includes("struct.new"));
+
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "ta.wasm")), imports);
+    const e = instance.exports;
+    const want = {
+      writeRead: 211,            // elements land at dataStart + i
+      byteOffsetAndLength: 8,    // byteOffset survives as a derived i32
+      wideElements: 1002,        // two bytes per element
+      floatElements: 15,         // f64 elements
+      payloadSharedWithBuffer: 119, // load<u32>(dataStart) sees what the view wrote
+      dataView: 85,              // DataView: same shape, not an ArrayBufferView
+      isView: 1,                 // ArrayBuffer.isView -> brand subtree, non-empty
+      viewBrands: 1,             // sibling views have distinct brands
+      viaClass: 1003,            // a class HOLDING a view is a GC struct
+      stdlibOnPayload: 18,       // FILL/SORT still work through dataStart
+    };
+    for (const name of Object.keys(want)) {
+      const got = e[name]();
+      check(`typedarray: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
+    }
+  }
+}
+
+// 34 — the view fixture at every optimisation level ---------------------------
+{
+  const answers = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("typedarray.ts", `ta${level}.wasm`, ["--wasmGc", level]);
+    check(`typedarray ${level} compiles`,
+      built.ok && !/wasm-validator|Aborted/.test(built.output), built.output);
+    if (built.ok) {
+      const { instance } = await WebAssembly.instantiate(
+        readFileSync(join(scratch, `ta${level}.wasm`)), imports);
+      const e = instance.exports;
+      answers.push([e.writeRead(), e.payloadSharedWithBuffer(), e.dataView(),
+        e.viaClass(), e.stdlibOnPayload()].join(","));
+    }
+  }
+  check("typedarray: -O0..-O3 all agree", new Set(answers).size === 1, answers.join(" | "));
+}
+
+// 35 — flag off: a typed array is still a pointer-shaped view ----------------
+//
+// The synthesised layout exists only in the compiler, so `std/` is untouched and the
+// flag-off module keeps the linear `{ buffer, dataStart, byteLength }` block.
+{
+  const built = compile("typedarray.ts", "taplain.wasm", []);
+  check("the typed-array fixture compiles without the flag", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "taplain.wat"), "utf8");
+    check("flag off: no GC array or struct for a view",
+      !/array\.new|array\.get|struct\.new \$~lib\/arraybuffer\/ArrayBufferView/.test(wat),
+      (wat.match(/.*(array\.new|struct\.new \$~lib\/arraybuffer).*/) ?? ["absent"])[0]);
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "taplain.wasm")), imports);
+    const e = instance.exports;
+    check("flag off: the same answers",
+      e.writeRead() === 211 && e.dataView() === 85 && e.viaClass() === 1003 &&
+      e.payloadSharedWithBuffer() === 119);
+  }
+}
+
+// 36 — a GC reference still cannot be turned into an address ----------------
+//
+// The guarantee the design rests on: the payload stays in linear memory *because* a
+// blob holds no references, and the only way to smuggle one in would be
+// `changetype<usize>(aGCReference)`. A view is now exactly the object most likely to
+// tempt that ("the data is right there"), so this is the test that keeps it refused.
+{
+  const built = compile("changetype-view.ts", "ctv.wasm", ["--wasmGc"]);
+  check("changetype<usize> of a TypedArray view is refused", !built.ok, built.output);
+  check("the refusal names the view and the reason",
+    /changetype<usize> of a wasm GC class instance \(Uint8Array\): a wasm GC reference has no address/.test(built.output),
+    built.output.split("\n").find((l) => /AS100/.test(l)) ?? "(no diagnostic)");
 }
 
 if (failures) {

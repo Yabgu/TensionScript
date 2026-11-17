@@ -1536,3 +1536,151 @@ only, so every coverage assertion read `(no coverage line)` from a build that pr
 one. `-O0..-O3` agree on every GC fixture, `test:compiler` stays at its five
 pre-existing mismatches, flag-off output is **byte-identical on all 15 fixtures that
 predate this round**, and no file under `std/assembly` was touched.
+
+## TypedArray views as GC structs: the handle, not the payload
+
+The rule is the user's, and it is what makes the round safe rather than clever:
+
+> "@inline [T*N] types i also designed as unaddressable but @managed [T*N] should be
+> on HEAP … that type is basically GC holding binary blob thats it … to be sure about
+> them we refuse them to hold pointer of any GC sort its compiler error"
+
+A byte buffer **holds no GC references**. So its storage needs no tracing, so its
+storage may stay in **linear memory** — addressable — while the *view object* becomes
+a GC struct whose fields are all scalars. That resolves the addressability problem
+instead of working around it: the GC object is a small handle, and the payload is
+still an address.
+
+### The layout, and where it is decided
+
+```
+ArrayBufferView  (abstract)   DataView
+  { <brand>        i32          { <brand>, buffer, dataStart, byteLength }
+    buffer        (mut i32)
+    dataStart     (mut i32)
+    byteLength    (mut i32)  }
+        ↑
+  the eleven typed arrays: an empty body, so the base's fields are their prefix
+```
+
+- **Field 0 is the brand** — immutable, as in every struct, so `instanceof` stays a
+  value compare.
+- **`buffer` is the one field whose declared type is not its stored type.** It is
+  declared `ArrayBuffer`, a linear-memory block, and a view's hold on it is the
+  block's *address*. Storing the address as an `i32` is what keeps `dataStart` a
+  real address, and an `i32` field is not traced — which is correct, because an
+  `ArrayBuffer` is not a GC object to begin with.
+- The rest are already scalars. All three are mutable in the struct because the
+  stdlib constructor assigns them; a `readonly` field costs the same on `struct.get`,
+  so mutability is not threaded from the declaration.
+
+**Decided in the compiler, never in the stdlib.** `isGcBufferViewClass`
+(`types.ts`) recognises the shape — a class whose own declared fields are exactly
+`buffer: <pointer-shaped class>`, `dataStart: usize`, `byteLength: i32`. It is a
+**shape test, not a name test**: `ArrayBufferView` and `DataView` both declare it,
+`DataView` is not an `ArrayBufferView` subclass, and a name list would have needed
+updating for both. `isStdlibGcClass` is the single answer to "is this standard-library
+class on the GC ABI" — `Array<T>`, a buffer view, or a buffer view's subclass — used
+by `isGcClass`, `isGcEligible` and `isGcPrototype` so the three cannot disagree.
+`gcFieldTypeRef` (`module.ts`) is where `buffer` becomes `i32`.
+
+**`std/assembly` is untouched**: `git diff --stat` lists no file under `std/`, and the
+flag-off module is byte-identical on every fixture *and* on `hello-sprites`.
+
+### `.buffer` is answered by the field itself — zero sites changed
+
+There was a design question here (synthesise a value, refuse with a diagnostic, or
+something else) and it dissolved: `buffer` **is still a field**, just an `i32` instead
+of a traced reference. So
+
+```
+this.buffer = buffer                          // struct.set, i32
+changetype<usize>(this.buffer)                // the block's address, unchanged
+get byteOffset() { dataStart - buffer }       // unchanged arithmetic
+```
+
+all keep working verbatim, including `atomics.ts`'s eleven `changetype<usize>(array.buffer)`
+sites and `array.ts:20`'s `changetype<ArrayBufferView>(array).buffer`. **Zero of the 19
+`.`buffer` sites in `std/assembly` changed.**
+
+### Two things this surfaced
+
+**1. All twelve view classes canonicalise into one wasm type.** They declare identical
+fields, so Binaryen's structural typing makes `Uint8Array` and `DataView` *the same
+type* — printed with whichever name was inserted first (measured: the supertype reads
+`$~lib/dataview/DataView`, and `Int32Array` got its own only because it was built in
+an earlier group). This is GC4's structural-identity hazard in a new place, and it is
+benign here for exactly the reason the brand field exists: dispatch is a brand
+*value* compare, never `ref.test`. `tests/gc/typedarray.ts`'s `viewBrands` is the
+load-bearing test — `dv instanceof DataView` true, `dv instanceof Uint8Array` false,
+`u8 instanceof DataView` false, all on one canonicalised type.
+
+**2. `compileVisitMembers` emitted a visitor for every managed class.** Under GC that
+compiled `Array<i32>~visit`, whose body reads `this.buffer` — a field the synthesised
+layout does not have (`TS2339` at `array.ts:524`). A GC struct is traced by the
+engine, so the guest scanner must not be asked to walk one; the case now emits
+`return()`, not a skipped slot, because the table is indexed by *typeinfo id* and
+omitting an entry would shift every class after it onto the wrong arm.
+
+### What is still refused, named
+
+`examples/2d/hello-sprites` under `--wasmGc`, before → after this round:
+
+```
+- 0 of 141 managed classes on the GC ABI - the program is not uniform:
+  16 holding a TypedArray, 1 holding an ArrayBuffer,
+  1 extending a class that is not GC (TaskState), 1 more reason
+  (and 12 blocked by a class that is not GC, 110 eligible, held back only by the latch)
+
++ 0 of 141 managed classes on the GC ABI - the program is not uniform:
+  1 holding an ArrayBuffer, 1 extending a class that is not GC (TaskState),
+  1 holding a Map (and 138 eligible, held back only by the latch)
+```
+
+**29 blockers gone** (16 direct + 12 transitive + 1 that the old three-cause limit
+hid), and **coverage is still zero**, because three classes remain:
+
+- **`~lib/tension-framework/assembly/ai/AiConfig`** — holds `Array<ArrayBuffer>` and
+  `ArrayBuffer | null`. `ArrayBuffer` is still a linear block with an `rtSize` header;
+  this round migrated the *views*, not the buffer. `ArrayBuffer`'s own round is the
+  one that can move this.
+- **`~lib/tension-framework/assembly/2d/tileset/Tileset`** — holds
+  `named: Map<string, Frame>`. `Map` is unmigrated, and migrating it needs the buffer
+  API plus `hashStr` (GC12's named item).
+- **`~lib/tension-framework/assembly/2d/scene/drive$State`** — extends `TaskState`
+  (`std/assembly/task-rt.ts:56`), the async runtime's state-machine base. Not mine to
+  migrate: it is the async lowering's contract, and it is the round after this one.
+
+Also named, not fixed: **`TypedArray.wrap`** (`typedarray.ts:1878-1881`) builds a view
+through `changetype<TArray>(__new(...))` plus three `offsetof` stores, so any program
+that calls it fails with the `changetype<usize>` diagnostic. Seven sites in
+`tension-framework` (`bytes.ts:85`, `res.ts:419`, `ai.ts:64,65,193,200`,
+`editor/json.ts:57`), zero in `std/assembly`, zero in the 2d examples — which is why
+`hello-sprites` compiles. `subarray`/`slice` route through the same helper.
+
+### The hazard this round creates, stated plainly
+
+Under the GC ABI a view's payload is linear memory that **nothing traces**. Before,
+`buffer` was a managed field and `__visit_members` kept it alive; now the address is an
+`i32` and the engine has no reason to look at it. The collector that still runs is
+`itcms`, and its root set is `__visit_globals` plus a scan of the *shadow stack* —
+which is disabled under the flag (it is the pointer ABI's root set). So a buffer could
+in principle be swept while a live view points into it.
+
+Not exercised by the fixture — Node exposes no forced GC, and a text fixture allocates
+too little to trigger a step — so this is a **named risk, not a measured one**, and the
+harness that would measure it is the one GC1 and GC5 used (`wasmtime` + `Store::gc`,
+in `/tmp`). Three candidate answers, none chosen here: pin the payload for the
+program's lifetime under the flag; give `ArrayBuffer` a GC-struct handle of its own so
+the view's field is a reference again; or make the payload a `(array (mut u8))` for
+victims that need tracing and keep linear memory only for the ones that do not.
+
+### Result
+
+`test:gc` 192 → **218 checks**, `-O0..-O3` agree on all 18 positive fixtures,
+`test:compiler` stays at its 5 pre-existing mismatches, flag-off output is
+**byte-identical on all 22 fixtures and on `hello-sprites`**, and `git diff --stat`
+lists **nothing under `std/`**. The guest still passes its own harness
+(`test.mjs`: 10,240 non-black pixels) with the flag-enabled module dropped in — and
+that is evidence the change did not break it, *not* evidence that it runs on the GC
+ABI: the latch is still off, so the module is byte-identical to the previous commit's.

@@ -32,9 +32,10 @@ import {
   GC_ARRAY_DATA_INDEX,
   GC_ARRAY_LENGTH_INDEX,
   gcMixedAbiReferrer,
-  gcStringOf
+  gcStringOf,
+  isLinearBufferField
 } from "./types";
-import { Class } from "./program";
+import { Class, Property } from "./program";
 import * as binaryen from "./glue/binaryen";
 import { synthesize as synthesizeDwarf } from "./dwarf";
 
@@ -4495,8 +4496,9 @@ function fillGcStructType(
 
   let fields = gcFieldsOf(member);
   for (let i = 0, k = fields.length; i < k; ++i) {
-    let fieldType = unchecked(fields[i]).type;
-    fieldTypes.push(gcFieldTypeRef(fieldType, slots));
+    let field = unchecked(fields[i]);
+    let fieldType = field.type;
+    fieldTypes.push(gcFieldTypeRef(fieldType, slots, field));
     packedTypes.push(determinePackedType(fieldType));
     // Every declared field is mutable. A `readonly` field would need the
     // mutability threaded from the declaration, and a `struct.get` on an
@@ -4714,7 +4716,14 @@ function gcElementTypeRef(element: Type): TypeRef {
 }
 
 /** The `TypeRef` for one struct field. */
-function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[]): TypeRef {
+function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[], field: Property | null = null): TypeRef {
+  // **A buffer view's `buffer` field is stored as an `i32` address.** Its declared
+  // type is `ArrayBuffer` — a linear-memory block — and a view's hold on it is the
+  // block's address, not a traced reference. That is the user's rule for a byte
+  // buffer, and it is what keeps `dataStart` an address every ABI site can use.
+  // Answered before the class test because `ArrayBuffer` is deliberately *not* a GC
+  // class, so the class arm below would fall through to the assertion.
+  if (field != null && isLinearBufferField(field)) return fieldType.size == 64 ? TypeRef.I64 : TypeRef.I32;
   // A class-typed field is a nullable ref to that class's struct. **In the group
   // being built** the slot is already allocated, so the reference is to a temp
   // heap type and the cycle closes; outside it, the class is built first and its

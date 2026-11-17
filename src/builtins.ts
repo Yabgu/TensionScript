@@ -11653,7 +11653,16 @@ export function compileVisitMembers(compiler: Compiler): void {
     assert(instanceId == nextId++);
     let instance = assert(managedClasses.get(instanceId));
     names[i] = instance.internalName;
-    if (instance.isPointerfree) {
+    // **A wasm GC struct is traced by the engine, so it needs no visitor.** Same
+    // argument as `__visit_globals` (GC12): the guest-scanner reads an object as a
+    // byte block and walks its typeinfo, and a GC struct has neither a linear
+    // layout to walk nor an id the scanner would recognise. Leaving the call in
+    // emitted `call $Array<i32>~visit`, whose body reads `this.buffer` — a field the
+    // synthesised layout does not have (measured: TS2339 on `array.ts:524`).
+    //
+    // `return()` and not a skipped slot: the table is indexed by *typeinfo id*, so
+    // omitting an entry would shift every class after it onto the wrong arm.
+    if (instance.isPointerfree || isGcClass(instance)) {
       cases[i] = module.return();
     } else {
       cases[i] = module.block(null, [

@@ -301,16 +301,17 @@ export function isGcClass(cls: Class): bool {
   // keeps the pointer ABI, exactly as it does today. `gcUniform` decides once.
   if (!gcUniform(cls.program)) return false;
   if (isStdlibClass(cls)) {
-    // **One exception, and it is the whole standard library's `Array`.** A dynamic
-    // `Array<T>` gets a compiler-synthesised GC layout (`gcDynamicArrayElementOf`),
-    // so it must be a GC struct — while `String`, the `TypedArray`s and everything
-    // else in `~lib/` keep the pointer ABI until their own rounds.
+    // **Two kinds of standard-library type are mounted on the GC heap**: `Array<T>`
+    // (a synthesised `{ brand, data, length_ }`) and the buffer views — the eleven
+    // typed arrays and `DataView` — whose payload stays in linear memory while the
+    // *view* becomes a struct of scalars. Everything else in `~lib/` (`String`,
+    // `Map`, `Set`, the runtime's own blocks) keeps the pointer ABI until its round.
     //
-    // **And it is conditional on the program, which is GC14's rule.** `Array` is a
-    // GC struct only when the program is uniform *given* that `Array` is one; see
+    // **And it is conditional on the program, which is GC14's rule.** These are GC
+    // structs only when the program is uniform *given* that they are; see
     // {@link gcUniform} for why that is the fixed point, and for what happens when
-    // it is not — `Array` goes back to the pointer ABI and the whole program with it.
-    return cls.prototype == cls.program.arrayPrototype;
+    // it is not — they go back to the pointer ABI, and the whole program with them.
+    return isStdlibGcClass(cls);
   }
   let base = cls.base;
   // `implicitlyExtendsObject` distinguishes "extends nothing, so the resolver
@@ -383,10 +384,30 @@ function gcStructFieldsSupported(cls: Class, intrinsic: bool = false): bool {
   let ok = true;
   let fields = gcFieldsOf(cls);
   for (let i = 0, k = fields.length; i < k; ++i) {
-    if (!gcStructFieldSupported(unchecked(fields[i]).type, intrinsic)) { ok = false; break; }
+    let field = unchecked(fields[i]);
+    if (!gcStructFieldSupported(field.type, intrinsic, field)) { ok = false; break; }
   }
   gcStructCheckPath.pop();
   return ok;
+}
+
+/**
+ * Whether this field is a **linear-buffer view's `buffer`**: the address of the
+ * payload, stored as an `i32` rather than as a traced reference.
+ *
+ * The one field in this migration whose declared type is deliberately *not* the type
+ * it is stored as. `ArrayBuffer` is a linear-memory block — the user's "binary blob"
+ * — so a view's hold on it is an address, and storing the address as an `i32` is
+ * exactly what keeps `dataStart` an address every ABI site can use. No reference is
+ * smuggled: `changetype<usize>(aGCReference)` is refused by name, and an `ArrayBuffer`
+ * is not a GC reference to begin with.
+ */
+export function isLinearBufferField(field: Property): bool {
+  if (field.name != "buffer") return false;
+  // `parent` is an `Element`; a field's declaring class is what the shape test needs.
+  let parent = field.parent;
+  if (parent == null || parent.kind != ElementKind.Class) return false;
+  return isGcBufferViewClass(<Class>parent);
 }
 
 /**
@@ -395,18 +416,30 @@ function gcStructFieldsSupported(cls: Class, intrinsic: bool = false): bool {
  * `intrinsic` asks the question as if the program-wide latch were on, so the answer
  * is "could this field be a reference" rather than "is it one right now".
  */
-function gcStructFieldSupported(fieldType: Type, intrinsic: bool = false): bool {
+function gcStructFieldSupported(
+  fieldType: Type,
+  intrinsic: bool = false,
+  field: Property | null = null
+): bool {
   if (intrinsic) {
     ++gcIntrinsicDepth;
-    let ok = gcStructFieldSupportedImpl(fieldType, intrinsic);
+    let ok = gcStructFieldSupportedImpl(fieldType, intrinsic, field);
     --gcIntrinsicDepth;
     return ok;
   }
-  return gcStructFieldSupportedImpl(fieldType, intrinsic);
+  return gcStructFieldSupportedImpl(fieldType, intrinsic, field);
 }
 
 /** {@link gcStructFieldSupported}'s body. */
-function gcStructFieldSupportedImpl(fieldType: Type, intrinsic: bool): bool {
+function gcStructFieldSupportedImpl(
+  fieldType: Type,
+  intrinsic: bool,
+  field: Property | null
+): bool {
+  // **A view's `buffer` field is an address, and an address is storable.** Checked
+  // first because everything below is about the *type*, and this field's type is a
+  // pointer-shaped class — which is exactly what makes it storable as an `i32`.
+  if (field != null && isLinearBufferField(field)) return true;
   // **A `String` field is storable now.** `String` is an `(array (mut u16))` under
   // the flag, so a class holding one has a reference-typed field like any other and
   // needs no exclusion. Before this round it was the single reason a real program
@@ -458,7 +491,9 @@ export function isGcEligible(cls: Class): bool {
 
 /** {@link isGcEligible}'s body, with the intrinsic depth raised by the caller. */
 function isGcEligibleImpl(cls: Class): bool {
-  if (isStdlibClass(cls)) return cls.prototype == cls.program.arrayPrototype;
+  // Standard library: GC exactly when it is one of the two mounted kinds. `Array`
+  // and the buffer views are synthesised layouts; a subclass of a view inherits.
+  if (isStdlibClass(cls)) return isStdlibGcClass(cls);
   let base = cls.base;
   if (base != null && !cls.prototype.implicitlyExtendsObject) {
     if (!isGcEligibleImpl(base)) return false;
@@ -730,8 +765,9 @@ function recordGcRefusal(coverage: GcCoverage, cls: Class): void {
   }
   let fields = gcFieldsOf(cls);
   for (let i = 0, k = fields.length; i < k; ++i) {
-    let fieldType = unchecked(fields[i]).type;
-    if (gcStructFieldSupported(fieldType, true)) continue;
+    let field = unchecked(fields[i]);
+    let fieldType = field.type;
+    if (gcStructFieldSupported(fieldType, true, field)) continue;
     let fieldClass = fieldType.classReference;
     if (fieldClass != null && !isStdlibClass(fieldClass)) {
       ++coverage.blocked;
@@ -1110,11 +1146,130 @@ export function gcSubtreeBrands(program: Program, cls: Class): i32[] {
  */
 export function isGcPrototype(prototype: ClassPrototype): bool {
   if (!gcClassesEnabled) return false;
-  if (isStdlibPrototype(prototype)) return false;
+  if (isStdlibPrototype(prototype)) {
+    // **A standard-library class IS a prototype here**, so `isGcClass`'s answer has
+    // to be reproduced without a `Class` in hand — and it must be reproduced, not
+    // guessed: this is the walk that fills a brand subtree, so answering "no" for
+    // `Uint8Array` made `ArrayBuffer.isView` an empty brand test and its
+    // `assert(subtree.length > 0)` fired (measured). The three migrated shapes are
+    // `Array`, a buffer view, and a buffer view's subclass; the resolved instance is
+    // what tells them apart, and it exists for all of them (none is generic).
+    let program = prototype.program;
+    if (prototype == program.arrayPrototype) return true;
+    let cls = prototype.getResolvedInstance("");
+    if (cls == null) return false;
+    if (isGcBufferViewClass(cls)) return true;
+    let base = cls.base;
+    return base != null && isGcBufferViewClass(base);
+  }
   let base = prototype.basePrototype;
   if (base != null) return isGcPrototype(base);
   return true;
 }
+
+/**
+ * A class's **own** declared fields, in member order — no base chain.
+ *
+ * Split out of {@link gcFieldsOf} because one question needs the declared set
+ * alone: {@link isGcBufferViewClass} identifies a linear-buffer view by the shape of
+ * what it declares, and walking the base chain there would make every subclass of a
+ * view look like a view by inheritance rather than by declaration.
+ */
+export function ownFieldsOf(cls: Class, out: Property[] = []): Property[] {
+  let members = cls.members;
+  if (members) {
+    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
+      let member = unchecked(_values[i]);
+      if (member.kind != ElementKind.PropertyPrototype) continue;
+      let property = (<PropertyPrototype>member).instance;
+      if (!property || !property.isField) continue;
+      if (property.parent != cls) continue;
+      out.push(property);
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether `cls` is a **linear-buffer view**: a standard-library class whose whole
+ * state is a raw address into linear memory plus a length.
+ *
+ * `ArrayBufferView` and `DataView` are the two that declare this shape, and it is
+ * the shape — not a name — that makes them safe to emit as GC structs. The rule is
+ * the user's: a byte buffer **holds no GC references**, so its storage needs no
+ * tracing, so its storage may stay in linear memory and be addressable, while the
+ * *view object* becomes a small GC struct of scalars. The GC object is the handle,
+ * not the payload.
+ *
+ * That is what resolves the addressability problem rather than working around it:
+ * `dataStart` survives as an `i32` field, so every ABI site keeps its raw address,
+ * and `changetype<usize>(aGCReference)` — the only thing that could smuggle a
+ * reference into a blob — is already refused by name (AS100).
+ */
+export function isGcBufferViewClass(cls: Class): bool {
+  if (!gcClassesEnabled) return false;
+  // Standard library only, and that is not a limitation: a class of this shape
+  // declared by a user is a class with a `buffer` field, and there is no reason to
+  // guess whether its author meant a linear view or an ordinary object.
+  if (!isStdlibClass(cls)) return false;
+  let own = ownFieldsOf(cls);
+  if (own.length != 3) return false;
+  let sawBuffer = false;
+  let sawDataStart = false;
+  let sawByteLength = false;
+  for (let i = 0, k = own.length; i < k; ++i) {
+    let property = unchecked(own[i]);
+    let type = property.type;
+    switch (property.name) {
+      case "buffer": {
+        // A **pointer-shaped** class, which is what makes the field's bits a linear
+        // address rather than a reference the engine has to trace.
+        let bufferClass = type.classReference;
+        if (bufferClass == null || isGcClass(bufferClass)) return false;
+        sawBuffer = true;
+        break;
+      }
+      case "dataStart": {
+        if (type.kind != TypeKind.Usize) return false;
+        sawDataStart = true;
+        break;
+      }
+      case "byteLength": {
+        if (type.kind != TypeKind.I32) return false;
+        sawByteLength = true;
+        break;
+      }
+      default: return false;
+    }
+  }
+  return sawBuffer && sawDataStart && sawByteLength;
+}
+
+/**
+ * Whether `cls` is a **standard-library class this slice emits as a GC struct**.
+ *
+ * One function because three places must agree — `isGcClass` (the latch-applied
+ * answer), `isGcEligible` (the latch-free question the report asks), and the field
+ * support test — and three copies is how the `String` case went missing in three
+ * places in GC11.
+ */
+function isStdlibGcClass(cls: Class): bool {
+  let program = cls.program;
+  // `Array<T>`: a synthesised layout, `{ brand, data, length_ }`.
+  if (cls.prototype == program.arrayPrototype) return true;
+  // A buffer view: a synthesised layout, `{ brand, buffer, dataStart, byteLength }`
+  // where `buffer` is the linear address of the payload rather than a reference.
+  if (isGcBufferViewClass(cls)) return true;
+  // **A subclass of a buffer view** — the eleven typed arrays. It declares nothing
+  // of its own (`Uint8Array` is an empty body over the base), so its struct is the
+  // base's prefix exactly, and it is one exactly when the base is.
+  let base = cls.base;
+  if (base != null && !cls.prototype.implicitlyExtendsObject && isGcBufferViewClass(base)) {
+    return gcStructFieldsSupported(cls, true);
+  }
+  return false;
+}
+
 
 /**
  * A class's fields in **struct order**: the base chain first, then its own.
@@ -1132,18 +1287,7 @@ export function isGcPrototype(prototype: ClassPrototype): bool {
 export function gcFieldsOf(classInstance: Class, out: Property[] = []): Property[] {
   let base = classInstance.base;
   if (base != null && isGcClass(base)) gcFieldsOf(base, out);
-  let members = classInstance.members;
-  if (members) {
-    for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-      let member = _values[i];
-      if (member.kind != ElementKind.PropertyPrototype) continue;
-      let property = (<PropertyPrototype>member).instance;
-      if (!property || !property.isField) continue;
-      if (property.parent != classInstance) continue;
-      out.push(property);
-    }
-  }
-  return out;
+  return ownFieldsOf(classInstance, out);
 }
 
 /** Represents a resolved type. */

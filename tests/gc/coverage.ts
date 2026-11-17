@@ -6,32 +6,29 @@
 // zero, is indistinguishable from one that works — which is why the report is
 // gated on `--wasmGc` and **not** on the latch.
 //
-// Two programs, and the pair is the point:
+// Two programs, and the pair is the point: `coverage-uniform.ts` is uniform and
+// reports INFO TS6413 `N of N`; this file is not uniform and reports WARNING TS6414
+// naming the cause.
 //
-// - `coverage-uniform.ts` is uniform, and reports INFO TS6413 `N of N`.
-// - this file is not uniform: a `TypedArray` field is an unmigrated
-//   standard-library type, so no class may be a GC struct. It reports WARNING
-//   TS6414, naming that cause.
-//
-// Every export answers a value compiled from the same program the report describes.
-class HoldsTypedArray {
-  data: Uint8Array;
-  constructor(n: i32) { this.data = new Uint8Array(n); }
-  sum(): i32 {
-    let s = 0;
-    for (let i = 0; i < this.data.length; ++i) s += this.data[i];
-    return s;
-  }
+// The cause here is an **`ArrayBuffer` field**, and it is the honest one: a dynamic
+// array and a typed array both have a synthesised GC layout now, but `ArrayBuffer`
+// itself is still a linear-memory block with an `rtSize` header, so a class holding
+// one directly cannot be a struct. (`Uint8Array` no longer blocks anything — GC16
+// gave the buffer views a synthesised layout — which is why this fixture uses the
+// raw buffer.)
+class HoldsArrayBuffer {
+  data: ArrayBuffer;
+  constructor(n: i32) { this.data = new ArrayBuffer(n); }
+  size(): i32 { return this.data.byteLength; }
 }
 
-class HoldsTypedArrayToo {
-  data: Float64Array;
-  constructor() { this.data = new Float64Array(2); }
+class HoldsArrayBufferToo {
+  other: ArrayBuffer;
+  constructor() { this.other = new ArrayBuffer(4); }
 }
 
 export function reportBlocked(): i32 {
-  let a = new HoldsTypedArray(3);
-  let b = new HoldsTypedArrayToo();
-  b.data[0] = 1.5;
-  return a.sum() + a.data.length; // 0 + 3
+  let a = new HoldsArrayBuffer(3);
+  let b = new HoldsArrayBufferToo();
+  return a.size() + b.other.byteLength; // 3 + 4
 }
