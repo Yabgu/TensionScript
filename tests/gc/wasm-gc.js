@@ -1374,6 +1374,119 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
+// 49 — `ArrayBuffer` is a GC handle ------------------------------------------
+//
+// `ArrayBuffer` declares zero instance fields: `byteLength` reads `rtSize` out of the
+// header and the object pointer *is* the payload start. So the GC object can only be
+// the **handle** — `{ <brand>, dataStart, byteLength }` — and the payload stays in the
+// arena, which is never-free and therefore cannot be stolen.
+//
+// That puts the whole weight on two facts this section asserts: `changetype<usize>(buf)`
+// yields `dataStart`, and `dataStart` does not move when the arena grows.
+{
+  const built = compile("arraybuffer.ts", "ab.wasm", ["--wasmGc"]);
+  check("the ArrayBuffer fixture compiles", built.ok, built.output);
+  const line = (built.output.match(/(?:INFO TS6413|WARNING TS6414): [^\n]*/) ?? [""])[0];
+  // The coalesced claim: before this round the program reports `0 of 3 … 1 holding an
+  // ArrayBuffer, 1 holding a Map, 1 holding a Set`, because a buffer field made a class
+  // ineligible and `gcUniform` is all-or-nothing.
+  check("a buffer, a Map and a Set are all on the GC ABI", /INFO TS6413: wasm-gc: 3 of 3/.test(built.output), line);
+
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "ab.wat"), "utf8");
+    check("ArrayBuffer is a struct of a brand, an address and a length",
+      /\(type \S*ArrayBuffer \(sub \(struct \(field \$<brand> i32\) \(field \$dataStart \(mut i32\)\) \(field \$byteLength \(mut i32\)\)\)\)\)/.test(wat),
+      (wat.match(/\(type \S*ArrayBuffer[^\n]*/) ?? ["absent"])[0]);
+    check("byteLength is a field read, not a header read",
+      !/func \$~lib\/arraybuffer\/ArrayBuffer#get:byteLength[^)]*\)\s*\n\s*\(local\.get \$0\)\s*\n\s*i32\.const [0-9]+\s*\n\s*i32\.sub/.test(wat),
+      "getter still subtracts from a fixed offset");
+    check("no field of the struct is a traced reference",
+      (wat.match(/\(type \S*ArrayBuffer \(sub \(struct([^\n]*)/) ?? ["", ""])[1]
+        .indexOf("ref") < 0,
+      (wat.match(/\(type \S*ArrayBuffer[^\n]*/) ?? [""])[0]);
+
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "ab.wasm")), imports);
+    const e = instance.exports;
+    const want = {
+      abLength: 64,          // the length is a field, not rtSize
+      abSlice: 28,           // slice(0,8) lengths and content (0+1+..+7)
+      sentinel8: 8,          // the whole payload survives, at four sizes...
+      sentinel16: 16,
+      sentinel64: 64,
+      sentinel1024: 1024,
+      sentinelChurn: 64,     // ...including across 200 000 allocations
+      addressStable: 7,      // dataStart across an allocation and a page-adding growth
+      inClass: 49,           // a class holding a buffer, read back after churn
+      mapRoundTrip: 60,      // Map's own behaviour, on migrated storage
+      setRoundTrip: 2,
+    };
+    for (const name of Object.keys(want)) {
+      const got = e[name]();
+      check(`arraybuffer: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
+    }
+  }
+}
+
+// 50 — a buffer's payload is not stolen, at every level ---------------------
+{
+  const answers = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("arraybuffer.ts", `ab${level}.wasm`, ["--wasmGc", level]);
+    check(`arraybuffer ${level} compiles`, built.ok, built.output);
+    if (!built.ok) continue;
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, `ab${level}.wasm`)), imports);
+    const e = instance.exports;
+    answers.push([e.abLength(), e.abSlice(), e.sentinel1024(), e.addressStable(), e.inClass(), e.mapRoundTrip()].join(","));
+  }
+  check("arraybuffer: -O0..-O3 all agree",
+    new Set(answers).size === 1 && answers[0] === "64,28,1024,7,49,60", answers.join(" | "));
+}
+
+// 51 — flag off: a buffer is still a linear block ---------------------------
+{
+  const built = compile("arraybuffer.ts", "aboff.wasm", []);
+  check("the ArrayBuffer fixture compiles without the flag", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "aboff.wat"), "utf8");
+    check("flag off: no GC struct for a buffer", !/struct\.new \$~lib\/arraybuffer\/ArrayBuffer/.test(wat),
+      (wat.match(/.*struct\.new \$~lib\/arraybuffer.*/) ?? ["absent"])[0]);
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "aboff.wasm")), imports);
+    const e = instance.exports;
+    check("flag off: the same answers",
+      e.abLength() === 64 && e.abSlice() === 28 && e.sentinel1024() === 1024 &&
+      e.addressStable() === 7 && e.inClass() === 49 && e.mapRoundTrip() === 60);
+  }
+}
+
+// 52 — `Map` and `Set` become eligible, and their entries do not block them --
+//
+// `Map`'s declared fields are two `ArrayBuffer`s and four scalars, so a buffer is the
+// only thing standing between it and a struct. Its *entries* are a different question:
+// `MapEntry` is `@unmanaged` and holds managed `K`/`V` in linear memory, which no
+// analysis of declared fields would see. This asserts the outcome rather than the
+// reasoning — the round-trip either works or the finding is that entries block it.
+{
+  writeFileSync(join(scratch, "mapholder.ts"),
+    `class H { m: Map<string, i32> = new Map<string, i32>(); }\n` +
+    `export function probe(): i32 { let h = new H(); h.m.set("a", 1); h.m.set("b", 2); return h.m.get("b"); }\n`);
+  const built = compile("mapholder.ts", "maph.wasm", ["--wasmGc"]);
+  const line = (built.output.match(/(?:INFO TS6413|WARNING TS6414): [^\n]*/) ?? [""])[0];
+  check("a class holding a Map<string,i32> is reported on the GC ABI",
+    /INFO TS6413: wasm-gc: 1 of 1/.test(built.output), line);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "maph.wat"), "utf8");
+    check("the Map holder carries a struct type", /H \(sub \(struct/.test(wat),
+      (wat.match(/\(type \S*H[^\n]*/) ?? ["absent"])[0]);
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "maph.wasm")), imports);
+    check("Map<string,i32> set/get round-trips", instance.exports.probe() === 2,
+      `got ${instance.exports.probe()} (expect 2)`);
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);
