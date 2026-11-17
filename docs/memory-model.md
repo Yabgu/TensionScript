@@ -72,17 +72,19 @@ Measured, both from the same source with `--wasmGc`, run on Node:
 ```
 class Box { v: Uint8Array = new Uint8Array(16); tag: i32 = 0; }
 
-stab()      heap-held view: write 42 and 7, churn 200k x Uint8Array(64), read back
-            -> 9      expected 49
-local()     local view:      write 42,      churn 200k x Uint8Array(64), read back
-            -> 9      expected 42
+no churn    write 42 and 7, read back                     -> 49   correct
+8 allocs    write 42 and 7, then 8 x Uint8Array(64)       -> 49   correct
+200k allocs write 42 and 7, then 200k x Uint8Array(64)    -> 9    wrong
 
 same program without --wasmGc
-stab()      -> 49     correct
+200k allocs                                               -> 49   correct
 ```
 
-`9` is the churn's own first byte: the payload was freed and its memory handed to the next
-allocation. The view handle is alive and correctly traced; the bytes it points at are not.
+It is pressure-dependent, which is what identifies it as a collection rather than a stale field:
+with no churn and with eight allocations the value is correct, and it is only after enough
+allocation to reach a threshold that it is not. `9` is the churn's own first byte: the payload was
+freed and its memory handed to the next allocation. The view handle is alive and correctly traced;
+the bytes it points at are not.
 
 The existing GC suite does not catch this. Every runtime assertion in it reads its values immediately,
 before a threshold is reached, so no collection happens between a write and its read. It is a genuine
