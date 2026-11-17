@@ -107,6 +107,7 @@ function check(name, condition, detail) {
  *   defect is gone and the marking is now a lie.
  */
 const expectedFailures = [];
+const expectedReasons = [];
 function xfail(name, condition, reason, detail) {
   if (condition) {
     console.log(`not ok  XPASS: ${name}\n          expected failure now passes — remove the xfail (${reason})`);
@@ -115,6 +116,7 @@ function xfail(name, condition, reason, detail) {
   }
   console.log(`xfail   ${name}${detail ? `\n          ${detail}` : ""}\n          known: ${reason}`);
   expectedFailures.push(name);
+  if (expectedReasons.indexOf(reason) < 0) expectedReasons.push(reason);
 }
 
 // 1 + 2 --------------------------------------------------------------------
@@ -1246,7 +1248,7 @@ function xfail(name, condition, reason, detail) {
   }
   // The boundary. An address is not a value.
   writeFileSync(join(scratch, "value-unmanaged.ts"),
-    `class Holder { v: @unmanaged [u32 * 4]; }\n` +
+    `class Holder { v: @unmanaged [u32 * 4] = changetype<@unmanaged [u32 * 4]>(0); }\n` +
     `export function run(): i32 { let h = new Holder(); return 1; }\n`);
   const unmanaged = compile("value-unmanaged.ts", "value-unmanaged.wasm", ["--wasmGc"]);
   check("@unmanaged [u32 * 4] is a fixable refusal, not a permanent one",
@@ -1796,11 +1798,76 @@ function xfail(name, condition, reason, detail) {
     !/INFO TS6413: wasm-gc: \d+ of \d+ managed class(es)? on the GC ABI\s*$/.test(built.output) &&
     !/INFO TS6413: wasm-gc: (\d+) of \1 managed/.test(built.output),
     line);
-  check("...and the count says it did not migrate",
-    /(?:INFO TS6413|WARNING TS6414): wasm-gc: 0 of \d+/.test(built.output), line);
+  // The strongest form of the invariant: a program with *any* error emitted nothing, so the
+  // line says so rather than reporting an eligibility answer for a program that does not
+  // exist. This covers refusals that mark no class — a body that cannot be emitted reports
+  // against a function, not a class, and would otherwise slip past a class-level count.
+  check("...and it says the build failed rather than counting anything",
+    /no class migrated - the program did not build \(\d+ error/.test(built.output), line);
   check("...and it names the cause rather than the latch",
     /holding a reference|holds a GC reference/.test(built.output),
     line || (built.output.split("\n").find((l) => /AS100/.test(l)) ?? "(none)"));
+}
+
+// 62 — a body that cannot be emitted also reports the build failed ----------
+//
+// `changetype<usize>` of a GC reference inside a standard-library body is refused against a
+// *function*, not a class, so no class-level count can see it. Measured while turning the
+// latch on for the 2D guest: 27 such refusals from `array.ts`'s `ensureCapacity`,
+// `string.ts:673`, `staticarray.ts:393` and `number.ts`, and the report still claimed
+// `118 of 143 managed classes on the GC ABI`.
+{
+  const built = compile("arraybuffer.ts", "ab2.wasm", ["--wasmGc"]);
+  check("a clean build still reports coverage normally",
+    built.ok && /INFO TS6413: wasm-gc: \d+ of \d+ managed classes on the GC ABI/.test(built.output),
+    built.output.split("\n").find((l) => /TS641/.test(l)) ?? "(none)");
+}
+
+// 63 — two fixes whose fixtures are blocked by a named defect ---------------
+//
+// Both were needed the moment the latch turned on for the 2D guest, and both are improvements
+// that cannot yet be *demonstrated*, because a third defect stands in front of them:
+//
+// **`StaticArray<T>#__visit` for a managed `T` cannot be emitted at all.** Its body opens with
+// `changetype<usize>(this)`, and a `StaticArray` is a wasm array. GC12 nulled the visitor
+// *table's* call sites; the method and the module-level `~visit` that calls it are emitted
+// elsewhere, with the pointer ABI's `(i32 this, i32 cookie)` signature. Replacing only the
+// method (measured) leaves its caller's arguments mismatched: `call* param number must
+// match`, then `call param types must match`. So the visitor is one piece of work, and until
+// it lands **any `StaticArray<SomeClass>` in a GC program fails** — which is a much wider
+// blocker than the guest that found it.
+//
+// Under that, these two are marked `xfail` rather than skipped: the defect stays visible, and
+// the harness fails the suite if either starts passing, which is when the marking must go.
+{
+  writeFileSync(join(scratch, "emptylit.ts"),
+    `class Thing { n: i32 = 1; }\n` +
+    `class Holder { items: Thing[] = []; tag: i32 = 0; }\n` +
+    `export function probe(): i32 { let h = new Holder(); h.items.push(new Thing()); ` +
+    `return h.items.length; }\n`);
+  const built = compile("emptylit.ts", "el.wasm", ["--wasmGc"]);
+  // An empty literal over a reference element used to reach `writeStaticBuffer`'s
+  // `assert(false)`; it is now `new Array<T>(0)`, which needs no segment at all.
+  xfail("an empty literal over a reference element compiles", built.ok,
+    "StaticArray<T>#__visit of a managed T cannot be emitted (GC26)",
+    built.output.split("\n").filter((l) => /ERROR AS/.test(l))[0] ?? "");
+
+  writeFileSync(join(scratch, "nonemptylit.ts"),
+    `class Thing { n: i32 = 1; }\n` +
+    `class Holder { items: Thing[] = [new Thing(), new Thing()]; }\n` +
+    `export function probe(): i32 { return new Holder().items.length; }\n`);
+  const nonEmpty = compile("nonemptylit.ts", "nel.wasm", ["--wasmGc"]);
+  // A non-empty one is refused *by name* instead of asserting — the message is the fix, and it
+  // is what a reader needs even while the broader defect stands.
+  // The named refusal is written (`an array literal of T under --wasmGc: …`), and it is what a
+  // reader will get once the blocker lifts. Today the same `__visit` failure is reported first,
+  // so the check is on the compile, not on the wording.
+  xfail("a non-empty literal over a reference element builds", nonEmpty.ok,
+    "the same `__visit` blocker fires first",
+    nonEmpty.output.split("\n").find((l) => /AS100/.test(l)) ?? "(compiled)");
+  // Flag off, both are ordinary literals — so the restriction is the flag's.
+  check("flag off: the same literals compile",
+    compile("nonemptylit.ts", "neloff.wasm", []).ok);
 }
 
 if (failures) {
@@ -1808,9 +1875,9 @@ if (failures) {
   process.exit(1);
 }
 if (expectedFailures.length) {
-  console.log(`\nwasm-gc: OK (${expectedFailures.length} expected failure(s): the linear heap is`);
-  console.log("  unrooted under --wasmGc, so a live payload is swept and reused — GC18;");
-  console.log("  see docs/memory-model.md)");
+  // The reasons are per-check, so the line names them rather than hard-coding one round's.
+  console.log(`\nwasm-gc: OK (${expectedFailures.length} expected failure(s)):`);
+  for (const reason of expectedReasons) console.log("  known: " + reason);
 } else {
   console.log("\nwasm-gc: OK");
 }

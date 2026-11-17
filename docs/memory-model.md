@@ -257,9 +257,34 @@ Because the two kinds of refusal are not the same kind of problem:
 - **`TS6415` — permanent.** Refused by the memory model itself. An inline value field in a GC class
   cannot become migratable without becoming a different type.
 
-A third category is owed and not yet reported: **exempt**. A generated wire record is linear by
-contract and trace-free by measurement (see below), so it is neither a work item nor a rule refusal —
-it is the C ABI, and the report should say so rather than counting it against the program.
+- **`TS6415` — exempt** (reported from GC25, and the first version of this page called the category
+  "owed"). A generated wire record is linear by contract and trace-free by measurement (see below),
+  so it is neither a work item nor a rule refusal — it is the C ABI, and the report says
+  `N of M on the GC ABI; K exempt (C-ABI records, trace-free: …)` rather than counting it against
+  the program. The arithmetic closes: **GC + exempt + refused = total**, asserted as a test.
+
+A fourth entry belongs here now, and it is **a limitation rather than an absence**:
+
+> **`Map<string, V>` and `Set<string>` are unsupported under `--wasmGc`.** `MapEntry<K, V>` is
+> `@unmanaged` — a packed linear block addressed by `changetype<usize>`, at 11 arithmetic sites in
+> `map.ts` plus the `set.ts` equivalents — so a *reference* key or value has no representation in it.
+> A container instantiated with one is therefore ineligible, which holds the whole program on the
+> pointer ABI where it works. Scalar entries (`Map<i32,i32>`, `Set<i32>`) do migrate.
+>
+> **Scope of a fix, measured rather than estimated:** 11 address-arithmetic sites in `map.ts`; and
+> when `K` or `V` is a reference, `entries`/`buckets` stop being byte buffers and become a GC array
+> plus an index table, with the load factor and probe arithmetic rewritten against it. `hashStr` is a
+> separate blocker that bites at the same moment: it is `@inline`, so it inlines into every lookup
+> and never reaches the call-site hook `compareImpl` uses, and a replacement was written and
+> **withdrawn because it produced a different number** from an independent XXH32 implementation
+> (`docs/wasm-gc.md` has the three disagreeing values).
+>
+> **What would decide it:** whether a GC-uniform program ever needs a *bulk* string-keyed map. Both
+> registries in the framework — `Tileset.named`, `Logger.registry` — are bounded name→object tables
+> reaching **6** and **2** distinct names in this tree, so they are now a linear `NamedTable<T>`
+> (`tension-framework/assembly/runtime/named-table.ts`), which costs nothing and removes the last
+> declared obstacle in the 2D guest. A bulk map would be a different argument, and nothing measured
+> here makes one.
 
 A report that lists any two of these three together tells a reader every refusal is the same kind of
 work item, and the natural next step from that reading breaks the C ABI. The split is load-bearing.

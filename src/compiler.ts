@@ -220,6 +220,8 @@ import {
   GC_ARRAY_MIN_SIZE,
   isGcReferenceType,
   isGcExempt,
+  noteGcRefusedClass,
+  gcReferenceShaped,
   ownFieldsOf,
   managedClassesOf,
   isGcArrayBufferClass,
@@ -1401,9 +1403,16 @@ export class Compiler extends DiagnosticEmitter {
       for (let f = 0, fn = own.length; f < fn; ++f) {
         let field = unchecked(own[f]);
         let type = field.type;
-        // A GC reference, not merely "a class": a `usize` or a plain pointer is the whole
-        // point of an unmanaged record.
-        if (!isGcReferenceType(type)) continue;
+        // **A GC reference, not merely "a class" — and asked latch-free.** `isGcReferenceType`
+        // goes through `gcStringOf`, which answers "is this a wasm array *right now*"; on a
+        // program that is non-uniform nothing is, so the one field this check exists to find
+        // was invisible. Measured: the AS100 stopped firing entirely and a record holding a
+        // `string` was merely reported as "held back only by the latch".
+        if (!gcReferenceShaped(type)) continue;
+        // **Recorded, not merely reported.** A refusal raised here happens before emission,
+        // so the coverage arithmetic has to know: a class the compiler refused is not a class
+        // it migrated, and a report that says otherwise contradicts the exit status.
+        noteGcRefusedClass(cls);
         this.error(
           DiagnosticCode.Not_implemented_0,
           field.identifierNode != null ? field.identifierNode.range : null,
@@ -1476,6 +1485,28 @@ export class Compiler extends DiagnosticEmitter {
    * to be told, not the state to bury in an informational line.
    */
   private reportGcCoverage(): void {
+    // **A build that failed must not report coverage as if it succeeded.** This is the whole
+    // family this arc keeps re-finding — GC14's report gated on the latch, GC23's latch held
+    // off by a rule the walk could not see, GC26's refused class counted as migrated. The
+    // general form is the strongest: if the program has any error, nothing was emitted, so
+    // "N of M on the GC ABI" describes an eligibility answer for a program that does not
+    // exist. Measured: turning the latch on for the 2D guest exposed 25 refusals from
+    // `std/assembly` bodies (`array.ts`'s `ensureCapacity`, `string.ts:673`, `staticarray.ts`)
+    // and the line still read `118 of 143 managed classes on the GC ABI`.
+    let errors = 0;
+    let emitted = this.diagnostics;
+    for (let i = 0, k = emitted.length; i < k; ++i) {
+      if (unchecked(emitted[i]).category == DiagnosticCategory.Error) errors++;
+    }
+    if (errors > 0) {
+      this.warning(
+        DiagnosticCode.wasm_gc_no_class_migrated_0,
+        null,
+        "the program did not build (" + errors.toString() + " error" +
+          (errors == 1 ? "" : "s") + "), so no class was migrated"
+      );
+      return;
+    }
     let coverage = gcCoverage(this.program);
     // **A permanent refusal gets its own diagnostic, and it is a warning.** These
     // classes are the C ABI's: an `@inline [T * N]` or an `@inline struct` field is a
@@ -2155,6 +2186,15 @@ export class Compiler extends DiagnosticEmitter {
   ): bool {
     if (instance.is(CommonFlags.Errored)) return false;
     if (instance.is(CommonFlags.Compiled)) return true;
+
+    // **`__visit` bodies are not no-op'd here, and that is a measured boundary.** The
+    // `StaticArray<T>#__visit` method is compiled by `compileFunction`, but the module-level
+    // `~visit` function that calls it is emitted elsewhere (the typeinfo machinery in
+    // `module.ts`), with the pointer ABI's `(i32 this, i32 cookie)`. Replacing only the method
+    // changes its signature under a caller that was not changed with it, so the module fails
+    // validation — measured: `call* param number must match`, then `call param types must
+    // match`. The visitor needs to be rewritten for the GC ABI as one piece. Recorded in
+    // `docs/wasm-gc.md`.
 
     if (!forceStdAlternative) {
       if (instance.hasDecorator(DecoratorFlags.Builtin)) return true;
@@ -12578,6 +12618,36 @@ export class Compiler extends DiagnosticEmitter {
       } else {
         values[i] = this.makeZero(elementType);
       }
+    }
+
+    // **A reference-element array literal cannot be a data segment under the flag.** The
+    // elements are GC references, and a static buffer is bytes; `writeStaticBuffer` reaches
+    // its `assert(false)` on an element type it has no case for — measured, on the *empty*
+    // literal `items: Thing[] = []`, which is the common shape (a field that fills later).
+    //
+    // An empty literal needs nothing written, so it is simply an empty array: no segment, no
+    // bytes, and the allocation is the ordinary `new` path below. A non-empty one is refused
+    // by name — building it at runtime (the way string literals are built in `__start`) is
+    // the fix, and it is a round of its own.
+    if (this.gcActive && isStatic && gcReferenceShaped(elementType)) {
+      if (length != 0) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          expression.range,
+          `an array literal of ${elementType.toString()} under --wasmGc: its elements are GC ` +
+          `references, and a literal is written into a data segment as bytes. Build it with ` +
+          `\`new Array<...>(n)\` and index assignments instead.`
+        );
+        this.currentType = arrayType;
+        return module.unreachable();
+      }
+      // **An empty literal is `new Array<T>(0)`**, which under the flag is the synthesised
+      // GC struct — not `makeNewArray`, whose `__newArray` is the pointer-ABI runtime and
+      // whose result is an `i32` the constructor's ref local cannot take. Measured: routing
+      // it through the ordinary path produced
+      // `local.set's value type must be correct` inside `~lib/rt/__newArray`.
+      this.currentType = arrayType;
+      return this.compileGcDynamicArrayNew(arrayInstance, elementType, null, expression);
     }
 
     // if the array is static, make a static arraybuffer segment

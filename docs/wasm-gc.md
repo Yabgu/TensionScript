@@ -2253,3 +2253,80 @@ That is the honest state: this round removed the last *record* obstacle and reve
 last obstacle is the container one. `Map<string,V>` is now the single thing between the guest
 and a uniform program — which is a smaller and better-defined blocker than six, but it is not
 zero.
+
+## GC26: the last declared blocker is gone, and the latch turns on to find a new one
+
+Two things happened in this round, and the second is the one to read.
+
+### `Map<string, V>` in the two framework registries became a linear table
+
+`Tileset.named` and `Logger.registry` are **bounded name→object tables**: one entry per named frame
+(per atlas region an app refers to by name) and one per logger name (per module that logs). Measured
+across the tree — `grep -rhoE '\.define\("[^"]*"'` and the same for `Logger\.get` — the distinct name
+counts are **6** and **2**, written once from an atlas manifest and from source literals. At that size
+a string compare against a short array beats hashing the key and chasing a bucket, so
+`NamedTable<T>` (`tension-framework/assembly/runtime/named-table.ts`) is a data-structure choice with
+a measurement behind it, not a workaround for a missing feature. Neither table deletes, so the type
+has no `delete`; both call sites keep their exact API and no other file changed.
+
+That removed the last thing the *latch* could see: `gcUniform` no longer has a reference-keyed
+container holding it off.
+
+### What the latch turning on revealed
+
+The 2D guest now enters the GC path — and **fails to build**, with 19 refusals, every one of them
+inside `std/assembly` and none in guest or framework code:
+
+```
+3  ~lib/string.ts:673         (strtod — parseFloat/parseInt)
+2  ~lib/string.ts:807
+2  ~lib/array.ts:380          (Array<T>#slice)
+2  ~lib/array.ts:129,131,134  (Array<T>#__set and ensureCapacity)
+2  ~lib/staticarray.ts:393    (StaticArray<T>#__visit)
+8  ~lib/util/number.ts        (dtoa/utoa formatting)
+```
+
+This is the inventory GC13 produced, now precise and now *reached*. `box-physics` (19) and
+`isometric` (20) fail the same way. **The end-to-end proof did not reach**: no module is emitted, so
+there is no struct count, no size, and no pixel comparison to report — and saying "the guest migrates
+and still draws" would be exactly the kind of claim this arc keeps having to retract.
+
+**The most consequential of them is `StaticArray<T>#__visit`.** Its body opens with
+`changetype<usize>(this)`, and a `StaticArray` is a wasm array, so it cannot be emitted — which means
+**any `StaticArray<SomeClass>` in a GC program fails**, not just this guest. GC12 nulled the visitor
+*table's* call sites; the method and the module-level `~visit` that calls it are emitted elsewhere
+with the pointer ABI's `(i32 this, i32 cookie)` signature. No-op'ing only the method was tried and
+measured: its caller's arguments then disagree (`call* param number must match`, then
+`call param types must match`). The visitor is one piece of work, and it is now the largest single
+item between this arc and a guest that runs on the GC ABI.
+
+### Two report defects fixed, and the invariant generalised
+
+- **A class whose record was refused still counted as migrated**: the build failed with AS100 and the
+  line read `2 of 2 managed classes on the GC ABI`. A refusal now marks the class, and the count
+  cannot include it.
+- **A body-level refusal marks no class at all** — it reports against a function — so the class-level
+  fix could not catch it, and the guest's line still said `118 of 143` while the build failed. The
+  general rule is now the strongest available: **if the program has any error, nothing was emitted**,
+  and the line says `no class migrated - the program did not build (N errors)` rather than reporting
+  an eligibility answer for a program that does not exist.
+
+### An empty array literal over a reference element
+
+`items: Thing[] = []` reached `writeStaticBuffer`'s `assert(false)`: a static buffer is bytes and a
+reference element has no case. An **empty** literal needs nothing written, so it is `new Array<T>(0)`;
+a non-empty one is refused by name. Both are marked `xfail` in the suite, because a third defect
+(`__visit`, above) stands in front of them and a test that is quietly disabled is worse than no test —
+the harness fails the suite if either starts passing.
+
+### Result
+
+`test:gc` 406 → **414 checks** (412 pass, 2 expected failures), `test:compiler` stays at its 5
+pre-existing mismatches, `-O0..-O3` agree on all 23 positive fixtures, and the **compiler** change is
+byte-neutral for flag-off output on all 30 fixtures and on all three 2D examples. Nothing under
+`std/` changed.
+
+The **framework** change necessarily moves flag-off output — it replaces `Map` with `NamedTable` in
+two files — and the numbers are: `hello-sprites` 178,582 → **178,896 bytes**, `box-physics` 211,969,
+`isometric` 399,202, all three byte-identical between the old and new *compiler* and all three
+passing their harnesses. `hello-sprites` still reports **10,240 non-black pixels, PASS**.

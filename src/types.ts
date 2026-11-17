@@ -639,6 +639,16 @@ export function isGcEligible(cls: Class): bool {
 
 /** {@link isGcEligible}'s body, with the intrinsic depth raised by the caller. */
 function isGcEligibleImpl(cls: Class): bool {
+  // **An `@unmanaged` record is never a GC struct.** It declares its own linear layout, so
+  // "one representation stored in the other" applies to it by definition. A trace-free one is
+  // *exempt* — it does not count against uniformity at all — and one that holds a reference
+  // is the crossing that has no representation, so it is ineligible.
+  //
+  // This arm was missing and it mattered: `isGcClass` already refused `@unmanaged`, so the
+  // emission was right, but *eligibility* answered `true`, so `gcUniform` thought a record
+  // holding a `string` was fine and the report counted it as migrated. Measured: a program
+  // that failed with AS100 still read `2 of 2 managed classes on the GC ABI`.
+  if (cls.hasDecorator(DecoratorFlags.Unmanaged)) return isGcExempt(cls);
   if (isStdlibClass(cls)) {
     // **The rule, and the reason the allow-list was the wrong shape.**
     //
@@ -759,7 +769,7 @@ export function gcUniform(program: Program): bool {
     // collector never sees it; its own fields are not the latch's question. This is the
     // partition: `gcUniform` asks whether every class *that needs the GC ABI* can have it.
     if (isGcExempt(cls)) continue;
-    if (!isGcEligible(cls)) { result = false; break; }
+    if (wasGcRefused(cls) || !isGcEligible(cls)) { result = false; break; }
   }
   gcUniformComputing.delete(program);
   gcUniformByProgram.set(program, new GcUniformAnswer(result, program.nextClassId));
@@ -1138,6 +1148,32 @@ function gcFieldLabel(fieldType: Type): string {
  * because the latch is off is reported as refused with the latch's own reason, not
  * as absent.
  */
+/**
+ * Classes the compiler **refused before emission**, per program.
+ *
+ * A refusal raised this early is a fact about the program, and the coverage arithmetic has
+ * to agree with it or the report contradicts the exit status — measured: the build failed
+ * with AS100 while the line still read `2 of 2 managed classes on the GC ABI`.
+ */
+let gcRefusedClassesByProgram: Map<Program, Class[]> = new Map();
+
+/** Records that `cls` was refused, so the report cannot count it as migrated. */
+export function noteGcRefusedClass(cls: Class): void {
+  let program = cls.program;
+  let known = gcRefusedClassesByProgram.get(program);
+  if (known == null) {
+    gcRefusedClassesByProgram.set(program, [ cls ]);
+  } else if (!known.includes(cls)) {
+    known.push(cls);
+  }
+}
+
+/** Whether `cls` was refused before emission. */
+export function wasGcRefused(cls: Class): bool {
+  let known = gcRefusedClassesByProgram.get(cls.program);
+  return known != null && known.includes(cls);
+}
+
 export function gcCoverage(program: Program): GcCoverage {
   let coverage = new GcCoverage();
   coverage.uniform = gcUniform(program);
@@ -1170,6 +1206,13 @@ export function gcCoverage(program: Program): GcCoverage {
     if (isGcExempt(cls)) {
       coverage.exempt++;
       recordGcExemption(coverage, cls);
+      continue;
+    }
+    // **A refused class is not a migrated class.** The exemption's own invariant was refused
+    // (a C record holding a reference), so this class cannot be on the GC ABI whatever the
+    // latch says — and a report that counts it would contradict the build's exit status.
+    if (wasGcRefused(cls)) {
+      coverage.refuse("refused before emission (see the error above)");
       continue;
     }
     if (coverage.uniform && isGcEligible(cls)) {
