@@ -1667,7 +1667,14 @@ Under the GC ABI a view's payload is linear memory that **nothing traces**. Befo
 which is disabled under the flag (it is the pointer ABI's root set). So a buffer could
 in principle be swept while a live view points into it.
 
-**This was a risk when it was written and it is now measured: the payload is lost.**
+**This was a risk when it was written, it was measured as a defect in GC18, and it is
+now closed in the flag's own allocator.** A view payload no longer lives in a heap that
+anything sweeps: `--wasmGc` allocates from a never-free bump arena, so the read-back in
+`tests/gc/linearheap.ts` answers `49` and no address is ever handed out twice
+(measured: `firstAddressReuse(200000) == 0`, memory 1 → 490 pages). The paragraphs below
+record the defect and the costing of the real answer, which is still open.
+
+### The defect as measured (GC18)
 GC18's ladder (`tests/gc/linearheap.ts`) writes two bytes into a heap-held view's
 payload, allocates 200 000 times, and reads back `60` where the source says `49`;
 without the flag the same fixture answers `49`. So the sentence above was right and the

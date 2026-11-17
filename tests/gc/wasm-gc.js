@@ -1105,15 +1105,17 @@ function xfail(name, condition, reason, detail) {
 
 // 40 — the ladder: values must be LIVE, not merely CURRENT --------------------
 //
-// The gap this round closes. Every runtime assertion before this section read its
-// values immediately after writing them, so a collection never fell between a write
-// and its read — the suite proved values *current*. This writes two bytes into a
-// payload held by a module-scope `Box`, allocates, and reads them back.
+// The gap GC18 closed. Every runtime assertion before that section read its values
+// immediately after writing them, so a collection never fell between a write and its
+// read — the suite proved values *current*. This writes two bytes into a payload held
+// by a module-scope `Box`, allocates, and reads them back.
 //
-// `many()` is an **expected failure** under the flag: the payload a live handle still
-// points at is swept and its bytes reused. Without the flag all three rungs pass,
-// which is §41 — that control is what makes this evidence about the flag rather than
-// about the fixture.
+// GC18 marked the third rung an expected failure: under `--wasmGc` the payload of a
+// live handle was swept and its bytes reused. GC19 replaced the flag's linear
+// allocator with a **never-free arena**, so a payload is never handed to another
+// allocation, and all three rungs pass. The `xfail` mechanism stays in this file —
+// it is how a known defect is kept visible instead of skipped — but there is no
+// entry using it now, which the closing line reports.
 {
   const built = compile("linearheap.ts", "lh.wasm", ["--wasmGc"]);
   check("the linear-heap fixture compiles", built.ok, built.output);
@@ -1125,10 +1127,10 @@ function xfail(name, condition, reason, detail) {
       `got ${e.noChurn()}`);
     check("ladder rung 2 (8 allocations, below the threshold): still 49", e.eight() === 49,
       `got ${e.eight()}`);
-    const many = e.many();
-    xfail("ladder rung 3 (200k allocations): 42 + 7 reads back as 49", many === 49,
-      "the payload of a live GC handle was swept and reused (GC18)",
-      `got ${many} after 200000 allocations of 64 bytes under --wasmGc`);
+    check("ladder rung 3 (200k allocations): the live payload still reads 49",
+      e.many() === 49, `got ${e.many()} after 200000 allocations of 64 bytes`);
+    check("a payload survives an explicit collection", e.writeThenCollect() === 49,
+      `got ${e.writeThenCollect()}`);
   }
 }
 
@@ -1150,34 +1152,33 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
-// 42 — address reuse, as a number -------------------------------------------
+// 42 — the trade, stated as a test: never-free means growth ----------------
 //
-// The measurement that decides *what the mechanism is*. Reuse being large under the
-// flag is not enough to call it an arena: it is equally large without the flag, which
-// is what identifies a **collector's free list** rather than a wrapping region. The
-// period also moves with the allocation size (`GRANULARITY / size`), which a fixed-slot
-// arena could not do.
+// GC18's measurement was that flag-on and flag-off reuse the same addresses at the
+// same rate (18 181 and 19 999 of 200 000) — because both ran `itcms` over `tlsf`, and
+// reuse is what a collector does. The arena removes exactly that: no address is ever
+// handed out twice under the flag, and linear memory grows to hold what would
+// otherwise have been reclaimed.
 //
-// `eqFirst` — how often the *first* churn address recurs — is reported but not
-// asserted: measured 18 181 in one history and 0 in another, and a number that depends
-// on what was allocated before is not a mechanism. `backsteps` is.
+// This is the cost, asserted rather than promised: the flagged run allocates ~19 MB
+// for 200 000 payloads and its memory grows accordingly, while the flag-off run stays
+// at one page because `itcms` reclaims.
 {
   const on = compile("linearheap.ts", "lhro.wasm", ["--wasmGc"]);
   const off = compile("linearheap.ts", "lhro2.wasm", []);
   if (on.ok && off.ok) {
     const a = (await WebAssembly.instantiate(readFileSync(join(scratch, "lhro.wasm")), imports)).instance.exports;
     const b = (await WebAssembly.instantiate(readFileSync(join(scratch, "lhro2.wasm")), imports)).instance.exports;
-    const onBack = a.reuseBacksteps(200000);
-    const offBack = b.reuseBacksteps(200000);
-    const onEq = a.firstAddressReuse(200000);
-    const offEq = b.firstAddressReuse(200000);
-    check("addresses are reused many times under the flag", onBack > 500,
-      `${onBack} backward steps in 200000 allocations (first-address recurrences: ${onEq})`);
-    check("...and about as often without it, so reuse is not the defect",
-      offBack > onBack / 2 && offBack < onBack * 2,
-      `flag on ${onBack}, flag off ${offBack} (first-address: ${onEq} / ${offEq})`);
-    check("neither run grows linear memory, so growth is not the explanation",
-      a.pages() <= 4 && b.pages() <= 4, `on ${a.pages()} pages, off ${b.pages()} pages`);
+    const onReuse = a.firstAddressReuse(200000);
+    const offReuse = b.firstAddressReuse(200000);
+    const onPages = a.pages();
+    const offPages = b.pages();
+    check("no address is reused under the flag, so no payload is ever overwritten",
+      onReuse === 0, `${onReuse} of 199 999 allocations returned the first address`);
+    check("the flag-off run still reclaims (it runs the collector)", offReuse > 5000,
+      `${offReuse} reuses`);
+    check("...and the flagged run's memory grew instead of reusing",
+      onPages > offPages * 10 && onPages > 150, `on ${onPages} pages, off ${offPages} pages`);
   } else {
     check("both reuse probes compile", false, `${on.ok ? "" : on.output.slice(0, 200)}${off.ok ? "" : off.output.slice(0, 200)}`);
   }
@@ -1281,17 +1282,16 @@ function xfail(name, condition, reason, detail) {
     built.output.split("\n").find((l) => /TS6415/.test(l)) ?? "(none)");
 }
 
-// 46 — the defect is not an optimisation artifact ----------------------------
+// 46 — the arena at every optimisation level --------------------------------
 //
 // The `-O0..-O3` gate exists because a re-used `ExpressionRef` used to be correct at
-// `-O0` and wrong above it. This defect is the opposite shape and must not be mistaken
-// for that one: the **wrong** value is wrong at every level, and only its exact digits
-// differ (measured 60 at `-O0`/`-O1`, 55 at `-O2`/`-O3` — the byte the churn happened
-// to leave there). The defined values agree exactly, so the gate is split: agreement on
-// what is defined, and "not 49" on the rung that is broken at *every* level.
+// `-O0` and wrong above it, and GC18 found the opposite shape — a defect whose *wrong
+// digits* varied by level (60 at `-O0`/`-O1`, 55 at `-O2`/`-O3`). The arena removes
+// both questions: every rung is 49, at every level, and the growth is not an artifact
+// of optimisation either.
 {
-  const defined = [];
-  const broken = [];
+  const answers = [];
+  const pages = [];
   for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
     const built = compile("linearheap.ts", `lho${level}.wasm`, ["--wasmGc", level]);
     check(`linearheap ${level} compiles`, built.ok, built.output);
@@ -1299,13 +1299,13 @@ function xfail(name, condition, reason, detail) {
     const { instance } = await WebAssembly.instantiate(
       readFileSync(join(scratch, `lho${level}.wasm`)), imports);
     const e = instance.exports;
-    defined.push([e.noChurn(), e.eight(), e.writeThenCollect()].join(","));
-    broken.push(e.many());
+    answers.push([e.noChurn(), e.eight(), e.many(), e.writeThenCollect()].join(","));
+    pages.push(e.firstAddressReuse(20000) === 0 ? "no-reuse" : "REUSE");
   }
-  check("linearheap: the defined values agree across -O0..-O3",
-    new Set(defined).size === 1, defined.join(" | "));
-  check("linearheap: the broken rung is broken at every level",
-    broken.length === 4 && broken.every((v) => v !== 49), broken.join(", "));
+  check("linearheap: every rung answers 49 at -O0..-O3",
+    new Set(answers).size === 1 && answers[0] === "49,49,49,49", answers.join(" | "));
+  check("linearheap: no address is reused at any level",
+    pages.every((v) => v === "no-reuse"), pages.join(", "));
 }
 
 if (failures) {

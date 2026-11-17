@@ -142,20 +142,36 @@ its only difference is that the shadow stack roots what is still reachable.
 Three empty pieces make an empty root set, so every `__new` object is garbage at the
 next collection — including one a live handle still points at through `dataStart`.
 
-### It is worse than a lost payload: the collector breaks its own invariants
+### A lost payload can also trip the collector's own asserts — on some allocation patterns
 
-With `DEBUG = true` compiled in (`std/assembly/rt/common.ts:13`), a program that
-allocates enough **traps**:
+`DEBUG` is `true` unconditionally (`std/assembly/rt/common.ts:13`), so the asserts are
+compiled into **every** build; `--target debug`/`--target release` make no difference
+(measured: the trap below reproduces at all four optimisation levels and all three
+targets).
+
+Whether it *fires* is **allocation-pattern dependent**, and this is the correction to
+an earlier version of this page. Measured, two fixtures, same flag:
 
 ```
-p2on.wasm d288 n=100 : assert@229:20   itcms.ts:229  assert(obj.color == i32(!white))  // sweep
-p2on.wasm d288 n=600 : assert@268:14   tlsf.ts:268   assert(blockInfo & FREE)           // allocateBlock
+loop allocating N views of one size, writing into a scratch array, N = 600
+  -> assert@268:14  tlsf.ts:268  assert(blockInfo & FREE)   (in allocateBlock)
+  -> and at other N, assert@229:20  itcms.ts:229  assert(obj.color == i32(!white))  (sweep)
+
+class Box { v: Uint8Array = new Uint8Array(16); }
+write 42/7, churn 200 000 x Uint8Array(64), read back
+  -> NO trap; answers 57 (wrong value, same defect)
 ```
 
-Both are this flag's, and neither is the `__link`/`__pin` lowering: measured, the same
-traps reproduce with those four lowerings disabled. So the allocator and the sweep
-reach a state they consider impossible, and a release build without `DEBUG` would
-corrupt quietly instead.
+So "a program that allocates enough traps" was an overstatement: the *corruption* is
+implied by the empty root set and reproduces on both shapes, while the *assert* needs
+a shape where the sweep and the free list disagree about a block — a loop that holds a
+scratch buffer across many allocations does it, a simple churn does not. What survives
+as a claim: when the asserts do fire, they name the mechanism (`sweep` freeing an
+object it believes is old-white, `allocateBlock` being handed a block not marked free)
+— and a build with `DEBUG` off would corrupt silently instead.
+
+Neither trap is caused by GC12's `__link`/`__pin` lowering: verified by disabling those
+four lowerings, after which both still reproduce.
 
 **And the obvious fix is not available.** Turning the shadow stack back on under the
 flag makes the **compiler** assert: `Module#tostack` (`src/module.ts:1850`) requires
@@ -163,6 +179,28 @@ the value to be `i32`, and a `(ref null $C)` local is not. Measured by forcing
 `useShadowStack` on for a flagged build — `AssertionError at n.tostack`. The shadow
 stack is structurally incompatible with ref-typed locals, so "put the root set back"
 is not a flag; it is the rest of the migration.
+
+### What the flag does about it today: a never-free arena
+
+Until the memory model question is decided, `--wasmGc` does not allocate from `itcms`
+at all. The compiler emits a **bump allocator** (`~gc/linNew`, `~gc/linRenew` in
+`src/compiler.ts`) and lowers every `__new`/`__alloc`/`__renew`/`__realloc` call site
+onto it, so:
+
+- a payload is **never handed to another allocation**, which is the whole defect: the
+  ladder's third rung now reads `49` where it read `60`;
+- `__free`, `__collect`, `__visit`, `__visit_members` and `__visit_globals` lower to
+  nothing, so the guest collector cannot run over objects it did not allocate;
+- linear memory **grows and is never reclaimed** — 200 000 × 64-byte payloads take
+  `memory.size()` from 1 page to 490, and the same address is never returned twice
+  (`firstAddressReuse(200000) == 0`, measured).
+
+The cost is exact for a sandbox guest whose arena dies with its instance, and the
+change is reversible: it is a stopgap, not the answer below. Measured cost per frame
+for a guest that rebuilds its submit buffer and a scratch array each frame: **262
+bytes** (10 sprites × 28-byte records + a 4-element `Array`), which is ~2.05 M frames
+— about 9.5 hours at 60 fps — inside a 512 MiB maximum. A guest that reuses its
+buffers, as `hello-sprites` does, pays nothing per frame.
 
 ### The three candidate answers
 

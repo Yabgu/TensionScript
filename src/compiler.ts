@@ -2981,6 +2981,154 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * **The never-free linear arena the flag allocates from.**
+   *
+   * Under `--wasmGc` the root set for linear memory is provably empty (GC18:
+   * `__visit_globals` compiles to a nop, `pinSpace` is empty because `__pin` is
+   * lowered away, and `visitStack`'s window is zero-width because
+   * `__stack_pointer == __heap_base`). So `itcms` frees every `__new` object at the
+   * next collection — including one a live handle still points at through
+   * `dataStart`. Measured: a payload written 42/7 reads back as 60, 55 or 63 after
+   * 200 000 allocations, depending on what the churn left behind.
+   *
+   * The flag therefore cannot keep using `itcms`. This emits a **bump allocator** and
+   * every `__new`/`__alloc` call site is lowered onto it, so a payload is never handed
+   * to another allocation: correctness is restored by construction, and the cost is
+   * that linear memory is never reclaimed. For a sandbox guest whose arena dies with
+   * its instance that cost is exact, and it is reversible — nothing here is a
+   * commitment to the final memory model, only to not emitting corrupting modules in
+   * the meantime.
+   *
+   * The layout is the one `changetype<OBJECT>(ptr - TOTAL_OVERHEAD)` expects, so
+   * `ArrayBuffer#byteLength` (`rtSize`) and `TensionScript`'s own header reads keep
+   * working: `mmInfo` at -20, `gcInfo`/`gcInfo2` at -16/-12, `rtId` at -8, `rtSize`
+   * at -4. The payload is zero-filled because `itcms`'s `__new` did, and
+   * `ArrayBuffer`'s constructor relies on it under the incremental runtime.
+   */
+  private emitGcLinearAllocator(): void {
+    if (this.gcLinearNewName.length) return; // already emitted
+    let module = this.module;
+    // `TOTAL_OVERHEAD` is `BLOCK_OVERHEAD + OBJECT_OVERHEAD` = 4 + 16, and the payload
+    // header sits at fixed negative offsets from the returned pointer:
+    // `mmInfo` -20, `gcInfo`/`gcInfo2` -16/-12, `rtId` -8, `rtSize` -4.
+    let TOTAL = 20;
+    let nextName = "~gc/linNext";
+
+    module.addGlobal(nextName, TypeRef.I32, true, module.i32(0));
+
+    // The bump pointer, lazily initialised to **the end of linear memory**.
+    //
+    // Deliberately not `__heap_base`: that global is only emitted when something asks
+    // for it, and a module that does not would fail validation with "global.get name
+    // must be valid" (measured on a fixture that allocates nothing at start-up).
+    // Starting past the current memory cannot overlap static data, the stack or a data
+    // segment, at the cost of one immediate growth.
+    let bumpStart: ExpressionRef = module.block(null, [
+      module.if(
+        module.unary(UnaryOp.EqzI32, module.global_get(nextName, TypeRef.I32)),
+        module.global_set(nextName,
+          module.binary(BinaryOp.ShlI32,
+            module.binary(BinaryOp.AddI32, module.memory_size(), module.i32(1)),
+            module.i32(16)))
+      )
+    ], TypeRef.None);
+
+    // `$~gc/linNew(size, id) -> ptr`
+    module.addFunction("~gc/linNew",
+      createType([TypeRef.I32, TypeRef.I32]), // size, id
+      TypeRef.I32,
+      [TypeRef.I32, TypeRef.I32], // object, end
+      module.block(null, [
+        bumpStart,
+        module.block(null, [
+          module.local_set(2, module.global_get(nextName, TypeRef.I32), false), // object
+          module.local_set(3,
+            module.binary(BinaryOp.AndI32,
+              module.binary(BinaryOp.AddI32,
+                module.binary(BinaryOp.AddI32,
+                  module.local_get(2, TypeRef.I32), module.i32(TOTAL)),
+                module.local_get(0, TypeRef.I32)),
+              module.i32(-16)), false),                                          // end
+          // **Grow to cover `end`, before a single byte is written.** `ge_u` and not
+          // `gt_u`: a block that ends exactly on the boundary must still grow, because
+          // the payload fill that follows writes up to it — measured, `gt_u` left the
+          // last block of a page with a `memory.fill` that trapped out of bounds while
+          // every address it used was inside the page.
+          //
+          // The delta is `(end >> 16) + 1 - pages`, which is never zero when a grow is
+          // needed and over-provisions by at most one page. A constant one-page delta
+          // was wrong the first time an allocation larger than a page appeared.
+          module.if(
+            module.binary(BinaryOp.GeU32,
+              module.local_get(3, TypeRef.I32),
+              module.binary(BinaryOp.ShlI32, module.memory_size(), module.i32(16))),
+            module.drop(module.memory_grow(
+              module.binary(BinaryOp.SubI32,
+                module.binary(BinaryOp.AddI32,
+                  module.binary(BinaryOp.ShrU32, module.local_get(3, TypeRef.I32), module.i32(16)),
+                  module.i32(1)),
+                module.memory_size()))))
+        ], TypeRef.None),
+        module.global_set(nextName, module.local_get(3, TypeRef.I32)),
+        module.store(4, module.local_get(2, TypeRef.I32), module.i32(0), TypeRef.I32, 0),
+        module.store(4, module.local_get(2, TypeRef.I32), module.i32(0), TypeRef.I32, 4),
+        module.store(4, module.local_get(2, TypeRef.I32), module.i32(0), TypeRef.I32, 8),
+        module.store(4, module.local_get(2, TypeRef.I32),
+          module.local_get(1, TypeRef.I32), TypeRef.I32, 12),
+        module.store(4, module.local_get(2, TypeRef.I32),
+          module.local_get(0, TypeRef.I32), TypeRef.I32, 16),
+        // Zero-filled because `itcms`'s `__new` did, and `ArrayBuffer`'s constructor
+        // relies on it under the incremental runtime (`memory.fill` is skipped there).
+        module.memory_fill(
+          module.binary(BinaryOp.AddI32, module.local_get(2, TypeRef.I32), module.i32(TOTAL)),
+          module.i32(0),
+          module.local_get(0, TypeRef.I32)),
+        module.binary(BinaryOp.AddI32, module.local_get(2, TypeRef.I32), module.i32(TOTAL))
+      ], TypeRef.I32));
+
+    // `$~gc/linRenew(ptr, size) -> ptr`: grow in place when the block already fits,
+    // else allocate a fresh one and copy. It never frees, so the old bytes stay valid
+    // for the whole copy — "never reuse" holds here too.
+    module.addFunction("~gc/linRenew",
+      createType([TypeRef.I32, TypeRef.I32]), // ptr, size
+      TypeRef.I32,
+      [TypeRef.I32, TypeRef.I32, TypeRef.I32], // oldSize, oldPtr, newPtr
+      module.block(null, [
+        module.local_set(2,
+          module.load(4, false, module.local_get(0, TypeRef.I32), TypeRef.I32, -4), false),
+        module.if(
+          module.binary(BinaryOp.LeU32,
+            module.local_get(1, TypeRef.I32), module.local_get(2, TypeRef.I32)),
+          module.return(module.block(null, [
+            module.store(4, module.local_get(0, TypeRef.I32),
+              module.local_get(1, TypeRef.I32), TypeRef.I32, -4),
+            module.local_get(0, TypeRef.I32)
+          ], TypeRef.I32))),
+        module.local_set(3, module.local_get(0, TypeRef.I32), false),
+        module.local_set(4,
+          module.call("~gc/linNew", [
+            module.local_get(1, TypeRef.I32),
+            // the old object's id, carried so the new block keeps its type
+            module.load(4, false,
+              module.binary(BinaryOp.SubI32, module.local_get(3, TypeRef.I32), module.i32(8)),
+              TypeRef.I32)
+          ], TypeRef.I32), false),
+        module.memory_copy(
+          module.local_get(4, TypeRef.I32),
+          module.local_get(3, TypeRef.I32),
+          module.local_get(2, TypeRef.I32)),
+        module.local_get(4, TypeRef.I32)
+      ], TypeRef.I32));
+
+    this.gcLinearNewName = "~gc/linNew";
+    this.gcLinearRenewName = "~gc/linRenew";
+  }
+
+  /** Names of the emitted arena functions, or empty when not emitted yet. */
+  private gcLinearNewName: string = "";
+  private gcLinearRenewName: string = "";
+
+  /**
    * A GC array reference with a **byte** offset into it, recovered from the
    * `changetype<usize>(x) + k` idiom the standard library uses to address a buffer.
    */
@@ -8260,8 +8408,54 @@ export class Compiler extends DiagnosticEmitter {
           gcNewName == "__link" || gcNewName.endsWith("/__link") ||
           gcNewName == "__pin" || gcNewName.endsWith("/__pin") ||
           gcNewName == "__unpin" || gcNewName.endsWith("/__unpin") ||
-          gcNewName == "__visit_members" || gcNewName.endsWith("/__visit_members")
+          gcNewName == "__visit_members" || gcNewName.endsWith("/__visit_members") ||
+          gcNewName == "__visit" || gcNewName.endsWith("/__visit") ||
+          gcNewName == "__visit_globals" || gcNewName.endsWith("/__visit_globals") ||
+          gcNewName == "__collect" || gcNewName.endsWith("/__collect")
         )) {
+          this.currentType = Type.void;
+          return module.nop();
+        }
+        // **The linear heap is a never-free arena under the flag**, so no module it
+        // produces can read bytes it no longer owns. `itcms`'s collector is not
+        // reachable here (its root set is provably empty — GC18 — so it frees live
+        // payloads), and the arena is the stopgap until the memory model is chosen.
+        //
+        // `__new` that the GC-array lowering did not take is the payload path —
+        // `ArrayBuffer`, `StaticArray` under a non-array element, anything the stdlib
+        // allocates with `idof<T>` that is not a wasm array. `__alloc`/`__realloc`/
+        // `__free` are `heap.alloc`'s surface and route to the same arena so the two
+        // allocators cannot hand out overlapping memory.
+        if (this.gcActive && (
+          gcNewName == "__new" || gcNewName.endsWith("/__new") ||
+          gcNewName == "__alloc" || gcNewName.endsWith("/__alloc")
+        )) {
+          if (expression.args.length != 2 && gcNewName.endsWith("__new")) {
+            return 0; // an unusual arity: fall through to the ordinary path
+          }
+          this.emitGcLinearAllocator();
+          let linSize = this.compileExpression(expression.args[0],
+            this.options.usizeType, Constraints.ConvImplicit);
+          let linId = expression.args.length > 1
+            ? this.compileExpression(expression.args[1], Type.u32, Constraints.ConvImplicit)
+            : module.i32(0);
+          this.currentType = this.options.usizeType;
+          return module.call(this.gcLinearNewName, [ linSize, linId ], TypeRef.I32);
+        }
+        if (this.gcActive && (
+          gcNewName == "__renew" || gcNewName.endsWith("/__renew") ||
+          gcNewName == "__realloc" || gcNewName.endsWith("/__realloc")
+        ) && expression.args.length == 2) {
+          this.emitGcLinearAllocator();
+          let renewPtr = this.compileExpression(expression.args[0],
+            this.options.usizeType, Constraints.ConvImplicit);
+          let renewSize = this.compileExpression(expression.args[1],
+            this.options.usizeType, Constraints.ConvImplicit);
+          this.currentType = this.options.usizeType;
+          return module.call(this.gcLinearRenewName, [ renewPtr, renewSize ], TypeRef.I32);
+        }
+        if (this.gcActive && (gcNewName == "__free" || gcNewName.endsWith("/__free"))) {
+          // Never-free: `heap.free` returns nothing to the arena, by definition.
           this.currentType = Type.void;
           return module.nop();
         }
