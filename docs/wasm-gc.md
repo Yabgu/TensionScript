@@ -1019,3 +1019,204 @@ string ones, `test:compiler` stays at its 5 pre-existing mismatches, and the fla
 output is **byte-identical on all 11 fixtures** (verified by compiling each with a
 `dist/` built from `src/` reverted, then with the current one). No file under
 `std/assembly` was touched.
+
+## The re-used `ExpressionRef` guard: three occurrences, then a mechanism
+
+Binaryen's IR is a **tree** — an `ExpressionRef` is owned by exactly one parent —
+and handing one node to two parents does not fail at construction. It produces a
+graph the optimizer cannot walk, whose symptom is a *correct* `-O0` build and a
+wrong `-O1` one. That is how this defect got past three rounds:
+
+- GC3: one `struct.get` used as several `i32.eq` operands,
+- GC4: a re-used operand in an `if`,
+- GC11: one `i32.const ptr` handed to every `load` of a literal's characters, which
+  let `-O1` fold every `offset=2i` to `offset=0` and made every string compare equal.
+
+Each was found by the `-O0..-O3` gate. Three occurrences say the mechanism should
+catch it. It now does, at the site, with both locations named:
+
+```
+re-used ExpressionRef: the i32(32) node (produced at 748) was handed to
+'load.ptr  [at n.load (module.ts:1894) <- at n.emitGcStringBuilds (compiler.ts:3013)]'
+and then to 'load.ptr at 760  [at n.load … <- at n.emitGcStringBuilds …]'
+```
+
+**Where it lives.** `src/module.ts`, beside the `Module` wrapper for Binaryen's C
+API: `guardProduce` records a ref a *producer* made, `guardRef` takes it as an
+operand and aborts on a second taking. There is no need to know which C functions
+return expressions, because a producer announces itself. The JS-side breadcrumb
+(`_TensionRefGuardHint` in `src/glue/binaryen.js`) supplies the stack, since
+`module.ts` is compiled.
+
+**Scope — and the two measurements that set it.** A check over the whole
+population is wrong here, and both reasons were measured rather than assumed:
+
+1. `compileStatements` (`compiler.ts:3414`) **unwraps an unnamed block and
+   re-parents its children** into the enclosing list. So a child of a block is
+   consumed again, legitimately, as soon as the block is discarded — a bare `for`
+   loop does exactly this with its own initialiser, with the flag **off**.
+2. A **pass** transforms the tree and re-parents nodes by design
+   (`passes/shadowstack.ts:676` moves a `return`'s operand into a `local.set`).
+
+So the guard tracks only what the three defects actually shared — the **GC
+builders** (`struct.*`, `array.*`, `ref.*`) and the **constants** (`i32`/`i64`/
+`f32`/`f64`) — checks every consumer, adds a duplicate-child check inside `block`
+(which re-parenting cannot explain), and suspends itself around `runPasses` and
+around a `Pass`'s subtree walk (`suspendRefGuard`/`resumeRefGuard`).
+
+**Cost when disabled:** two null tests per node. Measured on
+`tests/gc/dynarray.ts` at three runs each: **857/860/904 ms** without the guard
+(a `dist/` built from the previous commit) against **842/874/875 ms** with the
+guard present and off — indistinguishable.
+
+**Demonstration.** The GC11 defect was reintroduced verbatim (one `i32.const ptr`
+shared by every `load` in a literal's character loop), the build asserted, and the
+string fixture compiled with `TENSION_REF_GUARD=1`: the abort above is that run.
+Reverted immediately; the fixture now compiles clean, and check 27 in
+`tests/gc/wasm-gc.js` asserts the guard is silent on all ten GC fixtures.
+
+## The allocation route: `__new` for a GC type
+
+### The scope, measured
+
+`grep -rn "__new(" std/assembly` → **72 sites** (the declaration in
+`rt/index.d.ts` excluded), classified by the *id* argument:
+
+- **47 `idof<String>` / `idof<string>`** — a variable-length character buffer.
+- **4 `idof<StaticArray<T>>`** — a variable-length element buffer.
+- **8 `idof<ArrayBuffer>`** — a variable-length byte buffer, still linear memory
+  (out of scope until `ArrayBuffer` migrates).
+- **13 with a variable id** (`__, id`, `idof<TArray>()`) — the runtime helpers
+  (`__newBuffer`, `__newArray`) and the `TypedArray` generics, where the type is
+  not written at the call.
+
+Per file: `string.ts` 28, `util/number.ts` 15, `typedarray.ts` 6, `staticarray.ts`
+4, `util/string.ts` 4, `array.ts` 3, `arraybuffer.ts` 3, `util/uri.ts` 2, plus the
+runtime's own 5.
+
+So **51 of 72** are the GC-array shape, and the other 21 are either linear memory
+or type-erased.
+
+### The mechanism, and why the alternatives were worse
+
+**The compiler lowers `__new(size, idof<T>())` itself** when `T` is a GC array
+type: `array.new $t (size >> log2(elemSize)) (zero)`, and `changetype<String>(…)`
+around it becomes the identity because both sides are `(ref null $~gcarray/u16)`.
+
+- **vs a typed intrinsic `__gcNew<T>(len)`:** the intrinsic is fine, but *nothing
+  calls it*. `std/assembly` writes `__new` 72 times; an intrinsic means 72 call-site
+  edits plus a helper that has to exist in both ABIs — and flag-off byte identity
+  then rests on my care in 51 places instead of on the mechanism. Zero std edits
+  beat a smaller diff.
+- **vs rewriting the stdlib constructors onto a dual-ABI helper:** the same 72
+  edits with more new surface.
+- **vs intercepting `changetype<T>(__new(...))`:** misses the two
+  `let dst = __new(...)` sites (`util/uri.ts:45,141`) that hold the result in a
+  `usize` first, and puts the type logic in two places.
+
+**Why the `idof<T>()` argument is the safe key.** `T` is written literally at the
+site, so this is a compile-time type in the source — not GC6's runtime-`Type`-keyed
+lookup, where every reference type is `usize` and two generic instantiations are
+indistinguishable. Here there is no lookup at all: the node *is* the type argument.
+
+**The size arithmetic is not pattern-matched.** The element count is emitted as
+`size >> log2`, a runtime shift on the already-computed byte size. So a site that
+over-allocates (`__new(len * 2 * 2, …)` for surrogate pairs, `string.ts:528`) is
+handled correctly without knowing why it asks for twice as much.
+
+### The second half: `memory.copy` over two arrays
+
+Allocation alone is not enough — the next line of `substring` is
+`memory.copy(changetype<usize>(out), changetype<usize>(this) + fromPos, size)`, a
+byte address on both sides. The operands are recognised as
+`changetype<usize>(x) [+ byteOffset]` where `x` resolves to a GC array, and the
+copy becomes `array.copy` with the byte offsets and the length shifted down to
+element indices. Recognising this shape cannot misread valid code, because
+`changetype<usize>(aRef)` is itself an error under the flag.
+
+Emitted shape for `String#substring`:
+
+```
+(func $~lib/string/String#substring (type $2)
+  (param $0 (ref null $~gcarray/u16)) (param $1 i32) (param $2 i32)
+  (result (ref null $~gcarray/u16))
+  local.get $0
+  array.len                 ;; `length` is array.len, not a header read
+  ...
+  i32.const 1
+  i32.shr_u                 ;; bytes -> characters
+  array.new $~gcarray/u16
+  ...
+  local.get $16
+  i32.const 1
+  i32.shr_u                 ;; fromPos >> 1
+  local.get $20
+  i32.const 1
+  i32.shr_u                 ;; size >> 1
+  array.copy $~gcarray/u16 $~gcarray/u16
+```
+
+`grep -c "call \$~lib/rt/itcms/__new"` on the fixture: **0**. `array.copy`: 3
+(`substring`, `slice`, `substr`). `array.new $~gcarray/u16`: 12 (literals plus
+allocations).
+
+### A silent wrong answer, found by the change
+
+`changetype<usize>(x)` was refused for a **class** instance but not for a GC
+**array** — `isGcClass` answers false for everything under `~lib/` by design
+(GC10), so `String` and `StaticArray<T>` fell straight through. Measured
+consequence: `"aaa".replaceAll("a", "bb")` — which builds
+`changetype<usize>(out)` inside `__renew` — **compiled and answered 4 characters
+instead of 6**. That is worse than a diagnostic, and it is now one:
+
+```
+Not implemented: changetype<usize> of a wasm GC array (String): a wasm GC
+reference has no address, so it cannot become an integer or a pointer.
+```
+
+The `| null` form mattered: `String | null` carries no `classReference`, so the
+predicates answer false for exactly the local `replaceAll` declares
+(`let out: String | null`) — the first version of the check missed it and the wrong
+answer survived. It tests `type.nonNullableType` now.
+
+### What works, and what remains
+
+**Now compiling and correct** (values asserted, `-O0..-O3` agreeing):
+`substring`, `slice`, `substr`, plus the already-intercepted `length`,
+`charCodeAt`, `at`, `charAt`, `concat`, `==`/`!=`/`<`/`>`/`<=`/`>=`, `startsWith`,
+`endsWith`, `indexOf`, `includes`.
+
+**Remaining**, with the reason each fails:
+
+- `trim`, `toUpperCase`, `padStart`, `padEnd`, `repeat` — bodies read the buffer
+  with `load<u16>(changetype<usize>(this) + k)`. They need the *read* side of the
+  same idiom (`load` over an array), not the allocation side.
+- `replaceAll`, `split` — `replaceAll` reallocates with `__renew(ptr, size)`, which
+  is a pointer API with no array equivalent (`array.grow` does not exist in this
+  glue); `split` needs `Array<T>` and an array of strings.
+- `replace` (single, first occurrence) already works: it is `slice` + `concat`.
+- `parseInt`/`format`/`toString` on numbers — `util/number.ts` writes into a
+  `String` buffer with `store<u16>`, the write side of the same idiom.
+
+### Hashing: the allocation route does not answer it
+
+`util/hash.ts:71 hashStr` is **not** an allocation problem. It reads
+`load<u32>(pos)` at a raw address in a 16-byte unrolled loop — the *read* side. The
+allocation route is silent on it, and the new `changetype<usize>` diagnostic is
+what makes that visible rather than accidental: instantiating `Map<string, i32>`
+under the flag now fails with the diagnostic pointing at `hash.ts:72` and `:76`.
+
+It needs its own decision, and the decision is not "port `hashStr`": an
+`(array (mut u16))` is *packed `i16`*, so a `load<u32>` is two `array.get`s plus a
+shift-and-or, and the XXH32 fast path's 16-byte unrolled block reads become eight
+element reads. The two candidates are (a) generalise the `changetype<usize>(ref)+k`
+recogniser from `memory.copy` to `load`/`store`, so the stdlib's own arithmetic
+keeps working, or (b) give `hashStr` a GC arm over `array.get`. That is a
+round-sized question, not a line, and it belongs with `Map`.
+
+### Result
+
+`test:gc` 132 → **168 checks**, `-O0..-O3` agree on every fixture, `test:compiler`
+stays at its 5 pre-existing mismatches, flag-off output **byte-identical on all 13
+fixtures**, and **no file under `std/assembly` was touched** — the mechanism is
+entirely compiler-side.

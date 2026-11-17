@@ -258,6 +258,25 @@ export const defaultFeatures = Feature.MutableGlobals
                              | Feature.BulkMemory;
 
 /** Compiler options. */
+/**
+ * A GC array reference plus a byte offset, recovered from `changetype<usize>(x) + k`.
+ *
+ * See `Compiler#gcArraySliceOf`, which builds these while looking for `memory.copy`
+ * operands that the standard library wrote as byte addresses.
+ */
+export class GcArraySlice {
+  constructor(
+    /** The AST node of the array expression. */
+    public refExpr: Expression,
+    /** The AST node of the byte offset, or `null` for offset 0. */
+    public byteOffset: Expression | null,
+    /** The element type. */
+    public element: Type,
+    /** The array's own type (`String`, `StaticArray<T>`). */
+    public type: Type
+  ) {}
+}
+
 export class Options {
   constructor() { /* as internref */ }
 
@@ -2814,6 +2833,160 @@ export class Compiler extends DiagnosticEmitter {
         : module.binary(BinaryOp.LtI32,
             module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32))));
     return module.block(out, children, TypeRef.I32);
+  }
+
+  /**
+   * A GC array reference with a **byte** offset into it, recovered from the
+   * `changetype<usize>(x) + k` idiom the standard library uses to address a buffer.
+   */
+  private gcArraySliceOf(node: Expression): GcArraySlice | null {
+    let offset: Expression | null = null;
+    let target = node;
+    if (target.kind == NodeKind.Binary) {
+      let binary = <BinaryExpression>target;
+      // Only `+`: `ptr - k` is not a shape the string methods use, and guessing
+      // would be worse than falling back to the diagnostic.
+      if (binary.operator != Token.Plus) return null;
+      offset = binary.right;
+      target = binary.left;
+    }
+    if (target.kind != NodeKind.Call) return null;
+    let call = <CallExpression>target;
+    let callee = call.expression;
+    if (callee.kind != NodeKind.Identifier) return null;
+    if ((<IdentifierExpression>callee).text != "changetype") return null;
+    if (call.args.length != 1) return null;
+    let refExpr = call.args[0];
+    let type = this.resolver.resolveExpression(
+      refExpr, this.currentFlow, Type.auto, ReportMode.Swallow);
+    if (type == null) return null;
+    let element: Type;
+    if (gcStringOf(type)) element = Type.u16;
+    else {
+      let arrayElement = gcArrayElementOf(type);
+      if (arrayElement == null) return null;
+      element = arrayElement;
+    }
+    return new GcArraySlice(refExpr, offset, element, type);
+  }
+
+  /** log2 of an element's byte size, or `-1` when the guard should bail. */
+  private gcElementLog2(element: Type): i32 {
+    switch (element.byteSize) {
+      case 1: return 0;
+      case 2: return 1;
+      case 4: return 2;
+      case 8: return 3;
+    }
+    return -1;
+  }
+
+  /**
+   * **The allocation route: `__new(size, idof<T>())` for a GC array type.**
+   *
+   * Every allocating string method goes
+   * `changetype<String>(__new(len << 1, idof<String>()))` — 71 sites across
+   * `std/assembly` — and `__new` answers a `usize`. Under wasm GC there is no
+   * address, so the call has to *become* the allocation: `array.new $t (n) (zero)`,
+   * with `n = size >> log2(elemSize)`.
+   *
+   * **Why the `idof<T>()` argument is the right key.** `T` is written literally at
+   * the call site, so this is a compile-time type in the source — not GC6's
+   * runtime-`Type` lookup, where every reference type is `usize` and two generic
+   * instantiations are indistinguishable. The type here cannot be confused with
+   * another, because there is no lookup: the node *is* the type argument.
+   *
+   * The result is a reference, so the surrounding `changetype<String>(…)` becomes
+   * the identity (both sides are `(ref null $~gcarray/u16)`); `changetype` already
+   * accepts a ref whose type is already the target's.
+   *
+   * Returns `0` for anything it does not own — a non-`idof` second argument, a
+   * type that is not a GC array, a class allocation — so the ordinary path (and its
+   * diagnostic) still runs for them.
+   */
+  compileGcTypedNew(expression: CallExpression): ExpressionRef {
+    let args = expression.args;
+    if (args.length < 2) return 0;
+    let idArg = args[1];
+    if (idArg.kind != NodeKind.Call) return 0;
+    let idCall = <CallExpression>idArg;
+    let idCallee = idCall.expression;
+    if (idCallee.kind != NodeKind.Identifier) return 0;
+    if ((<IdentifierExpression>idCallee).text != "idof") return 0;
+    let typeArgs = idCall.typeArguments;
+    if (typeArgs == null || typeArgs.length != 1) return 0;
+
+    let type = this.resolver.resolveType(
+      unchecked(typeArgs[0]), this.currentFlow,
+      this.currentFlow.sourceFunction.parent, null, ReportMode.Swallow);
+    if (type == null) return 0;
+
+    let element: Type;
+    if (gcStringOf(type)) element = Type.u16;
+    else {
+      let arrayElement = gcArrayElementOf(type);
+      if (arrayElement == null) return 0;
+      element = arrayElement;
+    }
+    let log2 = this.gcElementLog2(element);
+    if (log2 < 0) return 0;
+
+    let module = this.module;
+    let arrayTypeRef = type.toRef();
+    let heapType = module.heapType(arrayTypeRef);
+    let size = this.compileExpression(args[0], this.options.usizeType, Constraints.ConvImplicit);
+    let count = log2 ? module.binary(BinaryOp.ShrU32, size, module.i32(log2)) : size;
+    this.currentType = type;
+    // `array.new` zero-fills, which is what `__new` guaranteed (`memory.fill`), and
+    // what the stdlib relies on for the parts of a buffer it does not write.
+    return module.array_new(heapType, count, this.makeFieldZero(element));
+  }
+
+  /**
+   * `memory.copy(dst, src, n)` where both sides are GC arrays.
+   *
+   * This is the second half of the allocation route and it is not optional: once
+   * `__new` produces an array, the very next line of `substring` is
+   * `memory.copy(changetype<usize>(out), changetype<usize>(this) + fromPos, size)` —
+   * a byte address on both sides, which a wasm array does not have. The operands
+   * are recognised as `changetype<usize>(x) [+ byteOffset]`, and the copy becomes
+   * `array.copy` with the byte offsets and the length shifted down to element
+   * indices.
+   *
+   * `changetype<usize>(aRef)` is *already* an error under the flag, so recognising
+   * this shape cannot misread valid code: there is no other meaning it could have.
+   *
+   * Returns `0` when either side is not a GC array, so a copy between linear
+   * buffers keeps its ordinary lowering.
+   */
+  compileGcMemoryCopy(destNode: Expression, srcNode: Expression, sizeNode: Expression): ExpressionRef {
+    let dest = this.gcArraySliceOf(destNode);
+    if (dest == null) return 0;
+    let src = this.gcArraySliceOf(srcNode);
+    if (src == null) return 0;
+    let log2 = this.gcElementLog2(dest.element);
+    // Same element width on both sides, or this is not a buffer-to-buffer copy of
+    // one type and the ordinary path should report it.
+    if (log2 < 0 || log2 != this.gcElementLog2(src.element)) return 0;
+    if (dest.element != src.element) return 0;
+
+    let module = this.module;
+    let heapType = module.heapType(dest.type.toRef());
+    let byteShift = (expr: ExpressionRef): ExpressionRef =>
+      log2 ? module.binary(BinaryOp.ShrU32, expr, module.i32(log2)) : expr;
+    let destRef = this.compileExpression(
+      dest.refExpr, dest.type, Constraints.ConvImplicit);
+    let destOffset = dest.byteOffset
+      ? this.compileExpression(dest.byteOffset, this.options.usizeType, Constraints.ConvImplicit)
+      : module.i32(0);
+    let srcRef = this.compileExpression(
+      src.refExpr, src.type, Constraints.ConvImplicit);
+    let srcOffset = src.byteOffset
+      ? this.compileExpression(src.byteOffset, this.options.usizeType, Constraints.ConvImplicit)
+      : module.i32(0);
+    let size = this.compileExpression(sizeNode, this.options.usizeType, Constraints.ConvImplicit);
+    this.currentType = Type.void;
+    return module.array_copy(destRef, byteShift(destOffset), srcRef, byteShift(srcOffset), byteShift(size));
   }
 
   /**
@@ -7881,6 +8054,20 @@ export class Compiler extends DiagnosticEmitter {
       }
       case ElementKind.Function: {
         let functionInstance = <Function>target;
+        // **The allocation route: `__new(size, idof<T>())` for a GC array type.**
+        // Every allocating string method in the standard library funnels through
+        // this one call, so lowering it here is what makes those bodies
+        // expressible at all — `__new` answers a `usize` and a wasm array has no
+        // address. See `compileGcTypedNew`.
+        // The declaration is `__new`; the *resolved instance* is whichever runtime
+        // module supplies it (`~lib/rt/itcms/__new` today), so the name is matched
+        // on the last segment — measured: a strict `== "__new"` never fired.
+        let gcNewName = functionInstance.prototype.internalName;
+        if (this.options.wasmGc &&
+            (gcNewName == "__new" || gcNewName.endsWith("/__new"))) {
+          let gcNew = this.compileGcTypedNew(expression);
+          if (gcNew != 0) return gcNew;
+        }
         // **`compareImpl` under wasm GC.** It is the single chokepoint behind
         // `==`, `equals`, `startsWith`, `endsWith`, `indexOf` and `includes` — every
         // one of them ends here — and its body walks `changetype<usize>(str) + i`

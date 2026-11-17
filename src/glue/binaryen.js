@@ -944,4 +944,46 @@ export function _BinaryenConstSetValueI64(expr, val) {
   binaryen._BinaryenConstSetValueI64(expr, toBigInt(val));
 }
 
+/**
+ * Whether the re-used-`ExpressionRef` guard is on.
+ *
+ * A debug aid, not part of Binaryen's C API. Binaryen's IR is a *tree*: every
+ * `ExpressionRef` is owned by exactly one parent, and handing the same node to two
+ * parents leaves the optimizer with a graph it cannot walk — the symptom is a
+ * fixture that is correct at `-O0` and wrong at `-O1`, which is how this defect
+ * cost three rounds (GC3, GC4, GC11).
+ *
+ * Read once, at load, from the environment, so the per-node test is a boolean.
+ * Defensive about `process` because this file is also bundled for the browser.
+ *   TENSION_REF_GUARD=1 node bin/tensionscript.js …
+ */
+export const TENSION_REF_GUARD = (() => {
+  try {
+    const value = globalThis.process?.env?.TENSION_REF_GUARD;
+    return value === "1" || value === "true";
+  } catch {
+    return false;
+  }
+})();
+
+/**
+ * A short call-site breadcrumb for the re-used-`ExpressionRef` guard.
+ *
+ * Debug only: it exists because "the same ref was taken twice by
+ * `block.children[]`" is not enough to find the culprit when a single method is
+ * the site for hundreds of nodes. JS-only, and only called when the guard is on,
+ * because a stack capture per operand is far too slow to run by default.
+ */
+export function _TensionRefGuardHint(site) {
+  let frames = "";
+  try {
+    const lines = (new Error().stack || "").split("\n");
+    // Skip this frame, `guardRef`, and the `Module` wrapper.
+    frames = lines.slice(3, 6).map((line) => line.trim()).join(" <- ");
+  } catch {
+    frames = "";
+  }
+  return site + (frames ? "  [" + frames + "]" : "");
+}
+
 export default binaryen;

@@ -10,7 +10,9 @@ import {
   FunctionRef,
   GlobalRef,
   Index,
-  StringRef
+  StringRef,
+  suspendRefGuard,
+  resumeRefGuard
 } from "../module";
 
 import {
@@ -1279,7 +1281,11 @@ export abstract class Pass extends Visitor {
     let body = _BinaryenFunctionGetBody(func);
     if (body) {
       this._currentFunction = func;
+      // A pass rewrites the tree and re-parents nodes, which the ref guard would
+      // report as a second use. Suspended for the whole subtree.
+      let wasGuardActive = suspendRefGuard();
       this.visit(body);
+      resumeRefGuard(wasGuardActive);
       this._currentFunction = 0;
     }
   }
@@ -1296,7 +1302,11 @@ export abstract class Pass extends Visitor {
   walkGlobal(global: GlobalRef): void {
     this._currentGlobal = global;
     let init = _BinaryenGlobalGetInitExpr(global);
-    if (init) this.visit(init);
+    if (init) {
+      let wasGuardActive = suspendRefGuard();
+      this.visit(init);
+      resumeRefGuard(wasGuardActive);
+    }
     this._currentGlobal = 0;
   }
 

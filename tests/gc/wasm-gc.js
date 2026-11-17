@@ -57,12 +57,18 @@ const imports = {
   },
 };
 
-function compile(entry, out, extraArgs) {
+function compile(entry, out, extraArgs, env) {
   const args = [cli, join(here, entry), "--outFile", join(scratch, out),
     "--textFile", join(scratch, out.replace(/\.wasm$/, ".wat")),
     ...extraArgs];
   try {
-    return { ok: true, output: execFileSync(process.execPath, args, { encoding: "utf8", stdio: "pipe" }) };
+    return {
+      ok: true,
+      output: execFileSync(process.execPath, args, {
+        encoding: "utf8", stdio: "pipe",
+        env: env ? { ...process.env, ...env } : process.env,
+      }),
+    };
   } catch (error) {
     return { ok: false, output: `${error.stdout ?? ""}${error.stderr ?? ""}` };
   }
@@ -577,6 +583,99 @@ function check(name, condition, detail) {
       e.lengthOf() === 5 && e.codeAt() === 101 && e.concatLen() === 4 &&
       e.eqDiff() === 0 && e.ltTrue() === 1 && e.startsBad() === 0 &&
       e.indexOfLl() === 2 && e.labelRound() === 1112);
+  }
+}
+
+// 23 — the allocation route: `__new` -> `array.new`, `memory.copy` -> `array.copy`
+//
+// `substring` and `slice` are ordinary stdlib bodies — no file under
+// `std/assembly` is edited for them. Before this round both failed at
+// `local.set's value type must be correct` on the `__new` call, because `__new`
+// answers a `usize` and a wasm array has no address.
+{
+  const built = compile("alloc.ts", "alloc.wasm", ["--wasmGc"]);
+  check("the allocation fixture compiles with validation on", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "alloc.wat"), "utf8");
+    check("the guest allocator is not called at all: `__new` became `array.new`",
+      !/call \$~lib\/rt\/itcms\/__new/.test(wat),
+      (wat.match(/.*~lib\/rt\/itcms\/__new.*/) ?? ["absent"])[0]);
+    check("`memory.copy` between two GC arrays became `array.copy`",
+      /array\.copy \$~gcarray\/u16 \$~gcarray\/u16/.test(wat));
+    check("the byte length is shifted down to an element count",
+      /i32\.shr_u\n\s*array\.new \$~gcarray\/u16/.test(wat),
+      (wat.match(/array\.new \$~gcarray\/u16/) ?? ["absent"])[0]);
+
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "alloc.wasm")), imports);
+    const e = instance.exports;
+    const want = {
+      subLen: 3, subEq: 1, subCode: 101, subWhole: 1, subEmpty: 0,
+      subOffset: 1, sliceEq: 1, sliceLen: 2, sliceNeg: 1, slicePast: 1,
+      substrEq: 1, probe: 31,
+    };
+    for (const name of Object.keys(want)) {
+      const got = e[name]();
+      check(`alloc: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
+    }
+  }
+}
+
+// 24 — every optimization level agrees on the allocation fixture --------------
+{
+  const answers = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("alloc.ts", `alc${level}.wasm`, ["--wasmGc", level]);
+    check(`alloc ${level} compiles`,
+      built.ok && !/wasm-validator|Aborted/.test(built.output), built.output);
+    if (built.ok) {
+      const { instance } = await WebAssembly.instantiate(
+        readFileSync(join(scratch, `alc${level}.wasm`)), imports);
+      answers.push(`${instance.exports.probe()},${instance.exports.subLen()},${instance.exports.sliceNeg()}`);
+    }
+  }
+  check("alloc: -O0..-O3 all agree", new Set(answers).size === 1, answers.join(" | "));
+}
+
+// 25 — flag off: `String` stays in linear memory and answers the same ---------
+{
+  const built = compile("alloc.ts", "allocplain.wasm", []);
+  check("the allocation fixture compiles without the flag", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "allocplain.wat"), "utf8");
+    check("flag off: no wasm GC array in the allocation fixture",
+      !/array\.new|array\.copy|array\.get/.test(wat));
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "allocplain.wasm")), imports);
+    check("flag off: the same answers", instance.exports.probe() === 31);
+  }
+}
+
+// 26 — `changetype<usize>` of a GC array is a diagnostic ----------------------
+//
+// The hole this closes was measured: `String#replaceAll` builds exactly this
+// shape, compiled, and answered a length of 4 where the source says 6.
+{
+  const built = compile("changetype-array.ts", "cta.wasm", ["--wasmGc"]);
+  check("changetype<usize> of a String is refused", !built.ok, built.output);
+  check("the refusal names the array and the reason",
+    /changetype<usize> of a wasm GC array \(String\): a wasm GC reference has no address/.test(built.output),
+    built.output.split("\n")[0]);
+}
+
+// 27 — the re-used-`ExpressionRef` guard is clean on every GC fixture ---------
+//
+// `TENSION_REF_GUARD=1` aborts at the site when a tracked node (a GC builtin's
+// result, or a constant) is handed to two operands. It found the GC11 defect in
+// one run when that defect was deliberately reintroduced; here it asserts the
+// tree is clean, which is what makes it usable rather than noisy.
+{
+  for (const fixture of ["fixtures", "brand", "arrays", "dynarray", "strings", "alloc", "cycles", "inherit", "classfield", "globalinit"]) {
+    const built = compile(`${fixture}.ts`, `grd-${fixture}.wasm`, ["--wasmGc"],
+      { TENSION_REF_GUARD: "1" });
+    check(`ref guard: ${fixture} builds with no re-used ExpressionRef`,
+      built.ok && !/re-used ExpressionRef/.test(built.output),
+      (built.output.match(/re-used ExpressionRef[^\n]*/) ?? [""])[0]);
   }
 }
 

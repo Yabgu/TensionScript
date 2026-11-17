@@ -56,7 +56,9 @@ import {
   TypeFlags,
   MemoryModelCode,
   isGcClass,
-  gcStringOf
+  gcStringOf,
+  gcArrayElementOf,
+  gcDynamicArrayElementOf
 } from "./types";
 
 import {
@@ -3582,6 +3584,14 @@ function builtin_memory_copy(ctx: BuiltinFunctionContext): ExpressionRef {
     if (!instance || !compiler.compileFunction(instance, true)) return module.unreachable();
     return compiler.compileCallDirect(instance, operands, ctx.reportNode);
   }
+  // **`memory.copy` between two wasm GC arrays is `array.copy`.** The string
+  // methods write `memory.copy(changetype<usize>(out), changetype<usize>(this) + k,
+  // n)` — byte addresses on both sides — and a wasm array has none. Recognised
+  // before the operands are compiled, because the *shape* is what identifies it.
+  if (compiler.options.wasmGc) {
+    let gcCopy = compiler.compileGcMemoryCopy(operands[0], operands[1], operands[2]);
+    if (gcCopy != 0) return gcCopy;
+  }
   let usizeType = compiler.options.usizeType;
   let arg0 = compiler.compileExpression(operands[0], usizeType, Constraints.ConvImplicit);
   let arg1 = compiler.compileExpression(operands[1], usizeType, Constraints.ConvImplicit);
@@ -3803,6 +3813,24 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
       operands[0], compiler.currentFlow
     );
     let sourceClass = sourceType ? sourceType.classReference : null;
+    // **And a GC *array* has no address either.** `isGcClass` answers false for
+    // everything under `~lib/` by design (GC10), so a `String` or a
+    // `StaticArray<T>` — both `(array (mut T))` under the flag — fell through this
+    // check entirely. Measured, and it matters: `String#replace`'s `__renew` path
+    // compiled and answered `"aaa".replace("a","bb")` with 4 characters instead of
+    // 6, a silent wrong answer instead of the diagnostic it deserved. The three
+    // predicates are the three GC array shapes; the one that is a *class* is
+    // caught by `isGcClass` above.
+    // On the **non-nullable** form: `String | null` carries no `classReference`, so
+    // the predicates answer false for exactly the local that `replace` builds
+    // (`let out: String | null`), which is how the silent wrong answer survived the
+    // first version of this check.
+    let sourceBase = sourceType != null ? sourceType.nonNullableType : null;
+    let sourceIsGcArray = sourceBase != null && (
+      gcStringOf(sourceBase) ||
+      gcArrayElementOf(sourceBase) != null ||
+      gcDynamicArrayElementOf(sourceBase) != null
+    );
     if (sourceClass != null && isGcClass(sourceClass)) {
       compiler.error(
         DiagnosticCode.Not_implemented_0,
@@ -3810,6 +3838,21 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
         `changetype<${toType.toString()}> of a wasm GC class instance (${sourceClass.name}): a ` +
         "wasm GC reference has no address, so it cannot become an integer or a pointer. " +
         "Pass it as a reference, or read a field through the class"
+      );
+      return module.unreachable();
+    }
+    // The array case needs its own target test: a class type's kind **is** `Usize`,
+    // so `isIntegerTarget` answers true for `changetype<String>` as well, and
+    // refusing that would refuse the identity conversion `__new` now depends on.
+    // Numeric target means "no class on the right", which is the only case where a
+    // reference genuinely has to become an address.
+    if (sourceIsGcArray && toType.classReference == null && isIntegerTarget(toType)) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        `changetype<${toType.toString()}> of a wasm GC array (${assert(sourceClass).name}): a ` +
+        "wasm GC reference has no address, so it cannot become an integer or a pointer. " +
+        "Use array.get/array.set, which the compiler emits for [] and for memory.copy"
       );
       return module.unreachable();
     }
