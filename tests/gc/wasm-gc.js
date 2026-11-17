@@ -34,7 +34,7 @@
  * `-O1`/`-O2`/`-O3` build abort inside effect analysis.
  */
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,7 +67,11 @@ const imports = {
  * that printed one.
  */
 function compile(entry, out, extraArgs, env) {
-  const args = [cli, join(here, entry), "--outFile", join(scratch, out),
+  // A checked-in fixture lives beside the harness; a generated one (the field-kind
+  // table) is written into the scratch dir at test time. Resolve by existence rather
+  // than by a flag, so both callers read the same.
+  const source = existsSync(join(here, entry)) ? join(here, entry) : join(scratch, entry);
+  const args = [cli, source, "--outFile", join(scratch, out),
     "--textFile", join(scratch, out.replace(/\.wasm$/, ".wat")),
     ...extraArgs];
   const result = spawnSync(process.execPath, args, {
@@ -946,6 +950,134 @@ function check(name, condition, detail) {
   check("the refusal names the view and the reason",
     /changetype<usize> of a wasm GC class instance \(Uint8Array\): a wasm GC reference has no address/.test(built.output),
     built.output.split("\n").find((l) => /AS100/.test(l)) ?? "(no diagnostic)");
+}
+
+// 37 — the report cannot claim what emission cannot deliver -------------------
+//
+// The invariant, and it is the point of the section: **no class may be reported on
+// the GC ABI unless its struct type can actually be built.** The two oracles used to
+// answer from different predicates — eligibility switched on `TypeKind`, and a
+// signature type's kind *is* `usizeType.kind` (with the `Value` bit cleared), so
+// `cb: (x: i32) => void` was called numeric and therefore storable, while emission
+// tested `isInternalReference` and hit `assert(false)`. Measured: `1 of 1 managed
+// class on the GC ABI`, then the compiler died at `gcFieldTypeRef` the moment an
+// instance was constructed.
+//
+// So: one fixture per field kind, written into the scratch dir from the table below.
+// Each must either (a) report coverage and carry a `(struct …)` type for the class, or
+// (b) refuse with a named reason. Neither may crash, and (a) and (b) may not overlap.
+{
+  const kinds = [
+    ["a value", "n: i32 = 0;", true],
+    ["a float", "f: f64 = 0;", true],
+    ["a string", "s: string = \"\";", true],
+    ["a class", "o: Inner = new Inner();", true],
+    ["a nullable class", "o: Inner | null = null;", true],
+    ["a StaticArray", "a: StaticArray<i32> = new StaticArray<i32>(1);", true],
+    ["a dynamic Array", "a: Array<i32> = new Array<i32>(0);", true],
+    ["a TypedArray", "t: Uint8Array = new Uint8Array(1);", true],
+    ["an ArrayBuffer", "b: ArrayBuffer = new ArrayBuffer(1);", false],
+    ["a function value", "cb: (x: i32) => void;", false],
+    ["a Map", "m: Map<i32, i32> = new Map<i32, i32>();", false],
+    ["an inline value array", "v: @inline [u32 * 4];", false, 6415],
+  ];
+  for (const [label, field, storable, permanentCode] of kinds) {
+    const name = `kind-${label.replace(/[^a-z]+/gi, "-").toLowerCase()}`;
+    writeFileSync(join(scratch, `${name}.ts`),
+      `class Inner { x: i32 = 0; }\n` +
+      `class Holder { ${field} }\n` +
+      `export function run(): i32 { let h = new Holder(); return 1; }\n`);
+    const built = compile(`${name}.ts`, `${name}.wasm`, ["--wasmGc"]);
+    const out = built.output;
+    const crashed = /AssertionError|at gcFieldTypeRef|at fillGcStructType/.test(out);
+    check(`field kind: ${label} does not crash the compiler`, !crashed,
+      out.split("\n").find((l) => /AssertionError|gcFieldTypeRef/.test(l)) ?? "");
+
+    const info = (out.match(/INFO TS6413: wasm-gc: (\d+) of (\d+)/) ?? []);
+    const claimsGc = info.length > 0 && info[1] !== "0";
+    const warned = /WARNING TS6414: /.test(out);
+    check(`field kind: ${label} is reported consistently`,
+      !(claimsGc && warned) && (claimsGc || warned),
+      `claimsGc=${claimsGc} warned=${warned}`);
+
+    if (storable) {
+      check(`field kind: ${label} is on the GC ABI`, claimsGc && built.ok, out.split("\n")[0]);
+      if (built.ok) {
+        const wat = readFileSync(join(scratch, `${name}.wat`), "utf8");
+        // The report said a struct exists; the module has to contain one.
+        check(`field kind: ${label} really emits a struct`,
+          /Holder \(sub \(struct/.test(wat),
+          (wat.match(/\(type \S*Holder[^\n]*/) ?? ["absent"])[0]);
+      }
+    } else {
+      check(`field kind: ${label} is refused by name`, warned && !claimsGc, out.split("\n")[0]);
+      if (permanentCode) {
+        check(`field kind: ${label} is refused as permanent (TS6415)`,
+          new RegExp(`WARNING TS6415: `).test(out), out.split("\n")[0]);
+      } else {
+        check(`field kind: ${label} is not called permanent`,
+          !/WARNING TS6415: /.test(out),
+          out.split("\n").find((l) => /TS6415/.test(l)) ?? "(none)");
+      }
+    }
+  }
+}
+
+// 38 — a function-typed field: refused, not asserted --------------------------
+//
+// The exact repro from the round's brief, in both forms. `f1` never constructs the
+// class and used to answer `1 of 1 managed class on the GC ABI` — a report that
+// lied. `f2` constructs it and used to kill the compiler. Both must name the cause.
+{
+  // `cb` is **initialised**, unlike the brief's repro: an uninitialised field is
+  // `TS2564` under strict property initialisation and fails flag-off too, which would
+  // make the fixture evidence about something else. A closure is the same field kind
+  // and is the shape a program actually writes.
+  writeFileSync(join(scratch, "fnfield-never.ts"),
+    `class H { cb: (x: i32) => void = (x: i32): void => {}; n: i32 = 0; }\n` +
+    `export function run(): i32 { return 1; }\n`);
+  writeFileSync(join(scratch, "fnfield-construct.ts"),
+    `class H { cb: (x: i32) => void = (x: i32): void => {}; n: i32 = 0; }\n` +
+    `export function run(): i32 { let h = new H(); return 1; }\n`);
+
+  for (const [file, what] of [["fnfield-never", "never constructed"], ["fnfield-construct", "constructed"]]) {
+    const built = compile(`${file}.ts`, `${file}.wasm`, ["--wasmGc"]);
+    check(`function field (${what}): no INFO claiming the class is GC`,
+      !/INFO TS6413: wasm-gc: [1-9]/.test(built.output), built.output.split("\n")[0]);
+    check(`function field (${what}): no compiler crash`,
+      !/AssertionError|gcFieldTypeRef/.test(built.output), built.output.split("\n")[0]);
+    check(`function field (${what}): the refusal names a function value`,
+      /WARNING TS6414: .*holding a function value/.test(built.output),
+      built.output.split("\n").find((l) => /TS6414/.test(l)) ?? "(none)");
+    check(`function field (${what}): it still compiles on the pointer ABI`, built.ok);
+  }
+}
+
+// 39 — permanent versus fixable, in one report -------------------------------
+//
+// The taxonomy is the user's: an `@inline [T * N]` is a C-compatible **value**, so a
+// class holding one can never be a GC struct — listing it beside `Map` sends a reader
+// to "fix" the C ABI. The two lists must be separate in the text, and the permanent
+// one carries its own diagnostic.
+{
+  writeFileSync(join(scratch, "mixed-reasons.ts"),
+    `class ValueHolder { v: @inline [u32 * 4]; }\n` +
+    `class MapHolder { m: Map<i32, i32> = new Map<i32, i32>(); }\n` +
+    `export function run(): i32 { let a = new ValueHolder(); let b = new MapHolder(); return 1; }\n`);
+  const built = compile("mixed-reasons.ts", "mixr.wasm", ["--wasmGc"]);
+  const line = (built.output.match(/WARNING TS6414: [^\n]*/) ?? [""])[0];
+  check("the report separates permanent obstacles from fixable ones",
+    /permanent, not a work item/.test(line) && /holding a value array/.test(line) &&
+    /holding a Map/.test(line),
+    line);
+  check("the fixable list leads, the permanent one follows",
+    line.indexOf("holding a Map") < line.indexOf("permanent, not a work item"), line);
+  check("permanently refused classes get their own diagnostic (TS6415)",
+    /WARNING TS6415: wasm-gc: \d+ class/.test(built.output),
+    built.output.split("\n").find((l) => /TS6415/.test(l)) ?? "(none)");
+  check("the permanent class is not counted as a fixable reason",
+    !/^: 1 holding a value array/.test(line.slice(line.indexOf(": "))) &&
+    /1 holding a Map/.test(line), line);
 }
 
 if (failures) {

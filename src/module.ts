@@ -33,7 +33,8 @@ import {
   GC_ARRAY_LENGTH_INDEX,
   gcMixedAbiReferrer,
   gcStringOf,
-  isLinearBufferField
+  isLinearBufferField,
+  gcFieldRefusal
 } from "./types";
 import { Class, Property } from "./program";
 import * as binaryen from "./glue/binaryen";
@@ -4724,6 +4725,33 @@ function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[], field: Property |
   // Answered before the class test because `ArrayBuffer` is deliberately *not* a GC
   // class, so the class arm below would fall through to the assertion.
   if (field != null && isLinearBufferField(field)) return fieldType.size == 64 ? TypeRef.I64 : TypeRef.I32;
+  // **The one oracle, consulted before anything is emitted.** `gcFieldRefusal` is what
+  // `gcStructFieldSupported` answers eligibility with, so if this reports a refusal the
+  // two disagree — which is a compiler bug, not a program's problem, and it must say so
+  // with the field's reason rather than `assert(false)`. Measured before this check:
+  // `class H { cb: (x: i32) => void }` was reported on the GC ABI (a signature type's
+  // *kind* is `usizeType.kind`, so the old kind-switch called it numeric) and then died
+  // here at `assert(false)`.
+  if (field != null) {
+    let refusal = gcFieldRefusal(fieldType, field);
+    if (refusal != null) {
+      throw new Error(
+        `wasm GC struct field ${field.parent != null ? (<Class>field.parent).internalName : "?"}#` +
+        `${field.name} cannot be emitted: ${refusal.reason}${refusal.permanent ? " (permanent: a value has no address, so it cannot be a field of a reference type)" : ""}. ` +
+        `Eligibility said it could be a struct, so the two answers disagree — that is a compiler defect.`
+      );
+    }
+  }
+  // **A `StaticArray<T>` field is a reference to a wasm array.** Its class is not a
+  // struct type (`isGcClass` answers false for it — it is standard library and not
+  // `Array`), so without this branch the field reached the same `assert(false)` the
+  // function-value case did. Found by the field-kind agreement test, which is why that
+  // test walks kinds rather than checking the one that was reported.
+  let element = gcArrayElementOf(fieldType);
+  if (element != null) {
+    let owner = fieldType.nonNullableType.classReference;
+    if (owner != null) return ensureGcArrayType(owner.program.module, assert(element));
+  }
   // A class-typed field is a nullable ref to that class's struct. **In the group
   // being built** the slot is already allocated, so the reference is to a temp
   // heap type and the cycle closes; outside it, the class is built first and its

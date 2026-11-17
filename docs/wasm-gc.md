@@ -1684,3 +1684,129 @@ lists **nothing under `std/`**. The guest still passes its own harness
 (`test.mjs`: 10,240 non-black pixels) with the flag-enabled module dropped in — and
 that is evidence the change did not break it, *not* evidence that it runs on the GC
 ABI: the latch is still off, so the module is byte-identical to the previous commit's.
+
+## One oracle for a field: why the report could lie, and the crash behind it
+
+`class H { cb: (x: i32) => void; n: i32 = 0; }` was reported
+`INFO TS6413: wasm-gc: 1 of 1 managed class on the GC ABI` — and the moment an
+instance was constructed the compiler died at `gcFieldTypeRef`'s `assert(false)`.
+
+**The cause is that eligibility and emission answered from different predicates.**
+
+- **Eligibility** switched on `fieldType.kind`. A signature type's kind **is
+  `usizeType.kind`**: `Type.fromSignature` builds it as `usizeType.kind` with
+  `TypeFlags.Reference` and the `Value` bit cleared. So `cb` matched the `Usize` arm
+  of the "is this a basic numeric type" switch and answered *storable*.
+- **Emission** tested `isInternalReference` (through `tryEnsureBasicType`), which a
+  signature type *is*, so it was "non-basic"; then `classReference` was null; then the
+  assert.
+
+`kind` is not the discriminator, because a reference can carry a numeric kind.
+**`isValue` is**: a value is a number or a vector and has a basic wasm type;
+everything else is a reference and must be one of the reference shapes this slice can
+emit. Both callers now ask one function, `gcFieldRefusal(fieldType, field)`, so they
+cannot disagree — and `gcFieldTypeRef` throws a *named* error naming the field and its
+reason if it is ever handed a field the oracle refused, because that would be a
+compiler defect rather than a program's problem.
+
+**The same defect had two more instances**, which is why the test walks field *kinds*
+rather than the one that was reported:
+
+- **`StaticArray<T>` as a class field** — `isGcClass` answers false for it (it is
+  standard library and not `Array`), so it reached the same `assert(false)`. Fixed by
+  the element branch emission now has.
+- **`@inline [T * N]` fields** are refused by the same oracle, permanently.
+
+### The invariant, as a test
+
+`tests/gc/wasm-gc.js` §37 writes one fixture per field kind and requires, for each:
+no crash; and either a coverage line **and** a `(struct …)` type for the class in the
+module, or a refusal with a named reason — never both, never neither. That is the
+statement "the report may not claim what emission cannot deliver", measured, rather
+than a check on the one kind that was reported.
+
+**It immediately found that GC16's own report was inflated.** `hello-sprites` was
+reported `138 eligible`; seven of those are not buildable — six classes hold an
+`@inline Vec3fValue` and one holds a function value. If the latch had ever been true
+for that guest, the compiler would have died exactly as `f2` did. The corrected line
+is below.
+
+### Permanent versus fixable, in the report
+
+The taxonomy is the user's: an `@inline [T * N]` is a C-compatible **value** ("C types
+[T*N] are same as C structs … its for interops"), a value has no address, and a field
+of a reference type is a reference. So a class holding one can **never** be a GC
+struct. Listing that beside `Map` sends a reader looking for a representation change
+that does not exist, and the thing they would break by finding one is the interop.
+
+```
+- the program is not uniform: 1 holding an ArrayBuffer, 1 holding a function value,
+  1 extending a class that is not GC (TaskState), 1 more reason;
+  permanent, not a work item: 6 holding an inline record (a Vec3fValue)
+```
+
+and, once per build, a diagnostic of its own:
+
+```
+WARNING TS6415: wasm-gc: 6 classes can never be on the GC ABI - 6 holding an inline
+record (a Vec3fValue). A value has no address, so it cannot be a field of a reference
+type; this is the memory model's rule, not a work item.
+```
+
+### Open question: function values under GC
+
+Refused by name, not supported, because the two candidate representations are a design
+decision:
+
+- **`ref func`** — the field's signature becomes a heap type and every closure must
+  carry its own type; dispatch then needs `ref.test` on a *signature* type, and a
+  closure's environment has to be a field of that type.
+- **a table index** — the field stays an `i32`, every closure lives in a table, and
+  the environment has to be kept alive by something the engine traces, which is the
+  same rooting problem as a linear payload.
+
+Neither is this round's to improvise. Recorded here so the choice is made once,
+deliberately.
+
+## `ArrayBuffer`: stopped, and the reason is rooting rather than mechanics
+
+`ArrayBuffer` declares zero instance fields: `byteLength` reads `rtSize` out of the
+header at `-TOTAL_OVERHEAD`, and the object pointer *is* the payload start. The
+intended treatment is the views' — `{ brand, dataStart: i32, byteLength: i32 }`,
+synthesised, `dataStart` still the address every ABI site uses — and it is not done,
+for two reasons. The first is mechanical, the second is the real one.
+
+**No `__new` under the GC ABI.** The payload is linear memory and has to be allocated
+linearly; the synthesised constructor would need the guest allocator's own entry point
+called from the compiler, which is a mechanism this tree does not have and this round
+was told not to invent.
+
+**The payload would have nothing rooting it.** This is GC16's documented hazard, and
+`ArrayBuffer` is where it stops being tolerable:
+
+- `itcms`'s root set is `__visit_globals` plus the pin space
+  (`std/assembly/rt/itcms.ts:155-164`) plus a scan of the *shadow stack* — and the
+  shadow stack is disabled under `--wasmGc`, because it is the pointer ABI's root set
+  and the engine is supposed to have replaced it.
+- A view's payload is already in that position after GC16: `dataStart` is an `i32`,
+  nothing traces it, and it survives today only because the fixture allocates too
+  little to trigger a step.
+- `ArrayBuffer` is the block *every* `Array`, `StaticArray` and view is built on. Giving
+  it a handle the engine does not trace would make every buffer in every program
+  collectible at the first step — a compile that works and a program that corrupts.
+
+Three candidate answers, none chosen here: **pin** the payload for the program's
+lifetime under the flag; **give the payload a GC owner** (a `(array (mut u8))` for the
+victims that need tracing, linear memory only for those that do not); or **leave
+`ArrayBuffer` on the pointer ABI**, which is self-consistent — a handle is only worth
+having if something traces what it points at. This is a decision for the architect, and
+it is the same decision GC16 left open for view payloads, now with a name and a cost.
+
+### Result
+
+`test:gc` 218 → **278 checks** (§37 field-kind agreement, §38 the two repros, §39 the
+split report), `-O0..-O3` agree on all 18 positive fixtures, `test:compiler` stays at
+its 5 pre-existing mismatches, flag-off output is **byte-identical on all 22 fixtures
+and on `hello-sprites`**, and nothing under `std/` changed. `ArrayBuffer` did **not**
+drop out of the guest's list — see the section above — so the round's Task 2 is a
+recorded stop, not a delivery, and the guest's coverage is still zero.

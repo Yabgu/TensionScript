@@ -1353,6 +1353,28 @@ export class Compiler extends DiagnosticEmitter {
    */
   private reportGcCoverage(): void {
     let coverage = gcCoverage(this.program);
+    // **A permanent refusal gets its own diagnostic, and it is a warning.** These
+    // classes are the C ABI's: an `@inline [T * N]` or an `@inline struct` field is a
+    // value, a value has no address, and a field of a reference type is a reference —
+    // so this can never be fixed by a representation change. Naming it separately is
+    // what stops a reader from going looking for the change that does not exist, which
+    // is how a migration ends up breaking the interop it was supposed to preserve.
+    if (coverage.permanentTotal > 0) {
+      let reasons = new Array<string>();
+      let shown = coverage.permanentReasons.length < 3 ? coverage.permanentReasons.length : 3;
+      for (let i = 0; i < shown; ++i) {
+        reasons.push(unchecked(coverage.permanentCounts[i]).toString() + " " + unchecked(coverage.permanentReasons[i]));
+      }
+      this.warning(
+        DiagnosticCode.wasm_gc_0_can_never_be_on_the_GC_ABI_1_A_value_has_no_address_so_it_cannot_be_a_field_of_a_reference_type_this_is_the_memory_model_s_rule_not_a_work_item,
+        null,
+        // `1 class` / `2 classes`, formatted here because a message template cannot
+        // pluralise and "1 class(es)" reads like a placeholder someone forgot.
+        coverage.permanentTotal.toString() +
+          (coverage.permanentTotal == 1 ? " class" : " classes"),
+        reasons.join(", ")
+      );
+    }
     if (coverage.total > 0 && coverage.onGc == 0) {
       this.warning(
         DiagnosticCode.wasm_gc_no_class_migrated_0,

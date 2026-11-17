@@ -392,6 +392,125 @@ function gcStructFieldsSupported(cls: Class, intrinsic: bool = false): bool {
 }
 
 /**
+ * **One oracle for one field, and why there had to be one.**
+ *
+ * `gcStructFieldSupported` (may this field be stored in a struct?) and
+ * `gcFieldTypeRef` (emit that field's type) used to answer from **different
+ * predicates**, so they contradicted each other and nothing checked:
+ *
+ * - eligibility switched on `fieldType.kind`, and a signature type's kind **is
+ *   `usizeType.kind`** — `Type.fromSignature` builds it as `usizeType.kind` with
+ *   `TypeFlags.Reference` and the `Value` bit cleared. So a function-typed field
+ *   (`cb: (x: i32) => void`) matched the `Usize` arm and answered "storable".
+ * - emission tested `isInternalReference` (via `tryEnsureBasicType`), which a
+ *   signature *is*, so it was "non-basic", then `classReference` was null, then
+ *   `assert(false)`.
+ *
+ * Measured: `class H { cb: (x: i32) => void }` was reported `1 of 1 managed class
+ * on the GC ABI` and, as soon as an instance was constructed, killed the compiler
+ * at `gcFieldTypeRef`. The report lied first, which is the worse half.
+ *
+ * The discriminator is **`isValue`**, not `kind`: a value is a number or a vector
+ * and has a basic wasm type; everything else is a reference and must be one of the
+ * reference shapes this slice can emit. That is the predicate both callers now use,
+ * so they cannot disagree.
+ */
+export class GcFieldRefusal {
+  constructor(
+    /** `true` when no representation change could ever fix it. */
+    public permanent: bool,
+    /** A short reason for the coverage report (`holding a function value`). */
+    public reason: string
+  ) {}
+}
+
+/**
+ * Whether a **class-typed field** is storable — the latch-applied answer, or the
+ * latch-free one inside an intrinsic query.
+ *
+ * The two questions differ, and getting this wrong is how the *report* started
+ * blaming `Array` and `TypedArray` for a program's non-uniformity: an eligibility
+ * question asked "could this be a reference", so it must not consult a latch that is
+ * false precisely because something else is ineligible. `isGcClass` answers "may we",
+ * `isGcEligible` answers "could we".
+ *
+ * The cycle guard is the same one `gcStructFieldsSupported` uses: a class already on
+ * the path answers "yes" optimistically, which is correct — a cycle of otherwise-fine
+ * classes becomes one `rec` group, and one containing a bad field is caught when that
+ * field's own class is checked.
+ */
+function gcClassFieldStorable(cls: Class): bool {
+  if (gcIntrinsicDepth > 0) {
+    if (gcStructCheckPath.includes(cls)) return true;
+    return isGcEligible(cls);
+  }
+  return isGcClass(cls);
+}
+
+/** Whether a field can be stored in a GC struct — `null` when it can. */
+export function gcFieldRefusal(fieldType: Type, field: Property | null): GcFieldRefusal | null {
+  // **A buffer view's `buffer` (or a buffer's `dataStart`) is an address**, and an
+  // address is a value. Checked first because these fields' *declared* types are the
+  // one place the declared type is deliberately not the stored one.
+  if (field != null && isLinearBufferField(field)) return null;
+
+  let cls = fieldType.classReference;
+
+  // **A value has no address, so it can never be a field of a reference type.**
+  // This is the memory model's own rule, not a work item: `@inline [T * N]` and an
+  // `@inline struct` are C-compatible values (the user's ruling: "C types [T*N] are
+  // same as C structs … its for interops"), so a class holding one can never be a GC
+  // struct. Permanent, and the report says so instead of listing it beside `Map`.
+  if (fieldType.kind == TypeKind.FixedArray) {
+    if (fieldType.fixedMemoryModel != MemoryModelCode.Unmanaged) {
+      return new GcFieldRefusal(true, "holding a value array (" + fieldType.toString() + ")");
+    }
+    // An `@unmanaged [T * N]` is an **address** — storable in principle, not emitted
+    // yet, so refused as fixable rather than permanent. Refusing it as permanent would
+    // be a lie about a C ABI shape this compiler intends to support.
+    return new GcFieldRefusal(false, "holding an array address (" + fieldType.toString() + ")");
+  }
+  if (cls != null && cls.hasDecorator(DecoratorFlags.InlineStruct)) {
+    return new GcFieldRefusal(true, "holding an inline record (" + gcFieldLabel(fieldType) + ")");
+  }
+
+  // **A reference that is not storable yet.** All fixable: each is a standard-library
+  // representation this migration intends to change.
+  if (gcStringOf(fieldType)) return null;
+  if (gcArrayElementOf(fieldType) != null) return null;
+  if (gcDynamicArrayElementOf(fieldType) != null) return null;
+  if (cls != null && cls.hasDecorator(DecoratorFlags.Unmanaged)) {
+    // A plain record pointer: `@unmanaged` allocates nothing and is erased, so the
+    // field is an `i32` address, exactly as under the pointer ABI.
+    return null;
+  }
+  if (cls != null) {
+    // A class field is storable exactly when the class is a GC struct.
+    return gcClassFieldStorable(cls) ? null : new GcFieldRefusal(false, "holding " + gcFieldLabel(fieldType));
+  }
+  if (fieldType.isValue) {
+    switch (fieldType.kind) {
+      case TypeKind.Bool:
+      case TypeKind.I8: case TypeKind.I16: case TypeKind.I32: case TypeKind.I64:
+      case TypeKind.Isize: case TypeKind.U8: case TypeKind.U16:
+      case TypeKind.U32: case TypeKind.U64: case TypeKind.Usize:
+      case TypeKind.F32: case TypeKind.F64:
+      case TypeKind.V128: return null;
+    }
+    return new GcFieldRefusal(false, "holding a " + fieldType.toString());
+  }
+  // Every remaining reference: a function value, a closure, an `externref`/`anyref`,
+  // a `[T * N]` view, a dynamic-array header. None has a GC representation yet.
+  //
+  // **A function value is refused rather than guessed at.** `ref func` would need the
+  // field's signature to be a heap type and every closure to carry its own type; a
+  // table index would make the field an `i32` and lose the closure environment. That
+  // is a design decision, not this round's, so the field is refused by name and the
+  // question is recorded in `docs/wasm-gc.md`.
+  return new GcFieldRefusal(false, "holding " + gcFieldLabel(fieldType));
+}
+
+/**
  * Whether this field is a **linear-buffer view's `buffer`**: the address of the
  * payload, stored as an `i32` rather than as a traced reference.
  *
@@ -436,36 +555,11 @@ function gcStructFieldSupportedImpl(
   intrinsic: bool,
   field: Property | null
 ): bool {
-  // **A view's `buffer` field is an address, and an address is storable.** Checked
-  // first because everything below is about the *type*, and this field's type is a
-  // pointer-shaped class — which is exactly what makes it storable as an `i32`.
-  if (field != null && isLinearBufferField(field)) return true;
-  // **A `String` field is storable now.** `String` is an `(array (mut u16))` under
-  // the flag, so a class holding one has a reference-typed field like any other and
-  // needs no exclusion. Before this round it was the single reason a real program
-  // (`class App { name: string }`) could not be a GC struct at all — and because
-  // `gcUniform` is all-or-nothing, one such field put the *whole* module back on the
-  // pointer ABI, which is where the parked-frame problem lives.
-  if (gcStringOf(fieldType)) return true;
-  // A `StaticArray<T>` is a wasm array under the flag, so a field of that class is a
-  // reference like a `String` field is — and `isGcClass` answers false for it (it is
-  // standard library, and it is not `Array`), so the class test below would call it
-  // unstorable and refuse a class that could migrate.
-  if (gcArrayElementOf(fieldType) != null) return true;
-  let cls = fieldType.classReference;
-  // The two oracles differ only in whether the program-wide latch applies: the
-  // latch asks "may we", eligibility asks "could we". A query that used the latch
-  // would make every managed class look ineligible whenever the latch said no, and
-  // the refusal reason would be a tautology instead of a cause.
-  if (cls != null) return intrinsic ? isGcEligible(cls) : isGcClass(cls);
-  switch (fieldType.kind) {
-    case TypeKind.Bool:
-    case TypeKind.I8: case TypeKind.I16: case TypeKind.I32: case TypeKind.I64:
-    case TypeKind.Isize: case TypeKind.U8: case TypeKind.U16:
-    case TypeKind.U32: case TypeKind.U64: case TypeKind.Usize:
-    case TypeKind.F32: case TypeKind.F64: return true;
-  }
-  return false;
+  // **One oracle.** `gcFieldRefusal` is the same answer `gcFieldTypeRef` uses to emit
+  // this field, so eligibility and emission cannot disagree — which they did, on a
+  // function-typed field, and the report told the user the class was GC-ready before
+  // the compiler died on it.
+  return gcFieldRefusal(fieldType, field) == null;
 }
 
 /** Classes on the current {@link gcStructFieldsSupported} path, for cycles. */
@@ -665,19 +759,41 @@ export class GcCoverage {
   total: i32 = 0;
   /** Whether the program-wide latch is on (i.e. anything at all could be GC). */
   uniform: bool = false;
-  /** Distinct **obstacle** reasons, most classes first. */
+  /**
+   * Distinct **fixable** obstacles, most classes first — a representation change this
+   * migration intends to make (`TypedArray`, `ArrayBuffer`, `Map`, a function value).
+   */
   reasons: string[] = [];
-  /** How many classes each obstacle reason accounts for, parallel to {@link reasons}. */
+  /** How many classes each fixable reason accounts for, parallel to {@link reasons}. */
   counts: i32[] = [];
+  /**
+   * Distinct **permanent** obstacles — {@link GcFieldRefusal.permanent}. A value has no
+   * address, so a class holding an `@inline [T * N]` or an `@inline struct` can never
+   * be a GC struct. Listed apart because putting one in the work list sends a reader
+   * to "fix" the C ABI.
+   */
+  permanentReasons: string[] = [];
+  /** How many classes each permanent reason accounts for. */
+  permanentCounts: i32[] = [];
   /** Classes with no obstacle of their own, held back by the program-wide latch. */
   heldBack: i32 = 0;
   /** Classes whose obstacle is another managed class that is itself not GC. */
   blocked: i32 = 0;
 
   /** Records one refused class under `reason`, or as latch-held-back when empty. */
-  refuse(reason: string): void {
+  refuse(reason: string, permanent: bool = false): void {
     if (reason.length == 0) {
       ++this.heldBack;
+      return;
+    }
+    if (permanent) {
+      let permAt = this.permanentReasons.indexOf(reason);
+      if (permAt < 0) {
+        this.permanentReasons.push(reason);
+        this.permanentCounts.push(1);
+      } else {
+        this.permanentCounts[permAt] += 1;
+      }
       return;
     }
     let at = this.reasons.indexOf(reason);
@@ -708,7 +824,15 @@ export class GcCoverage {
   /** The obstacle covering the most classes, or the latch when there is none. */
   get dominantReason(): string {
     if (this.reasons.length) return unchecked(this.reasons[0]);
+    if (this.permanentReasons.length) return unchecked(this.permanentReasons[0]);
     return "the program is not uniform";
+  }
+
+  /** How many classes are refused **permanently** — never a work item. */
+  get permanentTotal(): i32 {
+    let out = 0;
+    for (let i = 0, k = this.permanentCounts.length; i < k; ++i) out += unchecked(this.permanentCounts[i]);
+    return out;
   }
 
   /** The report line, without the `wasm-gc:` prefix. */
@@ -726,6 +850,25 @@ export class GcCoverage {
       parts.push(more.toString() + (more == 1 ? " more reason" : " more reasons"));
     }
     let detail = parts.length ? ": " + parts.join(", ") : "";
+    // **Permanent obstacles are named apart, and never called reasons.** A reader who
+    // sees "1 holding a value array" in the work list will go looking for the
+    // representation change that fixes it, and there is none: an `@inline [T * N]` is a
+    // C-compatible value with no address. One line higher is the difference between a
+    // work order and an invitation to break the C ABI.
+    if (this.permanentReasons.length) {
+      let permParts = new Array<string>();
+      let permShown = this.permanentReasons.length < 3 ? this.permanentReasons.length : 3;
+      for (let i = 0; i < permShown; ++i) {
+        permParts.push(unchecked(this.permanentCounts[i]).toString() + " " +
+          unchecked(this.permanentReasons[i]));
+      }
+      if (this.permanentReasons.length > permShown) {
+        let more = this.permanentReasons.length - permShown;
+        permParts.push(more.toString() + (more == 1 ? " more" : " more"));
+      }
+      detail += (detail.length ? "; " : ": ") +
+        "permanent, not a work item: " + permParts.join(", ");
+    }
     let line = out + " - the program is not uniform" + detail;
     // The transitive and latch counts are **not** reasons. A class blocked because it
     // holds another class that is blocked names no cause a migration can act on, and
@@ -766,14 +909,17 @@ function recordGcRefusal(coverage: GcCoverage, cls: Class): void {
   let fields = gcFieldsOf(cls);
   for (let i = 0, k = fields.length; i < k; ++i) {
     let field = unchecked(fields[i]);
-    let fieldType = field.type;
-    if (gcStructFieldSupported(fieldType, true, field)) continue;
-    let fieldClass = fieldType.classReference;
-    if (fieldClass != null && !isStdlibClass(fieldClass)) {
+    let refusal = gcFieldRefusal(field.type, field);
+    if (refusal == null) continue;
+    let fieldClass = field.type.classReference;
+    // A field whose type is another managed class that is itself refused is *blocked*,
+    // not a reason: acting on it is impossible until that class migrates, and letting
+    // the chain into the reason list would let it out-count the cause at its root.
+    if (!refusal.permanent && fieldClass != null && !isStdlibClass(fieldClass)) {
       ++coverage.blocked;
       return;
     }
-    coverage.refuse("holding " + gcFieldLabel(fieldType));
+    coverage.refuse(refusal.reason, refusal.permanent);
     return;
   }
   ++coverage.heldBack;
@@ -813,6 +959,13 @@ function gcArticle(preceding: string): string {
 
 /** A short name for a field type in a refusal reason. */
 function gcFieldLabel(fieldType: Type): string {
+  // A signature type has no class; naming it by its printed signature ("a (i32) => void")
+  // tells the reader what the field *is* but not that it is a function value, which is
+  // the thing that has no GC representation.
+  if (fieldType.signatureReference != null) return "a function value";
+  if (fieldType.kind == TypeKind.FixedArray) {
+    return "a value array (" + fieldType.toString() + ")";
+  }
   let cls = fieldType.classReference;
   if (cls != null) {
     // The nine `TypedArray`s are one cause, not nine: a count split across
