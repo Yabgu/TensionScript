@@ -2060,3 +2060,102 @@ class outside the migrated set and (b) holds `record: TaskRecord`, which is also
 carrier. So `TaskState` cannot become a GC struct without `TaskRecord`, and both belong to
 the async runtime — the round the brief put out of scope. **134 of 141 is this round's
 real ceiling**, and 135 needs `TaskState`+`TaskRecord`, not another emitter case.
+
+## The stdlib allow-list was the last gate — and it was the wrong shape
+
+GC22's report said `135 needs TaskState+TaskRecord, which is the async round and not another
+emitter case`. **That was wrong.** A reconstruction of both classes in a program reports 5 of
+5 on the GC ABI; the real ones were refused for being *standard library*, before their fields
+were ever examined:
+
+```
+isGcEligibleImpl:  if (isStdlibClass(cls)) return isStdlibGcClass(cls);
+```
+
+and `isStdlibGcClass` answered true only for `Array`, `ArrayBuffer`, the buffer views,
+`Function`, `Map` and `Set`.
+
+### The rule
+
+The list is only needed where **a class's declared fields are not its stored fields** — the
+two layouts the compiler synthesises, `Array<T>` and `ArrayBuffer`. Everything else is
+eligible exactly when its fields are, standard library or not. Three exclusions carry their own
+reasons, and each was found by measurement rather than foresight:
+
+- **`Object`** — it declares no fields, so the ordinary rule would make it a struct, and the
+  resolver gives every class `Object` as its base, so the whole tree re-based onto it
+  (`(type $~lib/object/Object (sub (struct …)))`, every class a subtype). It is also the class
+  `implicitlyExtendsObject` exists to special-case.
+- **`@unmanaged` classes** — a linear record by declaration, so "struct the engine traces" is a
+  contradiction. Without this, `itcms`'s own private `@unmanaged class Object extends BLOCK`
+  became a struct and every `changetype<usize>` in the collector turned into a refused
+  reference conversion — 100 failing checks.
+- **`String`, `StaticArray<T>`** — wasm GC *arrays*, answered by `toRef`/`ensureType` before
+  any class arm, so `isGcClass` must not also claim a struct for them.
+
+**Blast radius: 4 newly eligible standard-library classes on the guest** — `TaskEnv`,
+`TaskSlot`, `TaskState`, `TaskRecord` — and **zero** fixture changed behaviour from the rule
+itself (the two regressions the rule caused were the `Object` and `@unmanaged` cases above,
+which are now named). Flag-off output is byte-identical on all 27 fixtures and on
+`hello-sprites`: the rule only moves the *eligibility* answer for stdlib classes, and with the
+latch off nothing is emitted from it.
+
+### The guest, after it
+
+```
+WARNING TS6414: wasm-gc: no class migrated - 0 of 141 managed classes on the GC ABI - the
+program is not uniform: permanent, not a work item: 6 holding an inline record (a Vec3fValue)
+(and 135 eligible, held back only by the latch)
+```
+
+**135 of 141, and the only remaining refusals are the six permanent inline records.** The
+declared expectation was 140; measured 135, and the gap is arithmetic rather than a miss: the
+141 counts managed *non-stdlib* classes, so `TaskState`/`TaskRecord`/`TaskEnv` becoming eligible
+adds exactly one — `drive$State`, the guest's subclass. The stdlib carriers are not in the 141.
+
+## `Map`: scalar entries migrate, reference entries are refused
+
+`MapEntry<K,V>` is `@unmanaged` — a linear record — and `entry.key = key` writes `K` into it.
+For a scalar that is the representation that already worked. For a reference under the GC ABI
+it is a reference written to an address, and the failure mode was the one this arc keeps
+paying for: **`Map<string,i32>` took the GC ABI and aborted inside Binaryen with
+`isBasic() && "Basic type expected"`** — no diagnostic, no location.
+
+Two changes, both measured:
+
+- **a reference key or value makes the container ineligible**, so the program stays on the
+  pointer ABI and `Map<string,i32>` runs. It is also why uniformity now looks at resolved
+  `Map`/`Set` instances: with no user classes the latch answered `true` *trivially*, so a
+  program that only used `Map<string,i32>` still took the GC path.
+- **`Map<i32,i32>` and `Set<i32>` move to the GC ABI** with no further work, and `mapGrow`
+  (40 keys, forcing bucket and entry growth) passes there.
+
+`Map<string,V>` end to end therefore needs `MapEntry` to become a GC struct — a round of its
+own, and the same shape as the `Array<T>` work.
+
+## `hashStr`: written, measured, not shipped
+
+`hashStr` is the last thing between here and `Map<string,V>` behaving on the GC ABI. It is
+`@inline`, so it never becomes a call: it inlines into every `Map`/`Set` lookup and never
+reaches `makeCallDirect`, where `compareImpl` is replaced. The hook that does work is in
+`compileCallDirect`, above the inline branch.
+
+A replacement was written there — element reads instead of byte loads, keeping the 16-byte
+block loop by reconstructing each word as `elem[2k] | elem[2k+1] << 16`. It compiled, it ran,
+and **it produced the wrong number**:
+
+```
+HASH<string>("hello")   under the flag   3,734,832,270
+                        independent XXH32  2,917,590,130
+                        pointer-ABI build  neither
+```
+
+Three values, one algorithm, and no two agree — so at least one of the three is misread, and
+shipping a hash that is merely self-consistent would change every bucket index in a program
+while passing a round-trip test. It is reverted, with the hook site documented, and the two
+candidate causes are (a) the `else` arm of the `len >= 16` branch not being emitted as I
+intended, and (b) the pointer-ABI build's own value coming from somewhere other than the
+function I read — which an `-O0` dump of both bodies would settle in one pass.
+
+`Map<string,V>` stays on the pointer ABI until then, and that is correct rather than
+convenient: the pointer path's `hashStr` is the one with a known-good body.

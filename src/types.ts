@@ -311,7 +311,17 @@ export function isGcClass(cls: Class): bool {
     // structs only when the program is uniform *given* that they are; see
     // {@link gcUniform} for why that is the fixed point, and for what happens when
     // it is not — they go back to the pointer ABI, and the whole program with them.
-    return isStdlibGcClass(cls);
+    // **The same rule `isGcEligibleImpl` applies**, or the two answers diverge: a
+    // standard-library class is a struct when its layout is synthesised, and otherwise
+    // exactly when its fields are storable. Nothing else about it being standard library
+    // matters.
+    if (hasNonStructGcRepresentation(cls)) return false;
+    if (isStdlibGcClass(cls)) return true;
+    let stdlibBase = cls.base;
+    if (stdlibBase != null && !cls.prototype.implicitlyExtendsObject && !isGcClass(stdlibBase)) {
+      return false;
+    }
+    return gcStructFieldsSupported(cls);
   }
   let base = cls.base;
   // `implicitlyExtendsObject` distinguishes "extends nothing, so the resolver
@@ -618,9 +628,27 @@ export function isGcEligible(cls: Class): bool {
 
 /** {@link isGcEligible}'s body, with the intrinsic depth raised by the caller. */
 function isGcEligibleImpl(cls: Class): bool {
-  // Standard library: GC exactly when it is one of the two mounted kinds. `Array`
-  // and the buffer views are synthesised layouts; a subclass of a view inherits.
-  if (isStdlibClass(cls)) return isStdlibGcClass(cls);
+  if (isStdlibClass(cls)) {
+    // **The rule, and the reason the allow-list was the wrong shape.**
+    //
+    // A standard-library class needs the list only when its **declared fields are not its
+    // stored fields** — `Array<T>` (`{ brand, data, length_ }`) and `ArrayBuffer`
+    // (`{ brand, dataStart, byteLength }`), whose layouts the compiler synthesises. For
+    // everything else the ordinary question applies: are the fields storable? `Function<T>`
+    // and `Map`/`Set` were already being judged that way; `TaskState` and `TaskRecord` were
+    // not, and were refused for being standard library before their fields were ever
+    // examined — measured: a reconstruction of the same two classes reports 5 of 5.
+    //
+    // Two kinds of stdlib class are neither synthesised nor struct-shaped, and both must be
+    // excluded explicitly, because their representation *is* special and a struct would be
+    // wrong: `String` (an `(array (mut u16))`) and `StaticArray<T>` (a wasm array). Both are
+    // answered by `toRef`/`ensureType` before any class arm, so this only keeps the
+    // eligibility answer from claiming a struct exists for them.
+    if (hasNonStructGcRepresentation(cls)) return false;
+    if (isStdlibGcClass(cls)) return true;
+    // Otherwise: fall through to the ordinary base-chain and field test, exactly as a
+    // user-declared class.
+  }
   let base = cls.base;
   if (base != null && !cls.prototype.implicitlyExtendsObject) {
     if (!isGcEligibleImpl(base)) return false;
@@ -698,7 +726,22 @@ export function gcUniform(program: Program): bool {
   if (gcUniformComputing.has(program)) return true;
   gcUniformComputing.add(program);
   let result = true;
-  let classes = managedClassesOf(program);
+  // **A reference-keyed `Map`/`Set` makes the program non-uniform even when it declares no
+  // classes.** Uniformity is a property of the program, not of its user classes: with no
+  // classes at all this used to answer `true` trivially, so a program that only used
+  // `Map<string,i32>` took the GC ABI and then aborted inside Binaryen, because
+  // `MapEntry` stores `K` in a linear record. Measured: `isBasic() && "Basic type
+  // expected"`, no location.
+  let instances = program.instancesByName;
+  for (let _v = Map_values(instances), i = 0, k = _v.length; i < k; ++i) {
+    let element = unchecked(_v[i]);
+    if (element.kind != ElementKind.Class) continue;
+    let cls = <Class>element;
+    let proto = cls.prototype;
+    if (proto != program.mapPrototype && proto != program.setPrototype) continue;
+    if (gcContainerHoldsReference(cls)) { result = false; break; }
+  }
+  let classes = result ? managedClassesOf(program) : [];
   for (let i = 0, k = classes.length; i < k; ++i) {
     if (!isGcEligible(unchecked(classes[i]))) { result = false; break; }
   }
@@ -934,6 +977,14 @@ export class GcCoverage {
  *   because of other classes.
  */
 function recordGcRefusal(coverage: GcCoverage, cls: Class): void {
+  // A reference-keyed `Map`/`Set` is refused for its *entries*, which no field walk can
+  // see, so it is named here rather than reported as "eligible, held back by the latch".
+  if ((cls.prototype == cls.program.mapPrototype || cls.prototype == cls.program.setPrototype) &&
+      gcContainerHoldsReference(cls)) {
+    coverage.refuse("holding a " + (cls.prototype == cls.program.mapPrototype ? "Map" : "Set") +
+      " with a reference key or value");
+    return;
+  }
   let base = cls.base;
   if (base != null && !cls.prototype.implicitlyExtendsObject && !isGcEligible(base)) {
     coverage.refuse("extending a class that is not GC (" + base.name + ")");
@@ -1471,6 +1522,59 @@ export function isGcBufferViewClass(cls: Class): bool {
 }
 
 /**
+ * Whether a `Map`/`Set` instantiation stores a **GC reference** as its key or value.
+ *
+ * `MapEntry<K,V>` is `@unmanaged` — a linear record — so a reference in `K` or `V` has no
+ * representation there. Answered from the type arguments rather than from the fields,
+ * because the declared fields (`buckets`/`entries`: `ArrayBuffer`) are all fine and the
+ * blocker is one indirection away.
+ */
+function gcContainerHoldsReference(cls: Class): bool {
+  let arguments_ = cls.typeArguments;
+  if (arguments_ == null) return false;
+  for (let i = 0, k = arguments_.length; i < k; ++i) {
+    let arg = unchecked(arguments_[i]).nonNullableType;
+    if (gcStringOf(arg) || gcArrayElementOf(arg) != null ||
+        gcDynamicArrayElementOf(arg) != null) {
+      return true;
+    }
+    let argClass = arg.classReference;
+    if (argClass != null && isGcClass(argClass)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether `cls` is represented as something **other than a struct** under the flag.
+ *
+ * `String` and `StaticArray<T>` are wasm GC *arrays*; `ensureType` answers them before any
+ * class arm, so `isGcClass` must not also claim a struct for them. This is a property of
+ * the type rather than a list of names: both are recognised by the predicates the rest of
+ * the compiler already uses.
+ */
+export function hasNonStructGcRepresentation(cls: Class): bool {
+  let type = cls.type;
+  // **`Object` is the root of the pointer-shaped world, and it stays there.** It declares no
+  // fields, so the ordinary rule would make it a GC struct — and then *every* class becomes
+  // its subtype, because the resolver gives every class `Object` as its base. Measured: the
+  // emitted types turned into `(type $~lib/object/Object (sub (struct …)))` and every class
+  // in the tree re-based onto it, which changes the prefix contract and the structural
+  // identity of the whole program for one empty struct.
+  //
+  // It is also the class `implicitlyExtendsObject` exists to special-case: a flat class's
+  // only ancestor is implicit, and that is what makes a flat class flat.
+  if (cls.prototype == cls.program.objectPrototype) return true;
+  // **An `@unmanaged` class is a linear record by declaration** and can never be a GC
+  // struct. It declares the layout it wants, so `@unmanaged` and "struct the engine
+  // traces" are contradictory. Measured: without this, `itcms`'s own private
+  // `@unmanaged class Object extends BLOCK` became a struct — it has no base worth
+  // walking and all-scalar fields — and every `changetype<usize>` in the collector turned
+  // into a refused reference conversion.
+  if (cls.hasDecorator(DecoratorFlags.Unmanaged)) return true;
+  return gcStringOf(type) || gcArrayElementOf(type) != null;
+}
+
+/**
  * Whether `cls` is a **standard-library class this slice emits as a GC struct**.
  *
  * One function because three places must agree — `isGcClass` (the latch-applied
@@ -1513,6 +1617,17 @@ function isStdlibGcClass(cls: Class): bool {
   // answered here: entries are `@unmanaged` and hold `K`/`V` in linear memory, which no
   // analysis of a class's *declared* fields can see. See the note in `docs/wasm-gc.md`.
   if (cls.prototype == program.mapPrototype || cls.prototype == program.setPrototype) {
+    // **A container whose stored type is a reference is refused**, and the reason is its
+    // *entries*, not its declared fields: `MapEntry<K,V>` is `@unmanaged` and `entry.key =
+    // key` writes `K` into a linear record, which under the GC ABI means writing a
+    // reference to an address. Measured: `Map<string, i32>` aborts inside Binaryen with
+    // `isBasic() && "Basic type expected"` — a crash with no location, which is exactly
+    // what a named refusal is for.
+    //
+    // So a reference-keyed `Map`/`Set` stays pointer-shaped, the program stays non-uniform,
+    // and the report says why. `Map<i32,i32>` and `Set<i32>` are unaffected: scalars in a
+    // linear record are the representation that already worked.
+    if (gcContainerHoldsReference(cls)) return false;
     return gcStructFieldsSupported(cls, true);
   }
   // **A subclass of a buffer view** — the eleven typed arrays. It declares nothing

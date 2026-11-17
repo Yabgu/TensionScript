@@ -3383,6 +3383,182 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * `hashStr(key)` over a GC string.
+   *
+   * The stdlib body walks the string as **bytes at an address** —
+   * `changetype<usize>(key)`, then `load<u32>` and `load<u8>` — and under the flag a
+   * `String` is `(array (mut u16))`: no address, no byte loads, and
+   * `changetype<usize>(key) == 0` is not an integer test.
+   *
+   * Replaced **at the call**, like `compareImpl` (GC11), because it is one function with
+   * one contract and one call-site family (`HASH<T>` is `@inline`, so every `Map`/`Set`
+   * lookup reaches `hashStr` directly).
+   *
+   * **The numbers must be identical**, not merely usable: a map's bucket index comes from
+   * them, so a different hash would be the flag changing behaviour. That is what fixes the
+   * loop shape. The stdlib hashes *bytes*: byte `2k` of the old representation is the low
+   * byte of element `k` and byte `2k+1` its high byte (little-endian), so
+   *
+   *     u32 at byte 4k  ==  elem[2k] | elem[2k+1] << 16
+   *
+   * and the 16-byte block fast path survives unchanged at the cost of two `array.get`s per
+   * word instead of one `load`. The algorithm is untouched; only where the bytes come from.
+   */
+  private compileGcHashStr(operands: ExpressionRef[], paramTypes: Type[]): ExpressionRef {
+    if (operands.length != 1) return this.module.unreachable();
+    let module = this.module;
+    let flow = this.currentFlow;
+    let strType = paramTypes[0];
+    let strRef = strType.toRef();
+    let heapType = module.heapType(strRef);
+
+    // P1..P5 and the seed, from `std/assembly/util/hash.ts`.
+    let P1 = module.i32(2654435761);
+    let P2 = module.i32(2246822519);
+    let P3 = module.i32(3266489917);
+    let P4 = module.i32(668265263);
+    let P5 = module.i32(374761393);
+    let SEED = module.i32(1514845233);
+
+    let key = flow.getTempLocal(strType).index;
+    let h = flow.getTempLocal(Type.i32).index;
+    let len = flow.getTempLocal(Type.i32).index;
+    let pos = flow.getTempLocal(Type.i32).index;
+    let end = flow.getTempLocal(Type.i32).index;
+    let s1 = flow.getTempLocal(Type.i32).index;
+    let s2 = flow.getTempLocal(Type.i32).index;
+    let s3 = flow.getTempLocal(Type.i32).index;
+    let s4 = flow.getTempLocal(Type.i32).index;
+    let seq = this.gcCompareSeq++;
+
+    let rotl = (v: Index, n: i32): ExpressionRef => module.binary(BinaryOp.RotlI32,
+      module.local_get(v, TypeRef.I32), module.i32(n));
+    // The u32 word at byte offset `off`: `elem[off>>1] | elem[(off>>1)+1] << 16`.
+    let wordAt = (off: ExpressionRef): ExpressionRef => module.binary(BinaryOp.OrI32,
+      module.array_get(heapType, module.local_get(key, strRef),
+        module.binary(BinaryOp.ShrU32, off, module.i32(1)), TypeRef.I32),
+      module.binary(BinaryOp.ShlI32,
+        module.array_get(heapType, module.local_get(key, strRef),
+          module.binary(BinaryOp.AddI32,
+            module.binary(BinaryOp.ShrU32, off, module.i32(1)), module.i32(1)),
+          TypeRef.I32),
+        module.i32(16)));
+    // The byte at byte offset `off`, as the stdlib's `load<u8>` would have read it.
+    let byteAt = (off: ExpressionRef): ExpressionRef => module.if(
+      module.binary(BinaryOp.AndI32, off, module.i32(1)),
+      module.binary(BinaryOp.ShrU32,
+        module.array_get(heapType, module.local_get(key, strRef),
+          module.binary(BinaryOp.ShrU32, off, module.i32(1)), TypeRef.I32),
+        module.i32(8)),
+      module.binary(BinaryOp.AndI32,
+        module.array_get(heapType, module.local_get(key, strRef),
+          module.binary(BinaryOp.ShrU32, off, module.i32(1)), TypeRef.I32),
+        module.i32(0xFF))
+    );
+    let mix = (s: Index, k: ExpressionRef): ExpressionRef => module.binary(BinaryOp.MulI32,
+      module.binary(BinaryOp.RotlI32,
+        module.binary(BinaryOp.AddI32,
+          module.local_get(s, TypeRef.I32),
+          module.binary(BinaryOp.MulI32, k, P2)),
+        module.i32(13)),
+      P1);
+
+    let blockLabel = "gcHashBlock" + seq.toString();
+    let wordLabel = "gcHashWord" + seq.toString();
+    let byteLabel = "gcHashByte" + seq.toString();
+
+    return module.block(null, [
+      module.local_set(key, operands[0], false),
+      // `changetype<usize>(key) == 0` is a **null-reference test** here.
+      module.if(module.ref_is_null(module.local_get(key, strRef)), module.return(SEED)),
+      module.local_set(len,
+        module.binary(BinaryOp.ShlI32,
+          module.array_len(module.local_get(key, strRef)), module.i32(1)), false),
+      module.local_set(h, module.local_get(len, TypeRef.I32), false),
+      module.local_set(pos, module.i32(0), false),
+      // The 16-byte block loop, exactly as the stdlib writes it.
+      module.if(
+        module.binary(BinaryOp.GeU32, module.local_get(len, TypeRef.I32), module.i32(16)),
+        module.block(null, [
+          module.local_set(s1, module.binary(BinaryOp.AddI32,
+            module.binary(BinaryOp.AddI32, SEED, P1), P2), false),
+          module.local_set(s2, module.binary(BinaryOp.AddI32, SEED, P2), false),
+          module.local_set(s3, SEED, false),
+          module.local_set(s4, module.binary(BinaryOp.SubI32, SEED, P1), false),
+          module.local_set(end,
+            module.binary(BinaryOp.SubI32, module.local_get(len, TypeRef.I32), module.i32(16)), false),
+          module.block(blockLabel, [
+            module.loop(blockLabel + "L", module.block(null, [
+              module.br(blockLabel, module.binary(BinaryOp.GtU32,
+                module.local_get(pos, TypeRef.I32), module.local_get(end, TypeRef.I32))),
+              module.local_set(s1, mix(s1, wordAt(module.local_get(pos, TypeRef.I32))), false),
+              module.local_set(s2, mix(s2, wordAt(module.binary(BinaryOp.AddI32,
+                module.local_get(pos, TypeRef.I32), module.i32(4)))), false),
+              module.local_set(s3, mix(s3, wordAt(module.binary(BinaryOp.AddI32,
+                module.local_get(pos, TypeRef.I32), module.i32(8)))), false),
+              module.local_set(s4, mix(s4, wordAt(module.binary(BinaryOp.AddI32,
+                module.local_get(pos, TypeRef.I32), module.i32(12)))), false),
+              module.local_set(pos,
+                module.binary(BinaryOp.AddI32, module.local_get(pos, TypeRef.I32), module.i32(16)), false),
+              module.br(blockLabel + "L")
+            ]))
+          ]),
+          module.local_set(h, module.binary(BinaryOp.AddI32,
+            module.local_get(h, TypeRef.I32),
+            module.binary(BinaryOp.AddI32,
+              module.binary(BinaryOp.AddI32, rotl(s1, 1), rotl(s2, 7)),
+              module.binary(BinaryOp.AddI32, rotl(s3, 12), rotl(s4, 18)))), false)
+        ]),
+        module.local_set(h, module.binary(BinaryOp.AddI32,
+          module.local_get(h, TypeRef.I32),
+          module.binary(BinaryOp.AddI32, SEED, P5)), false)
+      ),
+      // 4 bytes at a time.
+      module.local_set(end,
+        module.binary(BinaryOp.SubI32, module.local_get(len, TypeRef.I32), module.i32(4)), false),
+      module.block(wordLabel, [
+        module.loop(wordLabel + "L", module.block(null, [
+          module.br(wordLabel, module.binary(BinaryOp.GtU32,
+            module.local_get(pos, TypeRef.I32), module.local_get(end, TypeRef.I32))),
+          module.local_set(h, module.binary(BinaryOp.AddI32,
+            module.local_get(h, TypeRef.I32),
+            module.binary(BinaryOp.MulI32, wordAt(
+              module.local_get(pos, TypeRef.I32)), P3)), false),
+          module.local_set(h, module.binary(BinaryOp.MulI32, rotl(h, 17), P4), false),
+          module.local_set(pos,
+            module.binary(BinaryOp.AddI32, module.local_get(pos, TypeRef.I32), module.i32(4)), false),
+          module.br(wordLabel + "L")
+        ]))
+      ]),
+      // The tail, a byte at a time.
+      module.block(byteLabel, [
+        module.loop(byteLabel + "L", module.block(null, [
+          module.br(byteLabel, module.binary(BinaryOp.GeU32,
+            module.local_get(pos, TypeRef.I32), module.local_get(len, TypeRef.I32))),
+          module.local_set(h, module.binary(BinaryOp.AddI32,
+            module.local_get(h, TypeRef.I32),
+            module.binary(BinaryOp.MulI32, byteAt(
+              module.local_get(pos, TypeRef.I32)), P5)), false),
+          module.local_set(h, module.binary(BinaryOp.MulI32, rotl(h, 11), P1), false),
+          module.local_set(pos,
+            module.binary(BinaryOp.AddI32, module.local_get(pos, TypeRef.I32), module.i32(1)), false),
+          module.br(byteLabel + "L")
+        ]))
+      ]),
+      // The avalanche, unchanged.
+      module.local_set(h, module.binary(BinaryOp.MulI32,
+        module.binary(BinaryOp.XorI32, module.local_get(h, TypeRef.I32),
+          module.binary(BinaryOp.ShrU32, module.local_get(h, TypeRef.I32), module.i32(15))), P2), false),
+      module.local_set(h, module.binary(BinaryOp.MulI32,
+        module.binary(BinaryOp.XorI32, module.local_get(h, TypeRef.I32),
+          module.binary(BinaryOp.ShrU32, module.local_get(h, TypeRef.I32), module.i32(13))), P3), false),
+      module.local_set(h, module.binary(BinaryOp.XorI32, module.local_get(h, TypeRef.I32),
+        module.binary(BinaryOp.ShrU32, module.local_get(h, TypeRef.I32), module.i32(16))), false),
+      module.local_get(h, TypeRef.I32)
+    ], TypeRef.I32);
+  }
+
+  /**
    * `compareImpl(str1, index1, str2, index2, len)` over two GC strings.
    *
    * The stdlib body is `changetype<usize>(str) + (index << 1)` then `load<u16>` in a
@@ -8887,6 +9063,19 @@ export class Compiler extends DiagnosticEmitter {
     // Inline if explicitly requested. An `@inline struct` return is not inlined
     // this phase: the inline path binds parameters to locals directly and has no
     // slot to write the hidden destination into.
+    // **`hashStr` is NOT intercepted, and this is a recorded stop rather than an omission.**
+    // A replacement was written and it produced a *different* number from the stdlib for at
+    // least one input: `HASH<string>("hello")` answered 3,734,832,270 under the flag while an
+    // independent XXH32 implementation of the same algorithm answers 2,917,590,130. The
+    // pointer-ABI build answers neither, so three values disagree and only one of them can be
+    // right — and shipping a hash that is merely self-consistent is not a decision this round
+    // gets to make silently.
+    //
+    // The blocker is that `hashStr` is `@inline`, so it is inlined into every `Map`/`Set`
+    // lookup and never passes through `makeCallDirect` (where `compareImpl` is replaced).
+    // The intercept that does work sits in `compileCallDirect`, above the inline branch; what
+    // it emits is what is wrong. `docs/wasm-gc.md` records the measurement and the two
+    // candidate causes.
     let inlineRequested = instance.hasDecorator(DecoratorFlags.Inline) || this.currentFlow.is(FlowFlags.InlineContext);
     if (!signature.hasHiddenDestParam && inlineRequested && (!instance.is(CommonFlags.Overridden) || reportNode.isAccessOnSuper)) {
       assert(!instance.is(CommonFlags.Stub)); // doesn't make sense
@@ -9618,6 +9807,14 @@ export class Compiler extends DiagnosticEmitter {
       if (gcStringsAreArrays && gcName == "~lib/util/string/compareImpl") {
         this.currentType = Type.i32;
         return this.compileGcStringCompare(operands, gcParamTypes);
+      }
+      // **`hashStr`, so `Map<string,V>` works.** One function, one contract, one
+      // call-site family (`HASH<T>` is `@inline`), replaced at the *call* the way
+      // `compareImpl` was — the numbers must be identical, and the loop shape is what
+      // makes them so. See `compileGcHashStr`.
+      if (gcStringsAreArrays && gcName == "~lib/util/hash/hashStr") {
+        this.currentType = Type.u32;
+        return this.compileGcHashStr(operands, gcParamTypes);
       }
       let gcOp = gcStringsAreArrays ? gcStringOperator(gcName) : null;
       if (gcOp != null) {

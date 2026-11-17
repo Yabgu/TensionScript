@@ -1508,17 +1508,22 @@ function xfail(name, condition, reason, detail) {
       `got ${instance.exports.probe()} (expect 20 + 2)`);
   }
 
-  // The string-keyed case: eligible, refused at `hashStr`, and named.
+  // The string-keyed case: **not eligible**, and that is the improvement GC23 made. It used
+  // to be eligible and then abort inside Binaryen, because `MapEntry` stores `K` in a linear
+  // record. Now the program stays on the pointer ABI and runs.
   writeFileSync(join(scratch, "mapstr.ts"),
     `class H { m: Map<string, i32> = new Map<string, i32>(); }\n` +
     `export function probe(): i32 { let h = new H(); h.m.set("a", 1); return h.m.get("a"); }\n`);
   const str = compile("mapstr.ts", "mapstr.wasm", ["--wasmGc"]);
-  check("a string-keyed Map is eligible (its declared fields are fine)",
-    /INFO TS6413: wasm-gc: 1 of 1/.test(str.output),
+  check("a string-keyed Map is not taken onto the GC ABI (its entries are linear)",
+    !/INFO TS6413: wasm-gc: [1-9]/.test(str.output),
     (str.output.match(/(?:INFO|WARNING) TS641[34]: [^\n]*/) ?? [""])[0]);
-  check("...and is refused by name at hashStr, not silently miscompiled",
-    !str.ok && /changetype<usize> of a wasm GC array \(String\)/.test(str.output),
-    str.output.split("\n").find((l) => /AS100/.test(l)) ?? "(compiled)");
+  check("...and it compiles and round-trips on the pointer ABI instead of crashing",
+    str.ok && (await (async () => {
+      const { instance } = await WebAssembly.instantiate(
+        readFileSync(join(scratch, "mapstr.wasm")), imports);
+      return instance.exports.probe() === 1;
+    })()), str.output.split("\n")[0]);
 }
 
 // 53 — function values as GC structs ----------------------------------------
@@ -1631,57 +1636,52 @@ function xfail(name, condition, reason, detail) {
   }
 }
 
-// 56 — `hashStr` under the flag, and it must produce the SAME numbers -------
+// 56 — scalar-entry `Map`/`Set` migrate; a reference key is refused, not crashed --
 //
-// The stdlib walks a string as bytes at an address. Under the flag a `String` is
-// `(array (mut u16))`: no address, no byte loads, no integer null test. The replacement
-// reads elements instead — byte `2k` is the low byte of element `k`, byte `2k+1` its high
-// byte — so it can reproduce the byte-level loop exactly, including the `u32`-at-a-time
-// fast path (`element[2k] | element[2k+1] << 16`).
+// `MapEntry<K,V>` is `@unmanaged` — a linear record — so a reference key or value has no
+// representation in it. Measured before this was a refusal: `Map<string,i32>` took the GC
+// ABI and aborted *inside Binaryen* with `isBasic() && "Basic type expected"`, a crash
+// with no location. Two things had to be true instead:
 //
-// **Equivalence is the assertion**, not merely "a hash": the bucket index comes from these
-// numbers, so a different hash would mean the flag changes behaviour. The same source is
-// compiled both ways and the four hashes compared.
+//  - scalar entries keep working and move to the GC ABI (`mapI32`, `setI32`, `mapGrow`);
+//  - a reference entry makes the program non-uniform, so it compiles and runs on the
+//    pointer ABI rather than crashing — asserted by running it, because "it compiles" was
+//    already true of the crashing version.
+//
+// `hashStr` is untouched: it is `@inline` and the replacement written for it disagreed
+// with an independent XXH32 implementation, so hashing stays on the pointer path and
+// `Map<string,V>` is out of scope until that is settled.
 {
-  const on = compile("hashmap.ts", "hm.wasm", ["--wasmGc"]);
-  const off = compile("hashmap.ts", "hmoff.wasm", []);
-  check("the hash fixture compiles under the flag", on.ok,
-    on.output.split("\n").filter((l) => /ERROR|Assertion/.test(l))[0] ?? on.output.slice(0, 300));
-  check("...and without it", off.ok, off.output.slice(0, 300));
-  if (on.ok && off.ok) {
-    const a = (await WebAssembly.instantiate(readFileSync(join(scratch, "hm.wasm")), imports)).instance.exports;
-    const b = (await WebAssembly.instantiate(readFileSync(join(scratch, "hmoff.wasm")), imports)).instance.exports;
-    for (const name of ["hashOf", "hashEmpty", "hashLong", "hashNonAscii"]) {
-      const underFlag = a[name]() >>> 0;
-      const pointerAbi = b[name]() >>> 0;
-      check(`hashStr: ${name} is identical both ways`, underFlag === pointerAbi,
-        `flag on 0x${underFlag.toString(16)}, flag off 0x${pointerAbi.toString(16)}`);
-    }
-  }
-}
-
-// 57 — `Map<string,i32>` and `Set<string>` end to end ------------------------
-{
-  const built = compile("hashmap.ts", "hmr.wasm", ["--wasmGc"]);
+  const built = compile("hashmap.ts", "hm.wasm", ["--wasmGc"]);
+  check("the scalar Map/Set fixture compiles", built.ok, built.output.slice(0, 300));
+  check("scalar-entry containers are on the GC ABI",
+    /INFO TS6413: wasm-gc: 1 of 1/.test(built.output),
+    (built.output.match(/(?:INFO|WARNING) TS641[34]: [^\n]*/) ?? [""])[0]);
   if (built.ok) {
     const { instance } = await WebAssembly.instantiate(
-      readFileSync(join(scratch, "hmr.wasm")), imports);
+      readFileSync(join(scratch, "hm.wasm")), imports);
     const e = instance.exports;
-    const want = {
-      mapStr: 356,   // set, get, has, size on three string keys
-      setStr: 2,     // add, has, size, with a duplicate
-      mapMany: 780,  // 40 distinct keys, forcing bucket and entry growth
-    };
+    const want = { mapI32: 30, setI32: 2, mapGrow: 1560 };
     for (const name of Object.keys(want)) {
       const got = e[name]();
       check(`hashmap: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
     }
   } else {
-    // **A skipped section is not a passing one.** GC14's lesson: a green signal that does
-    // not measure the thing it claims to. If the fixture does not compile, that is a
-    // failure of the feature this section exists to certify, so it says so.
-    check("hashmap: Map<string,i32> and Set<string> round-trip on the flag", false,
+    check("hashmap: Map<i32,i32> and Set<i32> round-trip on the flag", false,
       built.output.split("\n").filter((l) => /ERROR|Assertion/.test(l))[0] ?? "(no diagnostic)");
+  }
+
+  // A reference key: refused, on the pointer ABI, and it *runs*.
+  const str = compile("mapstr.ts", "ms.wasm", ["--wasmGc"]);
+  check("a reference-keyed Map does NOT take the GC ABI",
+    !/INFO TS6413: wasm-gc: [1-9]/.test(str.output),
+    (str.output.match(/(?:INFO|WARNING) TS641[34]: [^\n]*/) ?? [""])[0]);
+  check("...and does not crash the compiler", str.ok, str.output.split("\n")[0]);
+  if (str.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "ms.wasm")), imports);
+    check("...and Map<string,i32> still round-trips on the pointer ABI",
+      instance.exports.probe() === 1, `got ${instance.exports.probe()}`);
   }
 }
 
