@@ -213,6 +213,7 @@ import {
   GC_ARRAY_DATA_INDEX,
   GC_ARRAY_LENGTH_INDEX,
   GC_ARRAY_MIN_SIZE,
+  isGcReferenceType,
   gcSubtreeBrands,
   gcBrandOf,
   GC_BRAND_INDEX,
@@ -1616,7 +1617,7 @@ export class Compiler extends DiagnosticEmitter {
       if (global.is(CommonFlags.Inlined)) {
         initExpr = this.compileInlineConstant(global, global.type, Constraints.PreferStatic);
       } else {
-        initExpr = this.makeZero(type);
+        initExpr = this.makeFieldZero(type);
       }
     }
 
@@ -6344,6 +6345,33 @@ export class Compiler extends DiagnosticEmitter {
           contextualType, Constraints.None, null, expr
         );
       }
+      // **A wasm GC array's element write, which this path otherwise misses.**
+      // `a[i] += v` and `a[i]++` compile the operator first and then store, and
+      // the store goes through `lookupExpression` — so `compileAssignment`'s GC
+      // arm, which only sees a plain `=`, never runs. Without these two arms the
+      // store resolves `Array#__set`, whose body is
+      // `ensureCapacity(changetype<usize>(this), …)` + `__link(...)`, and
+      // `changetype<usize>` of a GC reference is exactly what cannot exist under
+      // the flag.
+      //
+      // Measured: this omission is 2 of the 7 blockers that block 16 of the 18
+      // real examples in `examples/` — the highest-leverage site in the tree.
+      if (this.options.wasmGc && arrayType != null) {
+        let gcCompoundDynamic = gcDynamicArrayElementOf(arrayType);
+        if (gcCompoundDynamic != null) {
+          return this.compileGcDynamicArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcCompoundDynamic, expr, contextualType != Type.void
+          );
+        }
+        let gcCompoundElement = gcArrayElementOf(arrayType);
+        if (gcCompoundElement != null) {
+          return this.compileGcStaticArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcCompoundElement, expr, contextualType != Type.void
+          );
+        }
+      }
     }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
@@ -8067,6 +8095,31 @@ export class Compiler extends DiagnosticEmitter {
             (gcNewName == "__new" || gcNewName.endsWith("/__new"))) {
           let gcNew = this.compileGcTypedNew(expression);
           if (gcNew != 0) return gcNew;
+        }
+        // **The collector's bookkeeping is what wasm GC replaces, so it lowers to
+        // nothing.** `__link(parent, child, expectMultiple)` adds an edge to the
+        // incremental collector's remembered set, `__pin`/`__unpin` keep an object
+        // out of the sweep, and `__visit_members` walks the object's typeinfo when
+        // the guest collector scans. Under wasm GC the *engine* traces references,
+        // so there is no set to update, nothing to pin, and nothing to walk.
+        //
+        // Reached at all because these calls appear in the stdlib's own bodies
+        // (`Array#__set`, `Map#set`, …) and each one takes a `usize` — the exact
+        // `changetype<usize>(aRef)` that cannot exist under the flag. Measured:
+        // `array.ts:136` and `map.ts:116/133/137`, four sites across the examples.
+        //
+        // The operands are **not compiled**: every one of them is a
+        // `changetype<usize>(…)` of a reference, which would be a diagnostic, and
+        // emitting them for their side effects would be wrong — these are pure
+        // bookkeeping.
+        if (this.options.wasmGc && (
+          gcNewName == "__link" || gcNewName.endsWith("/__link") ||
+          gcNewName == "__pin" || gcNewName.endsWith("/__pin") ||
+          gcNewName == "__unpin" || gcNewName.endsWith("/__unpin") ||
+          gcNewName == "__visit_members" || gcNewName.endsWith("/__visit_members")
+        )) {
+          this.currentType = Type.void;
+          return module.nop();
         }
         // **`compareImpl` under wasm GC.** It is the single chokepoint behind
         // `==`, `equals`, `startsWith`, `endsWith`, `indexOf` and `includes` — every
@@ -10535,7 +10588,7 @@ export class Compiler extends DiagnosticEmitter {
             // pointer ABI's zero and a reference's null are the same idea and not
             // the same value, and a struct-ref setter given `i32.const 0` is a
             // type error rather than a null field.
-            if (isGcClass(classReference)) {
+            if (isGcReferenceType(classReference.type)) {
               return module.ref_null(this.currentType.toRef());
             }
             return options.isWasm64 ? module.i64(0) : module.i32(0);
@@ -13270,6 +13323,47 @@ export class Compiler extends DiagnosticEmitter {
           module.local_get(tempLocal.index, this.currentType.toRef())
         ], this.currentType.toRef());
       }
+      // **A wasm GC array's element write.** Same omission, same consequence as
+      // the binary compound operators above: `a[i]++` stores through
+      // `lookupExpression` → `Array#__set`, whose body is `changetype<usize>(this)`
+      // into `ensureCapacity`. The post-increment's *result* is the old value, so
+      // the store's own value is discarded (`Type.void`) and the answer comes from
+      // `tempLocal`, exactly as the dynamic-array arm above does it.
+      if (this.options.wasmGc && arrayType != null) {
+        let gcPostDynamic = gcDynamicArrayElementOf(arrayType);
+        if (gcPostDynamic != null) {
+          // **Which `tee` depends on who consumes it.** In statement position
+          // the caller drops the returned expression and a `Block` typed `None`
+          // cannot be dropped (`can only drop a valid value`), so the store must
+          // yield a value. When the postfix result IS wanted it comes from
+          // `tempLocal`, so the store's own value must *not* be yielded — a
+          // value-returning non-final block element is refused by the validator
+          // (`non-final block elements returning a value must be dropped`).
+          let stored = this.compileGcDynamicArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcPostDynamic, expr, tempLocal == null
+          );
+          this.currentType = gcPostDynamic;
+          if (!tempLocal) return stored;
+          return module.block(null, [
+            stored,
+            module.local_get(tempLocal.index, this.currentType.toRef())
+          ], this.currentType.toRef());
+        }
+        let gcPostElement = gcArrayElementOf(arrayType);
+        if (gcPostElement != null) {
+          let stored = this.compileGcStaticArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcPostElement, expr, tempLocal == null
+          );
+          this.currentType = gcPostElement;
+          if (!tempLocal) return stored;
+          return module.block(null, [
+            stored,
+            module.local_get(tempLocal.index, this.currentType.toRef())
+          ], this.currentType.toRef());
+        }
+      }
     }
     let target = resolver.lookupExpression(expression.operand, flow); // reports
     if (!target) {
@@ -13684,6 +13778,30 @@ export class Compiler extends DiagnosticEmitter {
           elementAccess, arrayType, true,
           this.currentType, Constraints.None, null, expr
         );
+      }
+      // **A wasm GC array's element write.** The last of the four places with this
+      // omission — `compileAssignment`, the binary compounds, the postfix and this
+      // prefix arm all decide a store, and only the first was covered. `--a[i]`
+      // therefore resolved `Array#__set`, whose `changetype<usize>(this)` cannot
+      // exist under the flag. A prefix operator's own value *is* the new one, so
+      // the store's value is the expression's value.
+      if (this.options.wasmGc && arrayType != null) {
+        let gcPreDynamic = gcDynamicArrayElementOf(arrayType);
+        if (gcPreDynamic != null) {
+          this.currentType = gcPreDynamic;
+          return this.compileGcDynamicArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcPreDynamic, expr, true
+          );
+        }
+        let gcPreElement = gcArrayElementOf(arrayType);
+        if (gcPreElement != null) {
+          this.currentType = gcPreElement;
+          return this.compileGcStaticArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcPreElement, expr, true
+          );
+        }
       }
     }
     let target = resolver.lookupExpression(expression.operand, this.currentFlow);
@@ -16377,8 +16495,7 @@ export class Compiler extends DiagnosticEmitter {
   makeFieldZero(fieldType: Type): ExpressionRef {
     // `classReference`, not `getClass()` — the latter requires an *internal
     // reference*, and a `B | null` field is a nullable class type.
-    let fieldClass = fieldType.classReference;
-    if (fieldClass != null && (isGcClass(fieldClass) || gcStringOf(fieldType))) {
+    if (isGcReferenceType(fieldType)) {
       return this.module.ref_null(assert(fieldType.nullableType).toRef());
     }
     return this.makeZero(fieldType);
@@ -16499,6 +16616,22 @@ export class Compiler extends DiagnosticEmitter {
       case TypeKind.U64: return module.binary(BinaryOp.NeI64, expr, module.i64(0));
       case TypeKind.Isize:
       case TypeKind.Usize: {
+        // **A reference is not its own truthiness under wasm GC.** A class or
+        // array type's `kind` is `Usize` ("also the base of class types"), so a
+        // `String | null` — or any GC class — reaches this arm and used to be
+        // answered as the expression itself. That is right for the pointer ABI,
+        // where a pointer *is* an `i32` whose zero means null, and wrong here: the
+        // result stayed ref-typed and the enclosing `if` asserted in
+        // `evaluateCondition` (`type == TypeRef.I32`).
+        //
+        // Measured: `if (out)` on a `String | null` — the shape
+        // `String#replaceAll` uses — crashed the compiler with
+        // `AssertionError: assertion failed` at `compileIfStatement`. Five lines
+        // here, and the whole `if (nullableRef)` idiom works.
+        if (isGcReferenceType(type)) {
+          if (!(type.flags & TypeFlags.Nullable)) return module.i32(1); // cannot be null
+          return module.unary(UnaryOp.EqzI32, module.ref_is_null(expr));
+        }
         return type.size == 64
           ? module.binary(BinaryOp.NeI64, expr, module.i64(0))
           : expr;

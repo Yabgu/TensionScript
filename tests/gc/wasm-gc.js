@@ -679,6 +679,75 @@ function check(name, condition, detail) {
   }
 }
 
+// 28 — compound assignment and in/decrement on a GC array element -----------
+//
+// Four separate places decide a store (`compileAssignment`, the binary compounds,
+// the postfix operators, the prefix operators) and only the first was covered, so
+// `a[i] += v`, `a[i]++` and `--a[i]` resolved `Array#__set` — whose body is
+// `changetype<usize>(this)` into `ensureCapacity`, which cannot exist under the
+// flag. These fixtures are the regression: a store to the wrong index, or one that
+// writes the old value, changes every answer.
+{
+  const built = compile("elemwrite.ts", "elemwrite.wasm", ["--wasmGc"]);
+  check("the element-write fixture compiles with validation on", built.ok, built.output);
+  if (built.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "elemwrite.wasm")), imports);
+    const e = instance.exports;
+    const want = {
+      plusEquals: 15, compounds: 8, postIncStatement: 9,
+      postIncValue: 506, preDecValue: 8, compoundAfterGrowth: 164,
+      staticArrayCompound: 10, managedPostInc: 42,
+    };
+    for (const name of Object.keys(want)) {
+      const got = e[name]();
+      check(`elemwrite: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
+    }
+  }
+}
+
+// 29 — the collector's bookkeeping is not emitted ----------------------------
+//
+// `__link`/`__pin`/`__unpin`/`__visit_members` maintain the guest collector's
+// remembered set, pins and typeinfo walk. Under wasm GC the engine traces, so they
+// lower to nothing — and they must, because each takes a `usize` and every call site
+// passes `changetype<usize>(aRef)`.
+{
+  const built = compile("elemwrite.ts", "ew-link.wasm", ["--wasmGc"]);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "ew-link.wat"), "utf8");
+    check("no collector bookkeeping is called under the flag",
+      !/call \$~lib\/rt\/itcms\/(__link|__pin|__unpin|__visit_members)/.test(wat),
+      (wat.match(/.*~lib\/rt\/itcms\/__(link|pin|unpin|visit_members).*/) ?? ["absent"])[0]);
+  }
+  // Flag off it is still there: this is a lowering, not a deletion.
+  const plain = compile("elemwrite.ts", "ew-linkplain.wasm", []);
+  if (plain.ok) {
+    const wat = readFileSync(join(scratch, "ew-linkplain.wat"), "utf8");
+    check("flag off: the collector bookkeeping is still emitted",
+      /call \$~lib\/rt\/itcms\/__link/.test(wat));
+  }
+}
+
+// 30 — `if (nullableRef)` is truthiness, not the reference -------------------
+//
+// A class or array type's `kind` is `Usize`, so a `String | null` condition used to
+// be answered as the expression itself — correct for the pointer ABI, where a
+// pointer *is* an `i32`, and a ref-typed condition under GC. Measured: it crashed
+// the compiler with `AssertionError` in `evaluateCondition`, on the `if (out)`
+// shape `String#replaceAll` uses.
+{
+  const built = compile("truthiness.ts", "truth.wasm", ["--wasmGc"]);
+  check("the truthiness fixture compiles", built.ok, built.output);
+  if (built.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "truth.wasm")), imports);
+    check("a null string is falsy and a present one is truthy",
+      instance.exports.probe() === 29,
+      `probe() = ${instance.exports.probe()} (expect 29)`);
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);

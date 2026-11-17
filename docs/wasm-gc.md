@@ -1220,3 +1220,184 @@ round-sized question, not a line, and it belongs with `Map`.
 stays at its 5 pre-existing mismatches, flag-off output **byte-identical on all 13
 fixtures**, and **no file under `std/assembly` was touched** — the mechanism is
 entirely compiler-side.
+
+## A real guest, measured: 0 of 19 examples compile, and the work list behind that
+
+Every round so far fixed what the *fixtures* needed. This section is the other
+question — what does a real program need — measured by compiling every Tension
+example with this compiler, with and without the flag.
+
+Method: `/tmp/gc13-compile.mjs`, which runs the same command each example's own
+`package.json` build script runs (`tensionscript <entry> --config <asconfig>`),
+adds `--wasmGc`, and writes to `/tmp` so the Tension tree stays clean.
+
+**Baseline: 19 of 19 compile.** Every failure below is therefore attributable to
+the flag, not to a stale pin or a missing generated file.
+
+| | compiles |
+|---|---|
+| baseline (no flag) | **19 / 19** |
+| `--wasmGc` | **0 / 19** |
+
+That is the headline: `--wasmGc` currently makes every real program in this repo
+fail to compile.
+
+### The wall: 19 of 19, one message
+
+Eighteen of the nineteen stop at GC10's mixed-ABI refusal:
+
+```
+~lib/array/Array<~lib/tension-framework/assembly/ui/fonts/FontPage> is a wasm GC
+struct but ~lib/tension-framework/assembly/ui/fonts/FontBook holds a field of its
+type and is not one: a pointer-shaped class cannot reference a GC struct.
+```
+
+The mechanism is working exactly as designed — a mixed module must not be emitted —
+but the *policy* under it is self-contradictory, and this is the round's central
+finding:
+
+- `isGcClass` makes **`Array<T>` a GC struct unconditionally** under the flag
+  (the GC9 exception to its `~lib/` exclusion).
+- `gcUniform` **skips every `~lib/` class** when deciding whether the program is
+  eligible, on the assumption that `~lib/` classes are all pointer-shaped and never
+  hold a GC struct.
+- That assumption stopped being true the moment `Array` became one. Framework
+  classes are compiled with `~lib/` prefixes, so *every framework class that holds
+  an `Array`* is a crossing the latch cannot see — and the refusal is the only thing
+  that catches it, by failing the build.
+
+So the flag is unusable on any program with a `class Foo { items: Array<Bar> }`,
+which is every real program.
+
+### Behind the wall: 36 sites, measured with the refusal temporarily off
+
+To size the rest, the refusal was disabled in a scratch build (reverted; the tree
+carries no trace), and all 19 examples re-compiled. **40 distinct blocker sites**,
+**320 error occurrences** — an inlined body reports once per instantiation, which is
+why the error count is 8× the site count.
+
+Sites by how many examples hit them:
+
+- **7 sites, 16 of 18 examples** — the universal set: `array.ts:131`
+  (`ensureCapacity(changetype<usize>(this), …)`), `array.ts:136` (`__link`),
+  `map.ts:243`/`:249` (`changetype<usize>(entry.key/value)`), `string.ts:672`,
+  `:673` (`changetype<OBJECT>(changetype<usize>(str) - TOTAL_OVERHEAD).rtSize`) and
+  `:699` (`encodeUnsafe(changetype<usize>(str), …)`).
+- **7 sites, 12 examples** — `util/number.ts` number formatting (`utoa*_core(p, …)`,
+  `store<u16>`, the `HEX_DIGITS`/`ANY_DIGITS` LUTs).
+- **2 sites, 9 examples** — `string.ts:772`/`:807`, the UTF8 decode/`__renew` pair.
+- **2 sites, 7 examples** — `staticarray.ts:392`/`:393`, the linear header read.
+- **1 site, 5 examples** — `number.ts:759` (`memory.copy(changetype<usize>(result), dtoa_buf, size)`).
+- The rest (2–1 examples): Map internals, `hash.ts`, `src/main.ts`,
+  `tension-framework/…/text.ts` (two `String.UTF8.encodeUnsafe` calls).
+
+### Classified by shape, not by message
+
+Every one of the 40 is the same root cause — **`changetype<usize>(aRef)` used as a
+byte address inside a standard-library body** — so the useful classification is what
+the address is used *for*, because that is what each fix costs:
+
+- **13 sites — the address is passed to a helper** (`encodeUnsafe(p, …)`,
+  `utoa32_dec_core(p, …)`, `utoa64_any_core(p, …)`). The helper's *parameter* is a
+  byte pointer into a buffer. Fixing these means re-typing those helpers to take an
+  array plus an offset, i.e. migrating the function, not the call site.
+- **5 sites — address arithmetic passed on** (`hash.ts:97,104`, `number.ts:384,388,393`).
+- **4 sites — `changetype<usize>(x) == 0` as a null test** (`hash.ts:72`,
+  `string.ts:1014,1021,1040`).
+- **4 sites — the address is stored in a local, then used** (`hash.ts:76`,
+  `string.ts:672,677`, `map.ts:243,249`). These need the load/store generalisation
+  *and* a type for the local, which is a representation question.
+- **2 sites — the linear header read** (`rtSize` via `TOTAL_OVERHEAD`).
+- **1 site each** — `__renew`, `memory.copy` of a non-array, `load/store` at a raw
+  address, two LUT constants.
+- **4 sites — the collector interface** (`__link`, `__visit_members`). Fixed this
+  round; see below.
+
+**The `load`/`store` generalisation the brief expected to be the win is one site.**
+That is worth recording plainly: recognising `load<u16>(changetype<usize>(s) + k)` as
+`array.get` is a real and cheap improvement, and it would have removed **1** of the
+40. The dominant need is not reading a buffer in a loop; it is **passing a buffer to
+a stdlib helper that speaks pointers**.
+
+### What was fixed, and the measured effect
+
+1. **Element writes on a GC array through compound operators and in/decrement.**
+   Four separate places decide a store — `compileAssignment`, the binary compounds,
+   the postfix operators, the prefix operators — and only the first had the GC arm.
+   So `a[i] += v`, `a[i]++` and `--a[i]` resolved `Array#__set`, whose body is
+   `ensureCapacity(changetype<usize>(this), …)`. 16 sites across three arms, a real
+   defect; `tests/gc/elemwrite.ts` is the regression (8 values asserted).
+   **Measured effect on the examples: none.** `array.ts:131` is still in 16 of 18,
+   so it is reached by a route this arm does not cover. The fix is right and the
+   fixture proves it; the claim that it was the examples' blocker would have been
+   wrong, and the comment in the code says so.
+2. **The collector's bookkeeping lowers to nothing.** `__link`, `__pin`, `__unpin`
+   and `__visit_members` maintain the guest collector's remembered set, pins and
+   typeinfo walk — precisely what engine tracing replaces. They are emitted as
+   `nop`, with their operands **not compiled** (every one is a
+   `changetype<usize>(…)` of a reference, and they are pure bookkeeping). Measured:
+   **40 → 36 distinct sites**, `array.ts:136` and `map.ts:116/133/137` gone.
+3. **`if (nullableRef)` is truthiness.** A class or array type's `kind` is `Usize`,
+   so a `String | null` condition reached `makeIsTrueish`'s `Usize` arm and was
+   answered as the expression itself — correct for the pointer ABI, a ref-typed
+   condition under GC. Measured: it crashed the **compiler** with `AssertionError`
+   in `evaluateCondition` on `if (out)`, the shape `String#replaceAll` uses.
+   `tests/gc/truthiness.ts` covers it. This is also the `replaceAll` outcome asked
+   for: the assert is gone.
+4. **One predicate, `isGcReferenceType`.** It was needed in four places that must
+   agree (the `null` literal, `makeFieldZero`, a struct field's type ref, and
+   truthiness) and four hand-written copies is how the `String` case was missed in
+   three of them. `String | null` carrying no `classReference` — the GC12 finding —
+   is why it tests `nonNullableType`.
+
+### `examples/ai` fails differently, and it is a distinct cause
+
+`AssertionError` in `writeStaticBuffer`, from `compileArrayLiteral` →
+`addStaticBuffer`: a static array **literal** (`const X: u8[] = [...]`) is written
+into a data segment, and its element type has no `staticGcObjectOffsets` entry. Under
+the flag it needs the same treatment string literals got in GC11 — build the array in
+`__start` rather than point at a segment. Not attempted this round; named so it is
+not rediscovered.
+
+### The remaining-work list, replacing the estimate
+
+Ordered by (examples blocked ÷ effort). Effort is a judgement; the counts are not.
+
+1. **Decide `Array`'s GC-ness vs. non-uniform programs** — blocks **19/19**.
+   Not a bug fix, a policy decision, so it is recorded rather than taken. The two
+   routes:
+   - **Keep `Array` unconditional and migrate the framework.** Every `~lib/` class
+     that holds an `Array` must itself become a GC struct, transitively. The
+     framework has 111 classes (GC2's count); the closure size is unmeasured, and
+     measuring it is the next round's first task if this route is chosen.
+   - **Make `Array`'s GC-ness follow the program.** `Array` is a GC struct only when
+     the program could be uniform — which means `gcUniform` must stop skipping
+     `~lib/` classes that hold GC-typed fields. The consequence: on a real program
+     `--wasmGc` becomes a **no-op that compiles** rather than a build failure. That
+     is safer, and it means the flag's success is no longer evidence of GC.
+2. **The buffer-pointer API in `std/assembly`** — blocks 16/18, ~19 sites.
+   `encodeUnsafe`, `decodeUnsafe`, `utoa*_core`, `dtoa*`, `hashStr`. These take a
+   `usize` address into a buffer. The honest fix is to give them an array-plus-offset
+   form in GC mode, which is a stdlib API change (not a compiler one) and the largest
+   single item in the migration.
+3. **`local`-held addresses and header reads** — 4 sites, blocks 16/18.
+   `let pos = changetype<usize>(x)` then `load`/`store`, and
+   `changetype<OBJECT>(changetype<usize>(this) - TOTAL_OVERHEAD).rtSize`. The second
+   is `array.len` in disguise and may be cheaper than it looks.
+4. **`memory.copy` / `__renew` of a GC array** — 2 sites, blocks 6/18.
+   `array.copy` covers the copy; `__renew` has no array equivalent in this glue
+   (`array.grow` does not exist), so a `String#replaceAll` needs the two-object
+   design `Array` already uses.
+5. **The null test `changetype<usize>(x) == 0`** — 4 sites, blocks 2/18. Cheapest
+   remaining recogniser; deferred because it unblocks no example on its own.
+6. **Static array literals** — blocks 1/18 (`examples/ai`), plus every
+   `const LUT: u16[] = [...]` in the stdlib.
+
+### Result
+
+`test:gc` 168 → **181 checks** (three new sections: element writes, collector
+bookkeeping, truthiness), `-O0..-O3` agree on every fixture, `test:compiler` stays
+at its 5 pre-existing mismatches, flag-off output **byte-identical on all 13
+pre-existing fixtures**, and **no file under `std/assembly` was touched** — every
+change is compiler-side. One commit: the triage and the fixes are the same work,
+because the measurement is what justified the fixes.

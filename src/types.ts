@@ -435,6 +435,31 @@ export function gcStringOperator(internalName: string): GcStringOp | null {
  * `std/assembly/array.ts` is not edited: the layout exists only in the compiler, so
  * flag-off code is untouched by construction.
  */
+/**
+ * Whether `type`, under `--wasmGc`, is represented as a **reference** rather than
+ * an `i32` — a GC class, a `String`, or a GC array (`StaticArray<T>`, `Array<T>`).
+ *
+ * One predicate because the answer is needed in four places that must agree: the
+ * `null` literal's value, `makeFieldZero`, a struct field's type ref, and the
+ * truthiness of a reference in a condition. Four copies of the same four-way test
+ * is how the string case was missed in three of them.
+ *
+ * **`isGcClass` is not enough**: it answers false for everything under `~lib/` by
+ * design (the standard library kept the pointer ABI until GC11), so `String` and
+ * the arrays need their own predicates — and a class type's `kind` is `Usize`, so
+ * no `kind` test distinguishes them either.
+ */
+export function isGcReferenceType(type: Type | null): bool {
+  if (type == null || !gcClassesEnabled) return false;
+  let nonNullable = type.nonNullableType;
+  let cls = nonNullable.classReference;
+  if (cls == null) return false;
+  return isGcClass(cls) ||
+         gcStringOf(nonNullable) ||
+         gcArrayElementOf(nonNullable) != null ||
+         gcDynamicArrayElementOf(nonNullable) != null;
+}
+
 export function gcDynamicArrayElementOf(type: Type | null): Type | null {
   if (type == null || !gcClassesEnabled) return null;
   let cls = type.classReference;
