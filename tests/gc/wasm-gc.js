@@ -1517,6 +1517,83 @@ function xfail(name, condition, reason, detail) {
     str.output.split("\n").find((l) => /AS100/.test(l)) ?? "(compiled)");
 }
 
+// 53 — function values as GC structs ----------------------------------------
+//
+// `Function<T>` declares `{ _index: u32, _env: usize }`, and the compiler already treats
+// that layout as a contract (`FUNCTION_INDEX_OFFSET = 0`, `assertFunctionLayout`). Under
+// the flag it becomes `{ <brand>, _index i32, _env i32 }`: the index stays a table index
+// because `call_indirect` is unchanged, and `_env` stays an address into the never-free
+// arena. Neither is a reference, so the struct is untraced — and that is right, because
+// `_env` points at linear memory nothing traces.
+//
+// GC17's defect is the assertion that matters here: a class with a function-typed field
+// was *reported* on the GC ABI and then killed the compiler at `gcFieldTypeRef` the
+// moment an instance was constructed.
+{
+  const built = compile("functionvalue.ts", "fv.wasm", ["--wasmGc"]);
+  check("the function-value fixture compiles", built.ok, built.output);
+  const line = (built.output.match(/(?:INFO TS6413|WARNING TS6414): [^\n]*/) ?? [""])[0];
+  check("every class holding a function value is on the GC ABI",
+    /INFO TS6413: wasm-gc: 6 of 6/.test(built.output), line);
+
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "fv.wat"), "utf8");
+    check("Function<T> is a struct of an index and an environment address",
+      /\(type \S*Function<[^\n]*?\(sub \(struct \(field \$<brand> i32\) \(field \$_index \(mut i32\)\) \(field \$_env \(mut i32\)\)\)\)\)/.test(wat),
+      (wat.match(/\(type \S*Function<[^\n]*/) ?? ["absent"])[0]);
+    check("the callee read is struct.get, not a load at a constant offset",
+      /struct\.get \S*Function<[^\n]*\$_index/.test(wat),
+      (wat.match(/.*struct\.get \S*Function<.*/) ?? ["absent"])[0]);
+
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "fv.wasm")), imports);
+    const e = instance.exports;
+    const want = {
+      singleCall: 42,     // a function value in a field, called through it
+      twoFields: 302,     // two fields, so a wrong index shows
+      capturedEnv: 42,    // an arrow capturing a local, called after its frame returned
+      capturedThis: 42,   // an arrow capturing `this`
+      afterChurn: 42,     // called after 200 000 allocations: the env block survived
+      resumeShape: 42,    // `resume!: (s: X) => void`, the shape TaskState declares
+    };
+    for (const name of Object.keys(want)) {
+      const got = e[name]();
+      check(`functionvalue: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
+    }
+  }
+}
+
+// 54 — the same fixture at every level, and flag off -------------------------
+{
+  const answers = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("functionvalue.ts", `fv${level}.wasm`, ["--wasmGc", level]);
+    check(`functionvalue ${level} compiles`, built.ok, built.output);
+    if (!built.ok) continue;
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, `fv${level}.wasm`)), imports);
+    const e = instance.exports;
+    answers.push([e.singleCall(), e.twoFields(), e.capturedEnv(), e.capturedThis(), e.afterChurn(), e.resumeShape()].join(","));
+  }
+  check("functionvalue: -O0..-O3 all agree",
+    new Set(answers).size === 1 && answers[0] === "42,302,42,42,42,42", answers.join(" | "));
+
+  const plain = compile("functionvalue.ts", "fvoff.wasm", []);
+  check("the function-value fixture compiles without the flag", plain.ok, plain.output);
+  if (plain.ok) {
+    const wat = readFileSync(join(scratch, "fvoff.wat"), "utf8");
+    check("flag off: a function value is still a linear block",
+      !/struct\.new \$\S*Function</.test(wat),
+      (wat.match(/.*struct\.new \$\S*Function.*/) ?? ["absent"])[0]);
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "fvoff.wasm")), imports);
+    const e = instance.exports;
+    check("flag off: the same answers",
+      e.singleCall() === 42 && e.twoFields() === 302 && e.capturedEnv() === 42 &&
+      e.capturedThis() === 42 && e.afterChurn() === 42 && e.resumeShape() === 42);
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);
