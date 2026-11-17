@@ -43,6 +43,7 @@ import {
   GlobalRef,
   FeatureFlags,
   Index,
+  HeapTypeRef,
   getExpressionId,
   getExpressionType,
   getConstValueI32,
@@ -205,6 +206,9 @@ import {
   Signature,
   gcFieldsOf,
   gcArrayElementOf,
+  gcStringOf,
+  gcStringOperator,
+  GcStringOp,
   gcDynamicArrayElementOf,
   GC_ARRAY_DATA_INDEX,
   GC_ARRAY_LENGTH_INDEX,
@@ -834,6 +838,20 @@ export class Compiler extends DiagnosticEmitter {
     // NOTE: no more element compiles from here. may go to the start function!
 
     // compile the start function if not empty or if explicitly requested
+    // Under `--wasmGc`, build every distinct string literal into its global. Done
+    // last so `ensureStaticString` calls from anywhere in the compile are collected
+    // — but **placed first**: a module-scope `const E: string = "…"` becomes a
+    // start-function assignment of `global.get(~gcstr/N)`, so the literal's own
+    // global has to be built before the initialiser that reads it, or the constant
+    // is assigned `ref.null` and dereferences as a null pointer on first use.
+    if (this.options.wasmGc) {
+      let literalBuilds = new Array<ExpressionRef>();
+      this.emitGcStringBuilds(literalBuilds);
+      for (let i = literalBuilds.length - 1; i >= 0; --i) {
+        startFunctionBody.unshift(unchecked(literalBuilds[i]));
+      }
+    }
+
     let startIsEmpty = !startFunctionBody.length;
     let exportStart = options.exportStart;
     if (!startIsEmpty || exportStart != null) {
@@ -1587,10 +1605,22 @@ export class Compiler extends DiagnosticEmitter {
 
     if (initializeInStart) { // initialize to mutable zero and set the actual value in start
       if (isDeclaredInline) {
-        this.error(
-          DiagnosticCode.Decorator_0_is_not_valid_here,
-          findDecorator(DecoratorKind.Inline, global.decoratorNodes)!.range, "inline"
-        );
+        // **A GC reference cannot be an inline constant.** `@lazy @inline export
+        // const E_X: string = "..."` is the idiom `std/assembly/util/error.ts`
+        // uses for its messages, and under `--wasmGc` a string literal is an
+        // object built in `__start`, not a readable constant — so the value moves
+        // into the start function (the warning above already says it cannot be
+        // inlined) and the decorator has nothing left to inline. Refusing it here
+        // would make every program that can throw fail to compile under the flag.
+        // Flag-off keeps the error: there a string constant *is* a constant.
+        if (this.options.wasmGc && type.classReference != null) {
+          global.unset(CommonFlags.Inlined);
+        } else {
+          this.error(
+            DiagnosticCode.Decorator_0_is_not_valid_here,
+            findDecorator(DecoratorKind.Inline, global.decoratorNodes)!.range, "inline"
+          );
+        }
       }
       let internalType = type;
       if (type.isExternalReference && !type.is(TypeFlags.Nullable)) {
@@ -2582,10 +2612,413 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Ensures that a string exists in static memory and returns a pointer expression. Deduplicates. */
+  /** Distinct literal -> the global holding its array. */
+  private gcStringLiterals: Map<string, string> = new Map();
+  /** Literals whose start-time build has not been emitted yet. */
+  private gcStringBuilds: Array<{ globalName: string, ptr: i64, length: i32, type: Type }> = [];
+
+  /** Sequence for inlined `compareImpl` labels, so two loops in one body differ. */
+  private gcCompareSeq: i32 = 0;
+
   ensureStaticString(stringValue: string): ExpressionRef {
+    let stringType = this.program.stringInstance.type;
+    // **Under `--wasmGc` a literal is an object, not a pointer.** The bytes still
+    // live in the data segment (the module has linear memory either way), but the
+    // value a use site gets is a `(ref null (array (mut u16)))`. One object per
+    // *distinct* literal, built once in `__start` and held in a global — so a
+    // repeated literal costs a `global.get` and nothing else.
+    if (gcStringOf(stringType)) {
+      this.currentType = stringType;
+      return this.module.global_get(this.ensureGcStringLiteral(stringValue), stringType.toRef());
+    }
     let ptr = this.ensureStaticStringPtr(stringValue);
-    this.currentType = this.program.stringInstance.type;
+    this.currentType = stringType;
     return this.module.usize(ptr);
+  }
+
+  /**
+   * The `compareImpl` loop, emitted inline.
+   *
+   * `compareImpl` is no longer *called* — every call to it is replaced here, so the
+   * stdlib body (which walks `changetype<usize>(str) + i` with `load<u16>`) is never
+   * compiled and the function never exists in the module. The replacement therefore
+   * has to carry the loop itself rather than call it, which is why this is an
+   * emitter and not a `module.call`.
+   *
+   * Contract, unchanged: walk `rem` characters, answer the first differing pair as
+   * `a - b`, else `0`. A zero `rem` never dereferences, so an empty string at any
+   * offset is not an error. Labels carry a sequence number because the loop is
+   * inlined into `__eq`, `__gt`, `__lt` and `compareImpl` itself, and two of those
+   * can appear in one function body.
+   */
+  private emitGcStringCompareLoop(
+    heapType: HeapTypeRef,
+    strTypeRef: TypeRef,
+    s1: Index, p1: Index, s2: Index, p2: Index, rem: Index
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let seq = this.gcCompareSeq++;
+    let exit = "gcStrCmpExit" + seq.toString();
+    let again = "gcStrCmpAgain" + seq.toString();
+    let a = flow.getTempLocal(Type.i32).index;
+    let b = flow.getTempLocal(Type.i32).index;
+    let res = flow.getTempLocal(Type.i32).index;
+    return module.block(null, [
+      module.local_set(res, module.i32(0), false),
+      module.block(exit, [
+        module.loop(again, module.block(null, [
+          module.br(exit,
+            module.binary(BinaryOp.EqI32, module.local_get(rem, TypeRef.I32), module.i32(0))),
+          module.local_set(a, module.array_get(heapType,
+            module.local_get(s1, strTypeRef), module.local_get(p1, TypeRef.I32), TypeRef.I32), false),
+          module.local_set(b, module.array_get(heapType,
+            module.local_get(s2, strTypeRef), module.local_get(p2, TypeRef.I32), TypeRef.I32), false),
+          module.if(
+            module.binary(BinaryOp.NeI32, module.local_get(a, TypeRef.I32),
+              module.local_get(b, TypeRef.I32)),
+            module.block(null, [
+              module.local_set(res,
+                module.binary(BinaryOp.SubI32, module.local_get(a, TypeRef.I32),
+                  module.local_get(b, TypeRef.I32)), false),
+              module.br(exit)
+            ])
+          ),
+          module.local_set(p1,
+            module.binary(BinaryOp.AddI32, module.local_get(p1, TypeRef.I32), module.i32(1)), false),
+          module.local_set(p2,
+            module.binary(BinaryOp.AddI32, module.local_get(p2, TypeRef.I32), module.i32(1)), false),
+          module.local_set(rem,
+            module.binary(BinaryOp.SubI32, module.local_get(rem, TypeRef.I32), module.i32(1)), false),
+          module.br(again)
+        ]))
+      ]),
+      module.local_get(res, TypeRef.I32)
+    ], TypeRef.I32);
+  }
+
+  /**
+   * The leaf `@operator` statics of `String`, as far as a GC string needs them.
+   *
+   * `__eq` and `__not` are the two that cannot be expressed any other way — both
+   * begin `changetype<usize>(x) == 0`, and a reference is not an `i32`. `__gt` and
+   * `__lt` do the same test first and then defer to the comparison.
+   */
+  private compileGcStringOperator(op: GcStringOp, operands: ExpressionRef[], paramTypes: Type[]): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let arity = operands.length;
+    let seq = this.gcCompareSeq++;
+
+    if (op == GcStringOp.Not) {
+      if (arity != 1) return module.unreachable();
+      let strType = paramTypes[0];
+      let strRef = strType.toRef();
+      let local = flow.getTempLocal(strType).index;
+      // `!s` is "null or empty". `array.len` accepts a nullable ref and traps on
+      // null, so the null test comes first and the length test only runs when there
+      // is an array to measure.
+      return module.block(null, [
+        module.local_set(local, operands[0], false),
+        module.if(
+          module.ref_is_null(module.local_get(local, strRef)),
+          module.i32(1),
+          module.binary(BinaryOp.EqI32,
+            module.array_len(module.local_get(local, strRef)), module.i32(0))
+        )
+      ], TypeRef.I32);
+    }
+
+    if (arity != 2) return module.unreachable();
+    let leftType = paramTypes[0];
+    let rightType = paramTypes[1];
+    let leftRef = leftType.toRef();
+    let rightRef = rightType.toRef();
+    let heapType = module.heapType(leftRef);
+    let l = flow.getTempLocal(leftType).index;
+    let r = flow.getTempLocal(rightType).index;
+    let lLen = flow.getTempLocal(Type.i32).index;
+    let rLen = flow.getTempLocal(Type.i32).index;
+    // **No `return`.** This replacement is inlined where the operator was written,
+    // so a `return` here would return from the *caller* — correct only when the
+    // comparison is the caller's whole body, and a silent wrong answer otherwise.
+    // Every early exit is a `br` carrying its value to a block typed `i32`.
+    let out = "gcStrOpExit" + seq.toString();
+    let children: Array<ExpressionRef> = [
+      module.local_set(l, operands[0], false),
+      module.local_set(r, operands[1], false)
+    ];
+
+    if (op == GcStringOp.Eq) {
+      // Identity, then "either null is false", then the length test, then the
+      // character loop — the original order, so the identity fast path survives.
+      children.push(module.if(
+        module.ref_eq(module.local_get(l, leftRef), module.local_get(r, rightRef)),
+        module.br(out, 0, module.i32(1))));
+      children.push(module.if(
+        module.binary(BinaryOp.OrI32,
+          module.ref_is_null(module.local_get(l, leftRef)),
+          module.ref_is_null(module.local_get(r, rightRef))),
+        module.br(out, 0, module.i32(0))));
+      children.push(module.local_set(lLen, module.array_len(module.local_get(l, leftRef)), false));
+      children.push(module.local_set(rLen, module.array_len(module.local_get(r, rightRef)), false));
+      children.push(module.if(
+        module.binary(BinaryOp.NeI32,
+          module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32)),
+        module.br(out, 0, module.i32(0))));
+      children.push(module.br(out, 0,
+        module.binary(BinaryOp.EqI32,
+          this.emitGcStringCompareLoop(heapType, leftRef,
+            l, flow.getTempLocal(Type.i32).index, r, flow.getTempLocal(Type.i32).index, lLen),
+          module.i32(0))));
+      return module.block(out, children, TypeRef.I32);
+    }
+
+    // `>` and `<`: identity is false, an empty side decides, the common prefix
+    // decides, and an equal prefix defers to length.
+    let isGt = op == GcStringOp.Gt;
+    let cmp = flow.getTempLocal(Type.i32).index;
+    let rem = flow.getTempLocal(Type.i32).index;
+    children.push(module.if(
+      module.ref_eq(module.local_get(l, leftRef), module.local_get(r, rightRef)),
+      module.br(out, 0, module.i32(0))));
+    children.push(module.local_set(lLen, module.array_len(module.local_get(l, leftRef)), false));
+    children.push(module.local_set(rLen, module.array_len(module.local_get(r, rightRef)), false));
+    // an empty left side is greater than nothing and less than anything
+    children.push(module.if(
+      module.binary(BinaryOp.EqI32, module.local_get(lLen, TypeRef.I32), module.i32(0)),
+      module.br(out, 0, module.i32(0))));
+    children.push(module.if(
+      module.binary(BinaryOp.EqI32, module.local_get(rLen, TypeRef.I32), module.i32(0)),
+      module.br(out, 0, module.i32(1))));
+    // min(len) — the loop must not run off either end
+    children.push(module.local_set(rem,
+      module.if(
+        module.binary(BinaryOp.LtI32,
+          module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32)),
+        module.local_get(lLen, TypeRef.I32),
+        module.local_get(rLen, TypeRef.I32)), false));
+    children.push(module.local_set(cmp,
+      this.emitGcStringCompareLoop(heapType, leftRef,
+        l, flow.getTempLocal(Type.i32).index, r, flow.getTempLocal(Type.i32).index,
+        rem), false));
+    children.push(module.if(
+      module.local_get(cmp, TypeRef.I32),
+      module.br(out, 0, isGt
+        ? module.binary(BinaryOp.GtI32, module.local_get(cmp, TypeRef.I32), module.i32(0))
+        : module.binary(BinaryOp.LtI32, module.local_get(cmp, TypeRef.I32), module.i32(0)))));
+    children.push(module.br(out, 0,
+      isGt
+        ? module.binary(BinaryOp.GtI32,
+            module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32))
+        : module.binary(BinaryOp.LtI32,
+            module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32))));
+    return module.block(out, children, TypeRef.I32);
+  }
+
+  /**
+   * `compareImpl(str1, index1, str2, index2, len)` over two GC strings.
+   *
+   * The stdlib body is `changetype<usize>(str) + (index << 1)` then `load<u16>` in a
+   * loop. The replacement is the same loop with `array.get` — same contract (the
+   * first differing pair answers `a - b`, else `0`, and a zero length never
+   * dereferences, so an empty string at an offset is not an error), and it keeps
+   * the multibyte fast path out because comparing `u16` at a time is what the
+   * `while (len--)` tail of the original does anyway.
+   */
+  private compileGcStringCompare(operands: ExpressionRef[], paramTypes: Type[]): ExpressionRef {
+    if (operands.length != 5) return this.module.unreachable();
+    let module = this.module;
+    let flow = this.currentFlow;
+    let str1Type = paramTypes[0];
+    let str2Type = paramTypes[2];
+    let strTypeRef = str1Type.toRef();
+    let heapType = module.heapType(strTypeRef);
+
+    let s1 = flow.getTempLocal(str1Type).index;
+    let s2 = flow.getTempLocal(str2Type).index;
+    let p1 = flow.getTempLocal(Type.i32).index;
+    let p2 = flow.getTempLocal(Type.i32).index;
+    let rem = flow.getTempLocal(Type.i32).index;
+
+    return module.block(null, [
+      module.local_set(s1, operands[0], false),
+      module.local_set(p1, operands[1], false),
+      module.local_set(s2, operands[2], false),
+      module.local_set(p2, operands[3], false),
+      module.local_set(rem, operands[4], false),
+      this.emitGcStringCompareLoop(heapType, strTypeRef, s1, p1, s2, p2, rem)
+    ], TypeRef.I32);
+  }
+
+  /**
+   * `charCodeAt`, `at`, `charAt` and `concat` on a GC `String`.
+   *
+   * `charCodeAt` and `at` are `array.get`; `at`/`charAt` need a one-character
+   * string back, which is a fresh `(array (mut u16))` of length 1 or 2 (a surrogate
+   * pair). `concat` allocates `len(a)+len(b)` and copies both in with `array.copy`
+   * — the operation `+` and `${a}${b}` both funnel through.
+   *
+   * Returns `0` for a method this does not handle, so the caller falls through to
+   * the ordinary path (and its diagnostic, if the body cannot be emitted).
+   */
+  private compileGcStringCall(
+    access: PropertyAccessExpression,
+    receiverType: Type,
+    call: CallExpression
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let method = access.property.text;
+    let strTypeRef = receiverType.toRef();
+    let heapType = module.heapType(strTypeRef);
+
+    if (method == "charCodeAt") {
+      if (call.args.length != 1) return 0;
+      let strLocal = flow.getTempLocal(receiverType).index;
+      let idxLocal = flow.getTempLocal(Type.i32).index;
+      return module.block(null, [
+        module.local_set(strLocal,
+          this.compileExpression(access.expression, receiverType, Constraints.ConvImplicit), false),
+        module.local_set(idxLocal,
+          this.compileExpression(call.args[0], Type.i32, Constraints.ConvImplicit), false),
+        // Out of range answers 0 rather than trapping: `array.get` which would
+        // trap is only reached on the in-range arm. Note this is a typed `if` and
+        // **not** `module.return` — the intercept is inlined into the caller, so a
+        // `return` here would return from the caller's function.
+        module.if(
+          module.binary(BinaryOp.GeU32, module.local_get(idxLocal, TypeRef.I32),
+            module.array_len(module.local_get(strLocal, strTypeRef))),
+          module.i32(0),
+          module.array_get(heapType, module.local_get(strLocal, strTypeRef),
+            module.local_get(idxLocal, TypeRef.I32), TypeRef.I32)
+        )
+      ], TypeRef.I32);
+    }
+
+    if (method == "at" || method == "charAt") {
+      if (call.args.length != 1) return 0;
+      let strLocal = flow.getTempLocal(receiverType).index;
+      let idxLocal = flow.getTempLocal(Type.i32).index;
+      let outLocal = flow.getTempLocal(receiverType).index;
+      return module.block(null, [
+        module.local_set(strLocal,
+          this.compileExpression(access.expression, receiverType, Constraints.ConvImplicit), false),
+        module.local_set(idxLocal,
+          this.compileExpression(call.args[0], Type.i32, Constraints.ConvImplicit), false),
+        module.if(
+          module.binary(BinaryOp.GeU32, module.local_get(idxLocal, TypeRef.I32),
+            module.array_len(module.local_get(strLocal, strTypeRef))),
+          this.ensureStaticString(""),
+          module.block(null, [
+            module.local_set(outLocal, module.array_new(heapType, module.i32(1), module.i32(0)), false),
+            module.array_set(heapType, module.local_get(outLocal, strTypeRef), module.i32(0),
+              module.array_get(heapType, module.local_get(strLocal, strTypeRef),
+                module.local_get(idxLocal, TypeRef.I32), TypeRef.I32)),
+            module.local_get(outLocal, strTypeRef)
+          ], strTypeRef)
+        )
+      ], strTypeRef);
+    }
+
+    if (method == "concat") {
+      if (call.args.length != 1) return 0;
+      let aLocal = flow.getTempLocal(receiverType).index;
+      let bLocal = flow.getTempLocal(receiverType).index;
+      let lenLocal = flow.getTempLocal(Type.i32).index;
+      let outLocal = flow.getTempLocal(receiverType).index;
+      return module.block(null, [
+        module.local_set(aLocal,
+          this.compileExpression(access.expression, receiverType, Constraints.ConvImplicit), false),
+        module.local_set(bLocal,
+          this.compileExpression(call.args[0], receiverType, Constraints.ConvImplicit), false),
+        module.local_set(lenLocal,
+          module.binary(BinaryOp.AddI32,
+            module.array_len(module.local_get(aLocal, strTypeRef)),
+            module.array_len(module.local_get(bLocal, strTypeRef))), false),
+        module.local_set(outLocal,
+          module.array_new(heapType, module.local_get(lenLocal, TypeRef.I32), module.i32(0)), false),
+        module.array_copy(module.local_get(outLocal, strTypeRef), module.i32(0),
+          module.local_get(aLocal, strTypeRef), module.i32(0),
+          module.array_len(module.local_get(aLocal, strTypeRef))),
+        module.array_copy(module.local_get(outLocal, strTypeRef),
+          module.array_len(module.local_get(aLocal, strTypeRef)),
+          module.local_get(bLocal, strTypeRef), module.i32(0),
+          module.array_len(module.local_get(bLocal, strTypeRef))),
+        module.local_get(outLocal, strTypeRef)
+      ], strTypeRef);
+    }
+    return 0;
+  }
+
+  /**
+   * The global holding one distinct literal's array, and the pending start-time
+   * build that fills it.
+   *
+   * **Why a global and not `array.new_data` at each use site:** measured, that
+   * instruction needs a *passive* data segment whose element type is a packed `i16`,
+   * and this Binaryen's glue exports no `i16` type constructor at all
+   * (`_BinaryenTypeInt16` is undefined; only Int32/Int64/Float32/Float64 exist), so
+   * `_BinaryenArrayNewData` aborts with `heapType.isData()`. Materialising per site
+   * with `array.new_fixed` is reachable but loses deduplication and pays one
+   * constant per character at *every* use. A global costs one slot per distinct
+   * literal plus one call in `__start`.
+   *
+   * The build is deferred because `ensureStaticString` runs at any point during
+   * compilation, while the start function's body only exists as `currentBody` for
+   * the duration of `compileStartFunction`. `compileStartFunction` appends these
+   * after the module is otherwise compiled.
+   */
+  ensureGcStringLiteral(stringValue: string): string {
+    let existing = this.gcStringLiterals.get(stringValue);
+    if (existing != null) return existing;
+
+    let module = this.module;
+    let stringType = this.program.stringInstance.type;
+    let arrayTypeRef = stringType.toRef();
+    let globalName = `~gcstr/${this.gcStringLiterals.size}`;
+
+    // Deduplicated through the same segment map, so the bytes exist once.
+    let ptr = this.ensureStaticStringPtr(stringValue);
+    module.addGlobal(globalName, arrayTypeRef, true, this.makeFieldZero(stringType));
+    this.gcStringBuilds.push({ globalName, ptr, length: stringValue.length, type: stringType });
+    this.gcStringLiterals.set(stringValue, globalName);
+    return globalName;
+  }
+
+  /** Appends one build per distinct literal to the start function. */
+  private emitGcStringBuilds(body: ExpressionRef[]): void {
+    let module = this.module;
+    let builds = this.gcStringBuilds;
+    for (let b = 0, n = builds.length; b < n; ++b) {
+      let build = unchecked(builds[b]);
+      let arrayTypeRef = build.type.toRef();
+      let heapType = module.heapType(arrayTypeRef);
+      let tmp = this.currentFlow.getTempLocal(build.type).index;
+      let stmts = new Array<ExpressionRef>();
+      stmts.push(module.local_set(tmp,
+        module.array_new(heapType, module.i32(build.length), module.i32(0)), false));
+      // One `array.set` per character, unrolled: literals are short, and a loop
+      // would need its own locals and block for no gain at these sizes.
+      for (let i = 0; i < build.length; ++i) {
+        // **A fresh pointer expression per load.** Binaryen's IR is a tree with no
+        // sharing: handing the same `i32.const` node to several `load`s leaves the
+        // optimizer with one parent pointer for many children, and `-O1` and above
+        // then collapsed every `offset=2i` to `offset=0` — every literal read as a
+        // string of its first character repeated, and every string compared equal.
+        // `-O0` was correct, which is exactly how the same mistake looked in GC4.
+        stmts.push(module.array_set(heapType, module.local_get(tmp, arrayTypeRef),
+          module.i32(i),
+          module.load(2, false,
+            this.options.isWasm64
+              ? module.i64(i64_low(build.ptr), i64_high(build.ptr))
+              : module.i32(i64_low(build.ptr)),
+            TypeRef.I32, 2 * i, 2)));
+      }
+      stmts.push(module.global_set(build.globalName, module.local_get(tmp, arrayTypeRef)));
+      body.push(module.block(null, stmts, TypeRef.None));
+    }
+    builds.length = 0;
   }
 
   /** Ensures that a string exists in static memory and returns a pointer to it. Deduplicates. */
@@ -7342,6 +7775,19 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
+    // **`charCodeAt` / `at` / `charAt` / `concat` / `==` on a GC `String`.** The
+    // stdlib bodies read `dataStart`/`load<u16>`, which a wasm array does not have.
+    if (this.options.wasmGc && expression.expression.kind == NodeKind.PropertyAccess) {
+      let strAccess = <PropertyAccessExpression>expression.expression;
+      let strReceiver = this.resolver.resolveExpression(
+        strAccess.expression, flow, Type.auto, ReportMode.Swallow
+      );
+      if (strReceiver != null && gcStringOf(strReceiver)) {
+        let gcStr = this.compileGcStringCall(strAccess, strReceiver, expression);
+        if (gcStr != 0) return gcStr;
+      }
+    }
+
     // handle call to super
     if (expression.expression.kind == NodeKind.Super) {
       let flow = this.currentFlow;
@@ -7435,6 +7881,12 @@ export class Compiler extends DiagnosticEmitter {
       }
       case ElementKind.Function: {
         let functionInstance = <Function>target;
+        // **`compareImpl` under wasm GC.** It is the single chokepoint behind
+        // `==`, `equals`, `startsWith`, `endsWith`, `indexOf` and `includes` — every
+        // one of them ends here — and its body walks `changetype<usize>(str) + i`
+        // with `load<u16>`, which a wasm array cannot be addressed by. Replacing the
+        // *call* means one emission covers the whole comparison surface and no
+        // stdlib file changes.
         if (!this.checkNoManagedStructCopy(functionInstance, expression)) {
           return this.module.unreachable();
         }
@@ -8417,6 +8869,36 @@ export class Compiler extends DiagnosticEmitter {
     reportNode: Node,
     immediatelyDropped: bool = false
   ): ExpressionRef {
+    // **The stdlib string calls that cannot be emitted under wasm GC.**
+    //
+    // `compareImpl` is the single chokepoint behind `==`, `equals`, `startsWith`,
+    // `endsWith`, `indexOf` and `includes`; the `@operator` statics below it all
+    // begin `changetype<usize>(x) == 0`, and a reference is not an `i32`. Both are
+    // replaced *at the call* — the stdlib bodies are never compiled, so no file
+    // under `std/assembly` changes and the flag-off path is untouched by
+    // construction.
+    //
+    // This is the intercept point because operators do not come through
+    // `compileCallExpression`: `a == b` is lowered by `compileCommutativeBinaryOverload`,
+    // which calls `makeCallDirect` directly. One check here covers the binary
+    // operators, the unary ones, and ordinary `compareImpl(...)` calls.
+    if (this.options.wasmGc && operands != null) {
+      let gcName = instance.prototype.internalName;
+      let gcParamTypes = instance.signature.parameterTypes;
+      if (gcName == "~lib/util/string/compareImpl") {
+        this.currentType = Type.i32;
+        return this.compileGcStringCompare(operands, gcParamTypes);
+      }
+      let gcOp = gcStringOperator(gcName);
+      if (gcOp != null) {
+        // `currentType` is the *result* type of whatever was just compiled, and an
+        // early return here does not pass through the assignment `makeCallDirect`
+        // would have made. Leaving it as the operand's type made `a == b` resolve
+        // as `String` and the enclosing `return` report "not assignable to bool".
+        this.currentType = Type.bool;
+        return this.compileGcStringOperator(gcOp, operands, gcParamTypes);
+      }
+    }
     // A discarded-result sret call allocates its slot in `compileCallDirect`
     // (which builds the operands) and is wrapped here, where the call node is.
     let sretMarkLocal = this.sretDiscardMark;
@@ -11904,6 +12386,23 @@ export class Compiler extends DiagnosticEmitter {
       let gcLengthReceiver = resolver.resolveExpression(
         expression.expression, flow, Type.auto, ReportMode.Swallow
       );
+      // **`String#length` is `array.len`.** The getter reads
+      // `rtSize >> 1` from a linear header that a wasm array does not have.
+      if (gcLengthReceiver != null && gcStringOf(gcLengthReceiver)) {
+        if (expression.property.text != "length") {
+          this.error(
+            DiagnosticCode.Property_0_does_not_exist_on_type_1,
+            expression.property.range, expression.property.text, gcLengthReceiver.toString()
+          );
+          return module.unreachable();
+        }
+        let stringReceiver = this.compileExpression(
+          expression.expression, gcLengthReceiver, Constraints.ConvImplicit
+        );
+        this.currentType = Type.i32;
+        return module.array_len(stringReceiver);
+      }
+
       // **A dynamic `Array<T>`: `length_`, the used count.** Capacity lives in the
       // backing array and must stay invisible; see `compileGcDynamicArrayLength`.
       if (gcLengthReceiver != null && gcDynamicArrayElementOf(gcLengthReceiver) != null) {
@@ -11929,11 +12428,11 @@ export class Compiler extends DiagnosticEmitter {
           );
           return module.unreachable();
         }
-        let receiver = this.compileExpression(
+        let stringReceiver = this.compileExpression(
           expression.expression, gcLengthReceiver, Constraints.ConvImplicit
         );
         this.currentType = Type.i32;
-        return module.array_len(receiver);
+        return module.array_len(stringReceiver);
       }
     }
 
@@ -15692,7 +16191,7 @@ export class Compiler extends DiagnosticEmitter {
     // `classReference`, not `getClass()` — the latter requires an *internal
     // reference*, and a `B | null` field is a nullable class type.
     let fieldClass = fieldType.classReference;
-    if (fieldClass != null && isGcClass(fieldClass)) {
+    if (fieldClass != null && (isGcClass(fieldClass) || gcStringOf(fieldType))) {
       return this.module.ref_null(assert(fieldType.nullableType).toRef());
     }
     return this.makeZero(fieldType);
@@ -16265,7 +16764,10 @@ export class Compiler extends DiagnosticEmitter {
     if (message) {
       messageArg = this.compileExpression(message, stringInstance.type, Constraints.ConvImplicit);
     } else {
-      messageArg = this.makeZero(stringInstance.type);
+      // `makeFieldZero`, not `makeZero`: a GC reference's zero is `ref.null`, and
+      // `makeZero` answers `i32(0)` for a class — right for the pointer ABI, wrong
+      // for `abort`'s now-reference-typed `message` parameter.
+      messageArg = this.makeFieldZero(stringInstance.type);
     }
 
     return this.makeStaticAbort(messageArg, codeLocation);

@@ -504,6 +504,82 @@ function check(name, condition, detail) {
   }
 }
 
+// 20 — `String` as `(array (mut i16))` ---------------------------------------
+//
+// The gate for every real program: a `String` field made a class ineligible, and
+// `gcUniform` is all-or-nothing, so one string anywhere put the whole module back
+// on the pointer ABI. The measured facts here are (a) a string is a wasm array at
+// a two-byte element width, (b) the comparison surface — `==`, `<`, `startsWith`,
+// `indexOf`, `includes` — answers correctly through the one chokepoint they all
+// share, and (c) a class holding a `String` is now a GC struct.
+{
+  const built = compile("strings.ts", "str.wasm", ["--wasmGc"]);
+  check("the string fixture compiles with validation on", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "str.wat"), "utf8");
+    // Two bytes per character, not four: packedness is what keeps a `u16` array a
+    // different *type* from an `i32` array, so `String` is not structurally a
+    // `StaticArray<i32>`.
+    check("a String is an (array (mut i16))", /\(type \S*~gcarray\/u16 \(array \(mut i16\)\)\)/.test(wat),
+      wat.split("\n").slice(0, 4).join("\n"));
+    check("length is array.len", wat.includes("array.len"));
+    check("a class holding a String is a GC struct",
+      /\$tests\/gc\/strings\/Label \(sub \(struct .*ref null \S*~gcarray\/u16/.test(wat),
+      (wat.match(/\(type \S*Label[^\n]*/) ?? ["absent"])[0]);
+
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "str.wasm")), imports);
+    const e = instance.exports;
+    const want = {
+      lengthOf: 5, codeAt: 101, atChar: 111, charAtCode: 104,
+      concatLen: 4, concatCode: 99,
+      eqSame: 1, eqDiff: 0, neDiff: 1, ltTrue: 1, ltFalse: 0, gtTrue: 1, eqLengths: 0,
+      startsOk: 1, startsBad: 0, indexOfLl: 2, includesOk: 1, inclusiveComp: 0,
+      labelRound: 1112,
+    };
+    for (const name of Object.keys(want)) {
+      const got = e[name]();
+      check(`strings: ${name}() = ${want[name]}`, got === want[name], `got ${got}`);
+    }
+  }
+}
+
+// 21 — the string fixture at every optimization level ------------------------
+{
+  const answers = [];
+  for (const level of ["-O0", "-O1", "-O2", "-O3"]) {
+    const built = compile("strings.ts", `str${level}.wasm`, ["--wasmGc", level]);
+    check(`strings ${level} compiles`,
+      built.ok && !/wasm-validator|Aborted/.test(built.output), built.output);
+    if (built.ok) {
+      const { instance } = await WebAssembly.instantiate(
+        readFileSync(join(scratch, `str${level}.wasm`)), imports);
+      const e = instance.exports;
+      answers.push([e.lengthOf(), e.codeAt(), e.concatLen(), e.eqDiff(), e.ltTrue(),
+        e.startsBad(), e.indexOfLl(), e.labelRound()].join(","));
+    }
+  }
+  check("strings: -O0..-O3 all agree", new Set(answers).size === 1, answers.join(" | "));
+}
+
+// 22 — the flag off still leaves String in linear memory ---------------------
+{
+  const built = compile("strings.ts", "strplain.wasm", []);
+  check("the string fixture compiles without the flag", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "strplain.wat"), "utf8");
+    check("flag off: no wasm GC array for String", !/array.new|array.get|array.len/.test(wat),
+      wat.split("\n").slice(0, 4).join("\n"));
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "strplain.wasm")), imports);
+    const e = instance.exports;
+    check("flag off: the same answers",
+      e.lengthOf() === 5 && e.codeAt() === 101 && e.concatLen() === 4 &&
+      e.eqDiff() === 0 && e.ltTrue() === 1 && e.startsBad() === 0 &&
+      e.indexOfLl() === 2 && e.labelRound() === 1112);
+  }
+}
+
 if (failures) {
   console.error(`\nwasm-gc: ${failures} check(s) failed`);
   process.exit(1);

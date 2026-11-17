@@ -306,6 +306,13 @@ function gcStructFieldsSupported(cls: Class): bool {
 
 /** Whether one field's type can be a wasm struct field in this slice. */
 function gcStructFieldSupported(fieldType: Type): bool {
+  // **A `String` field is storable now.** `String` is an `(array (mut u16))` under
+  // the flag, so a class holding one has a reference-typed field like any other and
+  // needs no exclusion. Before this round it was the single reason a real program
+  // (`class App { name: string }`) could not be a GC struct at all — and because
+  // `gcUniform` is all-or-nothing, one such field put the *whole* module back on the
+  // pointer ABI, which is where the parked-frame problem lives.
+  if (gcStringOf(fieldType)) return true;
   let cls = fieldType.classReference;
   if (cls != null) return isGcClass(cls);
   switch (fieldType.kind) {
@@ -369,6 +376,52 @@ function isGcBaseChainUsable(cls: Class): bool {
     cursor = base;
   }
   return true;
+}
+
+/**
+ * Whether `type` is `String` under `--wasmGc`, where a string **is** an
+ * `(array (mut u16))`.
+ *
+ * `String` is a bare block — no declared fields, length implied by the allocation —
+ * so it maps onto a wasm array exactly like `StaticArray<u16>` does, and reuses the
+ * same array type. What differs is the *literal*: today a literal is a data segment
+ * and a `String` points at it, and under GC each distinct literal is one object
+ * built in `__start`.
+ */
+export function gcStringOf(type: Type | null): bool {
+  if (type == null || !gcClassesEnabled) return false;
+  let cls = type.classReference;
+  if (cls == null) return false;
+  let instance = cls.program.stringInstance;
+  return instance != null && cls == instance;
+}
+
+/** The leaf `String` operators that need a GC-specific body. */
+export const enum GcStringOp {
+  /** `__eq` */
+  Eq,
+  /** `__not` */
+  Not,
+  /** `__gt` */
+  Gt,
+  /** `__lt` */
+  Lt
+}
+
+/**
+ * Which GC operator body (if any) replaces a resolved function's stdlib body.
+ *
+ * Only the leaves: `__ne`, `__gte` and `__lte` are one-line wrappers around these,
+ * so their own bodies compile unchanged and reach the replacement by call.
+ */
+export function gcStringOperator(internalName: string): GcStringOp | null {
+  switch (internalName) {
+    case "~lib/string/String.__eq": return GcStringOp.Eq;
+    case "~lib/string/String.__not": return GcStringOp.Not;
+    case "~lib/string/String.__gt": return GcStringOp.Gt;
+    case "~lib/string/String.__lt": return GcStringOp.Lt;
+    default: return null;
+  }
 }
 
 /**
@@ -1418,6 +1471,10 @@ export class Type {
     // while `StaticArray<String>` keeps the pointer ABI. The build is delegated to
     // `ensureType` — the array type needs the module that owns the builder cache,
     // and `module.ts` imports this file.
+    // **`String` is an `(array (mut u16))`** — the same type `StaticArray<u16>`
+    // gets, because a `String` is a bare block with no fields of its own.
+    if (gcStringOf(this)) return ensureType(this);
+
     if (gcArrayElementOf(this) != null) return ensureType(this);
 
     if (gcClassesEnabled && this.isInternalReference) {

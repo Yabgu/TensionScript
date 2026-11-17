@@ -31,7 +31,8 @@ import {
   gcDynamicArrayElementOf,
   GC_ARRAY_DATA_INDEX,
   GC_ARRAY_LENGTH_INDEX,
-  gcMixedAbiReferrer
+  gcMixedAbiReferrer,
+  gcStringOf
 } from "./types";
 import { Class } from "./program";
 import * as binaryen from "./glue/binaryen";
@@ -4020,6 +4021,13 @@ export function ensureType(type: Type): TypeRef {
   let typeRef = tryEnsureBasicType(type);
   if (typeRef) return typeRef;
 
+  // **`String` is an `(array (mut u16))`** — one array type, shared with
+  // `StaticArray<u16>`, since a `String` is a bare block.
+  if (gcStringOf(type)) {
+    let owner = type.nonNullableType.classReference;
+    if (owner != null) return ensureGcArrayType(owner.program.module, Type.u16);
+  }
+
   // **`StaticArray<T>` is a wasm GC array.** Answered here because the array type
   // needs this module's builder cache, and `types.ts` is imported by this file.
   {
@@ -4439,7 +4447,7 @@ export function ensureGcArrayType(module: Module, element: Type): TypeRef {
   let cached = module.gcArrayTypeCache.get(element);
   if (cached) return cached;
   let builder = binaryen._TypeBuilderCreate(1);
-  binaryen._TypeBuilderSetArrayType(builder, 0, gcElementTypeRef(element), PackedType.NotPacked, true);
+  binaryen._TypeBuilderSetArrayType(builder, 0, gcElementTypeRef(element), gcElementPackedType(element), true);
   let out = binaryen._malloc(8);
   if (!binaryen._TypeBuilderBuildAndDispose(builder, out, out, out + 4)) {
     let errorIndex = binaryen.__i32_load(out);
@@ -4459,6 +4467,28 @@ export function ensureGcArrayType(module: Module, element: Type): TypeRef {
 }
 
 /** The wasm value type of one array element. */
+/**
+ * The storage width of one array element.
+ *
+ * `gcElementTypeRef` answers `i32` for every sub-word integer — there is no
+ * `_BinaryenTypeInt16` in this glue — so packedness is what separates a `u16`
+ * array from an `i32` array. Without it `String` and `StaticArray<i32>` both
+ * canonicalise to `(array (mut i32))`: one type for two element kinds, so a
+ * `String` would be structurally a `StaticArray<i32>` (exactly the kind of
+ * confusion the brand field exists to prevent), and every character would cost
+ * four bytes instead of two.
+ */
+function gcElementPackedType(element: Type): PackedType {
+  switch (element.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.U8: return PackedType.I8;
+    case TypeKind.I16:
+    case TypeKind.U16: return PackedType.I16;
+  }
+  return PackedType.NotPacked;
+}
+
 function gcElementTypeRef(element: Type): TypeRef {
   // **A class is checked before the kind switch**, because a class reference's
   // `kind` is `Usize` ("also the base of class types") — so the integer arms below
@@ -4500,6 +4530,16 @@ function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[]): TypeRef {
   // *internal reference*, which a `B | null` field is not once the union has been
   // formed — and a nullable class field is exactly what a cycle needs, since
   // neither object can be constructed with the other already present.
+  // **A `String` field is an array reference.** `String` is `(array (mut u16))`
+  // under the flag — the same type `StaticArray<u16>` uses — so the field holds a
+  // `(ref null $~gcarray/u16)` and needs no class slot. Without this case the field
+  // reached the `assert(false)` below, which is the "unsupported field kind" guard,
+  // and a real class (`class App { name: string }`) crashed the compiler instead of
+  // being emitted.
+  if (gcStringOf(fieldType)) {
+    let strOwner = fieldType.nonNullableType.classReference;
+    if (strOwner != null) return ensureGcArrayType(strOwner.program.module, Type.u16);
+  }
   let fieldClass = fieldType.classReference;
   if (fieldClass != null && isGcClass(fieldClass)) {
     let slot = gcSlotOf(fieldClass, slots);

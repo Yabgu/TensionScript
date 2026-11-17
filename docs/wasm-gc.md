@@ -884,3 +884,138 @@ intrinsic was **not** built this round — `length`'s setter turned out to need 
 same growth sequence `push` already emits, so interception was cheaper than an
 intrinsic for it; the remaining methods are the ones that genuinely want the
 intrinsic, because they are stdlib bodies rather than syntax.
+
+## `String` is a wasm GC array, and with it every real program becomes GC-uniform
+
+`String extends StaticArray<u16>` and `StaticArray` had already become an
+`(array (mut T))`, so the storage half was done. What was left was the
+representation of a *literal* and the method bodies that assumed a pointer.
+
+### The literal: option (b), chosen on two numbers
+
+**(a) `array.new_data`** — the natural first choice, and it is **unreachable in this
+glue**. `_BinaryenArrayNewData` exists, but it asserts `heapType.isData()` and what
+it wants is a *passive data segment of the packed element type*; this glue exports
+`_BinaryenTypeInt32/Int64/Float32/Float64` and no `Int16`, so a `u16` segment cannot
+be typed, and one array would also be materialised per *use site* rather than per
+literal.
+
+**(b) decode once in `__start`** — one global `(ref null $~gcarray/u16)` per
+distinct literal, filled from the (already deduplicated) data segment at startup.
+Measured on a fixture with 3 distinct literals and 1 repeat: the flag-off baseline
+is **240 bytes with 3 data segments** (the repeat already deduplicates), and the
+GC build is **one global and one build per distinct literal**, 4 globals for 4
+distinct strings and 3 for 3. Startup work is proportional to total literal
+characters, paid once, and a repeat costs nothing.
+
+The flip side is ordering, and it cost a real bug: a module-scope
+`const E: string = "…"` becomes a *start-function assignment* of
+`global.get(~gcstr/N)`, so the literal's global must be built **before** the
+initialiser that reads it. Emitting the builds last (which is where they are
+collected) assigned the constant `ref.null`, and the first use dereferenced a null
+pointer. They are now unshifted to the front of `__start`.
+
+### Element width: packed `i16`, not `i32`
+
+`gcElementTypeRef` answers `i32` for every sub-word integer, so packedness is the
+only thing that separates a `u16` array from an `i32` array — and without it
+`String` and `StaticArray<i32>` canonicalise into **one type**. Two consequences,
+both real: four bytes per character instead of two, and a `String` that is
+structurally a `StaticArray<i32>`. `gcElementPackedType` now passes
+`PackedType.I16`/`I8` for the sub-word kinds.
+
+### The comparison surface, replaced at one chokepoint
+
+`compareImpl` is behind `==`, `!=`, `<`, `>`, `startsWith`, `endsWith`, `indexOf`
+and `includes` — every one of them. Its body walks
+`changetype<usize>(str) + i` with `load<u16>`, which a wasm array does not have. So
+the **call** is replaced (`makeCallDirect`) with an inline `array.get` loop of the
+same contract: first differing pair answers `a - b`, else `0`, and a zero length
+never dereferences.
+
+The same intercept point carries the four leaf `@operator` statics. `__eq` and
+`__not` both begin `changetype<usize>(x) == 0`, and a reference is not an `i32`;
+identity becomes `ref.eq`, the null test becomes `ref.is_null`, and the rest is
+`array.len` plus the loop. `__ne`, `__gte` and `__lte` are one-line wrappers, so
+their own bodies compile unchanged and reach the replacements by call.
+
+**`makeCallDirect`, not `compileCallExpression`, and the difference mattered:**
+`a == b` is lowered by `compileCommutativeBinaryOverload`, which calls
+`makeCallDirect` directly. An intercept in `compileCallExpression` never fires for
+an operator.
+
+Two mistakes in this emission are worth recording because both were silent:
+
+- **`module.return` inside the replacement returns from the *caller*.** Correct
+  only when the comparison is the caller's whole body, and a wrong answer
+  otherwise. Every early exit is now a `br` carrying its value to a block typed
+  `i32`. (A `br_if` with a value is not usable for this: Binaryen gives it the
+  value's type, so a non-final one must be dropped — hence `if (cond) br $out`.)
+- **The early return also skipped the `currentType` assignment** `makeCallDirect`
+  would have made, so `a == b` resolved as `String` and the enclosing `return`
+  reported "not assignable to bool". `currentType` is set explicitly now.
+
+And one that `-O0` could not see, the same shape as GC4's re-used
+`ExpressionRef`: the literal builder handed **one** `i32.const ptr` node to every
+`load` in a literal's character loop. Binaryen's IR is a tree, so the shared child
+left the optimizer with one parent pointer for many nodes; at **-O1 and above**
+every `offset=2i` collapsed to `offset=0`, every literal read as its first
+character repeated, and every string compared equal. `-O0` was correct throughout.
+A fresh pointer expression per load fixes it, and the `-O0..-O3` gate is what
+caught it.
+
+### The eligibility flip, and the three things it uncovered
+
+A `String` field used to make a class ineligible, and `gcUniform` is all-or-nothing
+— so one string anywhere put the **whole module** back on the pointer ABI, which is
+exactly where the parked-frame problem lives. A `String` field is now supported as
+an array reference, and a `class Label { text: string; n: i32 }` is a GC struct with
+a `(ref null $~gcarray/u16)` field.
+
+Three defects only a real class could expose, in the order they appeared:
+
+1. **`gcFieldTypeRef` had no `String` case** and hit its own
+   `assert(false)` — "unsupported field kind" — crashing the compiler on
+   `class App { name: string }` instead of emitting it.
+2. **`~lib/rt/__visit_globals` read every class-typed global as an `i32`.** It
+   already skipped `isGcClass` globals, but `isGcClass` is *false for the standard
+   library by design*, so a string global slipped through and produced
+   `i32 != (ref null $array.0): global.get must have right type`. The skip is now
+   keyed on the type (`gcStringOf`), not on the class being migrated.
+3. **`makeAbort` zeroed its message with `makeZero`,** which answers `i32(0)` for a
+   class — so every `abort`/`assert` in the stdlib passed a pointer-shaped zero into
+   a now-reference-typed parameter. `makeFieldZero` (the GC10 fix, applied in the
+   same place) resolves it.
+
+Together these mean `std/assembly/util/error.ts` compiles under the flag at all,
+which it previously did not: its `@lazy @inline export const E_X: string = "…"`
+messages cannot be inline constants when a literal is an object built in `__start`.
+The `@inline` is dropped for GC reference globals (with the existing warning), so
+the global becomes an ordinary one; flag-off keeps the diagnostic.
+
+### Operations covered
+
+`length` (`array.len`), `charCodeAt`, `at`, `charAt` (a fresh one-character array),
+`concat` (and therefore `+`), `==`, `!=`, `<`, `>`, `<=`, `>=`, `startsWith`,
+`endsWith`, `indexOf`, `includes` — the last four through the `compareImpl`
+replacement.
+
+**Remaining**: everything that *allocates a new string* through the guest allocator
+— `slice`, `substring`, `replace`, `split`, `trim`, `padStart`, `toUpperCase`,
+`parseInt`, `format`. Measured: `"hello".substring(1, 4)` fails validation with
+`~(local.set $21 (call $~lib/rt/itcms/__new …))` — the body allocates through
+`__new` and stores the result into a GC-ref local. These need the allocation path,
+not a comparison, and that is the next slice.
+
+**Hashing** is not migrated: `std/assembly/util/hash.ts`'s `hashStr` does
+`changetype<usize>(key)` and `load<u32>(pos)`, so it keeps a pointer-ABI dependency
+alive for any program that instantiates a `Map` with string keys. It is dead code
+unless a `Map` is used, so it does not block today; it will block `Map`.
+
+### Result
+
+`test:gc` 101 → **132 checks**, `-O0..-O3` agree on every fixture including the
+string ones, `test:compiler` stays at its 5 pre-existing mismatches, and the flag-off
+output is **byte-identical on all 11 fixtures** (verified by compiling each with a
+`dist/` built from `src/` reverted, then with the current one). No file under
+`std/assembly` was touched.

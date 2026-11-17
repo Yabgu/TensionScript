@@ -55,7 +55,8 @@ import {
   TypeKind,
   TypeFlags,
   MemoryModelCode,
-  isGcClass
+  isGcClass,
+  gcStringOf
 } from "./types";
 
 import {
@@ -11440,6 +11441,12 @@ export function compileVisitGlobals(compiler: Compiler): void {
       classReference &&
       !classReference.hasDecorator(DecoratorFlags.Unmanaged) &&
       !isGcClass(classReference) &&
+      // `String` is the same case: an `(array (mut u16))` global is traced by the
+      // engine, and reading it as an `i32` here is a type error. The test is on the
+      // *type*, not on the class being `~lib/` — `isGcClass` answers false for the
+      // standard library by design, which is exactly why the string case needs its
+      // own predicate.
+      !gcStringOf(globalType) &&
       global.is(CommonFlags.Compiled)
     ) {
       if (global.is(CommonFlags.Inlined)) {
