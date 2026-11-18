@@ -397,6 +397,61 @@ The cost (C) keeps: **an async program is two modules**, and the runtime must sh
 whoever instantiates. The second is already how `tension::abi` is bound — the new part is one more
 module in that set, not a new kind of dependency.
 
+### 7.4 The runtime is not "all wasm" — only its spine is
+
+"Hand-written `.wat` runtime" is too broad and it was the wrong thing to write down. What the
+runtime module must contain is exactly the instructions the language cannot express:
+
+- the tag, and `do_yield` — whose body is one `(suspend $yield)`;
+- the continuation **table**, because only this module can name `(cont $ft)`;
+- `cont.new` and `resume`, i.e. `spawn(slot, f)` and `step(slot) → alive`.
+
+Everything else is policy, and policy is ordinary code with no special instructions. Measured:
+`guest5.wat` contains **zero** stack-switching instructions and *is* the scheduler —
+
+```wat
+(func (export "pump") (result i32) (local $alive i32)
+  (drop (call $spawn (i32.const 0) (call $worker_ref)))
+  (loop $again
+    (local.set $alive (call $step (i32.const 0)))
+    (br_if $again (local.get $alive)))
+  (global.get $ticks))
+```
+
+`rt2.wasm` + `guest5.wasm`, wasmtime 50.0.1: `TICKS=10` — the worker parked once, resumed, and ran
+to completion, with the loop living in the guest.
+
+So the division is not "runtime in wasm, program in TensionScript". It is:
+
+- **mechanism** (must be `.wat`): the tag, `suspend`, the continuation table, `cont.new`, `resume`;
+- **policy** (should be TensionScript): the ready queue, fairness, `join`, pools, `__asyncPump`'s
+  loop — all of it a `loop` and a `br_if` over slot ids, because resuming is just a call.
+
+Which is also why `rt2.wat` has **no memory, no imports and no start function**: it holds no data.
+Continuations sit in its table; every other byte of state belongs to the guest.
+
+### 7.5 Why the spine cannot be TensionScript today
+
+1. **It is circular.** The language has no syntax, intrinsic or builtin for `suspend` / `cont.new` /
+   `resume` (grep of `src/` is empty). Adding one means the compiler must *emit* those instructions,
+   which needs Binaryen constructors that do not exist. Writing the spine in TensionScript
+   presupposes solving the exact problem the spine exists to avoid.
+2. **It would depend on Backend A.** A compiled `async function` imports `scheduler.park`
+   (`std/assembly/task-rt.ts:145`) — measured on a two-function probe, whose only imports were
+   `env.abort` and `scheduler.park`. A runtime built out of TensionScript async code would rest on
+   the state machine it is replacing.
+3. **It would carry a heap.** Every compiled module defines and exports a memory — the trivial
+   `export function one(): i32` above emits `(memory 0) 0` and `(export "memory" (memory 0))`.
+   Two memories per program, or `--importMemory` (`cli/index.js:317`) to invert ownership of the
+   guest's heap. The spine needs neither.
+4. **It would move with the compiler.** The spine is an ABI artifact versioned with the host, not
+   per program. Hand-written, it is fixed and reviewable; generated, a compiler regression could
+   break async for programs that never use async.
+
+When (A) lands — Binaryen exposing the constructors — the spine could be written in TensionScript
+and compiled, with the `.wat` kept as the oracle its output is tested against. That is a real
+successor, not a rejection.
+
 ### 7.4 What would change this
 
 If the compiler ever wants single-module async output with debug info, (A) is the path and the
