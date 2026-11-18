@@ -274,87 +274,117 @@ the guest cannot dispatch for itself.
 
 ## 7. The emission mechanism — settled by spike (2026-11-18)
 
-Binaryen 131's **public JS API has no cont constructors**, verified:
+Binaryen 131's public JS API has **no continuation constructors**, confirmed:
 
 ```
-node --input-type=module -e 'import * as b from "binaryen";
-  console.log(Object.keys(b).filter(k=>/Cont|Suspend|Resume|Tag|Stack/i.test(k)))'
-→ (none)          b.Features.StackSwitching = 65536   (the flag exists)
+Object.keys(b).filter(k => /^_Binaryen(ContNew|Suspend|Resume|ResumeThrow|StackSwitch)$/.test(k))
+→ []
 ```
 
-C1's finding stands — but the spike found the problem is **worse than a missing API**, and
-that settled the choice.
+`_BinaryenContNewId`, `_BinaryenSuspendId`, `_BinaryenResumeId` exist but are expression **ID
+accessors**, not constructors, and are not declared in `src/binaryen-c.h` at all. Upstream's C++
+side has the builders (`wasm-builder.h`: `makeContNew`, `makeResume`, `makeSuspend`); the C API —
+and therefore the JS API, which is the C API through emscripten — exposes none of them. So
+JavaScript cannot *construct* a `cont.new` expression.
 
-**Binaryen cannot emit a runnable stack-switching module at all.** `parseText` *accepts*
-`cont` types; the binary it then emits is refused by wasmtime 50 at parse:
+**But Binaryen can emit, validate and run a continuation module through the text path.** Measured
+end-to-end on snowarch, wasmtime 50.0.1:
 
 ```
-wasm-tools validate --features all  → invalid continuation type (at offset 0x10)
-wasmtime 50.0.1 Module::from_file  → failed to parse WebAssembly module
+parseText → setFeatures(GC | StackSwitching | ExceptionHandling | ReferenceTypes)
+          → emitBinary → wasm-tools validate --features all  → OK
+          → wasmtime: compiles, runs, parks, resumes, returns 1
 ```
 
-The type section reads `01 0a 03 60 00 00 5d 70 60 00 01 7f` — `5d 70`, the *pre-final*
-encoding (`cont` of a heaptype). The standard is `5d 00` (`cont` of a type index), which is
-what `wasm-tools 1.261` emits for the same module. Two further defects on the same path:
-**`elem declare` is dropped** on reparse, so `ref.func $body` becomes an undeclared function
-reference — and it is dropped from the binary too, not only from the text.
+### 7.1 The landmine: GC must be enabled
 
-So the three options resolve as:
+This is the finding that produced two wrong conclusions on the first pass, so it is written as a
+rule rather than a caveat:
 
-- **(A) Extend our own glue** — no longer a shim. It needs a fix *inside* Binaryen's type
-  encoding and element-segment handling, i.e. a patched C++ build, not an added export.
-  More expensive than this file assumed, and still an emscripten rebuild.
-- **(B) Text splice + reparse** — **dead.** The reparse yields a binary the engine refuses at
-  parse. That is not a debug-info trade-off; it does not run.
-- **(C) Separate runtime module** — **proven, and it is the design.**
+**A module containing continuation types must be written with `GC` enabled**, even though stack
+switching is the proposal it uses. `HeapType::asWrittenGivenFeatures` (`src/wasm-type.h:280`):
 
-### 7.1 What (C) proves
+```cpp
+// Without GC, only top types like func and extern are supported.
+if (!feats.hasGC() && *this != HeapType::string) {
+  return getTop();
+}
+```
 
-Three modules in one store (`abi ← guest ← coreloop`), each validated by
-`wasm-tools validate --features all`, then compiled and run by wasmtime 50.0.1:
+Without GC, every concrete heap type is generalized to its top before writing: a continuation of
+`(func)` becomes `cont func`, encoded `5d 70` — the *pre-final* form, which wasmtime rejects at parse
+with `invalid continuation type`. With GC, the signature survives as a type index and the writer
+emits `5d 00`. Same source, four masks, measured:
+
+| feature mask | type section | `wasm-tools validate` |
+| --- | --- | --- |
+| StackSwitching | `... 5d 70 ...` | invalid continuation type |
+| + ReferenceTypes | `... 5d 70 ...` | invalid continuation type |
+| + ExceptionHandling | `... 5d 70 ...` | invalid continuation type |
+| + **GC** | `... 5d 00 ...` | valid — and runs |
+
+The second half of the landmine: **`_BinaryenModuleSetFeatures(module.ref, mask)` silently does
+nothing.** `module.setFeatures(mask)` is the call that applies. A spike using the former reads
+`5d 70` back, concludes Binaryen cannot express typed continuations, and is wrong — as this one
+briefly was. Anything that emits a continuation module must assert `getFeatures()` afterwards, or
+better, assert the emitted type section.
+
+There is no conflict with the tree's position on GC: wasm GC is already a hard dependency of this
+fork (the GC arc, `d96ac606`). Async simply makes the compiler *state* it.
+
+### 7.2 The three options, re-ranked
+
+- **(A) Extend our own glue.** Still an emscripten rebuild — but for a **narrower** reason than the
+  first pass assumed: the writer is sound, so this is only about exposing constructors
+  (`BinaryenContNew`/`Resume`/`Suspend` over the existing C++ builders). Buys programmatic IR,
+  optimisation and DWARF. Highest value, highest build cost, no longer "necessary for correctness".
+- **(B) Text splice + reparse.** **Viable.** Build IR → `emitText` → splice the continuation
+  functions → reparse → `emitBinary`, with GC in the feature mask. No toolchain change. The cost is
+  the one the file always named: text carries no DWARF, so async programs lose debug info and
+  source maps.
+- **(C) Separate runtime module.** **Proven, and preferred.** A hand-written `.wat` runtime owns
+  the tag, `do_yield`, the context table and `spawn`/`step`; the guest imports them and contains
+  **no stack-switching instruction at all**.
+
+**Recommendation: (C).** It needs no compiler API, keeps the guest a plain module, leaves DWARF
+untouched, and is already demonstrated — see §7.3.
+
+### 7.3 What (C) proves
+
+Three modules in one store (`abi ← guest ← coreloop`), each validated, then run on wasmtime 50:
 
 1. **`cont.new` on an imported function works.** The coreloop imports `guest.main` and does
-   `cont.new $ct (ref.func $main)`; `elem declare func $main` lives in the coreloop's own
-   text, where it survives.
-2. **A guest suspends by calling an imported function.** The runtime exports `do_yield`,
-   whose body is `(suspend $yield)`. The guest's `main` is `call $do_yield; i32.const 42` —
-   **no stack-switching instruction anywhere in the guest module.** Because the host call
-   runs on the guest's stack, the suspend suspends the *guest's* continuation. It parks,
-   resumes, and returns 42.
-3. **`spawn` crosses the boundary as a funcref.** The guest produces `ref.func $worker` and
-   passes it to `runtime.spawn`, which does `cont.new` on it and parks it in a runtime-owned
-   table; a later `step` resumes it. The worker ran, suspended, resumed, completed.
+   `cont.new $ct (ref.func $main)`; `elem declare func $main` lives in the coreloop's own text.
+2. **A guest suspends by calling an imported function.** The runtime exports `do_yield`, whose body
+   is `(suspend $yield)`. The guest's main is `call $do_yield; i32.const 42`. Because that call runs
+   on the guest's stack, the suspend suspends the *guest's* continuation. Parks, resumes, returns 42.
+3. **`spawn` crosses the boundary as a funcref.** The guest produces `ref.func $worker` and passes it
+   to `runtime.spawn`, which does `cont.new` on it and parks it in a runtime-owned table; a later
+   `step` resumes it.
 
-Fact 2 is why (C) works at all: the guest needs **no continuation type, no `cont.new`, no
-`suspend`** — only an ordinary call to an imported function. The compiler needs no new
-Binaryen API, the guest stays a plain module, and DWARF is untouched. `ref.func` is already
-emitted by the compiler (`compiler.ts:11738`), so the spawn path needs no new capability.
+Fact 2 is why (C) works: the guest needs no continuation type, no `cont.new`, no `suspend` — only an
+ordinary call to an imported function. `ref.func` is already emitted by the compiler
+(`compiler.ts:11738`), so spawn needs no new capability either.
 
-The costs (C) keeps: an async program is **two modules**, and a standalone `.wat` runtime
-must ship and be linked by whoever instantiates. The second is already how `tension::abi`
-is bound; the first is the price of not owning Binaryen.
+The costs (C) keeps: an async program is **two modules**, and the `.wat` runtime must ship and be
+linked by whoever instantiates. The second is already how `tension::abi` is bound.
 
-**Reproduction** (the spike is 3 `.wat` files and a 60-line wasmtime host, run on snowarch):
-`abi3.wat` owns the tag, `do_yield`, the context table and `spawn`/`step`; `guest3.wat`
-imports them and contains `call $do_yield` and `ref.func $worker`; `coreloop3.wat` imports
-`guest.main` and creates its continuation.
+### 7.4 What would change this
 
-### 7.2 What would change this
-
-If a future Binaryen fixes cont emission, (A) becomes worth revisiting for single-module
-output. Nothing in the design depends on it: the tag vocabulary, the parking rule and
-`__asyncPump` are identical either way. That is what the spike was for.
+If the compiler ever wants single-module async output with debug info, (A) is the path and the
+writer is already correct. Nothing in the design depends on it: the tag vocabulary, the parking
+rule and `__asyncPump` are identical across (A), (B) and (C).
 
 ## 8. Phases
 
-
 Each phase is a round with its own gate. No phase starts before the previous one's tests pass.
 
-- **P0 — the spike.** **Done 2026-11-18; see §7.** Mechanism (C) is proven: a guest with no
-  stack-switching instruction parks and resumes, `cont.new` on an imported function works,
-  and `spawn` carries a `ref.func` across the module boundary. (A) and (B) are closed for a
-  stronger reason than a missing API — Binaryen emits an invalid continuation type and drops
-  `elem declare`, so its binary is refused at parse. **No compiler integration in this round.**
+- **P0 — the spike.** **Done 2026-11-18; see §7.** Mechanism (C) is proven end to end: a guest
+  with no stack-switching instruction parks and resumes, `cont.new` on an imported function
+  works, and `spawn` carries a `ref.func` across the module boundary. Also settled: Binaryen
+  *can* emit a valid, runnable continuation module through the text path, but only with **GC in
+  the feature mask** — without it the writer generalizes to `5d 70` and every engine refuses
+  the module at parse. **No compiler integration in this round.**
 - **P1 — the shell.** `__start` rewritten, coreloop emitted, `main` resumed, `$done`/`$idle`
   correct, `__asyncPump` exported. A program with one await that returns a value.
 - **P2 — depth.** `main → a → b → await`, one capture. `try`/`catch` across an await.
