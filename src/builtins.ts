@@ -54,7 +54,14 @@ import {
   Type,
   TypeKind,
   TypeFlags,
-  MemoryModelCode
+  MemoryModelCode,
+  isGcClass,
+  gcClassesEnabled,
+  gcStringOf,
+  gcArrayElementOf,
+  gcDynamicArrayElementOf,
+  isGcArrayBufferClass,
+  GC_ARRAYBUFFER_DATA_INDEX
 } from "./types";
 
 import {
@@ -3580,6 +3587,14 @@ function builtin_memory_copy(ctx: BuiltinFunctionContext): ExpressionRef {
     if (!instance || !compiler.compileFunction(instance, true)) return module.unreachable();
     return compiler.compileCallDirect(instance, operands, ctx.reportNode);
   }
+  // **`memory.copy` between two wasm GC arrays is `array.copy`.** The string
+  // methods write `memory.copy(changetype<usize>(out), changetype<usize>(this) + k,
+  // n)` — byte addresses on both sides — and a wasm array has none. Recognised
+  // before the operands are compiled, because the *shape* is what identifies it.
+  if (compiler.gcActive) {
+    let gcCopy = compiler.compileGcMemoryCopy(operands[0], operands[1], operands[2]);
+    if (gcCopy != 0) return gcCopy;
+  }
   let usizeType = compiler.options.usizeType;
   let arg0 = compiler.compileExpression(operands[0], usizeType, Constraints.ConvImplicit);
   let arg1 = compiler.compileExpression(operands[1], usizeType, Constraints.ConvImplicit);
@@ -3789,6 +3804,101 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   let operands = ctx.operands;
   let typeArguments = ctx.typeArguments!;
   let toType = typeArguments[0];
+
+  // **A wasm GC reference is not an integer, and that is the point.** Under
+  // `--wasm-gc` a class instance is a `(ref null $C)`: there is no instruction
+  // that turns it into an address, no field offset to add, and no byte buffer to
+  // `memory.copy`. So `changetype<usize>(instance)` is refused at compile time
+  // with a message that says why, rather than emitted and failing at validation
+  // with `type mismatch: expected i32, found (ref $type)`.
+  //
+  // **The latch is tested before the operand is resolved, and that ordering is
+  // load-bearing.** Every predicate below is a no-op with the flag off — an
+  // `i32` pointer is not a GC reference, so nothing here can fire — but the
+  // `resolveExpression` call underneath is not a no-op: re-resolving an already
+  // resolved operand reaches `Signature.create` for a nested call. Measured on
+  // the three-line reproducer (`fn.toString()` then `idof<(x: i32) => i32>()`),
+  // this branch allocated `(i32) => usize` — `changetype`'s own signature, at id
+  // 27 — which `main` never creates, shifting every `idof` after it by one and
+  // failing five `test:compiler` fixtures that never mention GC. The id is only
+  // recoverable before it is burned, so the guard has to be here.
+  if (gcClassesEnabled && operands.length && isIntegerTarget(toType)) {
+    let sourceType = compiler.resolver.resolveExpression(
+      operands[0], compiler.currentFlow
+    );
+    let sourceClass = sourceType ? sourceType.classReference : null;
+    // **`changetype<usize>(anArrayBuffer)` is `dataStart`, not the handle's address.**
+    // The handle is a GC struct with no address; the *payload* has one, and it is the
+    // address every ABI site depends on — 55 mentions in `tension-framework` alone, and
+    // ten sites inside `std/assembly` that pass a buffer straight to `memory.copy`.
+    // Answering the payload's address is what keeps those untouched, and it is the whole
+    // reason the handle is allowed to be a GC object at all.
+    let sourceNonNull = sourceType != null ? sourceType.nonNullableType : null;
+    // **`isGcClass` as well as the identity test.** `isGcArrayBufferClass` answers
+    // "is this the buffer class", not "is it a reference right now": on a program whose
+    // latch is off a buffer is still an `i32` pointer, and asking for a heap type of it
+    // aborts inside Binaryen (`Assertion failed: isRef()`) — measured on a program that
+    // holds a function value, which makes the whole program non-uniform.
+    if (sourceNonNull != null && sourceNonNull.classReference != null &&
+        isGcArrayBufferClass(assert(sourceNonNull.classReference)) &&
+        isGcClass(assert(sourceNonNull.classReference))) {
+      let bufRef = compiler.compileExpression(
+        operands[0], sourceNonNull, Constraints.ConvImplicit
+      );
+      // `usize`, so on a 64-bit target this widens; the field is an `i32` because the
+      // address is wasm32-sized, the same as `dataStart` on a view.
+      compiler.currentType = compiler.options.usizeType;
+      return module.struct_get(
+        module.heapType(sourceNonNull.toRef()),
+        GC_ARRAYBUFFER_DATA_INDEX,
+        bufRef,
+        TypeRef.I32
+      );
+    }
+    // **And a GC *array* has no address either.** `isGcClass` answers false for
+    // everything under `~lib/` by design (GC10), so a `String` or a
+    // `StaticArray<T>` — both `(array (mut T))` under the flag — fell through this
+    // check entirely. Measured, and it matters: `String#replace`'s `__renew` path
+    // compiled and answered `"aaa".replace("a","bb")` with 4 characters instead of
+    // 6, a silent wrong answer instead of the diagnostic it deserved. The three
+    // predicates are the three GC array shapes; the one that is a *class* is
+    // caught by `isGcClass` above.
+    // On the **non-nullable** form: `String | null` carries no `classReference`, so
+    // the predicates answer false for exactly the local that `replace` builds
+    // (`let out: String | null`), which is how the silent wrong answer survived the
+    // first version of this check.
+    let sourceBase = sourceType != null ? sourceType.nonNullableType : null;
+    let sourceIsGcArray = sourceBase != null && (
+      gcStringOf(sourceBase) ||
+      gcArrayElementOf(sourceBase) != null ||
+      gcDynamicArrayElementOf(sourceBase) != null
+    );
+    if (sourceClass != null && isGcClass(sourceClass)) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        `changetype<${toType.toString()}> of a wasm GC class instance (${sourceClass.name}): a ` +
+        "wasm GC reference has no address, so it cannot become an integer or a pointer. " +
+        "Pass it as a reference, or read a field through the class"
+      );
+      return module.unreachable();
+    }
+    // The array case needs its own target test: a class type's kind **is** `Usize`,
+    // so `isIntegerTarget` answers true for `changetype<String>` as well, and
+    // refusing that would refuse the identity conversion `__new` now depends on.
+    // Numeric target means "no class on the right", which is the only case where a
+    // reference genuinely has to become an address.
+    if (sourceIsGcArray && toType.classReference == null && isIntegerTarget(toType)) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        `changetype<${toType.toString()}> of a wasm GC array (${assert(sourceClass).name}): a ` +
+        "wasm GC reference has no address, so it cannot become an integer or a pointer. " +
+        "Use array.get/array.set, which the compiler emits for [] and for memory.copy"
+      );
+      return module.unreachable();
+    }
+  }
   // --- the managed dynamic-array target, handled before the arity check -----
   //
   // `builtin_changetype` is dispatched ahead of the generic signature check, so
@@ -11405,9 +11515,23 @@ export function compileVisitGlobals(compiler: Compiler): void {
     let global = <Global>element;
     let globalType = global.type;
     let classReference = globalType.getClass();
+    // **A wasm GC global is traced by the engine, not by this visitor.** The
+    // visitor reads a global and hands it to `__visit` as an `i32`; a GC-struct
+    // global's type is a `(ref null $C)`, so `global.get` there is a type error
+    // (`i32 != (ref null $struct.0): global.get must have right type`). Skipping it
+    // is not an omission: the whole reason the migration exists is that the engine
+    // sees what `__visit_globals` cannot, and `__visit_globals` is exactly the
+    // guest-scanner this flag is replacing.
     if (
       classReference &&
       !classReference.hasDecorator(DecoratorFlags.Unmanaged) &&
+      !isGcClass(classReference) &&
+      // `String` is the same case: an `(array (mut u16))` global is traced by the
+      // engine, and reading it as an `i32` here is a type error. The test is on the
+      // *type*, not on the class being `~lib/` — `isGcClass` answers false for the
+      // standard library by design, which is exactly why the string case needs its
+      // own predicate.
+      !gcStringOf(globalType) &&
       global.is(CommonFlags.Compiled)
     ) {
       if (global.is(CommonFlags.Inlined)) {
@@ -11571,7 +11695,16 @@ export function compileVisitMembers(compiler: Compiler): void {
     assert(instanceId == nextId++);
     let instance = assert(managedClasses.get(instanceId));
     names[i] = instance.internalName;
-    if (instance.isPointerfree) {
+    // **A wasm GC struct is traced by the engine, so it needs no visitor.** Same
+    // argument as `__visit_globals` (GC12): the guest-scanner reads an object as a
+    // byte block and walks its typeinfo, and a GC struct has neither a linear
+    // layout to walk nor an id the scanner would recognise. Leaving the call in
+    // emitted `call $Array<i32>~visit`, whose body reads `this.buffer` — a field the
+    // synthesised layout does not have (measured: TS2339 on `array.ts:524`).
+    //
+    // `return()` and not a skipped slot: the table is indexed by *typeinfo id*, so
+    // omitting an entry would shift every class after it onto the wrong arm.
+    if (instance.isPointerfree || isGcClass(instance)) {
       cases[i] = module.return();
     } else {
       cases[i] = module.block(null, [
@@ -11951,4 +12084,29 @@ function contextualUsize(compiler: Compiler, value: i64, contextualType: Type): 
     assert(!i64_high(value));
     return module.i32(i64_low(value));
   }
+}
+
+/**
+ * Whether `type` is an integer-shaped target for a `changetype` *from* a
+ * reference — i.e. the direction a wasm GC reference cannot take.
+ *
+ * `usize` is the one that matters (an address), but `i32`/`u32`/`i64`/`u64` are
+ * the same mistake spelled differently, and a check that named only `usize`
+ * would let `changetype<u32>(instance)` through to the same validation error.
+ */
+function isIntegerTarget(type: Type): bool {
+  switch (type.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.I16:
+    case TypeKind.I32:
+    case TypeKind.I64:
+    case TypeKind.Isize:
+    case TypeKind.U8:
+    case TypeKind.U16:
+    case TypeKind.U32:
+    case TypeKind.U64:
+    case TypeKind.Usize: return true;
+  }
+  return false;
 }

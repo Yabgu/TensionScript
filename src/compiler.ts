@@ -43,6 +43,7 @@ import {
   GlobalRef,
   FeatureFlags,
   Index,
+  HeapTypeRef,
   getExpressionId,
   getExpressionType,
   getConstValueI32,
@@ -202,7 +203,32 @@ import {
   TypeKind,
   TypeFlags,
   MemoryModelCode,
-  Signature
+  Signature,
+  gcFieldsOf,
+  gcArrayElementOf,
+  gcStringOf,
+  gcCoverage,
+  gcUniform,
+  prepareGcLatch as prepareGcLatchOf,
+  isStdlibPrototype,
+  gcStringOperator,
+  gcFunctionValueUsable,
+  GcStringOp,
+  gcDynamicArrayElementOf,
+  GC_ARRAY_DATA_INDEX,
+  GC_ARRAY_LENGTH_INDEX,
+  GC_ARRAY_MIN_SIZE,
+  isGcReferenceType,
+  noteGcRefusedClass,
+  gcReferenceShaped,
+  ownFieldsOf,
+  isGcArrayBufferClass,
+  GC_ARRAYBUFFER_LENGTH_INDEX,
+  gcSubtreeBrands,
+  gcBrandOf,
+  GC_BRAND_INDEX,
+  GC_FIRST_FIELD_INDEX,
+  isGcClass
 } from "./types";
 
 import {
@@ -243,6 +269,25 @@ export const defaultFeatures = Feature.MutableGlobals
                              | Feature.BulkMemory;
 
 /** Compiler options. */
+/**
+ * A GC array reference plus a byte offset, recovered from `changetype<usize>(x) + k`.
+ *
+ * See `Compiler#gcArraySliceOf`, which builds these while looking for `memory.copy`
+ * operands that the standard library wrote as byte addresses.
+ */
+export class GcArraySlice {
+  constructor(
+    /** The AST node of the array expression. */
+    public refExpr: Expression,
+    /** The AST node of the byte offset, or `null` for offset 0. */
+    public byteOffset: Expression | null,
+    /** The element type. */
+    public element: Type,
+    /** The array's own type (`String`, `StaticArray<T>`). */
+    public type: Type
+  ) {}
+}
+
 export class Options {
   constructor() { /* as internref */ }
 
@@ -294,6 +339,22 @@ export class Options {
   exportRuntime: bool = false;
   /** Stack size in bytes, if using a stack. */
   stackSize: i32 = 0;
+  /**
+   * Emit user-declared classes as wasm GC structs (opt-in, off by default).
+   *
+   * **Why a flag and not the default:** a wasm GC class is a `(ref null $C)`,
+   * not an `i32`, so it cannot be stored in the linear-memory structures the
+   * standard library is built from (`String`, `Array`, `Map`, `Set`, the
+   * collector's own blocks). Until those move, a program that mixes the two
+   * worlds must say so. Off, this option changes nothing: not one emission site
+   * consults it, and the module's feature set is untouched.
+   *
+   * On, it (a) sets the GC and reference-types Binaryen features — struct
+   * emission is gated on them, and GC does not imply them — and (b) turns the
+   * shadow stack off, because its only purpose is to let a *guest* collector
+   * find roots in linear memory and the engine's tracer does that job here.
+   */
+  wasmGc: bool = false;
   /** Semantic major bundle version from root package.json */
   bundleMajorVersion: i32 = 0;
   /** Semantic minor bundle version from root package.json */
@@ -454,6 +515,15 @@ export const runtimeGlobals = [ "__rtti_base" ];
 const FUNCTION_INDEX_OFFSET: u32 = 0;
 
 /**
+ * The same field by **index**, for the GC path: `Function<T>`'s synthesised struct is
+ * `{ <brand> at 0, _index at 1, _env at 2 }`, so the brand pushes both offsets along by
+ * one. The constant above stays for the linear block, where `_index` really is at 0.
+ */
+const FUNCTION_INDEX_FIELD: u32 = 1;
+/** `_env`'s index in the same struct. */
+const FUNCTION_ENV_INDEX: u32 = 2;
+
+/**
  * The local the closure transform gives a `Struct` closure for the environment
  * it was handed (`docs/closures-plan.md` §6.1). It is the first statement of
  * the function's body, and the prologue below overwrites the zero the
@@ -485,6 +555,33 @@ class LazyLocal {
     public doneIndex: i32,
     /** The deferred expression, compiled at the first read. */
     public expression: Expression
+  ) {}
+}
+
+/**
+ * One distinct string literal's pending start-time build, under `--wasmGc`.
+ *
+ * A literal that uses the GC ABI is an object living in a global, not a pointer
+ * into static memory, so the object is built once in `__start` from the bytes in
+ * the data segment. `ensureGcStringLiteral` runs wherever a literal is first
+ * seen, but the start function's body only exists during `compileStartFunction`,
+ * so the description of the build is recorded here and replayed by
+ * `emitGcStringBuilds` afterwards.
+ *
+ * A class rather than an inline object type on the `Array`, because this
+ * compiler does not parse `Array<{ ... }>` — the bootstrap found that, which is
+ * the failure it exists to catch.
+ */
+class GcStringBuild {
+  constructor(
+    /** Name of the global that holds the array once built. */
+    public globalName: string,
+    /** Offset in the data segment of the literal's UTF-16 bytes. */
+    public ptr: i64,
+    /** Number of UTF-16 code units, which is the array's length. */
+    public length: i32,
+    /** The string's class type, whose instance is the array. */
+    public type: Type
   ) {}
 }
 
@@ -563,6 +660,17 @@ export class Compiler extends DiagnosticEmitter {
     this.program = program;
     let module = program.module;
     let options = program.options;
+
+    // **`--wasm-gc` is a dependency, not a hint.** Two things follow from it and
+    // both are stated at the option (`Options.wasmGc`): the GC and
+    // reference-types features, because Binaryen gates `struct.new`/`struct.get`
+    // on them and the GC bit alone does not imply reference types; and no shadow
+    // stack, because its whole job is to let a guest collector find roots in
+    // linear memory, which the engine's tracer now does without being asked.
+    // (`setGcClassesEnabled` already ran, in `Program`'s constructor — before any
+    // type was built. Setting it twice would be harmless and misleading.)
+    if (options.wasmGc) options.features |= Feature.GC | Feature.ReferenceTypes;
+
     if (options.memoryBase) {
       this.memoryOffset = i64_new(options.memoryBase);
       module.setLowMemoryUnused(false);
@@ -602,13 +710,35 @@ export class Compiler extends DiagnosticEmitter {
     this.shadowStack = new ShadowStackPass(this);
   }
 
+  /**
+   * Whether the GC ABI is in force for this program.
+   *
+   * `--wasmGc` *and* the program-wide latch. Every behavioural gate on the flag goes
+   * through this and not through `options.wasmGc`, so a program that stays on the
+   * pointer ABI is compiled to **the pointer representation by the mechanism** —
+   * rather than by 14 separate checks that each have to remember GC14.
+   *
+   * **Not byte-identical to a flag-off build, and the difference is measured.**
+   * `prepareGcLatch` resolves every declared managed class to read its fields, and a
+   * resolved class gets its `~visit` function emitted. On
+   * `examples/2d/hello-sprites`: 180,791 bytes against the flag-off 178,582, and
+   * three `~visit` functions that the flag-off build does not emit
+   * (`Map<string,Frame>`, `AnimationSeries`, `Array<u8>`). They are unreachable — the
+   * representation is the pointer ABI and the collector walks what it always did — so
+   * this is dead code, not a behaviour change. Suppressing visitor emission for
+   * classes resolved only by the latch is a named TODO; it is not done here because a
+   * latch that cannot read fields cannot decide anything.
+   */
+  get gcActive(): bool {
+    return this.options.wasmGc && gcUniform(this.program);
+  }
+
   /** Performs compilation of the underlying {@link Program} to a {@link Module}. */
   compile(): Module {
     let options = this.options;
     let module = this.module;
     let program = this.program;
     let resolver = this.resolver;
-    let hasShadowStack = options.stackSize > 0; // implies runtime=incremental
 
     // Register a dummy memory so Binaryen's EffectAnalyzer can read
     // memory.shared on loads/stores emitted during compilation. The real
@@ -619,6 +749,44 @@ export class Compiler extends DiagnosticEmitter {
 
     // initialize lookup maps, built-ins, imports, exports, etc.
     this.program.initialize();
+
+    // **Decide the program's GC ABI now**, before a single type is emitted: which
+    // classes may be GC structs decides whether `Array`, `StaticArray` and `String`
+    // are references or pointers, and that answer cannot change afterwards. See
+    // `Compiler#prepareGcLatch` and `prepareGcLatch` in `types.ts`.
+    if (options.wasmGc) {
+      // **A capturing closure is refused here, before anything is emitted.** `_env` is an
+      // `i32` address because `call_indirect` hands a callee's environment over through an
+      // `i32` global, and a capturing closure's environment is a heap object — a reference
+      // under the GC ABI, with no address to put in the field. Handling it means `_env`
+      // becoming a reference *and* the hand-over becoming ref-typed: a change to
+      // `Function<T>`'s layout and to the call contract together.
+      //
+      // Reported up front rather than at the creation site because the closure transform
+      // has already made the program non-uniform by then (its synthesized `$Env` class
+      // extends `TaskEnv`, a pointer-shaped stdlib class), so a check gated on `gcActive`
+      // would never fire — measured: the program reported "1 extending a class that is not
+      // GC (TaskEnv)" with no hint that a closure was the cause.
+      this.refuseCapturingClosures();
+      // **After the latch is prepared, not before.** The crossing check walks resolved
+      // classes, and before `prepareGcLatch` nothing is resolved — `getResolvedInstance("")`
+      // answers null, so the walk found no classes at all and no crossing was ever
+      // reported (measured: the debug line never printed). The latch itself is unaffected:
+      // it is computed from the same set and a crossing class is ineligible either way.
+      this.prepareGcLatch();
+      this.refuseGcExemptCrossings();
+    }
+
+    // **The flag only acts when it migrated something.** `--wasmGc` on a program
+    // that stays on the pointer ABI must produce the flag-off module *exactly*, or
+    // "opt-in" is a lie and — worse — the module is neither representation: the
+    // flag's other effect is to drop the shadow stack, which is the pointer ABI's
+    // only root set for a moving collector. Measured before this: every one of the
+    // 19 examples compiled 19 different bytes with the flag on at 0 % coverage.
+    if (options.wasmGc && !this.gcActive) {
+      module.useShadowStack = options.stackSize > 0; // put back what the flag removed
+    }
+    let hasShadowStack = !this.gcActive && options.stackSize > 0; // implies runtime=incremental
 
     // Binaryen treats all function references as being leaked to the outside world when
     // the module isn't marked as closed-world (see WebAssembly/binaryen#7135). Therefore,
@@ -796,6 +964,36 @@ export class Compiler extends DiagnosticEmitter {
     // NOTE: no more element compiles from here. may go to the start function!
 
     // compile the start function if not empty or if explicitly requested
+    // Under `--wasmGc`, build every distinct string literal into its global. Done
+    // last so `ensureStaticString` calls from anywhere in the compile are collected
+    // — but **placed first**: a module-scope `const E: string = "…"` becomes a
+    // start-function assignment of `global.get(~gcstr/N)`, so the literal's own
+    // global has to be built before the initialiser that reads it, or the constant
+    // is assigned `ref.null` and dereferences as a null pointer on first use.
+    if (this.gcActive) {
+      let literalBuilds = new Array<ExpressionRef>();
+      this.emitGcStringBuilds(literalBuilds);
+      for (let i = literalBuilds.length - 1; i >= 0; --i) {
+        startFunctionBody.unshift(unchecked(literalBuilds[i]));
+      }
+    }
+
+    // **The coverage report is gated on the flag, not on the latch.** The latch is
+    // `--wasmGc && gcUniform`, so gating on it made the report silent in the one
+    // case it exists to explain: a program that is *not* uniform migrated nothing,
+    // and a reader who asked for `--wasmGc` has to be told that. Measured by the
+    // architect on `examples/2d/hello-sprites`: 180,791 bytes, zero `(struct …)`
+    // types, and not one diagnostic.
+    //
+    // It runs **after** the literal builds above and before the start function is
+    // added, because by then every class the compile will resolve has been resolved
+    // (see `prepareGcLatch`), so the count is final.
+    //
+    // Flag off stays completely silent: this is inside the flag's own branch and
+    // `reportGcCoverage` is never reached, which is what keeps the flag-off output
+    // byte-identical — including its diagnostic stream.
+    if (this.options.wasmGc) this.reportGcCoverage();
+
     let startIsEmpty = !startFunctionBody.length;
     let exportStart = options.exportStart;
     if (!startIsEmpty || exportStart != null) {
@@ -1170,6 +1368,207 @@ export class Compiler extends DiagnosticEmitter {
 
   // files
 
+  /**
+   * Resolves every non-generic class, then freezes the program's GC answer.
+   *
+   * The resolution is the point: a class's *fields* are what make it ineligible, and
+   * they only exist once the class is resolved. A generic one has no fields until it
+   * is instantiated with type arguments, so it is left to `isGcClass`, which judges
+   * each instance — and a late one that turns out ineligible is pointer-shaped and
+   * caught by `gcMixedAbiReferrer` if it crosses, never by a crash.
+   *
+   * Diagnostics are swallowed here: a class that fails to resolve will report the
+   * same error at its real use site, and reporting it twice would be noise.
+   */
+  /**
+   * Reports, once, that a capturing closure cannot be a GC function value.
+   *
+   * One diagnostic per program rather than per closure: the reason is the same for all of
+   * them, and a file with ten arrows would otherwise produce ten copies of it.
+   */
+  /**
+   * Refuses the two crossings the exemption creates, **by name and before emission**.
+   *
+   * The partition gives managed classes two representations: a GC struct, and a linear
+   * C-ABI record. Two things must then be impossible rather than miscompiled, and both
+   * compiled before this check existed (measured):
+   *
+   * 1. **A GC class holding a C-ABI record as a plain field.** The record has no reference
+   *    for the field to hold — it is an address — so this is one representation stored in
+   *    the other. `@unmanaged` is the sanctioned crossing, because an address is not a
+   *    reference and nothing traces it.
+   * 2. **A linear record holding a GC reference.** A reference has no place in a record
+   *    whose layout is the C declaration's: the engine would trace a pointer the C side
+   *    cannot see, and the record would not be the size the header describes.
+   *
+   * An inline `@inline struct` field is *not* this: it is a value stored by value, and its
+   * refusal is the older permanent one ("a value has no address"), which names the memory
+   * model rather than a crossing.
+   */
+  private refuseGcExemptCrossings(): void {
+    // **The crossing rule is one-directional, and the other direction is not a bug.**
+    //
+    // A GC class holding an exempt record is *fine*: the record is linear, so the field is
+    // an address, and an address is untraced — the same shape as a buffer view's
+    // `dataStart`. `@unmanaged` is what declares the record, so every such field is through
+    // `@unmanaged` by definition, which is the sanctioned form.
+    //
+    // What is left is the direction that has no representation at all: a reference inside a
+    // record whose layout is the C declaration's. See below.
+    let program = this.program;
+    // An `@unmanaged` record must not hold a GC reference.
+    let instances = program.instancesByName;
+    for (let _v = Map_values(instances), i = 0, k = _v.length; i < k; ++i) {
+      let element = unchecked(_v[i]);
+      if (element.kind != ElementKind.Class) continue;
+      let cls = <Class>element;
+      if (!cls.hasDecorator(DecoratorFlags.Unmanaged)) continue;
+      let own = ownFieldsOf(cls);
+      for (let f = 0, fn = own.length; f < fn; ++f) {
+        let field = unchecked(own[f]);
+        let type = field.type;
+        // **A GC reference, not merely "a class" — and asked latch-free.** `isGcReferenceType`
+        // goes through `gcStringOf`, which answers "is this a wasm array *right now*"; on a
+        // program that is non-uniform nothing is, so the one field this check exists to find
+        // was invisible. Measured: the AS100 stopped firing entirely and a record holding a
+        // `string` was merely reported as "held back only by the latch".
+        if (!gcReferenceShaped(type)) continue;
+        // **Recorded, not merely reported.** A refusal raised here happens before emission,
+        // so the coverage arithmetic has to know: a class the compiler refused is not a class
+        // it migrated, and a report that says otherwise contradicts the exit status.
+        noteGcRefusedClass(cls);
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          field.identifierNode != null ? field.identifierNode.range : null,
+          `the C-ABI record ${cls.name} holds a GC reference in field \`${field.name}\`: ` +
+          `a wasm GC reference has no place in a record whose layout is the C declaration's ` +
+          `(the engine would trace a pointer the C side cannot see). Store the address as an ` +
+          `\`usize\`, or make the holder a GC class and drop \`@unmanaged\`.`
+        );
+        return;
+      }
+    }
+  }
+
+  private refuseCapturingClosures(): void {
+    // The closure transform records what each function expression's `_env` will mean,
+    // keyed by the expression node (`closure/ir.ts`), because the `FunctionPrototype` is
+    // created later, at compile time, from a *clone* of the declaration. So this asks the
+    // transform's own table rather than the prototypes — measured: every
+    // `prototype.envKind` was still `None` at this point.
+    let infos = envInfoOf();
+    for (let _values = Map_values(infos), i = 0, k = _values.length; i < k; ++i) {
+      let info = unchecked(_values[i]);
+      if (info.kind == EnvKind.None) continue;
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        this.currentFlow != null && this.currentFlow.sourceFunction != null
+          ? this.currentFlow.sourceFunction.identifierNode.range
+          : null,
+        "a capturing closure under --wasmGc: its environment is a heap object, and " +
+        "`Function<T>`'s `_env` is an `i32` address (the `call_indirect` hand-over is an " +
+        "`i32` global). A non-capturing function value — a named function, or a synthesized " +
+        "one like `f$resume` — works."
+      );
+      return;
+    }
+  }
+
+  private prepareGcLatch(): void {
+    let program = this.program;
+    let resolver = this.resolver;
+    let elements = program.elementsByDeclaration;
+    for (let _values = Map_values(elements), i = 0, k = _values.length; i < k; ++i) {
+      let element = unchecked(_values[i]);
+      if (element.kind != ElementKind.ClassPrototype) continue;
+      let prototype = <ClassPrototype>element;
+      if (prototype.typeParameterNodes != null) continue; // judged per instance
+      // **Managed classes only.** Resolving the standard library's own classes here
+      // would drag in ones the program never uses — `TemplateStringsArray` holds an
+      // `Array`, so eagerly resolving it manufactures a crossing out of a template
+      // literal that does not appear in the source. The stdlib's classes are
+      // resolved by use, and a real crossing there is still refused when it happens.
+      if (isStdlibPrototype(prototype)) continue;
+      resolver.resolveClass(prototype, null, new Map(), ReportMode.Swallow);
+    }
+    prepareGcLatchOf(program);
+  }
+
+  /**
+   * Says what `--wasmGc` actually did to this program.
+   *
+   * A report, not a gate: it never fails a build. But a flag that claims to move
+   * managed classes to a different representation has to say how many it moved, and
+   * a migration where that number silently stays at zero is indistinguishable from
+   * one that works. GC13 measured 0 of 19 real examples compiling under the flag;
+   * GC14's rule makes them compile on the pointer ABI instead, and this line is what
+   * stops that from being a silent success.
+   *
+   * Coverage zero with classes present is a **warning** naming the dominant reason,
+   * because "the flag is on and nothing migrated" is the state a reader most needs
+   * to be told, not the state to bury in an informational line.
+   */
+  private reportGcCoverage(): void {
+    // **A build that failed must not report coverage as if it succeeded.** This is the whole
+    // family this arc keeps re-finding — GC14's report gated on the latch, GC23's latch held
+    // off by a rule the walk could not see, GC26's refused class counted as migrated. The
+    // general form is the strongest: if the program has any error, nothing was emitted, so
+    // "N of M on the GC ABI" describes an eligibility answer for a program that does not
+    // exist. Measured: turning the latch on for the 2D guest exposed 25 refusals from
+    // `std/assembly` bodies (`array.ts`'s `ensureCapacity`, `string.ts:673`, `staticarray.ts`)
+    // and the line still read `118 of 143 managed classes on the GC ABI`.
+    let errors = 0;
+    let emitted = this.diagnostics;
+    for (let i = 0, k = emitted.length; i < k; ++i) {
+      if (unchecked(emitted[i]).category == DiagnosticCategory.Error) errors++;
+    }
+    if (errors > 0) {
+      this.warning(
+        DiagnosticCode.wasm_gc_no_class_migrated_0,
+        null,
+        "the program did not build (" + errors.toString() + " error" +
+          (errors == 1 ? "" : "s") + "), so no class was migrated"
+      );
+      return;
+    }
+    let coverage = gcCoverage(this.program);
+    // **A permanent refusal gets its own diagnostic, and it is a warning.** These
+    // classes are the C ABI's: an `@inline [T * N]` or an `@inline struct` field is a
+    // value, a value has no address, and a field of a reference type is a reference —
+    // so this can never be fixed by a representation change. Naming it separately is
+    // what stops a reader from going looking for the change that does not exist, which
+    // is how a migration ends up breaking the interop it was supposed to preserve.
+    if (coverage.permanentTotal > 0) {
+      let reasons = new Array<string>();
+      let shown = coverage.permanentReasons.length < 3 ? coverage.permanentReasons.length : 3;
+      for (let i = 0; i < shown; ++i) {
+        reasons.push(unchecked(coverage.permanentCounts[i]).toString() + " " + unchecked(coverage.permanentReasons[i]));
+      }
+      this.warning(
+        DiagnosticCode.wasm_gc_0_can_never_be_on_the_GC_ABI_1_A_value_has_no_address_so_it_cannot_be_a_field_of_a_reference_type_this_is_the_memory_model_s_rule_not_a_work_item,
+        null,
+        // `1 class` / `2 classes`, formatted here because a message template cannot
+        // pluralise and "1 class(es)" reads like a placeholder someone forgot.
+        coverage.permanentTotal.toString() +
+          (coverage.permanentTotal == 1 ? " class" : " classes"),
+        reasons.join(", ")
+      );
+    }
+    if (coverage.total > 0 && coverage.onGc == 0) {
+      this.warning(
+        DiagnosticCode.wasm_gc_no_class_migrated_0,
+        null,
+        coverage.toString()
+      );
+    } else {
+      this.info(
+        DiagnosticCode.wasm_gc_0,
+        null,
+        coverage.toString()
+      );
+    }
+  }
+
   /** Compiles the file matching the specified path. */
   compileFileByPath(normalizedPathWithoutExtension: string, reportNode: Node): void {
     let file: File;
@@ -1541,7 +1940,7 @@ export class Compiler extends DiagnosticEmitter {
       if (global.is(CommonFlags.Inlined)) {
         initExpr = this.compileInlineConstant(global, global.type, Constraints.PreferStatic);
       } else {
-        initExpr = this.makeZero(type);
+        initExpr = this.makeFieldZero(type);
       }
     }
 
@@ -1549,10 +1948,22 @@ export class Compiler extends DiagnosticEmitter {
 
     if (initializeInStart) { // initialize to mutable zero and set the actual value in start
       if (isDeclaredInline) {
-        this.error(
-          DiagnosticCode.Decorator_0_is_not_valid_here,
-          findDecorator(DecoratorKind.Inline, global.decoratorNodes)!.range, "inline"
-        );
+        // **A GC reference cannot be an inline constant.** `@lazy @inline export
+        // const E_X: string = "..."` is the idiom `std/assembly/util/error.ts`
+        // uses for its messages, and under `--wasmGc` a string literal is an
+        // object built in `__start`, not a readable constant — so the value moves
+        // into the start function (the warning above already says it cannot be
+        // inlined) and the decorator has nothing left to inline. Refusing it here
+        // would make every program that can throw fail to compile under the flag.
+        // Flag-off keeps the error: there a string constant *is* a constant.
+        if (this.gcActive && type.classReference != null) {
+          global.unset(CommonFlags.Inlined);
+        } else {
+          this.error(
+            DiagnosticCode.Decorator_0_is_not_valid_here,
+            findDecorator(DecoratorKind.Inline, global.decoratorNodes)!.range, "inline"
+          );
+        }
       }
       let internalType = type;
       if (type.isExternalReference && !type.is(TypeFlags.Nullable)) {
@@ -1561,7 +1972,17 @@ export class Compiler extends DiagnosticEmitter {
         global.set(CommonFlags.InternallyNullable);
         internalType = type.asNullable();
       }
-      module.addGlobal(internalName, internalType.toRef(), true, this.makeZero(internalType));
+      // **`makeFieldZero`, not `makeZero`.** A wasm GC reference's zero is
+      // `ref.null`; `makeZero` answers `i32(0)` for a class (correct under the
+      // pointer ABI, where a class *is* an `i32`), and as a global's init
+      // expression that is the wrong type:
+      //
+      //     [wasm-validator error in module] global init must have correct type
+      //     (i32.const 0) (on global app)
+      //
+      // This is the path for every non-constant initialiser — `const app = new
+      // Editor()` — so it gates every real program under the flag, not just a test.
+      module.addGlobal(internalName, internalType.toRef(), true, this.makeFieldZero(internalType));
       this.currentBody.push(
         module.global_set(internalName, initExpr)
       );
@@ -1789,6 +2210,15 @@ export class Compiler extends DiagnosticEmitter {
   ): bool {
     if (instance.is(CommonFlags.Errored)) return false;
     if (instance.is(CommonFlags.Compiled)) return true;
+
+    // **`__visit` bodies are not no-op'd here, and that is a measured boundary.** The
+    // `StaticArray<T>#__visit` method is compiled by `compileFunction`, but the module-level
+    // `~visit` function that calls it is emitted elsewhere (the typeinfo machinery in
+    // `module.ts`), with the pointer ABI's `(i32 this, i32 cookie)`. Replacing only the method
+    // changes its signature under a caller that was not changed with it, so the module fails
+    // validation — measured: `call* param number must match`, then `call param types must
+    // match`. The visitor needs to be rewritten for the GC ABI as one piece. Recorded in
+    // `docs/wasm-gc.md`.
 
     if (!forceStdAlternative) {
       if (instance.hasDecorator(DecoratorFlags.Builtin)) return true;
@@ -2374,6 +2804,28 @@ export class Compiler extends DiagnosticEmitter {
     let valueTypeRef = valueType.toRef();
     let thisTypeRef = this.options.sizeTypeRef;
     getterInstance.set(CommonFlags.Compiled);
+
+    // **A wasm GC class reads its field by type, not by offset.** `struct.get`
+    // needs the struct's heap type and the field's *index*, and a reference has
+    // no `i32` to add an offset to — so this is the one branch where the offset
+    // the rest of the function is built around has no meaning at all.
+    let gcClass = this.gcClassOfFieldGetter(property);
+    if (gcClass != null) {
+      let classTypeRef = gcClass.type.toRef();
+      let body = module.struct_get(
+        module.heapType(classTypeRef),
+        gcFieldIndex(gcClass, property),
+        module.local_get(0, classTypeRef),
+        valueTypeRef
+      );
+      return module.addFunction(
+        getterInstance.internalName,
+        classTypeRef,
+        valueTypeRef,
+        getterInstance.getNonParameterLocalTypeRefs(),
+        body
+      );
+    }
     // `this` is the object's reference, and for every reference kind here that
     // is the first field's address: `__new` returns `object + TOTAL_OVERHEAD`
     // (`std/assembly/rt/itcms.ts:268`) and the unmanaged allocator returns the
@@ -2403,6 +2855,32 @@ export class Compiler extends DiagnosticEmitter {
     );
   }
 
+  /**
+   * The class whose GC struct owns `property`, or `null` when this field is not
+   * emitted as a GC struct.
+   *
+   * A getter's `this` is the class instance it belongs to — for a field accessor
+   * that is the declaring class, so `property.parent` is the answer. Kept as one
+   * function so the getter, the setter and the constructor cannot disagree about
+   * which class is in play, which they would if each tested the flag itself.
+   */
+  private gcClassOfField(property: Property): Class | null {
+    let parent = property.parent;
+    if (parent == null || parent.kind != ElementKind.Class) return null;
+    let classInstance = <Class>parent;
+    return isGcClass(classInstance) ? classInstance : null;
+  }
+
+  /** {@link gcClassOfField}, for the getter path. */
+  private gcClassOfFieldGetter(property: Property): Class | null {
+    return this.gcClassOfField(property);
+  }
+
+  /** {@link gcClassOfField}, for the setter path. */
+  private gcClassOfFieldSetter(property: Property): Class | null {
+    return this.gcClassOfField(property);
+  }
+
   /** Makes a built-in setter of a property that is a field. */
   private makeBuiltinFieldSetter(property: Property): FunctionRef {
     let setterInstance = assert(property.setterInstance);
@@ -2410,6 +2888,28 @@ export class Compiler extends DiagnosticEmitter {
     let valueType = property.type;
     let thisTypeRef = this.options.sizeTypeRef;
     let valueTypeRef = valueType.toRef();
+
+    // A wasm GC class writes by type: `struct.set` takes the struct's heap type
+    // and the field's index. No write barrier either — the engine's tracer owns
+    // the edges, which is the whole reason `__link` disappears on this path.
+    let gcClass = this.gcClassOfFieldSetter(property);
+    if (gcClass != null) {
+      let classTypeRef = gcClass.type.toRef();
+      let body = module.struct_set(
+        module.heapType(classTypeRef),
+        gcFieldIndex(gcClass, property),
+        module.local_get(0, classTypeRef),
+        module.local_get(1, valueTypeRef)
+      );
+      setterInstance.set(CommonFlags.Compiled);
+      return module.addFunction(
+        setterInstance.internalName,
+        createType([ classTypeRef, valueTypeRef ]),
+        TypeRef.None,
+        null,
+        body
+      );
+    }
     // void(this.field = value)
     let bodyExpr = module.store(valueType.byteSize,
       module.local_get(0, thisTypeRef),
@@ -2464,10 +2964,943 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Ensures that a string exists in static memory and returns a pointer expression. Deduplicates. */
+  /** Distinct literal -> the global holding its array. */
+  private gcStringLiterals: Map<string, string> = new Map();
+  /** Literals whose start-time build has not been emitted yet. */
+  private gcStringBuilds: Array<GcStringBuild> = [];
+
+  /** Sequence for inlined `compareImpl` labels, so two loops in one body differ. */
+  private gcCompareSeq: i32 = 0;
+
   ensureStaticString(stringValue: string): ExpressionRef {
+    let stringType = this.program.stringInstance.type;
+    // **Under `--wasmGc` a literal is an object, not a pointer.** The bytes still
+    // live in the data segment (the module has linear memory either way), but the
+    // value a use site gets is a `(ref null (array (mut u16)))`. One object per
+    // *distinct* literal, built once in `__start` and held in a global — so a
+    // repeated literal costs a `global.get` and nothing else.
+    if (gcStringOf(stringType)) {
+      this.currentType = stringType;
+      return this.module.global_get(this.ensureGcStringLiteral(stringValue), stringType.toRef());
+    }
     let ptr = this.ensureStaticStringPtr(stringValue);
-    this.currentType = this.program.stringInstance.type;
+    this.currentType = stringType;
     return this.module.usize(ptr);
+  }
+
+  /**
+   * The `compareImpl` loop, emitted inline.
+   *
+   * `compareImpl` is no longer *called* — every call to it is replaced here, so the
+   * stdlib body (which walks `changetype<usize>(str) + i` with `load<u16>`) is never
+   * compiled and the function never exists in the module. The replacement therefore
+   * has to carry the loop itself rather than call it, which is why this is an
+   * emitter and not a `module.call`.
+   *
+   * Contract, unchanged: walk `rem` characters, answer the first differing pair as
+   * `a - b`, else `0`. A zero `rem` never dereferences, so an empty string at any
+   * offset is not an error. Labels carry a sequence number because the loop is
+   * inlined into `__eq`, `__gt`, `__lt` and `compareImpl` itself, and two of those
+   * can appear in one function body.
+   */
+  private emitGcStringCompareLoop(
+    heapType: HeapTypeRef,
+    strTypeRef: TypeRef,
+    s1: Index, p1: Index, s2: Index, p2: Index, rem: Index
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let seq = this.gcCompareSeq++;
+    let exit = "gcStrCmpExit" + seq.toString();
+    let again = "gcStrCmpAgain" + seq.toString();
+    let a = flow.getTempLocal(Type.i32).index;
+    let b = flow.getTempLocal(Type.i32).index;
+    let res = flow.getTempLocal(Type.i32).index;
+    return module.block(null, [
+      module.local_set(res, module.i32(0), false),
+      module.block(exit, [
+        module.loop(again, module.block(null, [
+          module.br(exit,
+            module.binary(BinaryOp.EqI32, module.local_get(rem, TypeRef.I32), module.i32(0))),
+          module.local_set(a, module.array_get(heapType,
+            module.local_get(s1, strTypeRef), module.local_get(p1, TypeRef.I32), TypeRef.I32), false),
+          module.local_set(b, module.array_get(heapType,
+            module.local_get(s2, strTypeRef), module.local_get(p2, TypeRef.I32), TypeRef.I32), false),
+          module.if(
+            module.binary(BinaryOp.NeI32, module.local_get(a, TypeRef.I32),
+              module.local_get(b, TypeRef.I32)),
+            module.block(null, [
+              module.local_set(res,
+                module.binary(BinaryOp.SubI32, module.local_get(a, TypeRef.I32),
+                  module.local_get(b, TypeRef.I32)), false),
+              module.br(exit)
+            ])
+          ),
+          module.local_set(p1,
+            module.binary(BinaryOp.AddI32, module.local_get(p1, TypeRef.I32), module.i32(1)), false),
+          module.local_set(p2,
+            module.binary(BinaryOp.AddI32, module.local_get(p2, TypeRef.I32), module.i32(1)), false),
+          module.local_set(rem,
+            module.binary(BinaryOp.SubI32, module.local_get(rem, TypeRef.I32), module.i32(1)), false),
+          module.br(again)
+        ]))
+      ]),
+      module.local_get(res, TypeRef.I32)
+    ], TypeRef.I32);
+  }
+
+  /**
+   * The leaf `@operator` statics of `String`, as far as a GC string needs them.
+   *
+   * `__eq` and `__not` are the two that cannot be expressed any other way — both
+   * begin `changetype<usize>(x) == 0`, and a reference is not an `i32`. `__gt` and
+   * `__lt` do the same test first and then defer to the comparison.
+   */
+  private compileGcStringOperator(op: GcStringOp, operands: ExpressionRef[], paramTypes: Type[]): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let arity = operands.length;
+    let seq = this.gcCompareSeq++;
+
+    if (op == GcStringOp.Not) {
+      if (arity != 1) return module.unreachable();
+      let strType = paramTypes[0];
+      let strRef = strType.toRef();
+      let local = flow.getTempLocal(strType).index;
+      // `!s` is "null or empty". `array.len` accepts a nullable ref and traps on
+      // null, so the null test comes first and the length test only runs when there
+      // is an array to measure.
+      return module.block(null, [
+        module.local_set(local, operands[0], false),
+        module.if(
+          module.ref_is_null(module.local_get(local, strRef)),
+          module.i32(1),
+          module.binary(BinaryOp.EqI32,
+            module.array_len(module.local_get(local, strRef)), module.i32(0))
+        )
+      ], TypeRef.I32);
+    }
+
+    if (arity != 2) return module.unreachable();
+    let leftType = paramTypes[0];
+    let rightType = paramTypes[1];
+    let leftRef = leftType.toRef();
+    let rightRef = rightType.toRef();
+    let heapType = module.heapType(leftRef);
+    let l = flow.getTempLocal(leftType).index;
+    let r = flow.getTempLocal(rightType).index;
+    let lLen = flow.getTempLocal(Type.i32).index;
+    let rLen = flow.getTempLocal(Type.i32).index;
+    // **No `return`.** This replacement is inlined where the operator was written,
+    // so a `return` here would return from the *caller* — correct only when the
+    // comparison is the caller's whole body, and a silent wrong answer otherwise.
+    // Every early exit is a `br` carrying its value to a block typed `i32`.
+    let out = "gcStrOpExit" + seq.toString();
+    let children: Array<ExpressionRef> = [
+      module.local_set(l, operands[0], false),
+      module.local_set(r, operands[1], false)
+    ];
+
+    if (op == GcStringOp.Eq) {
+      // Identity, then "either null is false", then the length test, then the
+      // character loop — the original order, so the identity fast path survives.
+      children.push(module.if(
+        module.ref_eq(module.local_get(l, leftRef), module.local_get(r, rightRef)),
+        module.br(out, 0, module.i32(1))));
+      children.push(module.if(
+        module.binary(BinaryOp.OrI32,
+          module.ref_is_null(module.local_get(l, leftRef)),
+          module.ref_is_null(module.local_get(r, rightRef))),
+        module.br(out, 0, module.i32(0))));
+      children.push(module.local_set(lLen, module.array_len(module.local_get(l, leftRef)), false));
+      children.push(module.local_set(rLen, module.array_len(module.local_get(r, rightRef)), false));
+      children.push(module.if(
+        module.binary(BinaryOp.NeI32,
+          module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32)),
+        module.br(out, 0, module.i32(0))));
+      children.push(module.br(out, 0,
+        module.binary(BinaryOp.EqI32,
+          this.emitGcStringCompareLoop(heapType, leftRef,
+            l, flow.getTempLocal(Type.i32).index, r, flow.getTempLocal(Type.i32).index, lLen),
+          module.i32(0))));
+      return module.block(out, children, TypeRef.I32);
+    }
+
+    // `>` and `<`: identity is false, an empty side decides, the common prefix
+    // decides, and an equal prefix defers to length.
+    let isGt = op == GcStringOp.Gt;
+    let cmp = flow.getTempLocal(Type.i32).index;
+    let rem = flow.getTempLocal(Type.i32).index;
+    children.push(module.if(
+      module.ref_eq(module.local_get(l, leftRef), module.local_get(r, rightRef)),
+      module.br(out, 0, module.i32(0))));
+    children.push(module.local_set(lLen, module.array_len(module.local_get(l, leftRef)), false));
+    children.push(module.local_set(rLen, module.array_len(module.local_get(r, rightRef)), false));
+    // an empty left side is greater than nothing and less than anything
+    children.push(module.if(
+      module.binary(BinaryOp.EqI32, module.local_get(lLen, TypeRef.I32), module.i32(0)),
+      module.br(out, 0, module.i32(0))));
+    children.push(module.if(
+      module.binary(BinaryOp.EqI32, module.local_get(rLen, TypeRef.I32), module.i32(0)),
+      module.br(out, 0, module.i32(1))));
+    // min(len) — the loop must not run off either end
+    children.push(module.local_set(rem,
+      module.if(
+        module.binary(BinaryOp.LtI32,
+          module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32)),
+        module.local_get(lLen, TypeRef.I32),
+        module.local_get(rLen, TypeRef.I32)), false));
+    children.push(module.local_set(cmp,
+      this.emitGcStringCompareLoop(heapType, leftRef,
+        l, flow.getTempLocal(Type.i32).index, r, flow.getTempLocal(Type.i32).index,
+        rem), false));
+    children.push(module.if(
+      module.local_get(cmp, TypeRef.I32),
+      module.br(out, 0, isGt
+        ? module.binary(BinaryOp.GtI32, module.local_get(cmp, TypeRef.I32), module.i32(0))
+        : module.binary(BinaryOp.LtI32, module.local_get(cmp, TypeRef.I32), module.i32(0)))));
+    children.push(module.br(out, 0,
+      isGt
+        ? module.binary(BinaryOp.GtI32,
+            module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32))
+        : module.binary(BinaryOp.LtI32,
+            module.local_get(lLen, TypeRef.I32), module.local_get(rLen, TypeRef.I32))));
+    return module.block(out, children, TypeRef.I32);
+  }
+
+  /**
+   * **The never-free linear arena the flag allocates from.**
+   *
+   * Under `--wasmGc` the root set for linear memory is provably empty (GC18:
+   * `__visit_globals` compiles to a nop, `pinSpace` is empty because `__pin` is
+   * lowered away, and `visitStack`'s window is zero-width because
+   * `__stack_pointer == __heap_base`). So `itcms` frees every `__new` object at the
+   * next collection — including one a live handle still points at through
+   * `dataStart`. Measured: a payload written 42/7 reads back as 60, 55 or 63 after
+   * 200 000 allocations, depending on what the churn left behind.
+   *
+   * The flag therefore cannot keep using `itcms`. This emits a **bump allocator** and
+   * every `__new`/`__alloc` call site is lowered onto it, so a payload is never handed
+   * to another allocation: correctness is restored by construction, and the cost is
+   * that linear memory is never reclaimed. For a sandbox guest whose arena dies with
+   * its instance that cost is exact, and it is reversible — nothing here is a
+   * commitment to the final memory model, only to not emitting corrupting modules in
+   * the meantime.
+   *
+   * The layout is the one `changetype<OBJECT>(ptr - TOTAL_OVERHEAD)` expects, so
+   * `ArrayBuffer#byteLength` (`rtSize`) and `TensionScript`'s own header reads keep
+   * working: `mmInfo` at -20, `gcInfo`/`gcInfo2` at -16/-12, `rtId` at -8, `rtSize`
+   * at -4. The payload is zero-filled because `itcms`'s `__new` did, and
+   * `ArrayBuffer`'s constructor relies on it under the incremental runtime.
+   */
+  private emitGcLinearAllocator(): void {
+    if (this.gcLinearNewName.length) return; // already emitted
+    let module = this.module;
+    // `TOTAL_OVERHEAD` is `BLOCK_OVERHEAD + OBJECT_OVERHEAD` = 4 + 16, and the payload
+    // header sits at fixed negative offsets from the returned pointer:
+    // `mmInfo` -20, `gcInfo`/`gcInfo2` -16/-12, `rtId` -8, `rtSize` -4.
+    let TOTAL = 20;
+    let nextName = "~gc/linNext";
+
+    module.addGlobal(nextName, TypeRef.I32, true, module.i32(0));
+
+    // The bump pointer, lazily initialised to **the end of linear memory**.
+    //
+    // Deliberately not `__heap_base`: that global is only emitted when something asks
+    // for it, and a module that does not would fail validation with "global.get name
+    // must be valid" (measured on a fixture that allocates nothing at start-up).
+    // Starting past the current memory cannot overlap static data, the stack or a data
+    // segment, at the cost of one immediate growth.
+    let bumpStart: ExpressionRef = module.block(null, [
+      module.if(
+        module.unary(UnaryOp.EqzI32, module.global_get(nextName, TypeRef.I32)),
+        module.global_set(nextName,
+          module.binary(BinaryOp.ShlI32,
+            module.binary(BinaryOp.AddI32, module.memory_size(), module.i32(1)),
+            module.i32(16)))
+      )
+    ], TypeRef.None);
+
+    // `$~gc/linNew(size, id) -> ptr`
+    module.addFunction("~gc/linNew",
+      createType([TypeRef.I32, TypeRef.I32]), // size, id
+      TypeRef.I32,
+      [TypeRef.I32, TypeRef.I32], // object, end
+      module.block(null, [
+        bumpStart,
+        module.block(null, [
+          module.local_set(2, module.global_get(nextName, TypeRef.I32), false), // object
+          // **`(object + TOTAL + size + 15) & -16`, and the `+ 15` is load-bearing.**
+          // `& -16` floors, so without it the reservation lands *below* the payload's
+          // last byte and the next block's header — or its zero-fill — begins inside
+          // this payload. Measured, with the `+ 15` missing: the last 4 bytes of every
+          // payload were zeroed by the very next allocation, and at an 8-byte payload,
+          // where the floored end fell before the payload even began, all 8. A
+          // 16-byte payload with `+ 15` reserves 48 bytes of span for 36 bytes of
+          // contents (20 header + 16 payload), so 12 bytes of slack.
+          module.local_set(3,
+            module.binary(BinaryOp.AndI32,
+              module.binary(BinaryOp.AddI32,
+                module.binary(BinaryOp.AddI32,
+                  module.binary(BinaryOp.AddI32,
+                    module.local_get(2, TypeRef.I32), module.i32(TOTAL)),
+                  module.local_get(0, TypeRef.I32)),
+                module.i32(15)),
+              module.i32(-16)), false),                                          // end
+          // **Grow to cover `end`, before a single byte is written.** `ge_u` and not
+          // `gt_u`: a block that ends exactly on the boundary must still grow, because
+          // the payload fill that follows writes up to it — measured, `gt_u` left the
+          // last block of a page with a `memory.fill` that trapped out of bounds while
+          // every address it used was inside the page.
+          //
+          // The delta is `(end >> 16) + 1 - pages`, which is never zero when a grow is
+          // needed and over-provisions by at most one page. A constant one-page delta
+          // was wrong the first time an allocation larger than a page appeared.
+          module.if(
+            module.binary(BinaryOp.GeU32,
+              module.local_get(3, TypeRef.I32),
+              module.binary(BinaryOp.ShlI32, module.memory_size(), module.i32(16))),
+            module.drop(module.memory_grow(
+              module.binary(BinaryOp.SubI32,
+                module.binary(BinaryOp.AddI32,
+                  module.binary(BinaryOp.ShrU32, module.local_get(3, TypeRef.I32), module.i32(16)),
+                  module.i32(1)),
+                module.memory_size()))))
+        ], TypeRef.None),
+        module.global_set(nextName, module.local_get(3, TypeRef.I32)),
+        module.store(4, module.local_get(2, TypeRef.I32), module.i32(0), TypeRef.I32, 0),
+        module.store(4, module.local_get(2, TypeRef.I32), module.i32(0), TypeRef.I32, 4),
+        module.store(4, module.local_get(2, TypeRef.I32), module.i32(0), TypeRef.I32, 8),
+        module.store(4, module.local_get(2, TypeRef.I32),
+          module.local_get(1, TypeRef.I32), TypeRef.I32, 12),
+        module.store(4, module.local_get(2, TypeRef.I32),
+          module.local_get(0, TypeRef.I32), TypeRef.I32, 16),
+        // Zero-filled because `itcms`'s `__new` did, and `ArrayBuffer`'s constructor
+        // relies on it under the incremental runtime (`memory.fill` is skipped there).
+        module.memory_fill(
+          module.binary(BinaryOp.AddI32, module.local_get(2, TypeRef.I32), module.i32(TOTAL)),
+          module.i32(0),
+          module.local_get(0, TypeRef.I32)),
+        module.binary(BinaryOp.AddI32, module.local_get(2, TypeRef.I32), module.i32(TOTAL))
+      ], TypeRef.I32));
+
+    // `$~gc/linRenew(ptr, size) -> ptr`: grow in place when the block already fits,
+    // else allocate a fresh one and copy. It never frees, so the old bytes stay valid
+    // for the whole copy — "never reuse" holds here too.
+    module.addFunction("~gc/linRenew",
+      createType([TypeRef.I32, TypeRef.I32]), // ptr, size
+      TypeRef.I32,
+      [TypeRef.I32, TypeRef.I32, TypeRef.I32], // oldSize, oldPtr, newPtr
+      module.block(null, [
+        module.local_set(2,
+          module.load(4, false, module.local_get(0, TypeRef.I32), TypeRef.I32, -4), false),
+        module.if(
+          module.binary(BinaryOp.LeU32,
+            module.local_get(1, TypeRef.I32), module.local_get(2, TypeRef.I32)),
+          module.return(module.block(null, [
+            module.store(4, module.local_get(0, TypeRef.I32),
+              module.local_get(1, TypeRef.I32), TypeRef.I32, -4),
+            module.local_get(0, TypeRef.I32)
+          ], TypeRef.I32))),
+        module.local_set(3, module.local_get(0, TypeRef.I32), false),
+        module.local_set(4,
+          module.call("~gc/linNew", [
+            module.local_get(1, TypeRef.I32),
+            // the old object's id, carried so the new block keeps its type
+            module.load(4, false,
+              module.binary(BinaryOp.SubI32, module.local_get(3, TypeRef.I32), module.i32(8)),
+              TypeRef.I32)
+          ], TypeRef.I32), false),
+        module.memory_copy(
+          module.local_get(4, TypeRef.I32),
+          module.local_get(3, TypeRef.I32),
+          module.local_get(2, TypeRef.I32)),
+        module.local_get(4, TypeRef.I32)
+      ], TypeRef.I32));
+
+    this.gcLinearNewName = "~gc/linNew";
+    this.gcLinearRenewName = "~gc/linRenew";
+  }
+
+  /** Names of the emitted arena functions, or empty when not emitted yet. */
+  private gcLinearNewName: string = "";
+  private gcLinearRenewName: string = "";
+
+  /**
+   * A GC array reference with a **byte** offset into it, recovered from the
+   * `changetype<usize>(x) + k` idiom the standard library uses to address a buffer.
+   */
+  private gcArraySliceOf(node: Expression): GcArraySlice | null {
+    let offset: Expression | null = null;
+    let target = node;
+    if (target.kind == NodeKind.Binary) {
+      let binary = <BinaryExpression>target;
+      // Only `+`: `ptr - k` is not a shape the string methods use, and guessing
+      // would be worse than falling back to the diagnostic.
+      if (binary.operator != Token.Plus) return null;
+      offset = binary.right;
+      target = binary.left;
+    }
+    if (target.kind != NodeKind.Call) return null;
+    let call = <CallExpression>target;
+    let callee = call.expression;
+    if (callee.kind != NodeKind.Identifier) return null;
+    if ((<IdentifierExpression>callee).text != "changetype") return null;
+    if (call.args.length != 1) return null;
+    let refExpr = call.args[0];
+    let type = this.resolver.resolveExpression(
+      refExpr, this.currentFlow, Type.auto, ReportMode.Swallow);
+    if (type == null) return null;
+    let element: Type;
+    if (gcStringOf(type)) element = Type.u16;
+    else {
+      let arrayElement = gcArrayElementOf(type);
+      if (arrayElement == null) return null;
+      element = arrayElement;
+    }
+    return new GcArraySlice(refExpr, offset, element, type);
+  }
+
+  /** log2 of an element's byte size, or `-1` when the guard should bail. */
+  private gcElementLog2(element: Type): i32 {
+    switch (element.byteSize) {
+      case 1: return 0;
+      case 2: return 1;
+      case 4: return 2;
+      case 8: return 3;
+    }
+    return -1;
+  }
+
+  /**
+   * **The allocation route: `__new(size, idof<T>())` for a GC array type.**
+   *
+   * Every allocating string method goes
+   * `changetype<String>(__new(len << 1, idof<String>()))` — 71 sites across
+   * `std/assembly` — and `__new` answers a `usize`. Under wasm GC there is no
+   * address, so the call has to *become* the allocation: `array.new $t (n) (zero)`,
+   * with `n = size >> log2(elemSize)`.
+   *
+   * **Why the `idof<T>()` argument is the right key.** `T` is written literally at
+   * the call site, so this is a compile-time type in the source — not GC6's
+   * runtime-`Type` lookup, where every reference type is `usize` and two generic
+   * instantiations are indistinguishable. The type here cannot be confused with
+   * another, because there is no lookup: the node *is* the type argument.
+   *
+   * The result is a reference, so the surrounding `changetype<String>(…)` becomes
+   * the identity (both sides are `(ref null $~gcarray/u16)`); `changetype` already
+   * accepts a ref whose type is already the target's.
+   *
+   * Returns `0` for anything it does not own — a non-`idof` second argument, a
+   * type that is not a GC array, a class allocation — so the ordinary path (and its
+   * diagnostic) still runs for them.
+   */
+  compileGcTypedNew(expression: CallExpression): ExpressionRef {
+    let args = expression.args;
+    if (args.length < 2) return 0;
+    let idArg = args[1];
+    if (idArg.kind != NodeKind.Call) return 0;
+    let idCall = <CallExpression>idArg;
+    let idCallee = idCall.expression;
+    if (idCallee.kind != NodeKind.Identifier) return 0;
+    if ((<IdentifierExpression>idCallee).text != "idof") return 0;
+    let typeArgs = idCall.typeArguments;
+    if (typeArgs == null || typeArgs.length != 1) return 0;
+
+    let type = this.resolver.resolveType(
+      unchecked(typeArgs[0]), this.currentFlow,
+      this.currentFlow.sourceFunction.parent, null, ReportMode.Swallow);
+    if (type == null) return 0;
+
+    // **`__new(size, idof<ArrayBuffer>())` builds a handle over a linear payload.** This
+    // is the site every buffer in the system goes through — ten of them in
+    // `std/assembly`, all the same shape — so recognising it here is what lets `std/`
+    // stay untouched.
+    //
+    // The payload still comes from the arena (`~gc/linNew`), because it has to be a real
+    // address: `dataStart` is what every ABI site passes to a host verb. What changes is
+    // that the *object* is now a struct holding that address and the length, instead of
+    // the address being the object.
+    if (isGcArrayBufferClass(assert(type.classReference))) {
+      this.emitGcLinearAllocator();
+      let module = this.module;
+      let bufTypeRef = type.toRef();
+      let bufHeap = module.heapType(bufTypeRef);
+      let bufSize = this.compileExpression(args[0], this.options.usizeType, Constraints.ConvImplicit);
+      // One temp for the size: it is read twice (payload length, then field) and the
+      // expression must not be compiled twice — it may have side effects.
+      let bufSizeLocal = this.currentFlow.getTempLocal(this.options.usizeType).index;
+      this.currentType = type;
+      return module.block(null, [
+        module.local_set(bufSizeLocal, bufSize, false),
+        module.struct_new(bufHeap, [
+          module.i32(gcBrandOf(assert(type.classReference))),
+          module.call(this.gcLinearNewName, [
+            module.local_get(bufSizeLocal, this.options.usizeType.toRef()),
+            module.i32(0) // id: the header's rtId, unused by the struct
+          ], TypeRef.I32),
+          module.local_get(bufSizeLocal, this.options.usizeType.toRef())
+        ])
+      ], bufTypeRef);
+    }
+
+    let element: Type;
+    if (gcStringOf(type)) element = Type.u16;
+    else {
+      let arrayElement = gcArrayElementOf(type);
+      if (arrayElement == null) return 0;
+      element = arrayElement;
+    }
+    let log2 = this.gcElementLog2(element);
+    if (log2 < 0) return 0;
+
+    let module = this.module;
+    let arrayTypeRef = type.toRef();
+    let heapType = module.heapType(arrayTypeRef);
+    let size = this.compileExpression(args[0], this.options.usizeType, Constraints.ConvImplicit);
+    let count = log2 ? module.binary(BinaryOp.ShrU32, size, module.i32(log2)) : size;
+    this.currentType = type;
+    // `array.new` zero-fills, which is what `__new` guaranteed (`memory.fill`), and
+    // what the stdlib relies on for the parts of a buffer it does not write.
+    return module.array_new(heapType, count, this.makeFieldZero(element));
+  }
+
+  /**
+   * `memory.copy(dst, src, n)` where both sides are GC arrays.
+   *
+   * This is the second half of the allocation route and it is not optional: once
+   * `__new` produces an array, the very next line of `substring` is
+   * `memory.copy(changetype<usize>(out), changetype<usize>(this) + fromPos, size)` —
+   * a byte address on both sides, which a wasm array does not have. The operands
+   * are recognised as `changetype<usize>(x) [+ byteOffset]`, and the copy becomes
+   * `array.copy` with the byte offsets and the length shifted down to element
+   * indices.
+   *
+   * `changetype<usize>(aRef)` is *already* an error under the flag, so recognising
+   * this shape cannot misread valid code: there is no other meaning it could have.
+   *
+   * Returns `0` when either side is not a GC array, so a copy between linear
+   * buffers keeps its ordinary lowering.
+   */
+  compileGcMemoryCopy(destNode: Expression, srcNode: Expression, sizeNode: Expression): ExpressionRef {
+    let dest = this.gcArraySliceOf(destNode);
+    if (dest == null) return 0;
+    let src = this.gcArraySliceOf(srcNode);
+    if (src == null) return 0;
+    let log2: i32 = this.gcElementLog2(dest.element);
+    // Same element width on both sides, or this is not a buffer-to-buffer copy of
+    // one type and the ordinary path should report it.
+    if (log2 < 0 || log2 != this.gcElementLog2(src.element)) return 0;
+    if (dest.element != src.element) return 0;
+
+    // `module` is captured by `byteShift`, so its type must be declared: the
+    // closure lowering rebuilds a capture's environment field-by-field and an
+    // inferred type is not available to it.
+    let module: Module = this.module;
+    let byteShift = (expr: ExpressionRef): ExpressionRef =>
+      log2 ? module.binary(BinaryOp.ShrU32, expr, module.i32(log2)) : expr;
+    let destRef = this.compileExpression(
+      dest.refExpr, dest.type, Constraints.ConvImplicit);
+    // The bound local is what the test narrows; reading `dest.byteOffset` twice
+    // leaves the second read `Expression | null` (TS2322).
+    let destOffsetExpr = dest.byteOffset;
+    let destOffset = destOffsetExpr != null
+      ? this.compileExpression(destOffsetExpr, this.options.usizeType, Constraints.ConvImplicit)
+      : module.i32(0);
+    let srcRef = this.compileExpression(
+      src.refExpr, src.type, Constraints.ConvImplicit);
+    let srcOffsetExpr = src.byteOffset;
+    let srcOffset = srcOffsetExpr != null
+      ? this.compileExpression(srcOffsetExpr, this.options.usizeType, Constraints.ConvImplicit)
+      : module.i32(0);
+    let size = this.compileExpression(sizeNode, this.options.usizeType, Constraints.ConvImplicit);
+    this.currentType = Type.void;
+    return module.array_copy(destRef, byteShift(destOffset), srcRef, byteShift(srcOffset), byteShift(size));
+  }
+
+  /**
+   * `hashStr(key)` over a GC string.
+   *
+   * The stdlib body walks the string as **bytes at an address** —
+   * `changetype<usize>(key)`, then `load<u32>` and `load<u8>` — and under the flag a
+   * `String` is `(array (mut u16))`: no address, no byte loads, and
+   * `changetype<usize>(key) == 0` is not an integer test.
+   *
+   * Replaced **at the call**, like `compareImpl` (GC11), because it is one function with
+   * one contract and one call-site family (`HASH<T>` is `@inline`, so every `Map`/`Set`
+   * lookup reaches `hashStr` directly).
+   *
+   * **The numbers must be identical**, not merely usable: a map's bucket index comes from
+   * them, so a different hash would be the flag changing behaviour. That is what fixes the
+   * loop shape. The stdlib hashes *bytes*: byte `2k` of the old representation is the low
+   * byte of element `k` and byte `2k+1` its high byte (little-endian), so
+   *
+   *     u32 at byte 4k  ==  elem[2k] | elem[2k+1] << 16
+   *
+   * and the 16-byte block fast path survives unchanged at the cost of two `array.get`s per
+   * word instead of one `load`. The algorithm is untouched; only where the bytes come from.
+   */
+  private compileGcHashStr(operands: ExpressionRef[], paramTypes: Type[]): ExpressionRef {
+    if (operands.length != 1) return this.module.unreachable();
+    // Captured by all four arrows below; see `compileGcMemoryCopy`.
+    let module: Module = this.module;
+    let flow = this.currentFlow;
+    let strType = paramTypes[0];
+    // Declared, not inferred: `wordAt`, `byteAt` and `mix` capture these, and the
+    // closure lowering needs a declared type for every capture (these six plus
+    // `module`, declared above).
+    let strRef: TypeRef = strType.toRef();
+    let heapType: HeapTypeRef = module.heapType(strRef);
+
+    // P1..P5 and the seed, from `std/assembly/util/hash.ts`.
+    let P1: ExpressionRef = module.i32(2654435761);
+    let P2: ExpressionRef = module.i32(2246822519);
+    let P3 = module.i32(3266489917);
+    let P4 = module.i32(668265263);
+    let P5 = module.i32(374761393);
+    let SEED = module.i32(1514845233);
+
+    let key: i32 = flow.getTempLocal(strType).index;
+    let h = flow.getTempLocal(Type.i32).index;
+    let len = flow.getTempLocal(Type.i32).index;
+    let pos = flow.getTempLocal(Type.i32).index;
+    let end = flow.getTempLocal(Type.i32).index;
+    let s1 = flow.getTempLocal(Type.i32).index;
+    let s2 = flow.getTempLocal(Type.i32).index;
+    let s3 = flow.getTempLocal(Type.i32).index;
+    let s4 = flow.getTempLocal(Type.i32).index;
+    let seq = this.gcCompareSeq++;
+
+    let rotl = (v: Index, n: i32): ExpressionRef => module.binary(BinaryOp.RotlI32,
+      module.local_get(v, TypeRef.I32), module.i32(n));
+    // The u32 word at byte offset `off`: `elem[off>>1] | elem[(off>>1)+1] << 16`.
+    let wordAt = (off: ExpressionRef): ExpressionRef => module.binary(BinaryOp.OrI32,
+      module.array_get(heapType, module.local_get(key, strRef),
+        module.binary(BinaryOp.ShrU32, off, module.i32(1)), TypeRef.I32),
+      module.binary(BinaryOp.ShlI32,
+        module.array_get(heapType, module.local_get(key, strRef),
+          module.binary(BinaryOp.AddI32,
+            module.binary(BinaryOp.ShrU32, off, module.i32(1)), module.i32(1)),
+          TypeRef.I32),
+        module.i32(16)));
+    // The byte at byte offset `off`, as the stdlib's `load<u8>` would have read it.
+    let byteAt = (off: ExpressionRef): ExpressionRef => module.if(
+      module.binary(BinaryOp.AndI32, off, module.i32(1)),
+      module.binary(BinaryOp.ShrU32,
+        module.array_get(heapType, module.local_get(key, strRef),
+          module.binary(BinaryOp.ShrU32, off, module.i32(1)), TypeRef.I32),
+        module.i32(8)),
+      module.binary(BinaryOp.AndI32,
+        module.array_get(heapType, module.local_get(key, strRef),
+          module.binary(BinaryOp.ShrU32, off, module.i32(1)), TypeRef.I32),
+        module.i32(0xFF))
+    );
+    let mix = (s: Index, k: ExpressionRef): ExpressionRef => module.binary(BinaryOp.MulI32,
+      module.binary(BinaryOp.RotlI32,
+        module.binary(BinaryOp.AddI32,
+          module.local_get(s, TypeRef.I32),
+          module.binary(BinaryOp.MulI32, k, P2)),
+        module.i32(13)),
+      P1);
+
+    let blockLabel = "gcHashBlock" + seq.toString();
+    let wordLabel = "gcHashWord" + seq.toString();
+    let byteLabel = "gcHashByte" + seq.toString();
+
+    return module.block(null, [
+      module.local_set(key, operands[0], false),
+      // `changetype<usize>(key) == 0` is a **null-reference test** here.
+      module.if(module.ref_is_null(module.local_get(key, strRef)), module.return(SEED)),
+      module.local_set(len,
+        module.binary(BinaryOp.ShlI32,
+          module.array_len(module.local_get(key, strRef)), module.i32(1)), false),
+      module.local_set(h, module.local_get(len, TypeRef.I32), false),
+      module.local_set(pos, module.i32(0), false),
+      // The 16-byte block loop, exactly as the stdlib writes it.
+      module.if(
+        module.binary(BinaryOp.GeU32, module.local_get(len, TypeRef.I32), module.i32(16)),
+        module.block(null, [
+          module.local_set(s1, module.binary(BinaryOp.AddI32,
+            module.binary(BinaryOp.AddI32, SEED, P1), P2), false),
+          module.local_set(s2, module.binary(BinaryOp.AddI32, SEED, P2), false),
+          module.local_set(s3, SEED, false),
+          module.local_set(s4, module.binary(BinaryOp.SubI32, SEED, P1), false),
+          module.local_set(end,
+            module.binary(BinaryOp.SubI32, module.local_get(len, TypeRef.I32), module.i32(16)), false),
+          module.block(blockLabel, [
+            module.loop(blockLabel + "L", module.block(null, [
+              module.br(blockLabel, module.binary(BinaryOp.GtU32,
+                module.local_get(pos, TypeRef.I32), module.local_get(end, TypeRef.I32))),
+              module.local_set(s1, mix(s1, wordAt(module.local_get(pos, TypeRef.I32))), false),
+              module.local_set(s2, mix(s2, wordAt(module.binary(BinaryOp.AddI32,
+                module.local_get(pos, TypeRef.I32), module.i32(4)))), false),
+              module.local_set(s3, mix(s3, wordAt(module.binary(BinaryOp.AddI32,
+                module.local_get(pos, TypeRef.I32), module.i32(8)))), false),
+              module.local_set(s4, mix(s4, wordAt(module.binary(BinaryOp.AddI32,
+                module.local_get(pos, TypeRef.I32), module.i32(12)))), false),
+              module.local_set(pos,
+                module.binary(BinaryOp.AddI32, module.local_get(pos, TypeRef.I32), module.i32(16)), false),
+              module.br(blockLabel + "L")
+            ]))
+          ]),
+          module.local_set(h, module.binary(BinaryOp.AddI32,
+            module.local_get(h, TypeRef.I32),
+            module.binary(BinaryOp.AddI32,
+              module.binary(BinaryOp.AddI32, rotl(s1, 1), rotl(s2, 7)),
+              module.binary(BinaryOp.AddI32, rotl(s3, 12), rotl(s4, 18)))), false)
+        ]),
+        module.local_set(h, module.binary(BinaryOp.AddI32,
+          module.local_get(h, TypeRef.I32),
+          module.binary(BinaryOp.AddI32, SEED, P5)), false)
+      ),
+      // 4 bytes at a time.
+      module.local_set(end,
+        module.binary(BinaryOp.SubI32, module.local_get(len, TypeRef.I32), module.i32(4)), false),
+      module.block(wordLabel, [
+        module.loop(wordLabel + "L", module.block(null, [
+          module.br(wordLabel, module.binary(BinaryOp.GtU32,
+            module.local_get(pos, TypeRef.I32), module.local_get(end, TypeRef.I32))),
+          module.local_set(h, module.binary(BinaryOp.AddI32,
+            module.local_get(h, TypeRef.I32),
+            module.binary(BinaryOp.MulI32, wordAt(
+              module.local_get(pos, TypeRef.I32)), P3)), false),
+          module.local_set(h, module.binary(BinaryOp.MulI32, rotl(h, 17), P4), false),
+          module.local_set(pos,
+            module.binary(BinaryOp.AddI32, module.local_get(pos, TypeRef.I32), module.i32(4)), false),
+          module.br(wordLabel + "L")
+        ]))
+      ]),
+      // The tail, a byte at a time.
+      module.block(byteLabel, [
+        module.loop(byteLabel + "L", module.block(null, [
+          module.br(byteLabel, module.binary(BinaryOp.GeU32,
+            module.local_get(pos, TypeRef.I32), module.local_get(len, TypeRef.I32))),
+          module.local_set(h, module.binary(BinaryOp.AddI32,
+            module.local_get(h, TypeRef.I32),
+            module.binary(BinaryOp.MulI32, byteAt(
+              module.local_get(pos, TypeRef.I32)), P5)), false),
+          module.local_set(h, module.binary(BinaryOp.MulI32, rotl(h, 11), P1), false),
+          module.local_set(pos,
+            module.binary(BinaryOp.AddI32, module.local_get(pos, TypeRef.I32), module.i32(1)), false),
+          module.br(byteLabel + "L")
+        ]))
+      ]),
+      // The avalanche, unchanged.
+      module.local_set(h, module.binary(BinaryOp.MulI32,
+        module.binary(BinaryOp.XorI32, module.local_get(h, TypeRef.I32),
+          module.binary(BinaryOp.ShrU32, module.local_get(h, TypeRef.I32), module.i32(15))), P2), false),
+      module.local_set(h, module.binary(BinaryOp.MulI32,
+        module.binary(BinaryOp.XorI32, module.local_get(h, TypeRef.I32),
+          module.binary(BinaryOp.ShrU32, module.local_get(h, TypeRef.I32), module.i32(13))), P3), false),
+      module.local_set(h, module.binary(BinaryOp.XorI32, module.local_get(h, TypeRef.I32),
+        module.binary(BinaryOp.ShrU32, module.local_get(h, TypeRef.I32), module.i32(16))), false),
+      module.local_get(h, TypeRef.I32)
+    ], TypeRef.I32);
+  }
+
+  /**
+   * `compareImpl(str1, index1, str2, index2, len)` over two GC strings.
+   *
+   * The stdlib body is `changetype<usize>(str) + (index << 1)` then `load<u16>` in a
+   * loop. The replacement is the same loop with `array.get` — same contract (the
+   * first differing pair answers `a - b`, else `0`, and a zero length never
+   * dereferences, so an empty string at an offset is not an error), and it keeps
+   * the multibyte fast path out because comparing `u16` at a time is what the
+   * `while (len--)` tail of the original does anyway.
+   */
+  private compileGcStringCompare(operands: ExpressionRef[], paramTypes: Type[]): ExpressionRef {
+    if (operands.length != 5) return this.module.unreachable();
+    let module = this.module;
+    let flow = this.currentFlow;
+    let str1Type = paramTypes[0];
+    let str2Type = paramTypes[2];
+    let strTypeRef = str1Type.toRef();
+    let heapType = module.heapType(strTypeRef);
+
+    let s1 = flow.getTempLocal(str1Type).index;
+    let s2 = flow.getTempLocal(str2Type).index;
+    let p1 = flow.getTempLocal(Type.i32).index;
+    let p2 = flow.getTempLocal(Type.i32).index;
+    let rem = flow.getTempLocal(Type.i32).index;
+
+    return module.block(null, [
+      module.local_set(s1, operands[0], false),
+      module.local_set(p1, operands[1], false),
+      module.local_set(s2, operands[2], false),
+      module.local_set(p2, operands[3], false),
+      module.local_set(rem, operands[4], false),
+      this.emitGcStringCompareLoop(heapType, strTypeRef, s1, p1, s2, p2, rem)
+    ], TypeRef.I32);
+  }
+
+  /**
+   * `charCodeAt`, `at`, `charAt` and `concat` on a GC `String`.
+   *
+   * `charCodeAt` and `at` are `array.get`; `at`/`charAt` need a one-character
+   * string back, which is a fresh `(array (mut u16))` of length 1 or 2 (a surrogate
+   * pair). `concat` allocates `len(a)+len(b)` and copies both in with `array.copy`
+   * — the operation `+` and `${a}${b}` both funnel through.
+   *
+   * Returns `0` for a method this does not handle, so the caller falls through to
+   * the ordinary path (and its diagnostic, if the body cannot be emitted).
+   */
+  private compileGcStringCall(
+    access: PropertyAccessExpression,
+    receiverType: Type,
+    call: CallExpression
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let method = access.property.text;
+    let strTypeRef = receiverType.toRef();
+    let heapType = module.heapType(strTypeRef);
+
+    if (method == "charCodeAt") {
+      if (call.args.length != 1) return 0;
+      let strLocal = flow.getTempLocal(receiverType).index;
+      let idxLocal = flow.getTempLocal(Type.i32).index;
+      return module.block(null, [
+        module.local_set(strLocal,
+          this.compileExpression(access.expression, receiverType, Constraints.ConvImplicit), false),
+        module.local_set(idxLocal,
+          this.compileExpression(call.args[0], Type.i32, Constraints.ConvImplicit), false),
+        // Out of range answers 0 rather than trapping: `array.get` which would
+        // trap is only reached on the in-range arm. Note this is a typed `if` and
+        // **not** `module.return` — the intercept is inlined into the caller, so a
+        // `return` here would return from the caller's function.
+        module.if(
+          module.binary(BinaryOp.GeU32, module.local_get(idxLocal, TypeRef.I32),
+            module.array_len(module.local_get(strLocal, strTypeRef))),
+          module.i32(0),
+          module.array_get(heapType, module.local_get(strLocal, strTypeRef),
+            module.local_get(idxLocal, TypeRef.I32), TypeRef.I32)
+        )
+      ], TypeRef.I32);
+    }
+
+    if (method == "at" || method == "charAt") {
+      if (call.args.length != 1) return 0;
+      let strLocal = flow.getTempLocal(receiverType).index;
+      let idxLocal = flow.getTempLocal(Type.i32).index;
+      let outLocal = flow.getTempLocal(receiverType).index;
+      return module.block(null, [
+        module.local_set(strLocal,
+          this.compileExpression(access.expression, receiverType, Constraints.ConvImplicit), false),
+        module.local_set(idxLocal,
+          this.compileExpression(call.args[0], Type.i32, Constraints.ConvImplicit), false),
+        module.if(
+          module.binary(BinaryOp.GeU32, module.local_get(idxLocal, TypeRef.I32),
+            module.array_len(module.local_get(strLocal, strTypeRef))),
+          this.ensureStaticString(""),
+          module.block(null, [
+            module.local_set(outLocal, module.array_new(heapType, module.i32(1), module.i32(0)), false),
+            module.array_set(heapType, module.local_get(outLocal, strTypeRef), module.i32(0),
+              module.array_get(heapType, module.local_get(strLocal, strTypeRef),
+                module.local_get(idxLocal, TypeRef.I32), TypeRef.I32)),
+            module.local_get(outLocal, strTypeRef)
+          ], strTypeRef)
+        )
+      ], strTypeRef);
+    }
+
+    if (method == "concat") {
+      if (call.args.length != 1) return 0;
+      let aLocal = flow.getTempLocal(receiverType).index;
+      let bLocal = flow.getTempLocal(receiverType).index;
+      let lenLocal = flow.getTempLocal(Type.i32).index;
+      let outLocal = flow.getTempLocal(receiverType).index;
+      return module.block(null, [
+        module.local_set(aLocal,
+          this.compileExpression(access.expression, receiverType, Constraints.ConvImplicit), false),
+        module.local_set(bLocal,
+          this.compileExpression(call.args[0], receiverType, Constraints.ConvImplicit), false),
+        module.local_set(lenLocal,
+          module.binary(BinaryOp.AddI32,
+            module.array_len(module.local_get(aLocal, strTypeRef)),
+            module.array_len(module.local_get(bLocal, strTypeRef))), false),
+        module.local_set(outLocal,
+          module.array_new(heapType, module.local_get(lenLocal, TypeRef.I32), module.i32(0)), false),
+        module.array_copy(module.local_get(outLocal, strTypeRef), module.i32(0),
+          module.local_get(aLocal, strTypeRef), module.i32(0),
+          module.array_len(module.local_get(aLocal, strTypeRef))),
+        module.array_copy(module.local_get(outLocal, strTypeRef),
+          module.array_len(module.local_get(aLocal, strTypeRef)),
+          module.local_get(bLocal, strTypeRef), module.i32(0),
+          module.array_len(module.local_get(bLocal, strTypeRef))),
+        module.local_get(outLocal, strTypeRef)
+      ], strTypeRef);
+    }
+    return 0;
+  }
+
+  /**
+   * The global holding one distinct literal's array, and the pending start-time
+   * build that fills it.
+   *
+   * **Why a global and not `array.new_data` at each use site:** measured, that
+   * instruction needs a *passive* data segment whose element type is a packed `i16`,
+   * and this Binaryen's glue exports no `i16` type constructor at all
+   * (`_BinaryenTypeInt16` is undefined; only Int32/Int64/Float32/Float64 exist), so
+   * `_BinaryenArrayNewData` aborts with `heapType.isData()`. Materialising per site
+   * with `array.new_fixed` is reachable but loses deduplication and pays one
+   * constant per character at *every* use. A global costs one slot per distinct
+   * literal plus one call in `__start`.
+   *
+   * The build is deferred because `ensureStaticString` runs at any point during
+   * compilation, while the start function's body only exists as `currentBody` for
+   * the duration of `compileStartFunction`. `compileStartFunction` appends these
+   * after the module is otherwise compiled.
+   */
+  ensureGcStringLiteral(stringValue: string): string {
+    let existing = this.gcStringLiterals.get(stringValue);
+    if (existing != null) return existing;
+
+    let module = this.module;
+    let stringType = this.program.stringInstance.type;
+    let arrayTypeRef = stringType.toRef();
+    let globalName = `~gcstr/${this.gcStringLiterals.size}`;
+
+    // Deduplicated through the same segment map, so the bytes exist once.
+    let ptr = this.ensureStaticStringPtr(stringValue);
+    module.addGlobal(globalName, arrayTypeRef, true, this.makeFieldZero(stringType));
+    this.gcStringBuilds.push(new GcStringBuild(globalName, ptr, stringValue.length, stringType));
+    this.gcStringLiterals.set(stringValue, globalName);
+    return globalName;
+  }
+
+  /** Appends one build per distinct literal to the start function. */
+  private emitGcStringBuilds(body: ExpressionRef[]): void {
+    let module = this.module;
+    let builds = this.gcStringBuilds;
+    for (let b = 0, n = builds.length; b < n; ++b) {
+      let build = unchecked(builds[b]);
+      let arrayTypeRef = build.type.toRef();
+      let heapType = module.heapType(arrayTypeRef);
+      let tmp = this.currentFlow.getTempLocal(build.type).index;
+      let stmts = new Array<ExpressionRef>();
+      stmts.push(module.local_set(tmp,
+        module.array_new(heapType, module.i32(build.length), module.i32(0)), false));
+      // One `array.set` per character, unrolled: literals are short, and a loop
+      // would need its own locals and block for no gain at these sizes.
+      for (let i = 0; i < build.length; ++i) {
+        // **A fresh pointer expression per load.** Binaryen's IR is a tree with no
+        // sharing: handing the same `i32.const` node to several `load`s leaves the
+        // optimizer with one parent pointer for many children, and `-O1` and above
+        // then collapsed every `offset=2i` to `offset=0` — every literal read as a
+        // string of its first character repeated, and every string compared equal.
+        // `-O0` was correct, which is exactly how the same mistake looked in GC4.
+        stmts.push(module.array_set(heapType, module.local_get(tmp, arrayTypeRef),
+          module.i32(i),
+          module.load(2, false,
+            this.options.isWasm64
+              ? module.i64(i64_low(build.ptr), i64_high(build.ptr))
+              : module.i32(i64_low(build.ptr)),
+            TypeRef.I32, 2 * i, 2)));
+      }
+      stmts.push(module.global_set(build.globalName, module.local_get(tmp, arrayTypeRef)));
+      body.push(module.block(null, stmts, TypeRef.None));
+    }
+    builds.length = 0;
   }
 
   /** Ensures that a string exists in static memory and returns a pointer to it. Deduplicates. */
@@ -2624,6 +4057,30 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   // === Table ====================================================================================
+
+  /**
+   * A function value as a **GC struct**: `{ <brand>, _index, _env: 0 }`.
+   *
+   * The static instance `ensureRuntimeFunction` builds is a data segment — a linear block
+   * with the index at offset 0 — and a field holding a function value is now a
+   * `(ref null $Function<T>)`, so the value has to be a struct. Allocating it at the use
+   * site rather than caching one per signature is deliberate: it costs one `struct.new`,
+   * and a cached global would have to be built in `__start` before anything could compare
+   * two function values anyway. Identity comparisons read `_index`, which is the same
+   * table index in every copy — a function value's identity genuinely is an integer.
+   */
+  private makeGcFunctionValue(instance: Function): ExpressionRef {
+    let module = this.module;
+    let rtInstance = assert(this.resolver.resolveClass(
+      this.program.functionPrototype, [ instance.type ]));
+    let typeRef = rtInstance.type.toRef();
+    let heapType = module.heapType(typeRef);
+    return module.struct_new(heapType, [
+      module.i32(gcBrandOf(rtInstance)),
+      module.i32(this.ensureFunctionTableIndex(instance)),
+      module.i32(0) // _env: nothing captured
+    ]);
+  }
 
   /** Ensures that a runtime counterpart of the specified function exists and returns its address. */
   ensureRuntimeFunction(instance: Function): i64 {
@@ -5620,6 +7077,33 @@ export class Compiler extends DiagnosticEmitter {
           contextualType, Constraints.None, null, expr
         );
       }
+      // **A wasm GC array's element write, which this path otherwise misses.**
+      // `a[i] += v` and `a[i]++` compile the operator first and then store, and
+      // the store goes through `lookupExpression` — so `compileAssignment`'s GC
+      // arm, which only sees a plain `=`, never runs. Without these two arms the
+      // store resolves `Array#__set`, whose body is
+      // `ensureCapacity(changetype<usize>(this), …)` + `__link(...)`, and
+      // `changetype<usize>` of a GC reference is exactly what cannot exist under
+      // the flag.
+      //
+      // Measured: this omission is 2 of the 7 blockers that block 16 of the 18
+      // real examples in `examples/` — the highest-leverage site in the tree.
+      if (this.gcActive && arrayType != null) {
+        let gcCompoundDynamic = gcDynamicArrayElementOf(arrayType);
+        if (gcCompoundDynamic != null) {
+          return this.compileGcDynamicArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcCompoundDynamic, expr, contextualType != Type.void
+          );
+        }
+        let gcCompoundElement = gcArrayElementOf(arrayType);
+        if (gcCompoundElement != null) {
+          return this.compileGcStaticArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcCompoundElement, expr, contextualType != Type.void
+          );
+        }
+      }
     }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
@@ -6520,6 +8004,22 @@ export class Compiler extends DiagnosticEmitter {
     // a `T[N]` is inline storage and has no class to hang an operator on -- the
     // lookup below would report "index signature missing" for a target that is
     // perfectly writable.
+    // **`a.length = n` on a GC `Array<T>`.** The declared setter calls
+    // `ensureCapacity`, which is linear-memory code (`__renew`, `store<usize>`), so
+    // it cannot be emitted for a wasm-array-backed `Array`.
+    if (this.gcActive && expression.kind == NodeKind.PropertyAccess) {
+      let access = <PropertyAccessExpression>expression;
+      if (access.property.text == "length") {
+        let setLengthType = resolver.resolveExpression(access.expression, flow, Type.auto, ReportMode.Swallow);
+        let setLengthElement = gcDynamicArrayElementOf(setLengthType);
+        if (setLengthElement != null) {
+          return this.compileGcDynamicArraySetLength(
+            access.expression, valueExpression, assert(setLengthType), setLengthElement
+          );
+        }
+      }
+    }
+
     if (expression.kind == NodeKind.ElementAccess) {
       let elementAccess = <ElementAccessExpression>expression;
       let arrayType = resolver.resolveExpression(elementAccess.expression, flow);
@@ -6537,6 +8037,37 @@ export class Compiler extends DiagnosticEmitter {
         return this.compileUnmanagedArrayElementAccess(
           elementAccess, arrayType, true,
           contextualType, Constraints.None, valueExpression
+        );
+      }
+      // **`a[i] = v` on a wasm GC `StaticArray<T>`: `array.set`.** Intercepted
+      // here, before the index-signature lookup — that lookup resolves `__set`,
+      // which is linear-memory code and cannot be called on a wasm array.
+      //
+      // Flag-guarded: the extra `resolveExpression` below must not run in a
+      // program that never asked for wasm GC.
+      let gcWriteType = this.gcActive
+        ? resolver.resolveExpression(elementAccess.expression, flow)
+        : null;
+      let gcWriteDynamic = gcDynamicArrayElementOf(gcWriteType);
+      if (gcWriteDynamic != null) {
+        let value = this.compileExpression(valueExpression, gcWriteDynamic);
+        let valueRefType = this.currentType;
+        return this.compileGcDynamicArraySet(
+          elementAccess.expression, elementAccess.elementExpression,
+          assert(gcWriteType), gcWriteDynamic,
+          this.convertExpression(value, valueRefType, gcWriteDynamic, false, valueExpression),
+          contextualType != Type.void
+        );
+      }
+      let gcWriteElement = gcArrayElementOf(gcWriteType);
+      if (gcWriteElement != null) {
+        let value = this.compileExpression(valueExpression, gcWriteElement);
+        let valueRefType = this.currentType;
+        return this.compileGcStaticArraySet(
+          elementAccess.expression, elementAccess.elementExpression,
+          assert(gcWriteType), gcWriteElement,
+          this.convertExpression(value, valueRefType, gcWriteElement, false, valueExpression),
+          contextualType != Type.void
         );
       }
       if (arrayType && arrayType.kind == TypeKind.DynamicArray) {
@@ -6660,6 +8191,7 @@ export class Compiler extends DiagnosticEmitter {
         assert(parent.kind == ElementKind.Class);
         let classInstance = <Class>parent;
         let isUnchecked = flow.is(FlowFlags.UncheckedContext);
+
         let indexedSet = classInstance.lookupOverload(OperatorKind.IndexedSet, isUnchecked);
         if (!indexedSet) {
           let indexedGet = classInstance.lookupOverload(OperatorKind.IndexedGet, isUnchecked);
@@ -7140,6 +8672,55 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let flow = this.currentFlow;
 
+    // **`push`/`pop` on a GC `Array<T>`.** Their stdlib bodies are linear-memory
+    // code (`ensureCapacity`, `__renew`, `store<T>` at an offset), and `push` is the
+    // one that grows — which is the whole reason `Array` is a struct holding a
+    // reference rather than a wasm array. Intercepted before resolution, and only
+    // for a method call whose receiver is a dynamic `Array` on the GC heap.
+    if (this.gcActive && expression.expression.kind == NodeKind.PropertyAccess) {
+      let access = <PropertyAccessExpression>expression.expression;
+      let receiverType = this.resolver.resolveExpression(
+        access.expression, flow, Type.auto, ReportMode.Swallow
+      );
+      let element = gcDynamicArrayElementOf(receiverType);
+      if (element != null) {
+        let method = access.property.text;
+        if (method == "push") {
+          if (expression.args.length != 1) {
+            this.error(DiagnosticCode.Expected_0_arguments_but_got_1, expression.range,
+              "1", expression.args.length.toString());
+            return module.unreachable();
+          }
+          return this.compileGcDynamicArrayPush(
+            access.expression, expression.args[0], assert(receiverType), element
+          );
+        }
+        if (method == "pop") {
+          if (expression.args.length != 0) {
+            this.error(DiagnosticCode.Expected_0_arguments_but_got_1, expression.range,
+              "0", expression.args.length.toString());
+            return module.unreachable();
+          }
+          return this.compileGcDynamicArrayPop(
+            access.expression, assert(receiverType), element
+          );
+        }
+      }
+    }
+
+    // **`charCodeAt` / `at` / `charAt` / `concat` / `==` on a GC `String`.** The
+    // stdlib bodies read `dataStart`/`load<u16>`, which a wasm array does not have.
+    if (this.gcActive && expression.expression.kind == NodeKind.PropertyAccess) {
+      let strAccess = <PropertyAccessExpression>expression.expression;
+      let strReceiver = this.resolver.resolveExpression(
+        strAccess.expression, flow, Type.auto, ReportMode.Swallow
+      );
+      if (strReceiver != null && gcStringOf(strReceiver)) {
+        let gcStr = this.compileGcStringCall(strAccess, strReceiver, expression);
+        if (gcStr != 0) return gcStr;
+      }
+    }
+
     // handle call to super
     if (expression.expression.kind == NodeKind.Super) {
       let flow = this.currentFlow;
@@ -7164,7 +8745,12 @@ export class Compiler extends DiagnosticEmitter {
         return module.unreachable();
       }
       let thisLocal = assert(flow.lookupLocal(CommonNames.this_));
-      let sizeTypeRef = this.options.sizeTypeRef;
+      // **The derived class's ref, not the base's.** A `super(…)` call passes
+      // the same object to the base constructor, and under wasm GC the value is a
+      // `(ref null $Derived)` — a subtype of `(ref null $Base)`, so it is
+      // accepted there, while the pointer-width `i32` this used to pass is not a
+      // ref at all. `thisSlotTypeRef` asks the class whose local this is.
+      let sizeTypeRef = this.thisSlotTypeRef(classInstance);
 
       let baseCtorInstance = this.ensureConstructor(baseClassInstance, expression);
       this.checkFieldInitialization(baseClassInstance, expression);
@@ -7188,6 +8774,20 @@ export class Compiler extends DiagnosticEmitter {
       }
       flow.set(FlowFlags.AccessesThis | FlowFlags.CallsSuper);
       this.currentType = Type.void;
+      if (isGcClass(classInstance)) {
+        // **A super call under wasm GC: run it, keep our own `this`.** The base
+        // constructor returns a `(ref null $Base)` and this local holds a
+        // `(ref null $Derived)` — assigning one to the other is ill-typed, and
+        // rightly so: the object never changed. The derived constructor already
+        // allocated a struct whose leading fields *are* the base's (the prefix
+        // requirement), so the base's initialisers write into the same object and
+        // its "allocate if null" arm finds it non-null and does nothing. The call
+        // is kept for its side effects, its result is dropped, and the expression
+        // answers our own reference — which is what the caller expects.
+        // A statement, so: run it and drop the result. `currentType` is
+        // `Type.void` above — the same shape the pointer-ABI `local.set` had.
+        return module.drop(superCall);
+      }
       return module.local_set(thisLocal.index, superCall, classInstance.type.isManaged);
     }
 
@@ -7214,6 +8814,97 @@ export class Compiler extends DiagnosticEmitter {
       }
       case ElementKind.Function: {
         let functionInstance = <Function>target;
+        // **The allocation route: `__new(size, idof<T>())` for a GC array type.**
+        // Every allocating string method in the standard library funnels through
+        // this one call, so lowering it here is what makes those bodies
+        // expressible at all — `__new` answers a `usize` and a wasm array has no
+        // address. See `compileGcTypedNew`.
+        // The declaration is `__new`; the *resolved instance* is whichever runtime
+        // module supplies it (`~lib/rt/itcms/__new` today), so the name is matched
+        // on the last segment — measured: a strict `== "__new"` never fired.
+        let gcNewName = functionInstance.prototype.internalName;
+        if (this.gcActive &&
+            (gcNewName == "__new" || gcNewName.endsWith("/__new"))) {
+          let gcNew = this.compileGcTypedNew(expression);
+          if (gcNew != 0) return gcNew;
+        }
+        // **The collector's bookkeeping is what wasm GC replaces, so it lowers to
+        // nothing.** `__link(parent, child, expectMultiple)` adds an edge to the
+        // incremental collector's remembered set, `__pin`/`__unpin` keep an object
+        // out of the sweep, and `__visit_members` walks the object's typeinfo when
+        // the guest collector scans. Under wasm GC the *engine* traces references,
+        // so there is no set to update, nothing to pin, and nothing to walk.
+        //
+        // Reached at all because these calls appear in the stdlib's own bodies
+        // (`Array#__set`, `Map#set`, …) and each one takes a `usize` — the exact
+        // `changetype<usize>(aRef)` that cannot exist under the flag. Measured:
+        // `array.ts:136` and `map.ts:116/133/137`, four sites across the examples.
+        //
+        // The operands are **not compiled**: every one of them is a
+        // `changetype<usize>(…)` of a reference, which would be a diagnostic, and
+        // emitting them for their side effects would be wrong — these are pure
+        // bookkeeping.
+        if (this.gcActive && (
+          gcNewName == "__link" || gcNewName.endsWith("/__link") ||
+          gcNewName == "__pin" || gcNewName.endsWith("/__pin") ||
+          gcNewName == "__unpin" || gcNewName.endsWith("/__unpin") ||
+          gcNewName == "__visit_members" || gcNewName.endsWith("/__visit_members") ||
+          gcNewName == "__visit" || gcNewName.endsWith("/__visit") ||
+          gcNewName == "__visit_globals" || gcNewName.endsWith("/__visit_globals") ||
+          gcNewName == "__collect" || gcNewName.endsWith("/__collect")
+        )) {
+          this.currentType = Type.void;
+          return module.nop();
+        }
+        // **The linear heap is a never-free arena under the flag**, so no module it
+        // produces can read bytes it no longer owns. `itcms`'s collector is not
+        // reachable here (its root set is provably empty — GC18 — so it frees live
+        // payloads), and the arena is the stopgap until the memory model is chosen.
+        //
+        // `__new` that the GC-array lowering did not take is the payload path —
+        // `ArrayBuffer`, `StaticArray` under a non-array element, anything the stdlib
+        // allocates with `idof<T>` that is not a wasm array. `__alloc`/`__realloc`/
+        // `__free` are `heap.alloc`'s surface and route to the same arena so the two
+        // allocators cannot hand out overlapping memory.
+        if (this.gcActive && (
+          gcNewName == "__new" || gcNewName.endsWith("/__new") ||
+          gcNewName == "__alloc" || gcNewName.endsWith("/__alloc")
+        )) {
+          if (expression.args.length != 2 && gcNewName.endsWith("__new")) {
+            return 0; // an unusual arity: fall through to the ordinary path
+          }
+          this.emitGcLinearAllocator();
+          let linSize = this.compileExpression(expression.args[0],
+            this.options.usizeType, Constraints.ConvImplicit);
+          let linId = expression.args.length > 1
+            ? this.compileExpression(expression.args[1], Type.u32, Constraints.ConvImplicit)
+            : module.i32(0);
+          this.currentType = this.options.usizeType;
+          return module.call(this.gcLinearNewName, [ linSize, linId ], TypeRef.I32);
+        }
+        if (this.gcActive && (
+          gcNewName == "__renew" || gcNewName.endsWith("/__renew") ||
+          gcNewName == "__realloc" || gcNewName.endsWith("/__realloc")
+        ) && expression.args.length == 2) {
+          this.emitGcLinearAllocator();
+          let renewPtr = this.compileExpression(expression.args[0],
+            this.options.usizeType, Constraints.ConvImplicit);
+          let renewSize = this.compileExpression(expression.args[1],
+            this.options.usizeType, Constraints.ConvImplicit);
+          this.currentType = this.options.usizeType;
+          return module.call(this.gcLinearRenewName, [ renewPtr, renewSize ], TypeRef.I32);
+        }
+        if (this.gcActive && (gcNewName == "__free" || gcNewName.endsWith("/__free"))) {
+          // Never-free: `heap.free` returns nothing to the arena, by definition.
+          this.currentType = Type.void;
+          return module.nop();
+        }
+        // **`compareImpl` under wasm GC.** It is the single chokepoint behind
+        // `==`, `equals`, `startsWith`, `endsWith`, `indexOf` and `includes` — every
+        // one of them ends here — and its body walks `changetype<usize>(str) + i`
+        // with `load<u16>`, which a wasm array cannot be addressed by. Replacing the
+        // *call* means one emission covers the whole comparison surface and no
+        // stdlib file changes.
         if (!this.checkNoManagedStructCopy(functionInstance, expression)) {
           return this.module.unreachable();
         }
@@ -7512,6 +9203,19 @@ export class Compiler extends DiagnosticEmitter {
     // Inline if explicitly requested. An `@inline struct` return is not inlined
     // this phase: the inline path binds parameters to locals directly and has no
     // slot to write the hidden destination into.
+    // **`hashStr` is NOT intercepted, and this is a recorded stop rather than an omission.**
+    // A replacement was written and it produced a *different* number from the stdlib for at
+    // least one input: `HASH<string>("hello")` answered 3,734,832,270 under the flag while an
+    // independent XXH32 implementation of the same algorithm answers 2,917,590,130. The
+    // pointer-ABI build answers neither, so three values disagree and only one of them can be
+    // right — and shipping a hash that is merely self-consistent is not a decision this round
+    // gets to make silently.
+    //
+    // The blocker is that `hashStr` is `@inline`, so it is inlined into every `Map`/`Set`
+    // lookup and never passes through `makeCallDirect` (where `compareImpl` is replaced).
+    // The intercept that does work sits in `compileCallDirect`, above the inline branch; what
+    // it emits is what is wrong. `docs/wasm-gc.md` records the measurement and the two
+    // candidate causes.
     let inlineRequested = instance.hasDecorator(DecoratorFlags.Inline) || this.currentFlow.is(FlowFlags.InlineContext);
     if (!signature.hasHiddenDestParam && inlineRequested && (!instance.is(CommonFlags.Overridden) || reportNode.isAccessOnSuper)) {
       assert(!instance.is(CommonFlags.Stub)); // doesn't make sense
@@ -8085,7 +9789,11 @@ export class Compiler extends DiagnosticEmitter {
 
   /** Marks managed call operands for the shadow stack. */
   private operandsTostack(signature: Signature, operands: ExpressionRef[]): void {
-    if (!this.options.stackSize) return;
+    // Same condition the pass itself uses: no shadow stack under `--wasm-gc`,
+    // because the engine's tracer is the root set. Without this, a managed
+    // operand is handed to `needToStack`, which reads it as an integer constant
+    // and aborts on a `ref.null`.
+    if (!this.options.stackSize || this.gcActive) return;
     let module = this.module;
     let operandIndex = 0;
     let thisType = signature.thisType;
@@ -8192,6 +9900,72 @@ export class Compiler extends DiagnosticEmitter {
     reportNode: Node,
     immediatelyDropped: bool = false
   ): ExpressionRef {
+    // **`ArrayBuffer#byteLength` is a field, not a header read.** Its declared body is
+    // `changetype<OBJECT>(changetype<usize>(this) - TOTAL_OVERHEAD).rtSize`, which cannot
+    // be emitted for a handle: the struct is not adjacent to the payload, and
+    // `changetype<usize>(this)` on a GC reference is refused. The synthesised layout
+    // carries the length, so this is one `struct.get` — and it is *cheaper* than the
+    // header read it replaces, which is the rare case of a migration that shortens a
+    // method body.
+    if (this.gcActive && instance.prototype.internalName == "~lib/arraybuffer/ArrayBuffer#get:byteLength") {
+      let bufModule = this.module;
+      let bufThisType = instance.signature.thisType;
+      if (bufThisType != null && bufThisType.classReference != null &&
+          isGcArrayBufferClass(assert(bufThisType.classReference))) {
+        this.currentType = Type.i32;
+        return bufModule.struct_get(
+          bufModule.heapType(bufThisType.toRef()),
+          GC_ARRAYBUFFER_LENGTH_INDEX,
+          assert(operands)[0],
+          TypeRef.I32
+        );
+      }
+    }
+
+    // **The stdlib string calls that cannot be emitted under wasm GC.**
+    //
+    // `compareImpl` is the single chokepoint behind `==`, `equals`, `startsWith`,
+    // `endsWith`, `indexOf` and `includes`; the `@operator` statics below it all
+    // begin `changetype<usize>(x) == 0`, and a reference is not an `i32`. Both are
+    // replaced *at the call* — the stdlib bodies are never compiled, so no file
+    // under `std/assembly` changes and the flag-off path is untouched by
+    // construction.
+    //
+    // This is the intercept point because operators do not come through
+    // `compileCallExpression`: `a == b` is lowered by `compileCommutativeBinaryOverload`,
+    // which calls `makeCallDirect` directly. One check here covers the binary
+    // operators, the unary ones, and ordinary `compareImpl(...)` calls.
+    if (this.gcActive && operands != null) {
+      let gcName = instance.prototype.internalName;
+      let gcParamTypes = instance.signature.parameterTypes;
+      // **`gcStringOf`, not just the name.** Whether a `String` is a wasm array is
+      // the program's decision (GC14): on a non-uniform program strings are linear
+      // memory, the operands here are `i32`, and these replacements would take a
+      // heap type from a non-reference — `Assertion failed: isRef()` inside
+      // Binaryen. Measured on a program whose only ineligible class holds a `Map`.
+      let gcStringsAreArrays = gcParamTypes.length != 0 && gcStringOf(gcParamTypes[0]);
+      if (gcStringsAreArrays && gcName == "~lib/util/string/compareImpl") {
+        this.currentType = Type.i32;
+        return this.compileGcStringCompare(operands, gcParamTypes);
+      }
+      // **`hashStr`, so `Map<string,V>` works.** One function, one contract, one
+      // call-site family (`HASH<T>` is `@inline`), replaced at the *call* the way
+      // `compareImpl` was — the numbers must be identical, and the loop shape is what
+      // makes them so. See `compileGcHashStr`.
+      if (gcStringsAreArrays && gcName == "~lib/util/hash/hashStr") {
+        this.currentType = Type.u32;
+        return this.compileGcHashStr(operands, gcParamTypes);
+      }
+      let gcOp = gcStringsAreArrays ? gcStringOperator(gcName) : GcStringOp.None;
+      if (gcOp != GcStringOp.None) {
+        // `currentType` is the *result* type of whatever was just compiled, and an
+        // early return here does not pass through the assignment `makeCallDirect`
+        // would have made. Leaving it as the operand's type made `a == b` resolve
+        // as `String` and the enclosing `return` report "not assignable to bool".
+        this.currentType = Type.bool;
+        return this.compileGcStringOperator(gcOp, operands, gcParamTypes);
+      }
+    }
     // A discarded-result sret call allocates its slot in `compileCallDirect`
     // (which builds the operands) and is wrapped here, where the call node is.
     let sretMarkLocal = this.sretDiscardMark;
@@ -8458,7 +10232,17 @@ export class Compiler extends DiagnosticEmitter {
     // a call and is read twice, which breaks every build at optimizeLevel >= 2,
     // i.e. release. Evaluating the callee before the operands is what the
     // non-trivial case already did.
-    let functionArgLocal = this.currentFlow.getTempLocal(this.options.usizeType);
+    // **Under the flag the callee is a reference**, so it is bound into a local of *its*
+    // type and its two fields are `struct.get`s. `_index` stays an `i32` and `_env` stays
+    // an address, so the table index and the environment hand-over below are unchanged.
+    // The callee's type is the signature's own type, so no expression-type inspection is
+    // needed: a function value is a GC struct exactly when one can be (`gcFunctionValueUsable`).
+    let calleeIsGc = this.gcActive && gcFunctionValueUsable(signature.type);
+    let calleeTypeRef = calleeIsGc ? signature.type.asNullable().toRef() : 0;
+    let functionArgLocal = calleeIsGc
+      ? this.currentFlow.getTempLocal(signature.type)
+      : this.currentFlow.getTempLocal(this.options.usizeType);
+    let calleeHeap = calleeIsGc ? module.heapType(calleeTypeRef) : 0;
 
     // Deliver the callee's environment. An arrow function that captures `this`
     // was created with the receiver of its creating function stored in `_env`,
@@ -8474,13 +10258,17 @@ export class Compiler extends DiagnosticEmitter {
       module.global_get(envGlobal, sizeTypeRef),
       false
     ));
+    let calleeRefForLocal = calleeIsGc ? calleeTypeRef : sizeTypeRef;
     stmts.push(module.global_set(envGlobal,
-      module.load(envBytes, false,
-        module.local_tee(functionArgLocal.index, functionArg, true),
-        sizeTypeRef, envOffset
-      )
+      calleeIsGc
+        ? module.struct_get(calleeHeap, FUNCTION_ENV_INDEX,
+            module.local_tee(functionArgLocal.index, functionArg, true), TypeRef.I32)
+        : module.load(envBytes, false,
+            module.local_tee(functionArgLocal.index, functionArg, true),
+            sizeTypeRef, envOffset
+          )
     ));
-    functionArg = module.local_get(functionArgLocal.index, sizeTypeRef);
+    functionArg = module.local_get(functionArgLocal.index, calleeRefForLocal);
 
     // We might be calling a varargs stub here, even if all operands have been
     // provided, so we must set `argumentsLength` in any case. Inject setting it
@@ -8489,7 +10277,10 @@ export class Compiler extends DiagnosticEmitter {
     let argumentsLength = this.ensureArgumentsLength();
     let functionArgWithVararg = module.block(null, [
       module.global_set(argumentsLength, module.i32(numArguments)),
-      module.load(4, false, functionArg, TypeRef.I32, FUNCTION_INDEX_OFFSET) // ._index
+      // `._index` — a `struct.get` under the flag, a load at offset 0 otherwise.
+      calleeIsGc
+        ? module.struct_get(calleeHeap, FUNCTION_INDEX_FIELD, functionArg, TypeRef.I32)
+        : module.load(4, false, functionArg, TypeRef.I32, FUNCTION_INDEX_OFFSET)
     ], sizeTypeRef);
 
     if (operands) this.operandsTostack(signature, operands);
@@ -9287,6 +11078,22 @@ export class Compiler extends DiagnosticEmitter {
           expression, targetType, false, contextualType, constraints
         );
       }
+      // **A dynamic `Array<T>` indexed: `array.get data[i]`**, checked against
+      // `length_`. Before the generic `__get`, which is linear-memory code.
+      let gcReadDynamic = gcDynamicArrayElementOf(targetType);
+      if (gcReadDynamic != null) {
+        return this.compileGcDynamicArrayGet(
+          targetExpression, expression.elementExpression, targetType, gcReadDynamic
+        );
+      }
+      // **`StaticArray<T>` indexed under `--wasm-gc`: `array.get`.** Before the
+      // generic `__get` overload, which is linear-memory code.
+      let gcReadElement = gcArrayElementOf(targetType);
+      if (gcReadElement != null) {
+        return this.compileGcStaticArrayGet(
+          targetExpression, expression.elementExpression, targetType, gcReadElement
+        );
+      }
       let classReference = targetType.getClassOrWrapper(this.program);
       if (classReference) {
         let isUnchecked = this.currentFlow.is(FlowFlags.UncheckedContext);
@@ -9463,10 +11270,22 @@ export class Compiler extends DiagnosticEmitter {
     // function value keeps the static instance with `_env = 0` (plan D6).
     let valueType = this.currentType;
     let expr: ExpressionRef;
+    // **A capturing closure is refused by name under the flag, and it is a design
+    // question rather than a missing case.** `_env` is an `i32` address because
+    // `call_indirect`'s environment hand-over is an `i32` global, and the environment a
+    // capturing closure needs is a heap object — a reference under the GC ABI, with no
+    // address to store. Making `_env` a reference instead changes `Function<T>`'s layout
+    // and the hand-over contract together, which is a round of its own.
+    //
+    // Refused *here* rather than left to fail downstream, so the message names the cause:
+    // otherwise the program is non-uniform for a reason ("extends a class that is not GC
+    // (TaskEnv)") that describes the symptom.
     if (instance.prototype.envKind == EnvKind.Struct) {
       expr = this.makeEnvFunctionValue(instance, assert(creationEnvOf().get(expression)));
     } else if (instance.prototype.capturesThis) {
       expr = this.makeCapturingFunctionValue(instance);
+    } else if (this.gcActive && gcFunctionValueUsable(valueType)) {
+      expr = this.makeGcFunctionValue(instance);
     } else {
       let offset = this.ensureRuntimeFunction(instance); // reports
       expr = this.options.isWasm64
@@ -9616,9 +11435,18 @@ export class Compiler extends DiagnosticEmitter {
       case NodeKind.Null: {
         let options = this.options;
         if (contextualType.isReference) {
-          let classReference = contextualType.getClass();
+          // `classReference`, not `getClass()`: a `B | null` contextual type is
+          // nullable and `getClass()` requires an internal reference.
+          let classReference = contextualType.classReference;
           if (classReference) {
             this.currentType = classReference.type.asNullable();
+            // **A wasm GC reference's null is `ref.null`, not `i32(0)`.** The
+            // pointer ABI's zero and a reference's null are the same idea and not
+            // the same value, and a struct-ref setter given `i32.const 0` is a
+            // type error rather than a null field.
+            if (isGcReferenceType(classReference.type)) {
+              return module.ref_null(this.currentType.toRef());
+            }
             return options.isWasm64 ? module.i64(0) : module.i32(0);
           }
           let signatureReference = contextualType.getSignature();
@@ -9909,8 +11737,14 @@ export class Compiler extends DiagnosticEmitter {
           this.currentType = Type.func;
           return module.ref_func(functionInstance.internalName, ensureType(functionInstance.type));
         }
-        let offset = this.ensureRuntimeFunction(functionInstance);
+        // **A function value is a GC struct under the flag**, so a field that holds one
+        // can receive it. Same rule as the declaration path above: the static data
+        // segment is a linear block and a `(ref null $Function<T>)` field cannot take it.
         this.currentType = functionInstance.signature.type;
+        if (this.gcActive && gcFunctionValueUsable(this.currentType)) {
+          return this.makeGcFunctionValue(functionInstance);
+        }
+        let offset = this.ensureRuntimeFunction(functionInstance);
         return this.options.isWasm64
           ? module.i64(i64_low(offset), i64_high(offset))
           : module.i32(i64_low(offset));
@@ -10122,6 +11956,44 @@ export class Compiler extends DiagnosticEmitter {
     // <value> instanceof <nonValue> - always false
     if (actualType.isValue) {
       return module.maybeDropCondition(expr, module.i32(0));
+    }
+
+    // **`instanceof` under wasm GC is one instruction.** The engine knows the
+    // type of a reference, so `ref.test` answers "is this a T or a subtype of T"
+    // without reading a header, walking an id table or consulting RTTI — which is
+    // the whole of what this function's pointer-ABI arms below do. Both
+    // directions fall out of one emission: a `Derived` passes a `Base` test
+    // because its heap type is a subtype, a `Base` fails a `Derived` test, and a
+    // sibling fails both. A null reference fails every test, which is
+    // `instanceof`'s answer too.
+    //
+    // Taken only when both sides are GC structs. A mixed comparison would be a
+    // ref against a pointer, which the type checker has already refused.
+    let actualClass = actualType.getClass();
+    let expectedClass = expectedType.nonNullableType.getClass();
+    if (actualClass != null && expectedClass != null &&
+        isGcClass(actualClass) && isGcClass(expectedClass)) {
+      // **`instanceof` under wasm GC reads the brand, and never `ref.test`.**
+      //
+      // Why not `ref.test`: wasm GC type identity is structural, so two classes
+      // with identical layouts are one type and `ref.test (ref $SetX)` is true
+      // for a `SetY` — a live defect in the editor's undo dispatch
+      // (`tension-framework/assembly/editor/command.ts:220,259`). Why not a single
+      // brand compare either: `instanceof Base` must be true for an instance of
+      // any class derived from Base, and those have their own brands. So the test
+      // is "is the runtime object's brand one of the brands in `expected`'s
+      // subtree" — `makeGcBrandTest`, one compare per class in the subtree. It is
+      // correct in every case, which is the requirement.
+      let test = this.makeGcBrandTest(expectedClass, expr, actualType.nonNullableType.toRef());
+      // A null reference matches no class, which is `instanceof`'s answer too.
+      if (actualType.isNullableReference) {
+        return module.binary(
+          BinaryOp.AndI32,
+          module.unary(UnaryOp.EqzI32, module.ref_is_null(expr)),
+          test
+        );
+      }
+      return test;
     }
 
     // both LHS and RHS are references now
@@ -10782,6 +12654,36 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
+    // **A reference-element array literal cannot be a data segment under the flag.** The
+    // elements are GC references, and a static buffer is bytes; `writeStaticBuffer` reaches
+    // its `assert(false)` on an element type it has no case for — measured, on the *empty*
+    // literal `items: Thing[] = []`, which is the common shape (a field that fills later).
+    //
+    // An empty literal needs nothing written, so it is simply an empty array: no segment, no
+    // bytes, and the allocation is the ordinary `new` path below. A non-empty one is refused
+    // by name — building it at runtime (the way string literals are built in `__start`) is
+    // the fix, and it is a round of its own.
+    if (this.gcActive && isStatic && gcReferenceShaped(elementType)) {
+      if (length != 0) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          expression.range,
+          `an array literal of ${elementType.toString()} under --wasmGc: its elements are GC ` +
+          `references, and a literal is written into a data segment as bytes. Build it with ` +
+          `\`new Array<...>(n)\` and index assignments instead.`
+        );
+        this.currentType = arrayType;
+        return module.unreachable();
+      }
+      // **An empty literal is `new Array<T>(0)`**, which under the flag is the synthesised
+      // GC struct — not `makeNewArray`, whose `__newArray` is the pointer-ABI runtime and
+      // whose result is an `i32` the constructor's ref local cannot take. Measured: routing
+      // it through the ordinary path produced
+      // `local.set's value type must be correct` inside `~lib/rt/__newArray`.
+      this.currentType = arrayType;
+      return this.compileGcDynamicArrayNew(arrayInstance, elementType, null, expression);
+    }
+
     // if the array is static, make a static arraybuffer segment
     if (isStatic) {
       let totalOverhead = program.totalOverhead;
@@ -11280,6 +13182,27 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (!classInstance) return module.unreachable();
     if (contextualType == Type.void) constraints |= Constraints.WillDrop;
+
+    // **`new Array<T>(n)` on the GC heap.** The constructor body allocates an
+    // `ArrayBuffer` into `this`, which cannot type-check once `this` is a GC struct,
+    // so it is never compiled: this emits the struct directly.
+    let gcDynamicElement = gcDynamicArrayElementOf(classInstance.type);
+    if (gcDynamicElement != null) {
+      return this.compileGcDynamicArrayNew(
+        classInstance, gcDynamicElement,
+        expression.args.length ? expression.args[0] : null, expression
+      );
+    }
+
+    // **`new StaticArray<T>(n)` is `array.new`.**
+    let gcNewElement = gcArrayElementOf(classInstance.type);
+    if (gcNewElement != null) {
+      return this.compileGcStaticArrayNew(
+        classInstance, gcNewElement,
+        expression.args.length ? expression.args[0] : null, expression
+      );
+    }
+
     let ctor = this.ensureConstructor(classInstance, expression);
     if (!ctor.hasDecorator(DecoratorFlags.Inline)) {
       // Inlined ctors haven't been compiled yet and are checked upon inline
@@ -11373,7 +13296,11 @@ export class Compiler extends DiagnosticEmitter {
       // generate body
       let signature = instance.signature;
       let module = this.module;
-      let sizeTypeRef = this.options.sizeTypeRef;
+      // The type of the `this` local this constructor builds: the struct's own
+      // ref for a wasm GC class, the pointer width otherwise. Used for the
+      // conditional allocation, the base call's first operand, the field
+      // initialisers and the returned `local.get` — all four must agree.
+      let sizeTypeRef = this.thisSlotTypeRef(classInstance);
       let stmts = new Array<ExpressionRef>();
 
       // {
@@ -11386,7 +13313,24 @@ export class Compiler extends DiagnosticEmitter {
       stmts.push(
         this.makeConditionalAllocation(classInstance, 0)
       );
-      if (baseClass) {
+      // **Chain to the base only when the base is a GC struct too.**
+      //
+      // A class with no declared base still has `Object` as its `base`, and
+      // `Object` is standard library — a pointer-ABI class whose constructor
+      // returns an `i32`. Assigning that into a `(ref null $C)` local is an
+      // ill-typed store, which is what a zero-field base class produced before
+      // this guard. There is nothing to chain to in that case: the derived struct
+      // has no `Object` prefix, so the base constructor has no bytes to write.
+      // Under `--wasm-gc` only: a GC class with an implicit `Object` base has no
+      // `Object` prefix in its struct, so there is nothing to chain to. With the
+      // flag off this stays exactly what it was — the `Object#constructor` call is
+      // a no-op, but emitting it is the existing output and a flag that changes
+      // nothing is a flag that changes *nothing*.
+      let baseToChain = (baseClass != null &&
+        !(isGcClass(classInstance) && classInstance.prototype.implicitlyExtendsObject))
+        ? baseClass
+        : null;
+      if (baseToChain) {
         let parameterTypes = signature.parameterTypes;
         let numParameters = parameterTypes.length;
         let operands = new Array<ExpressionRef>(1 + numParameters);
@@ -11394,12 +13338,20 @@ export class Compiler extends DiagnosticEmitter {
         for (let i = 1; i <= numParameters; ++i) {
           operands[i] = module.local_get(i, parameterTypes[i - 1].toRef());
         }
-        stmts.push(
-          module.local_set(0,
-            this.makeCallDirect(assert(baseClass.constructorInstance), operands, reportNode, false),
-            baseClass.type.isManaged
-          )
+        let baseCall = this.makeCallDirect(
+          assert(baseToChain.constructorInstance), operands, reportNode, false
         );
+        if (isGcClass(baseToChain)) {
+          // Same object, same struct prefix: run the base's initialisers against
+          // our reference and drop its result. It answers `(ref $Base)`, which is
+          // not assignable to our `(ref $Derived)` local just because it is the
+          // same object.
+          stmts.push(module.drop(baseCall));
+        } else {
+          stmts.push(
+            module.local_set(0, baseCall, baseToChain.type.isManaged)
+          );
+        }
       }
       this.makeFieldInitializationInConstructor(classInstance, stmts);
       stmts.push(
@@ -11505,11 +13457,24 @@ export class Compiler extends DiagnosticEmitter {
     assert(parent.kind == ElementKind.Class);
     let classInstance = <Class>parent;
     if (classInstance.type.isUnmanaged || ctorInstance.hasDecorator(DecoratorFlags.Unsafe)) this.checkUnsafe(reportNode);
+    // The `this` operand a constructor call passes: a null pointer today, and
+    // for a wasm GC class a `ref.null` of the struct type. `i32(0)` is not a
+    // value of a ref type, and that mismatch is what validation reports as
+    // "call param types must match" rather than anything pointing here.
+    // `ref.null` takes a **heap type**, not a ref type: `Module#ref_null`
+    // forwards its argument straight to `_BinaryenRefNull`, which reads it as a
+    // heap type. Passing the nullable ref type there prints `ref.null none` (the
+    // bottom type) rather than `ref.null $C`, which is a different value.
+    let thisArg = isGcClass(classInstance)
+      // `ref.null` asserts its argument is a *nullable* ref type; a class's own
+      // type is non-nullable, so the null value is typed by the nullable variant.
+      ? this.module.ref_null(assert(classInstance.type.nullableType).toRef())
+      : this.makeZero(this.options.usizeType);
     let expr = this.compileCallDirect(
       ctorInstance,
       argumentExpressions,
       reportNode,
-      this.makeZero(this.options.usizeType),
+      thisArg,
       constraints
     );
     if (getExpressionType(expr) != TypeRef.None) { // possibly WILL_DROP
@@ -11529,6 +13494,80 @@ export class Compiler extends DiagnosticEmitter {
     this.maybeCompileEnclosingSource(expression);
 
     let resolver = this.resolver;
+
+    // **`StaticArray#length` is `array.len`, answered in emission.** The resolver
+    // already types `a.length` correctly — `compilePropertyAccessExpression` reaches
+    // `lookupPropertyAccessExpression` and yields the getter's `i32` — so no
+    // resolver change is needed and none is made. What must not happen is *calling*
+    // that getter: its body reads `rtSize` out of a header a wasm array does not
+    // have.
+    //
+    // **The receiver is compiled first, and that ordering is the whole bug GC6
+    // reported as "a.length does not type as i32":** `compileExpression` sets
+    // `this.currentType = contextualType` on entry, so assigning `i32` before
+    // calling it leaves `currentType` as the receiver's type, which the caller then
+    // reports as `StaticArray<i32> is not assignable to i32`. The resolver was
+    // never wrong.
+    //
+    // **Guarded on the flag before anything resolves.** `resolveExpression` here
+    // would resolve the receiver for *every* property access in every program, and
+    // an early resolution changes what later resolutions see — measured: it moved
+    // 14 compiler fixtures that have nothing to do with arrays. With the flag off
+    // this block must not run at all.
+    if (this.gcActive) {
+      let gcLengthReceiver = resolver.resolveExpression(
+        expression.expression, flow, Type.auto, ReportMode.Swallow
+      );
+      // **`String#length` is `array.len`.** The getter reads
+      // `rtSize >> 1` from a linear header that a wasm array does not have.
+      if (gcLengthReceiver != null && gcStringOf(gcLengthReceiver)) {
+        if (expression.property.text != "length") {
+          this.error(
+            DiagnosticCode.Property_0_does_not_exist_on_type_1,
+            expression.property.range, expression.property.text, gcLengthReceiver.toString()
+          );
+          return module.unreachable();
+        }
+        let stringReceiver = this.compileExpression(
+          expression.expression, gcLengthReceiver, Constraints.ConvImplicit
+        );
+        this.currentType = Type.i32;
+        return module.array_len(stringReceiver);
+      }
+
+      // **A dynamic `Array<T>`: `length_`, the used count.** Capacity lives in the
+      // backing array and must stay invisible; see `compileGcDynamicArrayLength`.
+      if (gcLengthReceiver != null && gcDynamicArrayElementOf(gcLengthReceiver) != null) {
+        if (expression.property.text != "length") {
+          this.error(
+            DiagnosticCode.Property_0_does_not_exist_on_type_1,
+            expression.property.range, expression.property.text, gcLengthReceiver.toString()
+          );
+          return module.unreachable();
+        }
+        // Receiver first: `compileExpression` overwrites `currentType` on entry.
+        let receiver = this.compileExpression(
+          expression.expression, gcLengthReceiver, Constraints.ConvImplicit
+        );
+        this.currentType = Type.i32;
+        return this.compileGcDynamicArrayLength(receiver, gcLengthReceiver.toRef());
+      }
+      if (gcLengthReceiver != null && gcArrayElementOf(gcLengthReceiver) != null) {
+        if (expression.property.text != "length") {
+          this.error(
+            DiagnosticCode.Property_0_does_not_exist_on_type_1,
+            expression.property.range, expression.property.text, gcLengthReceiver.toString()
+          );
+          return module.unreachable();
+        }
+        let stringReceiver = this.compileExpression(
+          expression.expression, gcLengthReceiver, Constraints.ConvImplicit
+        );
+        this.currentType = Type.i32;
+        return module.array_len(stringReceiver);
+      }
+    }
+
     // `y.length` on a `[T * n]`: the buffer header's first field, an i32.
     //
     // Intercepted before `lookupExpression`, because the array kind has no class
@@ -12176,6 +14215,47 @@ export class Compiler extends DiagnosticEmitter {
           module.local_get(tempLocal.index, this.currentType.toRef())
         ], this.currentType.toRef());
       }
+      // **A wasm GC array's element write.** Same omission, same consequence as
+      // the binary compound operators above: `a[i]++` stores through
+      // `lookupExpression` → `Array#__set`, whose body is `changetype<usize>(this)`
+      // into `ensureCapacity`. The post-increment's *result* is the old value, so
+      // the store's own value is discarded (`Type.void`) and the answer comes from
+      // `tempLocal`, exactly as the dynamic-array arm above does it.
+      if (this.gcActive && arrayType != null) {
+        let gcPostDynamic = gcDynamicArrayElementOf(arrayType);
+        if (gcPostDynamic != null) {
+          // **Which `tee` depends on who consumes it.** In statement position
+          // the caller drops the returned expression and a `Block` typed `None`
+          // cannot be dropped (`can only drop a valid value`), so the store must
+          // yield a value. When the postfix result IS wanted it comes from
+          // `tempLocal`, so the store's own value must *not* be yielded — a
+          // value-returning non-final block element is refused by the validator
+          // (`non-final block elements returning a value must be dropped`).
+          let stored = this.compileGcDynamicArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcPostDynamic, expr, tempLocal == null
+          );
+          this.currentType = gcPostDynamic;
+          if (!tempLocal) return stored;
+          return module.block(null, [
+            stored,
+            module.local_get(tempLocal.index, this.currentType.toRef())
+          ], this.currentType.toRef());
+        }
+        let gcPostElement = gcArrayElementOf(arrayType);
+        if (gcPostElement != null) {
+          let stored = this.compileGcStaticArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcPostElement, expr, tempLocal == null
+          );
+          this.currentType = gcPostElement;
+          if (!tempLocal) return stored;
+          return module.block(null, [
+            stored,
+            module.local_get(tempLocal.index, this.currentType.toRef())
+          ], this.currentType.toRef());
+        }
+      }
     }
     let target = resolver.lookupExpression(expression.operand, flow); // reports
     if (!target) {
@@ -12590,6 +14670,30 @@ export class Compiler extends DiagnosticEmitter {
           elementAccess, arrayType, true,
           this.currentType, Constraints.None, null, expr
         );
+      }
+      // **A wasm GC array's element write.** The last of the four places with this
+      // omission — `compileAssignment`, the binary compounds, the postfix and this
+      // prefix arm all decide a store, and only the first was covered. `--a[i]`
+      // therefore resolved `Array#__set`, whose `changetype<usize>(this)` cannot
+      // exist under the flag. A prefix operator's own value *is* the new one, so
+      // the store's value is the expression's value.
+      if (this.gcActive && arrayType != null) {
+        let gcPreDynamic = gcDynamicArrayElementOf(arrayType);
+        if (gcPreDynamic != null) {
+          this.currentType = gcPreDynamic;
+          return this.compileGcDynamicArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcPreDynamic, expr, true
+          );
+        }
+        let gcPreElement = gcArrayElementOf(arrayType);
+        if (gcPreElement != null) {
+          this.currentType = gcPreElement;
+          return this.compileGcStaticArraySet(
+            elementAccess.expression, elementAccess.elementExpression,
+            arrayType, gcPreElement, expr, true
+          );
+        }
       }
     }
     let target = resolver.lookupExpression(expression.operand, this.currentFlow);
@@ -15270,6 +17374,26 @@ export class Compiler extends DiagnosticEmitter {
     return !type.isManaged;
   }
 
+  /**
+   * The zero value of a **field** type: `ref.null` for a wasm GC reference,
+   * `makeZero` for everything else.
+   *
+   * `makeZero` answers `i32(0)` for a class because a class *is* a `usize`
+   * reference — and for a `(ref null $C)` that constant is not a value of the
+   * type. Two emitters need this: the `struct.new` operand list and the deferred
+   * field initialiser, which writes the zero through the setter when a field has
+   * no initialiser.
+   */
+  makeFieldZero(fieldType: Type): ExpressionRef {
+    // `classReference`, not `getClass()` — the latter requires an *internal
+    // reference*, and a `B | null` field is a nullable class type.
+    if (isGcReferenceType(fieldType) ||
+        (fieldType.signatureReference != null && gcFunctionValueUsable(fieldType))) {
+      return this.module.ref_null(assert(fieldType.nullableType).toRef());
+    }
+    return this.makeZero(fieldType);
+  }
+
   makeZero(type: Type): ExpressionRef {
     let module = this.module;
     switch (type.kind) {
@@ -15385,6 +17509,22 @@ export class Compiler extends DiagnosticEmitter {
       case TypeKind.U64: return module.binary(BinaryOp.NeI64, expr, module.i64(0));
       case TypeKind.Isize:
       case TypeKind.Usize: {
+        // **A reference is not its own truthiness under wasm GC.** A class or
+        // array type's `kind` is `Usize` ("also the base of class types"), so a
+        // `String | null` — or any GC class — reaches this arm and used to be
+        // answered as the expression itself. That is right for the pointer ABI,
+        // where a pointer *is* an `i32` whose zero means null, and wrong here: the
+        // result stayed ref-typed and the enclosing `if` asserted in
+        // `evaluateCondition` (`type == TypeRef.I32`).
+        //
+        // Measured: `if (out)` on a `String | null` — the shape
+        // `String#replaceAll` uses — crashed the compiler with
+        // `AssertionError: assertion failed` at `compileIfStatement`. Five lines
+        // here, and the whole `if (nullableRef)` idiom works.
+        if (isGcReferenceType(type)) {
+          if (!(type.flags & TypeFlags.Nullable)) return module.i32(1); // cannot be null
+          return module.unary(UnaryOp.EqzI32, module.ref_is_null(expr));
+        }
         return type.size == 64
           ? module.binary(BinaryOp.NeI64, expr, module.i64(0))
           : expr;
@@ -15561,6 +17701,13 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let options = this.options;
     this.currentType = classInstance.type;
+    // **A wasm GC class is `struct.new`, and there is nothing to lay out.** The
+    // header, the id and the size all lived in the object so a guest collector
+    // could find and size it; the engine's tracer needs none of them. Field
+    // initialisers still run afterwards through the generated setters, which are
+    // `struct.set` on this path, so the constructor's shape is unchanged — only
+    // where the storage comes from.
+    if (isGcClass(classInstance)) return this.makeGcStructNew(classInstance);
     if (classInstance.hasDecorator(DecoratorFlags.Unmanaged)) {
       let allocInstance = program.allocInstance;
       this.compileFunction(allocInstance);
@@ -15581,6 +17728,21 @@ export class Compiler extends DiagnosticEmitter {
     }
   }
 
+  /**
+   * The wasm type of a class's `this` slot: its GC struct ref, or the pointer
+   * width for every class still on the linear-memory ABI.
+   *
+   * One function because `this` crosses five different emitters (the field
+   * initialisers, the conditional allocation, `compileCallDirect`'s implicit
+   * receiver, the getter/setter bodies and the constructor's own signature) and
+   * a consensus spelled out five times is a consensus that breaks once.
+   */
+  thisSlotTypeRef(classInstance: Class): TypeRef {
+    return isGcClass(classInstance)
+      ? classInstance.type.toRef()
+      : this.options.sizeTypeRef;
+  }
+
   /** Makes a conditional allocation where `this` might not have been initialized yet. */
   makeConditionalAllocation(
     classInstance: Class,
@@ -15589,6 +17751,29 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let classType = classInstance.type;
     let classTypeRef = classType.toRef();
+    // A GC class's `this` is a ref, so the "is it already allocated?" test is
+    // `ref.is_null` and the local's type is the struct's, not the pointer width.
+    // The `__new` path below keeps its `classTypeRef == sizeTypeRef` assertion
+    // because for a pointer-shaped class those two really are the same type.
+    if (isGcClass(classInstance)) {
+      // **The `if` must be a statement, and `local.set` is not one.** Binaryen
+      // types a `local.set` as the *value* it stores, so an `if` whose then-arm
+      // is a bare `local.set` has a value type — and a value-typed `if` may only
+      // be the last child of a block. Inside a multi-statement function body it
+      // is invalid IR: `validate()` reports it as `local.get must have proper
+      // type` (the condition's operand, first expression it walks), and an
+      // optimization pass asserts in `trapOnNull` because effect analysis finds
+      // a non-ref where a ref must be. Wrapping the arm in a `none`-typed block
+      // makes the `if` a statement, which is what it is for.
+      return module.if(
+        module.ref_is_null(module.local_get(thisIndex, classTypeRef)),
+        module.block(null, [
+          // `false` for `isManaged`: the shadow stack is off under `--wasm-gc`
+          // (the engine's tracer is the root set), so there is no slot to fill.
+          module.local_set(thisIndex, this.makeAllocation(classInstance), false)
+        ], TypeRef.None)
+      );
+    }
     assert(classTypeRef == this.options.sizeTypeRef);
     return module.if(
       module.unary(classTypeRef == TypeRef.I64 ? UnaryOp.EqzI64 : UnaryOp.EqzI32,
@@ -15599,6 +17784,32 @@ export class Compiler extends DiagnosticEmitter {
         classInstance.type.isManaged
       )
     );
+  }
+
+  /**
+   * `struct.new $C (defaults…)` — one operand per field, in declaration order.
+   *
+   * The defaults are the same "zero" the linear-memory path gets for free from
+   * `__new` (which `memory.fill`s the record), spelled per field: an integer 0, a
+   * float 0, a `ref.null` for a reference. `makeZero` cannot be reused for a
+   * reference field because a pointer-shaped field's zero is `i32(0)`, which is
+   * not a value of a ref type.
+   */
+  makeGcStructNew(classInstance: Class): ExpressionRef {
+    let module = this.module;
+    let classTypeRef = classInstance.type.toRef();
+    let operands = new Array<ExpressionRef>();
+    // **Field 0 is the brand**, a constant of this class — immutable, so this is
+    // the only place it is ever written. Then every declared field of the struct,
+    // base chain first: the same list and order the type was declared with
+    // (`gcFieldsOf`). The constructor's field initialisers then run over the same
+    // list.
+    operands.push(module.i32(gcBrandOf(classInstance)));
+    let fields = gcFieldsOf(classInstance);
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      operands.push(this.makeFieldZero(unchecked(fields[i]).type));
+    }
+    return module.struct_new(module.heapType(classTypeRef), operands);
   }
 
   /** Makes the initializers for a class's fields within the constructor. */
@@ -15615,7 +17826,12 @@ export class Compiler extends DiagnosticEmitter {
     let flow = this.currentFlow;
     let isInline = flow.isInline;
     let thisLocalIndex = isInline ? flow.lookupLocal(CommonNames.this_)!.index : 0;
-    let sizeTypeRef = this.options.sizeTypeRef;
+    // `this`'s slot type: the pointer width for a pointer-shaped class, the
+    // struct's own ref type for a wasm GC class. A setter call passes `this` as
+    // its first operand, so this is both the `local.get`'s type and the call's
+    // first parameter type — and getting it wrong reports as two validator
+    // errors that name the local, not this line.
+    let sizeTypeRef = this.thisSlotTypeRef(classInstance);
     let nonParameterFields: Property[] | null = null;
 
     // TODO: for (let member of members.values()) {
@@ -15732,7 +17948,7 @@ export class Compiler extends DiagnosticEmitter {
           module.local_get(thisLocalIndex, sizeTypeRef),
           initializerNode // use initializer if present, otherwise initialize with zero
             ? this.compileExpression(initializerNode, fieldType, Constraints.ConvImplicit)
-            : this.makeZero(fieldType)
+            : this.makeFieldZero(fieldType)
         ], field.identifierNode, true);
         if (this.currentType != Type.void) { // in case
           expr = module.drop(expr);
@@ -15761,7 +17977,10 @@ export class Compiler extends DiagnosticEmitter {
     if (message) {
       messageArg = this.compileExpression(message, stringInstance.type, Constraints.ConvImplicit);
     } else {
-      messageArg = this.makeZero(stringInstance.type);
+      // `makeFieldZero`, not `makeZero`: a GC reference's zero is `ref.null`, and
+      // `makeZero` answers `i32(0)` for a class — right for the pointer ABI, wrong
+      // for `abort`'s now-reference-typed `message` parameter.
+      messageArg = this.makeFieldZero(stringInstance.type);
     }
 
     return this.makeStaticAbort(messageArg, codeLocation);
@@ -15797,6 +18016,545 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /** Makes a runtime non-null check, e.g. on `<Type>possiblyNull` or `possiblyNull!`. */
+  /**
+   * `new Array<T>(n)`: a GC struct `{ <brand>, data, length_ }` whose backing array
+   * has capacity `max(n, MIN_SIZE)` and whose used count is `n`.
+   *
+   * **Capacity is never observable** — see `compileGcDynamicArrayLength`. It is a
+   * property of the backing array alone; every read, write and length goes through
+   * `length_`, so a caller cannot tell a capacity-8 array holding 3 elements from a
+   * capacity-3 one.
+   */
+  private compileGcDynamicArrayNew(
+    classInstance: Class,
+    element: Type,
+    lengthExpression: Expression | null,
+    reportNode: Node
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = classInstance.type.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let length = lengthExpression != null
+      ? this.compileExpression(lengthExpression, Type.i32, Constraints.ConvImplicit)
+      : module.i32(0);
+    let lengthLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(lengthLocal, length, false));
+    stmts.push(module.if(
+      module.binary(BinaryOp.GtU32, module.local_get(lengthLocal, TypeRef.I32),
+        module.i32(0x7ffffff0)),
+      this.makeStaticAbort(this.ensureStaticString("Invalid length"), reportNode)
+    ));
+    // Capacity: `max(n, MIN_SIZE)`, the floor the stdlib constructor uses.
+    // `Module#select` takes `(ifTrue, ifFalse, condition)` — the condition is
+    // **last**, unlike the WAT text form. Passing it first silently produced a
+    // capacity of 0 and every `push` trapped: measured.
+    let capacity = module.select(
+      module.local_get(lengthLocal, TypeRef.I32),          // if n > MIN_SIZE
+      module.i32(GC_ARRAY_MIN_SIZE),                       // else the floor
+      module.binary(BinaryOp.GtU32, module.local_get(lengthLocal, TypeRef.I32),
+        module.i32(GC_ARRAY_MIN_SIZE))
+    );
+    stmts.push(module.struct_new(module.heapType(classTypeRef), [
+      module.i32(gcBrandOf(classInstance)),
+      module.array_new(module.heapType(arrayTypeRef), capacity, this.makeFieldZero(element)),
+      module.local_get(lengthLocal, TypeRef.I32)
+    ]));
+    this.currentType = classInstance.type;
+    return module.block(null, stmts, classTypeRef);
+  }
+
+  /**
+   * `a.length` on a GC `Array<T>`: **field `length_`, never `array.len`.**
+   *
+   * This is how capacity stays unobservable. Capacity lives in the backing array;
+   * the used count lives in the struct. Every read, write and length goes through
+   * `length_`, so a capacity-8 array holding 3 elements is indistinguishable from a
+   * capacity-3 one — which is the reason a separate field exists at all.
+   */
+  private compileGcDynamicArrayLength(ref: ExpressionRef, classTypeRef: TypeRef): ExpressionRef {
+    return this.module.struct_get(
+      this.module.heapType(classTypeRef), GC_ARRAY_LENGTH_INDEX, ref, TypeRef.I32
+    );
+  }
+
+  /** The backing array out of the struct. */
+  private gcDynamicArrayData(ref: ExpressionRef, classTypeRef: TypeRef, element: Type): ExpressionRef {
+    return this.module.struct_get(
+      this.module.heapType(classTypeRef), GC_ARRAY_DATA_INDEX, ref,
+      this.module.arrayTypeOf(element)
+    );
+  }
+
+  /**
+   * The AS `Type` for a backing array of `element` — `StaticArray<element>`.
+   *
+   * `StaticArray<T>`'s `toRef` is `(ref null (array (mut T)))`, exactly the type
+   * this struct's `data` field carries, so its `Type` is the one thing the compiler
+   * can hand `getTempLocal` for a correctly-typed slot — there is no AS-side `Type`
+   * for a bare wasm array otherwise.
+   */
+  private gcBackingArrayType(element: Type): Type {
+    let arrayClass = this.resolver.resolveClass(this.program.staticArrayPrototype, [ element ]);
+    assert(arrayClass != null);
+    return assert(arrayClass).type;
+  }
+
+  /** The range check both `a[i]` and `a[i] = v` use: `u32(i) >= u32(length_)`. */
+  private makeGcDynamicArrayBoundsCheck(
+    indexLocal: i32, refLocal: i32, classTypeRef: TypeRef
+  ): ExpressionRef {
+    return this.module.if(
+      this.module.binary(BinaryOp.GeU32, this.module.local_get(indexLocal, TypeRef.I32),
+        this.compileGcDynamicArrayLength(
+          this.module.local_get(refLocal, classTypeRef), classTypeRef)),
+      this.makeStaticAbort(this.ensureStaticString("Index out of range"),
+        this.currentFlow.sourceFunction.identifierNode)
+    );
+  }
+
+  /**
+   * `a[i]` on a GC `Array<T>`: a range check against **`length_`**, then
+   * `array.get data[i]`.
+   *
+   * Against the used count, not the capacity — that is the second half of keeping
+   * capacity invisible, and the same unsigned compare the stdlib's `__get` uses, so
+   * a negative index is out of range without a second test.
+   */
+  private compileGcDynamicArrayGet(
+    targetExpression: Expression,
+    indexExpression: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let indexLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(targetExpression, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(indexLocal,
+      this.compileExpression(indexExpression, Type.i32, Constraints.ConvImplicit), false));
+    if (!flow.is(FlowFlags.UncheckedContext)) {
+      stmts.push(this.makeGcDynamicArrayBoundsCheck(indexLocal, refLocal, classTypeRef));
+    }
+    stmts.push(module.array_get(module.heapType(arrayTypeRef),
+      this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+      module.local_get(indexLocal, TypeRef.I32), element.toRef()));
+    this.currentType = element;
+    return module.block(null, stmts, element.toRef());
+  }
+
+  /** `a[i] = v`: range check against `length_`, then `array.set data[i] v`. */
+  private compileGcDynamicArraySet(
+    targetExpression: Expression | null,
+    indexExpression: Expression | null,
+    targetType: Type,
+    element: Type,
+    valueExpr: ExpressionRef,
+    tee: bool
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let indexLocal = flow.getTempLocal(Type.i32).index;
+    let valueLocal = flow.getTempLocal(element).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(assert(targetExpression), targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(indexLocal,
+      this.compileExpression(assert(indexExpression), Type.i32, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(valueLocal, valueExpr, element.isManaged));
+    if (!flow.is(FlowFlags.UncheckedContext)) {
+      stmts.push(this.makeGcDynamicArrayBoundsCheck(indexLocal, refLocal, classTypeRef));
+    }
+    stmts.push(module.array_set(module.heapType(arrayTypeRef),
+      this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+      module.local_get(indexLocal, TypeRef.I32), module.local_get(valueLocal, element.toRef())));
+    if (tee) stmts.push(module.local_get(valueLocal, element.toRef()));
+    this.currentType = tee ? element : Type.void;
+    return module.block(null, stmts, tee ? element.toRef() : TypeRef.None);
+  }
+
+  /**
+   * `a.push(v)`: grow when full, then store at `length_` and increment it.
+   *
+   * **Growth is 2× with a `MIN_SIZE` floor, via `array.copy`.** The old elements are
+   * copied into the new array, `data` is replaced, and the *struct* — therefore the
+   * array's identity — is unchanged. That identity stability is why `Array` is a
+   * struct holding a reference rather than being a wasm array: a wasm array cannot
+   * grow, so a push would have to replace the array object wherever a caller held
+   * it.
+   */
+  private compileGcDynamicArrayPush(
+    receiver: Expression,
+    value: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let valueLocal = flow.getTempLocal(element).index;
+    let lenLocal = flow.getTempLocal(Type.i32).index;
+    let newLocal = flow.getTempLocal(this.gcBackingArrayType(element)).index;
+    let capLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(receiver, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(valueLocal,
+      this.compileExpression(value, element, Constraints.ConvImplicit), element.isManaged));
+    stmts.push(module.local_set(lenLocal,
+      this.compileGcDynamicArrayLength(module.local_get(refLocal, classTypeRef), classTypeRef), false));
+
+    // if (length_ == array.len data) { cap = len(data); new = array.new(max(cap<<1,
+    //                                 MIN_SIZE)); copy; data = new }
+    let grow = module.block(null, [
+      module.local_set(capLocal, module.array_len(this.gcDynamicArrayData(
+        module.local_get(refLocal, classTypeRef), classTypeRef, element)), false),
+      module.local_set(newLocal, module.array_new(module.heapType(arrayTypeRef),
+        module.select(
+          module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)),
+          module.i32(GC_ARRAY_MIN_SIZE),
+          module.binary(BinaryOp.GtU32,
+            module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)),
+            module.i32(GC_ARRAY_MIN_SIZE))),
+        this.makeFieldZero(element)), false),
+      module.array_copy(module.local_get(newLocal, arrayTypeRef), module.i32(0),
+        this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+        module.i32(0), module.local_get(capLocal, TypeRef.I32)),
+      module.struct_set(module.heapType(classTypeRef), GC_ARRAY_DATA_INDEX,
+        module.local_get(refLocal, classTypeRef), module.local_get(newLocal, arrayTypeRef))
+    ], TypeRef.None);
+    stmts.push(module.if(
+      module.binary(BinaryOp.EqI32, module.local_get(lenLocal, TypeRef.I32),
+        module.array_len(this.gcDynamicArrayData(
+          module.local_get(refLocal, classTypeRef), classTypeRef, element))),
+      grow
+    ));
+
+    stmts.push(module.array_set(module.heapType(arrayTypeRef),
+      this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+      module.local_get(lenLocal, TypeRef.I32), module.local_get(valueLocal, element.toRef())));
+    // `push` answers the new length, as the stdlib's does.
+    stmts.push(module.local_set(lenLocal,
+      module.binary(BinaryOp.AddI32, module.local_get(lenLocal, TypeRef.I32), module.i32(1)), false));
+    stmts.push(module.struct_set(module.heapType(classTypeRef), GC_ARRAY_LENGTH_INDEX,
+      module.local_get(refLocal, classTypeRef), module.local_get(lenLocal, TypeRef.I32)));
+    stmts.push(module.local_get(lenLocal, TypeRef.I32));
+    this.currentType = Type.i32;
+    return module.block(null, stmts, TypeRef.I32);
+  }
+
+  /**
+   * `a.length = n` on a GC `Array<T>`: grow if `n` exceeds the capacity, then set
+   * `length_`.
+   *
+   * **Truncation needs no work** — the used count is the only thing that shrinks,
+   * and the spare elements stay in the backing array as unreachable slots the
+   * collector may still see. That is the same behaviour the stdlib has (it keeps
+   * the buffer and lowers `length_`), so nothing observable changes.
+   *
+   * Growth reuses `push`'s sequence: allocate `max(cap<<1, MIN_SIZE)` — repeating
+   * until it fits `n` is *not* done, because a single 2× step that is still short
+   * would leave `length_ > capacity`. Instead the new capacity is
+   * `max(n, cap<<1, MIN_SIZE)`, one allocation.
+   */
+  private compileGcDynamicArraySetLength(
+    receiver: Expression,
+    lengthExpression: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let newLenLocal = flow.getTempLocal(Type.i32).index;
+    let capLocal = flow.getTempLocal(Type.i32).index;
+    let newLocal = flow.getTempLocal(this.gcBackingArrayType(element)).index;
+    let stmts = new Array<ExpressionRef>();
+
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(receiver, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(newLenLocal,
+      this.compileExpression(lengthExpression, Type.i32, Constraints.ConvImplicit), false));
+
+    // `u32(n) > BLOCK_MAXSIZE` → the stdlib's RangeError(E_INVALIDLENGTH). Unsigned,
+    // so a negative length is refused here rather than becoming a huge allocation.
+    stmts.push(module.if(
+      module.binary(BinaryOp.GtU32, module.local_get(newLenLocal, TypeRef.I32),
+        module.i32(0x7ffffff0)),
+      this.makeStaticAbort(this.ensureStaticString("Invalid length"),
+        this.currentFlow.sourceFunction.identifierNode)
+    ));
+
+    // if (n > array.len data) grow to max(n, cap<<1, MIN_SIZE)
+    let grow = module.block(null, [
+      module.local_set(capLocal, module.array_len(this.gcDynamicArrayData(
+        module.local_get(refLocal, classTypeRef), classTypeRef, element)), false),
+      module.local_set(newLocal, module.array_new(module.heapType(arrayTypeRef),
+        module.select(module.local_get(newLenLocal, TypeRef.I32),
+          module.select(
+            module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)),
+            module.i32(GC_ARRAY_MIN_SIZE),
+            module.binary(BinaryOp.GtU32,
+              module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)),
+              module.i32(GC_ARRAY_MIN_SIZE))),
+          module.binary(BinaryOp.GtU32, module.local_get(newLenLocal, TypeRef.I32),
+            module.binary(BinaryOp.ShlI32, module.local_get(capLocal, TypeRef.I32), module.i32(1)))),
+        this.makeFieldZero(element)), false),
+      module.array_copy(module.local_get(newLocal, arrayTypeRef), module.i32(0),
+        this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+        module.i32(0), module.local_get(capLocal, TypeRef.I32)),
+      module.struct_set(module.heapType(classTypeRef), GC_ARRAY_DATA_INDEX,
+        module.local_get(refLocal, classTypeRef), module.local_get(newLocal, arrayTypeRef))
+    ], TypeRef.None);
+    stmts.push(module.if(
+      module.binary(BinaryOp.GtU32, module.local_get(newLenLocal, TypeRef.I32),
+        module.array_len(this.gcDynamicArrayData(
+          module.local_get(refLocal, classTypeRef), classTypeRef, element))),
+      grow
+    ));
+
+    stmts.push(module.struct_set(module.heapType(classTypeRef), GC_ARRAY_LENGTH_INDEX,
+      module.local_get(refLocal, classTypeRef), module.local_get(newLenLocal, TypeRef.I32)));
+    this.currentType = Type.void;
+    return module.block(null, stmts, TypeRef.None);
+  }
+
+  /** `a.pop()`: `length_--`, then the element that was last. */
+  private compileGcDynamicArrayPop(
+    receiver: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classTypeRef = targetType.toRef();
+    let arrayTypeRef = module.arrayTypeOf(element);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let lenLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(receiver, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(lenLocal,
+      this.compileGcDynamicArrayLength(module.local_get(refLocal, classTypeRef), classTypeRef), false));
+    // An empty array cannot be popped: the stdlib's `pop` would return a hole, so
+    // throwing is the honest equivalent and matches `__get`'s out-of-range.
+    stmts.push(module.if(
+      module.binary(BinaryOp.EqI32, module.local_get(lenLocal, TypeRef.I32), module.i32(0)),
+      this.makeStaticAbort(this.ensureStaticString("Index out of range"),
+        this.currentFlow.sourceFunction.identifierNode)
+    ));
+    stmts.push(module.struct_set(module.heapType(classTypeRef), GC_ARRAY_LENGTH_INDEX,
+      module.local_get(refLocal, classTypeRef),
+      module.binary(BinaryOp.SubI32, module.local_get(lenLocal, TypeRef.I32), module.i32(1))));
+    stmts.push(module.array_get(module.heapType(arrayTypeRef),
+      this.gcDynamicArrayData(module.local_get(refLocal, classTypeRef), classTypeRef, element),
+      module.binary(BinaryOp.SubI32, module.local_get(lenLocal, TypeRef.I32), module.i32(1)),
+      element.toRef()));
+    this.currentType = element;
+    return module.block(null, stmts, element.toRef());
+  }
+
+  /**
+   * `new StaticArray<T>(n)` as `array.new $Elem (n) (zero)`.
+   *
+   * **Why the stdlib body is never compiled.** `StaticArray`'s members are
+   * linear-memory code — the constructor calls `__new`, `#get:length` reads
+   * `rtSize` out of a header, `__get`/`__uset` load/store at an offset — and none
+   * of it type-checks when the instance is a wasm array. Every call site is
+   * intercepted (`new` here, `.length`, `a[i]`, `a[i] = v`), so none of them is
+   * ever referenced and none is emitted. **That is the boundary in emitted code**:
+   * a `StaticArray<T>` instance gets `array.*`; the class's own methods are
+   * unreachable and unemitted.
+   */
+  private compileGcStaticArrayNew(
+    classInstance: Class,
+    element: Type,
+    lengthExpression: Expression | null,
+    reportNode: Node
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let arrayTypeRef = classInstance.type.toRef();
+    let heapType = module.heapType(arrayTypeRef);
+    let length = lengthExpression != null
+      ? this.compileExpression(lengthExpression, Type.i32, Constraints.ConvImplicit)
+      : module.i32(0);
+    let lengthLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(lengthLocal, length, false));
+    // A negative length must not become a huge `array.new`. The stdlib constructor
+    // refused it with `RangeError(E_INVALIDLENGTH)`; an abort with the same message
+    // is this language's `throw` (`compileThrowStatement`).
+    stmts.push(module.if(
+      module.binary(BinaryOp.GtU32, module.local_get(lengthLocal, TypeRef.I32),
+        module.i32(0x7ffffff0)),
+      this.makeStaticAbort(this.ensureStaticString("Invalid length"), reportNode)
+    ));
+    stmts.push(module.array_new(
+      heapType, module.local_get(lengthLocal, TypeRef.I32), this.makeFieldZero(element)
+    ));
+    this.currentType = classInstance.type;
+    return module.block(null, stmts, arrayTypeRef);
+  }
+
+  /**
+   * `a[i]` on a wasm GC `StaticArray<T>`: a range check, then `array.get`.
+   *
+   * **The check throws rather than letting `array.get` trap.** A wasm trap is fatal
+   * to the store — the guest cannot catch it — while `StaticArray`'s contract is a
+   * `RangeError(E_INDEXOUTOFRANGE)`, and `throw` compiles to an abort in this
+   * language (`compileThrowStatement`: no error-handling spec). So the shape is
+   * `u32(i) >= u32(array.len)` then the same abort with the stdlib's own
+   * `"Index out of range"`. Cost: one compare and one branch — the check the
+   * pointer version already performed — and no change in observable behaviour.
+   * `unchecked` skips it, which is that flag's meaning.
+   */
+  private compileGcStaticArrayGet(
+    targetExpression: Expression,
+    indexExpression: Expression,
+    targetType: Type,
+    element: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let arrayTypeRef = targetType.toRef();
+    let heapType = module.heapType(arrayTypeRef);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let indexLocal = flow.getTempLocal(Type.i32).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(targetExpression, targetType, Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(indexLocal,
+      this.compileExpression(indexExpression, Type.i32, Constraints.ConvImplicit), false));
+    if (!flow.is(FlowFlags.UncheckedContext)) {
+      stmts.push(this.makeGcArrayBoundsCheck(
+        indexLocal, module.array_len(module.local_get(refLocal, arrayTypeRef))
+      ));
+    }
+    stmts.push(module.array_get(heapType, module.local_get(refLocal, arrayTypeRef),
+      module.local_get(indexLocal, TypeRef.I32), element.toRef()));
+    this.currentType = element;
+    return module.block(null, stmts, element.toRef());
+  }
+
+  /**
+   * `a[i] = v` on a wasm GC `StaticArray<T>`: a range check, then `array.set`.
+   *
+   * Takes the value already compiled (`valueExpr` in `makeAssignment`), because
+   * recompiling the expression would emit its side effects twice.
+   */
+  private compileGcStaticArraySet(
+    targetExpression: Expression | null,
+    indexExpression: Expression | null,
+    targetType: Type,
+    element: Type,
+    valueExpr: ExpressionRef,
+    tee: bool
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let arrayTypeRef = targetType.toRef();
+    let heapType = module.heapType(arrayTypeRef);
+    let refLocal = flow.getTempLocal(targetType).index;
+    let indexLocal = flow.getTempLocal(Type.i32).index;
+    let valueLocal = flow.getTempLocal(element).index;
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(refLocal,
+      this.compileExpression(assert(targetExpression), targetType,
+        Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(indexLocal,
+      this.compileExpression(assert(indexExpression), Type.i32,
+        Constraints.ConvImplicit), false));
+    stmts.push(module.local_set(valueLocal, valueExpr, element.isManaged));
+    if (!flow.is(FlowFlags.UncheckedContext)) {
+      stmts.push(this.makeGcArrayBoundsCheck(
+        indexLocal, module.array_len(module.local_get(refLocal, arrayTypeRef))
+      ));
+    }
+    stmts.push(module.array_set(heapType,
+      module.local_get(refLocal, arrayTypeRef),
+      module.local_get(indexLocal, TypeRef.I32),
+      module.local_get(valueLocal, element.toRef())));
+    if (tee) stmts.push(module.local_get(valueLocal, element.toRef()));
+    this.currentType = tee ? element : Type.void;
+    return module.block(null, stmts, tee ? element.toRef() : TypeRef.None);
+  }
+
+  /** `if (u32(i) >= u32(len)) abort with the stdlib's "Index out of range"`. */
+  private makeGcArrayBoundsCheck(indexLocal: i32, len: ExpressionRef): ExpressionRef {
+    let module = this.module;
+    return module.if(
+      module.binary(BinaryOp.GeU32, module.local_get(indexLocal, TypeRef.I32), len),
+      this.makeStaticAbort(
+        this.ensureStaticString("Index out of range"),
+        this.currentFlow.sourceFunction.identifierNode
+      )
+    );
+  }
+
+  /**
+   * The brand test for `instanceof C` / `<C>x`: is the runtime object's brand one
+   * of the brands in `classInstance`'s subtree?
+   *
+   * **Not `ref.test`.** wasm GC type identity is structural, so two classes with
+   * identical layouts are one type and `ref.test (ref $SetX)` is true for a
+   * `SetY`. A brand compare cannot be fooled by canonicalization. **Not a single
+   * brand compare either.** `instanceof Base` must hold for an instance of any
+   * class derived from `Base`, and those have their own brands — so the test is a
+   * chain over the subtree, one `i32.eq` per class.
+   *
+   * `ref` must be a GC class reference whose static type is a supertype of (or
+   * equal to) every candidate: the brand is field 0 of every struct, so
+   * `struct.get` on the operand's static type reads the right field whichever
+   * concrete struct it holds.
+   */
+  makeGcBrandTest(classInstance: Class, ref: ExpressionRef, refTypeRef: TypeRef = 0): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let operandTypeRef = refTypeRef || classInstance.type.toRef();
+    let subtree = gcSubtreeBrands(this.program, classInstance);
+    assert(subtree.length > 0); // a class is always in its own subtree
+
+    // **The brand is read once into a temp local, and each compare reads it.**
+    // A single `struct.get` ExpressionRef cannot be an operand of two compares:
+    // Binaryen's IR is a tree, not a DAG, so reusing a node puts the same
+    // expression in two places — which validates at `-O0` and makes `LocalCSE`
+    // assert at `-O2` (`LocalCSE.cpp:192`). Measured, on a three-class subtree.
+    let brandLocal = flow.getTempLocal(Type.i32).index;
+    let test: ExpressionRef = module.i32(0);
+    for (let i = 0, k = subtree.length; i < k; ++i) {
+      let isIt = module.binary(
+        BinaryOp.EqI32,
+        module.local_get(brandLocal, TypeRef.I32),
+        module.i32(unchecked(subtree[i]))
+      );
+      test = i == 0 ? isIt : module.binary(BinaryOp.OrI32, test, isIt);
+    }
+    return module.block(null, [
+      module.local_set(brandLocal, module.struct_get(
+        module.heapType(operandTypeRef),
+        GC_BRAND_INDEX,
+        ref,
+        TypeRef.I32
+      ), false),
+      test
+    ], TypeRef.I32);
+  }
+
   makeRuntimeNonNullCheck(
     /** Expression being checked. */
     expr: ExpressionRef,
@@ -15817,6 +18575,9 @@ export class Compiler extends DiagnosticEmitter {
       reportNode
     ); // TODO: throw
 
+    // Bound first: see `isLinearBufferField` — a property read does not stay
+    // narrowed across `a != null && f(a)` in this compiler.
+    let typeClass = type.classReference;
     if (type.isExternalReference) {
       let nonNullExpr = module.local_get(tempIndex, type.toRef());
       if (this.options.hasFeature(Feature.GC)) {
@@ -15828,6 +18589,15 @@ export class Compiler extends DiagnosticEmitter {
         ),
         staticAbortCallExpr,
         nonNullExpr
+      );
+    } else if (typeClass != null && isGcClass(typeClass)) {
+      // **A reference is not a condition.** The pointer ABI tests `local.tee`'s
+      // i32 for zero; a `(ref null $C)` has no truthiness in wasm, so the guard is
+      // `ref.is_null` and this is the arm that a nullable class field needs.
+      expr = module.if(
+        module.ref_is_null(module.local_tee(tempIndex, expr, false)),
+        staticAbortCallExpr,
+        module.local_get(tempIndex, type.toRef())
       );
     } else {
       expr = module.if(
@@ -15861,6 +18631,36 @@ export class Compiler extends DiagnosticEmitter {
       this.ensureStaticString("invalid downcast"),
       reportNode
     ); // TODO: throw
+
+    // A GC class downcast is the same test `instanceof` is: the brand chain over
+    // the target's subtree. `prepareInstanceOf` would emit `__instanceof(id)`,
+    // which reads a linear header a GC struct does not have.
+    let gcTarget = toType.nonNullableType.classReference;
+    let gcSource = type.nonNullableType.classReference;
+    if (gcTarget != null && gcSource != null && isGcClass(gcTarget) && isGcClass(gcSource)) {
+      let temp = flow.getTempLocal(type);
+      let tempIndex = temp.index;
+      // The brand test decides *whether* the cast is legal; `ref.cast` makes the
+      // value's static type the target's, which the pointer ABI did not need
+      // because every reference was one `i32`.
+      //
+      // **`local.set`, then a branch — not `local.tee` inside the condition.**
+      // A ref-typed `local.tee` nested in a condition makes Binaryen's `LocalCSE`
+      // assert at `-O2` (`LocalCSE.cpp:192`, `!(requests && original)`), and a
+      // statement-shaped store is also the more honest description: the value is
+      // stored once and read by both arms.
+      return module.block(null, [
+        module.local_set(tempIndex, expr, false),
+        module.if(
+          this.makeGcBrandTest(gcTarget, module.local_get(tempIndex, type.toRef())),
+          module.ref_cast(
+            module.local_get(tempIndex, type.toRef()),
+            toType.nonNullableType.toRef()
+          ),
+          staticAbortCallExpr
+        )
+      ], toType.nonNullableType.toRef());
+    }
 
     if (!toType.isNullableReference || flow.isNonnull(expr, type)) {
       // Simplify if the value cannot be `null`. If toType is non-nullable, a
@@ -15952,4 +18752,24 @@ function mangleImportName(
       decorator.range, "1", "0"
     );
   }
+}
+
+/**
+ * The index of `property` among its class's fields, in declaration order.
+ *
+ * **The same walk `prepareType` does when it builds the struct type**, which is
+ * why it must count *fields* and not members: methods, accessors and static
+ * members are not struct fields, and a struct type whose field N is the Nth
+ * field is only addressable if both sides agree on that ordinal. A mismatch
+ * would not trap — `struct.get` with a wrong index reads a different field of
+ * the right type — so it is worth computing rather than assuming.
+ */
+function gcFieldIndex(classInstance: Class, property: Property): i32 {
+  let fields = gcFieldsOf(classInstance);
+  for (let i = 0, k = fields.length; i < k; ++i) {
+    // `+ 1` because field 0 is the brand (`GC_BRAND_INDEX`), in every struct.
+    if (unchecked(fields[i]) == property) return GC_FIRST_FIELD_INDEX + i;
+  }
+  assert(false); // a field that is not among its class's fields is a compiler bug
+  return 0;
 }

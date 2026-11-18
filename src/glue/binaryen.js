@@ -944,4 +944,24 @@ export function _BinaryenConstSetValueI64(expr, val) {
   binaryen._BinaryenConstSetValueI64(expr, toBigInt(val));
 }
 
+/**
+ * A short call-site breadcrumb for the re-used-`ExpressionRef` guard.
+ *
+ * Debug only: it exists because "the same ref was taken twice by
+ * `block.children[]`" is not enough to find the culprit when a single method is
+ * the site for hundreds of nodes. JS-only, and only called when the guard is on,
+ * because a stack capture per operand is far too slow to run by default.
+ */
+export function _TensionRefGuardHint(site) {
+  let frames = "";
+  try {
+    const lines = (new Error().stack || "").split("\n");
+    // Skip this frame, `guardRef`, and the `Module` wrapper.
+    frames = lines.slice(3, 6).map((line) => line.trim()).join(" <- ");
+  } catch {
+    frames = "";
+  }
+  return site + (frames ? "  [" + frames + "]" : "");
+}
+
 export default binaryen;

@@ -2,6 +2,10 @@ This package is TensionScript, a fork of AssemblyScript maintained at
 https://github.com/Yabgu/TensionScript for the Tension engine. The attribution
 notices below are retained from the original project, as its license requires.
 
+The authors listed below are the AssemblyScript contributors whose work this
+package derives from; they are retained under Apache-2.0 §4(d), and they are
+not the maintainers of this fork.
+
 The following authors have all licensed their contributions to AssemblyScript
 under the licensing terms detailed in LICENSE:
 

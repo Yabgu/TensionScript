@@ -10,7 +10,7 @@ claim it tracked upstream.
 ## 1. What this fork is
 
 TensionScript is a **fork of AssemblyScript**, published as
-`@yabgu_gm/tensionscript@0.10.0`, and the guest language for the
+`@yabgu_gm/tensionscript@0.14.1`, and the guest language for the
 [Tension](https://github.com/Yabgu/Tension) engine: game logic compiles to
 WebAssembly, and the engine's C side reads the records the guest declares.
 
@@ -18,6 +18,14 @@ WebAssembly, and the engine's C side reads the records the guest declares.
 Binaryen and other dependencies (#3035)", 2026-07-21), and an ancestor of this
 tree at `ef18ae56` (2026-10-27). The fork is not built against upstream; the base
 is a reference point.
+
+**The toolchain at that base has one measured gap**, recorded separately because
+the compiler round depends on it: this fork's Binaryen (`131.0.0-nightly.
+20260721`, identical to upstream's at `b6bda05c`) declares stack-switching
+expressions in its type definitions, has no constructors for them at runtime, and
+writes a continuation type encoding that wasmtime refuses. See
+[`binaryen-stack-switching.md`](binaryen-stack-switching.md) for the commands and
+the bytes.
 
 ## 2. Why it is a fork
 
@@ -80,18 +88,25 @@ The sharing is a decision, not a residue, and it is bounded:
   compatibility. It claims fork-internal compatibility: a program that compiles
   on 0.9.0 compiles unchanged on 0.10.0.
 
-## 5. The sync cadence
+## 5. The sync question — no cadence yet
+
+**There is no review schedule, and this section no longer claims one.** An earlier
+version said "quarterly review"; no review has ever been run on a schedule, there
+is no owner for one, and `docs/upstream-reviews/` does not exist. A commitment
+nobody keeps is worse than the absence it hides, so what follows is the mechanism
+and the rule, not a calendar.
 
 - **The base stays pinned** at `b6bda05c` with the date it was checked. There is
   one remote (`origin`); upstream is read with
-  `git ls-remote https://github.com/AssemblyScript/assemblyscript main` rather
-  than tracked, so "how far behind" is a documented query, not an empty one.
-- **Quarterly review.** Once a quarter: what landed upstream, what conflicts with
-  a divergence here, what is worth cherry-picking, and what is refused by name.
-  The unit of sync is the **cherry-pick**, not the merge — the base is an
-  ancestor, so that stays available.
-- **Each review is recorded** as a CHANGELOG entry naming the upstream range and
-  what was taken or refused; if enough accumulate they move to
+  `git ls-remote https://github.com/AssemblyScript/assemblyscript main`, run when
+  someone asks rather than tracked, so "how far behind" is a documented query
+  rather than an empty one.
+- **When a review happens**, it asks what landed upstream, what conflicts with a
+  divergence here, what is worth cherry-picking, and what is refused by name. The
+  unit of sync is the **cherry-pick**, not the merge — the base is an ancestor, so
+  that stays available.
+- **A review is recorded** as a CHANGELOG entry naming the upstream range and what
+  was taken or refused; if enough accumulate they move to
   `docs/upstream-reviews/`, with the same entry format. **No review is recorded
   yet** — the base has not moved since the fork, so the first entry will name the
   range from `b6bda05c` and state what it found.

@@ -230,5 +230,8 @@
   "'@abi.align({0})' is too large; the maximum is {1}.": 6409,
   "Alignment is a property of the field, not its type. Place '@abi.align(N)' on the field declaration.": 6410,
   "A view parameter ('@unmanaged {0}' over an inline type) cannot appear in a host-visible signature: an '@external' or exported parameter is supplied by the host, and a view is an address this compiler did not materialise.": 6411,
-  "Call to '{0}' emits {1} operands but its signature declares {2}.": 6412
+  "Call to '{0}' emits {1} operands but its signature declares {2}.": 6412,
+  "wasm-gc: {0}": 6413,
+  "wasm-gc: no class migrated - {0}": 6414,
+  "wasm-gc: {0} can never be on the GC ABI - {1}. A value has no address, so it cannot be a field of a reference type; this is the memory model's rule, not a work item.": 6415
 }

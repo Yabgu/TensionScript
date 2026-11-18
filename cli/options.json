@@ -202,6 +202,21 @@
     "type": "s",
     "default": "incremental"
   },
+  "wasmGc": {
+    "category": "Features",
+    "description": [
+      "Emits user-declared classes as wasm GC structs.",
+      "",
+      "Off by default. On, a class declared outside the standard library is a",
+      "(ref null $C) instead of an i32 pointer: construction is struct.new, a",
+      "field read is struct.get, and changetype<usize> on an instance is",
+      "refused. The standard library keeps the pointer ABI until the migration",
+      "reaches it, so a program that mixes the two must say so.",
+      ""
+    ],
+    "type": "b",
+    "default": false
+  },
   "exportRuntime": {
     "category": "Features",
     "description": [

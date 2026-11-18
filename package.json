@@ -9,7 +9,6 @@
     "wasm"
   ],
   "version": "0.14.1",
-  "author": "Daniel Wirtz <dcode+assemblyscript@dcode.io>",
   "license": "Apache-2.0",
   "homepage": "https://github.com/Yabgu/Tension",
   "repository": {
@@ -83,7 +82,7 @@
     "watch": "node scripts/build --watch",
     "coverage": "npx c8 -- npm test",
     "pretest": "npm run check",
-    "test": "npm run test:parser && npm run test:flags && npm run test:async && npm run test:closure && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli",
+    "test": "npm run test:parser && npm run test:flags && npm run test:async && npm run test:closure && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli && npm run test:gc",
     "test:parser": "node --enable-source-maps tests/parser",
     "test:flags": "node --enable-source-maps tests/flags.js",
     "test:async": "node --enable-source-maps tests/async/resolver.js && node --enable-source-maps tests/async/lower.js && node --enable-source-maps tests/async/runtime.js",
@@ -95,6 +94,7 @@
     "test:transform:esm": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/simple.js --noEmit",
     "test:transform:cjs": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/simple.js --noEmit",
     "test:cli": "node tests/cli/options.js",
+    "test:gc": "node tests/gc/wasm-gc.js",
     "test:debug": "node tests/debug/runner.js --check",
     "test:debug:unit": "node --enable-source-maps tests/debug/unit/dwarf.js && node --enable-source-maps tests/debug/unit/library-path.js",
     "asbuild": "npm run asbuild:debug && npm run asbuild:release",

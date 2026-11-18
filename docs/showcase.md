@@ -7,7 +7,10 @@ result is recorded in that commit's message. Examples that do not yet compile ar
 marked **pending** with the phase that will land them, and are not written as if
 they work.
 
-Version this describes: **0.10.0**. Base: `origin/main` after PR #31.
+Version this describes: **0.14.1** (`package.json`, which is what npm's
+`dist-tags.latest` reports), **plus the phases [`CHANGELOG.md`](../CHANGELOG.md)
+still marks "Unreleased"** — sized enums among them. Base: `origin/main` at
+`f941a1f0`; this document's rewrite landed in PR #31.
 
 ---
 
@@ -60,9 +63,16 @@ Semantics worth knowing:
 
 Refused / limitations:
 
-- **A `@unmanaged`-typed field is a reference, not inline.** `@unmanaged struct
-  Outer { tag: u8; inner: Inner; }` with a 16-byte `@unmanaged Inner` is **8**
-  bytes (`1 + 3 pad + 4 pointer`), measured.
+- **An `@unmanaged`-typed field is one pointer, not the record inline.**
+  `@unmanaged struct Outer { tag: u8; inner: Inner; }`, with a 16-byte
+  `@unmanaged Inner`, is **8** bytes — and that 8 is the size of the
+  **containing record**: `tag` at offset 0, three bytes of alignment padding, and
+  a **4-byte pointer** at offset 4 (wasm32). Measured: `sizeof<Outer>()` **8**,
+  `offsetof<Outer>("inner")` **4**, and a record holding only that field
+  (`@unmanaged struct Bare { inner: Inner; }`) is **4**. `@unmanaged` on a
+  declaration allocates and stores nothing; it marks the *storage class*, so the
+  field costs one pointer and the `Inner` itself lives wherever it was allocated.
+  The shape is exactly `struct { uint8_t tag; Inner *inner; }` in C.
 - **A plain-struct-typed field is inline**, since the default flip: the same
   `Outer` with a plain 16-byte `Inner` is **20** bytes (`1 + 3 pad + 16`),
   measured. The two spellings differ in the *field*, not the outer — which is why
@@ -555,6 +565,17 @@ repository.
 | **`state-vector-declarations`** *(engine)* | 41 sites writing into memory that is not a record — a fixed field sequence with no declared type. Finding: `Tension/docs/session-findings.md`. |
 | **`const borrow`** | **Not found in either repository.** Named in a task brief; no scoping entry, finding, or source location defines it. Listed here so the absence is recorded rather than silently dropped. |
 
+**Undecided: a packed `@unmanaged` layout.** An `@unmanaged` record uses C
+layout, so fields sit at their natural alignment and
+`struct { tag: u8; inner: Inner * }` is **8** bytes on wasm32 — not the 5 bytes its
+fields would occupy end to end. A packed variant would be those 5 bytes, and it
+would give up two things at once: the alignment the rest of the toolchain assumes,
+and the property §1 is built on, that a C header can describe the record. The
+current choice is deliberate rather than incidental: C layout *is* the interop
+contract here. Whether a packed variant should ever exist is a separate question,
+it is undecided, and it belongs to the user. This entry records the question and
+takes no position on it.
+
 ---
 
 ## 10. Where to go next
@@ -562,9 +583,12 @@ repository.
 - **[`roadmap.md`](roadmap.md)** — deferred features and durable findings, one
   line each with the reason it is not built yet, and the repository's workflow.
 - **[`fork-posture.md`](fork-posture.md)** — what this fork is, what it
-  deliberately shares with AssemblyScript, and the sync cadence.
+  deliberately shares with AssemblyScript, and the sync question.
 - **[`scheduler-contract.md`](scheduler-contract.md)** — the async contract §5
   implements against.
+- **[`binaryen-stack-switching.md`](binaryen-stack-switching.md)** — what the
+  pinned Binaryen can and cannot emit for stack switching, with the bytes and the
+  re-run commands. Read it before planning any Backend B emission.
 - **[`async-phase1.md`](async-phase1.md)** — the phase-1 async record, kept
   because it documents the shape the later phases were built on.
 - **[`../CHANGELOG.md`](../CHANGELOG.md)** — what shipped in which release.

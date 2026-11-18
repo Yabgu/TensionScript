@@ -86,6 +86,8 @@ declare type stringview_iter = ref_stringview_iter | null;
 declare const ASC_TARGET: i32;
 /** Runtime type. 0 = Stub, 1 = Minimal, 2 = Incremental. */
 declare const ASC_RUNTIME: i32;
+/** Whether `--wasmGc` is on. 0 = off (pointer ABI), 1 = wasm GC types. */
+declare const ASC_WASM_GC: i32;
 /** Provided noAssert option. */
 declare const ASC_NO_ASSERT: bool;
 /** Provided memoryBase option. */

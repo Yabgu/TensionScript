@@ -953,6 +953,9 @@ export declare function __f64_store(ptr: usize, value: number): void;
 export declare function __i32_load8_s(ptr: usize): i8;
 export declare function __i32_load8_u(ptr: usize): u8;
 export declare function __i32_load16_s(ptr: usize): i16;
+/** A short call-site breadcrumb for the re-used-`ExpressionRef` guard (debug). */
+export declare function _TensionRefGuardHint(site: string): string;
+
 export declare function __i32_load16_u(ptr: usize): u16;
 export declare function __i32_load(ptr: usize): i32;
 export declare function __f32_load(ptr: usize): f32;

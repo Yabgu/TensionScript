@@ -161,6 +161,11 @@ export function setStackSize(options: Options, stackSize: i32): void {
   options.stackSize = stackSize;
 }
 
+/** Sets the `wasmGc` option: emit user-declared classes as wasm GC structs. */
+export function setWasmGc(options: Options, wasmGc: bool): void {
+  options.wasmGc = wasmGc;
+}
+
 /** Sets the bundle semantic version. */
 export function setBundleVersion(
   options: Options,

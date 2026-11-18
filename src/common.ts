@@ -179,6 +179,8 @@ export namespace CommonNames {
   // constants
   export const ASC_TARGET = "ASC_TARGET";
   export const ASC_RUNTIME = "ASC_RUNTIME";
+  /** `--wasmGc`: emit user classes and `StaticArray` as wasm GC types. */
+  export const ASC_WASM_GC = "ASC_WASM_GC";
   export const ASC_NO_ASSERT = "ASC_NO_ASSERT";
   export const ASC_MEMORY_BASE = "ASC_MEMORY_BASE";
   export const ASC_TABLE_BASE = "ASC_TABLE_BASE";

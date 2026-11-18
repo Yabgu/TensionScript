@@ -20,14 +20,170 @@ import {
 import {
   Type,
   TypeFlags,
-  TypeKind
+  TypeKind,
+  isGcClass,
+  gcFieldsOf,
+  gcBrandOf,
+  GC_BRAND_INDEX,
+  GC_BRAND_NAME,
+  GC_FIRST_FIELD_INDEX,
+  gcArrayElementOf,
+  gcDynamicArrayElementOf,
+  GC_ARRAY_DATA_INDEX,
+  GC_ARRAY_LENGTH_INDEX,
+  gcMixedAbiReferrer,
+  gcStringOf,
+  isLinearBufferField,
+  isGcArrayBufferClass,
+  gcFunctionValueUsable,
+  GC_ARRAYBUFFER_DATA_INDEX,
+  GC_ARRAYBUFFER_LENGTH_INDEX,
+  gcFieldRefusal
 } from "./types";
-import {
-  ElementKind,
-  PropertyPrototype
-} from "./program";
+import { Class, Property, DecoratorFlags } from "./program";
 import * as binaryen from "./glue/binaryen";
 import { synthesize as synthesizeDwarf } from "./dwarf";
+
+// === The re-used-`ExpressionRef` guard =======================================================
+//
+// Binaryen's IR is a **tree**: an `ExpressionRef` is owned by exactly one parent.
+// Handing the same node to two parents does not fail at construction — it produces
+// a graph the optimizer cannot walk, which shows up as a *correct* `-O0` build and
+// a wrong `-O1` one. That is how this defect got past three rounds:
+//
+//   - GC3: one `struct.get` used as several `i32.eq` operands,
+//   - GC4: a re-used operand in an `if`,
+//   - GC11: one `i32.const ptr` handed to every `load` of a literal's characters,
+//     which let `-O1` fold every `offset=2i` to `offset=0` and made every string
+//     compare equal.
+//
+// Each was found by the `-O0..-O3` gate — a fine net but a late one, and three
+// occurrences say the mechanism should catch it instead.
+//
+// **Scope, and why it is not the whole population.** The guard tracks the refs a
+// *producer* records: the GC builders (`struct_new`/`struct_get`/`array_new`/…,
+// `ref_*`) and the constants (`i32`/`i64`/`f32`/`f64`). Those are exactly the refs
+// the three defects shared, and a constant is the one node a caller is most likely
+// to build once and reuse. It does **not** track refs from `block`/`if`/`local_get`
+// and friends, because the compiler's ordinary block assembly re-parents those —
+// measured: a bare `for` loop, with the flag off, re-parents its initialiser — and
+// a check over the whole population reports that pre-existing pattern immediately
+// and buries the signal. A fourth occurrence of the *actual* defect is a shared GC
+// node or a shared constant, and that is what this covers.
+//
+// Off unless `TENSION_REF_GUARD=1`; when off, both entry points are a null test.
+
+/** One tracked ref: who produced it, and whether an operand has taken it. */
+class RefGuardRecord {
+  constructor(
+    /** Where the ref was produced. */
+    public site: string,
+    /** The consumption counter when it was produced. */
+    public producedAt: i32 = 0,
+    /** Whether an operand has taken it already. */
+    public used: bool = false,
+    /** Where it was first taken, for the report. */
+    public usedSite: string = ""
+  ) {}
+}
+
+/** Tracked refs, or `null` when the guard is off. */
+let refGuardLive: Map<ExpressionRef, RefGuardRecord> | null = null;
+
+/** Whether `refGuardLive` has been decided yet. Constant-initialised, see below. */
+let refGuardChecked: bool = false;
+
+/**
+ * Whether the guard was switched on, by `enableRefGuard` from the JS entry.
+ *
+ * **A setter rather than an environment read here**, and the reason is the
+ * self-compile: this file is compiled to WebAssembly, where the only modules the
+ * generated binding can call are Binaryen's own. A helper exported from
+ * `glue/binaryen.js` — the obvious place for an env read — is bound to
+ * `imports.binaryen`, the npm package, which does not have it, so the call traps
+ * (`__module0.tensionRefGuard is not a function`) the moment the guard is asked
+ * about. Keeping the decision outside the wasm graph is what lets `index-js.ts`
+ * read the environment while the self-hosted compiler simply never turns the
+ * guard on.
+ */
+let refGuardWanted: bool = false;
+
+/** Turns the re-used-`ExpressionRef` guard on or off. Called by the JS entry. */
+export function enableRefGuard(on: bool): void {
+  refGuardWanted = on;
+}
+
+/**
+ * The live map, decided on first use.
+ *
+ * **The decision cannot live in the declaration.** This compiler resolves a
+ * module-level `let` whose initialiser is not a constant *after* the functions
+ * that read it, and reports every such read as
+ * `TS2448: Variable 'src/module/refGuardLive' used before its declaration`
+ * (measured: with the flag read in the declaration, 5 × TS2448 + 8 cascading
+ * TS2339; with a constant `null` here and this function, none). The state is the
+ * same either way — the flag cannot change during a run — so the only thing the
+ * rewrite moves is *when* it is read, from module start to the first guarded
+ * call.
+ */
+function refGuardNow(): Map<ExpressionRef, RefGuardRecord> | null {
+  if (!refGuardChecked) {
+    refGuardChecked = true;
+    if (refGuardWanted) refGuardLive = new Map();
+  }
+  return refGuardLive;
+}
+
+/** Monotonic count of consumptions, so a violation can be placed in time. */
+let refGuardSeq: i32 = 0;
+
+/** Records `ref` as one this guard watches. Called by producers only. */
+function guardProduce(ref: ExpressionRef, site: string): ExpressionRef {
+  let live = refGuardNow();
+  if (live !== null && ref) live.set(ref, new RefGuardRecord(site, ++refGuardSeq));
+  return ref;
+}
+
+/** Takes `ref` as an operand. Aborts if a tracked ref is taken a second time. */
+function guardRef(ref: ExpressionRef, site: string): ExpressionRef {
+  let live = refGuardNow();
+  if (live === null || !ref) return ref; // guard off, or an absent operand
+  let record = live.get(ref);
+  if (record == null) return ref; // not a tracked ref: ordinary block assembly
+  if (record.used) {
+    binaryen._BinaryenExpressionPrint(ref); // the offending node, for the report
+    assert(false,
+      "re-used ExpressionRef: the " + record.site + " node (produced at " +
+      record.producedAt.toString() + ") was handed to '" +
+      record.usedSite + "' and then to '" +
+      binaryen._TensionRefGuardHint(site + " at " + (++refGuardSeq).toString()) +
+      "' after an operand had already taken it. Binaryen's IR is a tree, so a node " +
+      "may be consumed once; build a fresh node instead of storing one in a " +
+      "variable and reusing it.");
+  }
+  record.usedSite = binaryen._TensionRefGuardHint(site);
+  record.used = true;
+  ++refGuardSeq;
+  return ref;
+}
+
+/**
+ * Suspends the ref guard for a subtree *transformation*; answers whether it was on.
+ *
+ * A pass rewrites the tree and re-parents nodes by design, so the guard's contract
+ * ("construction builds a tree") does not hold inside one. The records are dropped
+ * on resume because the tree a pass leaves is not the tree it was given.
+ */
+export function suspendRefGuard(): bool {
+  let was = refGuardNow() !== null;
+  refGuardLive = null;
+  return was;
+}
+
+/** Resumes the ref guard if it was suspended. */
+export function resumeRefGuard(wasActive: bool): void {
+  if (wasActive) refGuardLive = new Map();
+}
 
 /** A Binaryen-compatible index. */
 export type Index = binaryen.Index;
@@ -1381,6 +1537,34 @@ export class Module {
 
   private lit: usize;
 
+  /**
+   * The wasm GC struct type built for each class, **keyed by the class**.
+   *
+   * Not by `Type`. Two classes can share one `Type` object — types are interned
+   * by kind and flags, and every class is a `Usize` reference — so a cache keyed
+   * on the `Type` handed the second class the first one's struct. Measured: a
+   * file with `Base`, `Derived` and `Sibling` emitted `Derived`'s constructor
+   * with `Sibling`'s type, because `Sibling` was built first and the `Type` was
+   * the same object. Nothing about the two classes is the same.
+   */
+  gcTypeCache: Map<Class, TypeRef> = new Map();
+
+  /** Brand id -> the class that owns it, so a hash collision is caught. */
+  gcBrandOwners: Map<i32, Class> = new Map();
+
+  /** GC array type per element type, so `StaticArray<i32>` is built once. */
+  gcArrayTypeCache: Map<Type, TypeRef> = new Map();
+
+  /**
+   * Heap-type slots allocated but not yet filled, keyed by class.
+   *
+   * Non-empty only while a `rec` group is being built. A field whose type is
+   * another member of that group must reference the member's *temp* heap type —
+   * that is how a cycle closes — so the lookup has to be reachable from
+   * `gcFieldTypeRef`, which is where field types are built.
+   */
+  gcPendingSlots: Map<Class, HeapTypeRef> = new Map();
+
   static create(useShadowStack: bool, sizeType: TypeRef): Module {
     return new Module(binaryen._BinaryenModuleCreate(), useShadowStack, sizeType);
   }
@@ -1397,13 +1581,13 @@ export class Module {
   i32(value: i32): ExpressionRef {
     let out = this.lit;
     binaryen._BinaryenLiteralInt32(out, value);
-    return binaryen._BinaryenConst(this.ref, out);
+    return guardProduce(binaryen._BinaryenConst(this.ref, out), "i32(" + value.toString() + ")");
   }
 
   i64(valueLow: i32, valueHigh: i32 = 0): ExpressionRef {
     let out = this.lit;
     binaryen._BinaryenLiteralInt64(out, i64_new(valueLow, valueHigh));
-    return binaryen._BinaryenConst(this.ref, out);
+    return guardProduce(binaryen._BinaryenConst(this.ref, out), "i64");
   }
 
   // isize<T>(value: T): ExpressionRef {
@@ -1435,13 +1619,13 @@ export class Module {
   f32(value: f32): ExpressionRef {
     let out = this.lit;
     binaryen._BinaryenLiteralFloat32(out, value);
-    return binaryen._BinaryenConst(this.ref, out);
+    return guardProduce(binaryen._BinaryenConst(this.ref, out), "f32");
   }
 
   f64(value: f64): ExpressionRef {
     let out = this.lit;
     binaryen._BinaryenLiteralFloat64(out, value);
-    return binaryen._BinaryenConst(this.ref, out);
+    return guardProduce(binaryen._BinaryenConst(this.ref, out), "f64");
   }
 
   v128(bytes: Uint8Array): ExpressionRef {
@@ -1454,6 +1638,124 @@ export class Module {
     return binaryen._BinaryenConst(this.ref, out);
   }
 
+  /** The heap type behind a ref type — what `struct.new`/`struct.get`/`struct.set` take. */
+  heapType(type: TypeRef): HeapTypeRef {
+    return binaryen._BinaryenTypeGetHeapType(type);
+  }
+
+  /**
+   * `struct.new $heapType (operands…)` — allocate a wasm GC struct.
+   *
+   * One operand per field, in declaration order. The heap type comes from the
+   * type builder through `Type#toRef` (`_BinaryenTypeGetHeapType` of a nullable
+   * ref), so a struct this module never registered cannot be constructed by
+   * accident.
+   */
+  struct_new(heapType: HeapTypeRef, operands: ExpressionRef[]): ExpressionRef {
+    if (refGuardNow() !== null) {
+      for (let guardI = 0; guardI < operands.length; ++guardI) {
+        guardRef(unchecked(operands[guardI]), "struct_new.operands[]");
+      }
+    }
+    let numOperands = operands.length;
+    let operandsPtr = numOperands
+      ? allocPtrArray(operands)
+      : 0;
+    let expr = binaryen._BinaryenStructNew(this.ref, operandsPtr, numOperands, heapType);
+    return guardProduce(expr, "struct.new");
+  }
+
+  /**
+   * `ref.test $heapType` — is this reference an instance of that type or a
+   * subtype of it? The wasm GC answer to `instanceof`, and it needs no header,
+   * no type id and no visitor: the engine knows the type of every reference.
+   */
+  ref_test(heapType: HeapTypeRef, ref: ExpressionRef): ExpressionRef {
+    ref = guardRef(ref, "ref_test.ref");
+    return guardProduce(binaryen._BinaryenRefTest(this.ref, ref, heapType), "ref.test");
+  }
+
+  /**
+   * `ref.cast $heapType` — narrow a reference's static type.
+   *
+   * **Not a runtime check to be relied on.** Under structural typing two classes
+   * with the same layout share one wasm type, so a cast between them succeeds for
+   * either; what guarantees the cast is correct is the brand test the caller emits
+   * *before* it. This only makes the value's static type match the target, which
+   * the pointer ABI got for free by having one type for everything.
+   */
+  ref_cast(ref: ExpressionRef, type: TypeRef): ExpressionRef {
+    ref = guardRef(ref, "ref_cast.ref");
+    // The C API takes a **heap type**, not a ref type — `ref.cast $T`, and the
+    // result is the non-null `(ref $T)`.
+    return guardProduce(binaryen._BinaryenRefCast(this.ref, ref, this.heapType(type)), "ref.cast");
+  }
+
+  /** The GC array type for an element, as a shared accessor. */
+  arrayTypeOf(element: Type): TypeRef {
+    return ensureGcArrayType(this, element);
+  }
+
+  /** `array.len` — the length a wasm array carries, so `StaticArray` needs no field. */
+  array_len(ref: ExpressionRef): ExpressionRef {
+    ref = guardRef(ref, "array_len.ref");
+    return guardProduce(binaryen._BinaryenArrayLen(this.ref, ref), "array.len");
+  }
+
+  /**
+   * `array.new $heapType (n) (zero)`.
+   *
+   * **`_BinaryenArrayNew`, not `_BinaryenArrayNewDefault`** — the latter is the text
+   * format's name for this form and the glue does not export it (measured:
+   * `typeof _BinaryenArrayNewDefault === "undefined"` in 131.0.0-nightly.20260721).
+   * Same lesson as `_BinaryenContNew` in C1: probe the runtime, not the `.d.ts`.
+   */
+  array_new(heapType: HeapTypeRef, length: ExpressionRef, init: ExpressionRef): ExpressionRef {
+    length = guardRef(length, "array_new.length");
+    init = guardRef(init, "array_new.init");
+    return guardProduce(binaryen._BinaryenArrayNew(this.ref, heapType, length, init), "array.new");
+  }
+
+  /** `array.copy $elem (dst, dstOffset, src, srcOffset, len)` — growth copies. */
+  array_copy(dest: ExpressionRef, destOffset: ExpressionRef,
+    src: ExpressionRef, srcOffset: ExpressionRef, length: ExpressionRef): ExpressionRef {
+    dest = guardRef(dest, "array_copy.dest");
+    destOffset = guardRef(destOffset, "array_copy.destOffset");
+    src = guardRef(src, "array_copy.src");
+    srcOffset = guardRef(srcOffset, "array_copy.srcOffset");
+    length = guardRef(length, "array_copy.length");
+    return guardProduce(binaryen._BinaryenArrayCopy(this.ref,
+      dest, destOffset, src, srcOffset, length), "array.copy");
+  }
+
+  /** `array.get $heapType` — the caller range-checks first. */
+  array_get(heapType: HeapTypeRef, ref: ExpressionRef, index: ExpressionRef, type: TypeRef): ExpressionRef {
+    ref = guardRef(ref, "array_get.ref");
+    index = guardRef(index, "array_get.index");
+    return guardProduce(binaryen._BinaryenArrayGet(this.ref, ref, index, type, false), "array.get");
+  }
+
+  /** `array.set $heapType` — the caller range-checks first. */
+  array_set(heapType: HeapTypeRef, ref: ExpressionRef, index: ExpressionRef, value: ExpressionRef): ExpressionRef {
+    ref = guardRef(ref, "array_set.ref");
+    index = guardRef(index, "array_set.index");
+    value = guardRef(value, "array_set.value");
+    return guardProduce(binaryen._BinaryenArraySet(this.ref, ref, index, value), "array.set");
+  }
+
+  /** `struct.get $heapType $index` — a field read by type and index, never by offset. */
+  struct_get(heapType: HeapTypeRef, index: Index, ref: ExpressionRef, type: TypeRef): ExpressionRef {
+    ref = guardRef(ref, "struct_get.ref");
+    return guardProduce(binaryen._BinaryenStructGet(this.ref, index, ref, type, false), "struct.get");
+  }
+
+  /** `struct.set $heapType $index` — a field write by type and index. */
+  struct_set(heapType: HeapTypeRef, index: Index, ref: ExpressionRef, value: ExpressionRef): ExpressionRef {
+    ref = guardRef(ref, "struct_set.ref");
+    value = guardRef(value, "struct_set.value");
+    return guardProduce(binaryen._BinaryenStructSet(this.ref, index, ref, value), "struct.set");
+  }
+
   ref_null(type: TypeRef): ExpressionRef {
     // TODO: Provide the desired bottom type directly? Currently, Binaryen does
     // this under the hood, but this API could change to take a heap type.
@@ -1463,18 +1765,23 @@ export class Module {
     //   ),
     //   true
     // );
-    return binaryen._BinaryenRefNull(this.ref, type);
+    return guardProduce(binaryen._BinaryenRefNull(this.ref, type), "ref.null");
   }
 
   ref_eq(left: ExpressionRef, right: ExpressionRef): ExpressionRef {
-    return binaryen._BinaryenRefEq(this.ref, left, right);
+    left = guardRef(left, "ref_eq.left");
+    right = guardRef(right, "ref_eq.right");
+    return guardProduce(binaryen._BinaryenRefEq(this.ref, left, right), "ref.eq");
   }
 
   string_eq(left: ExpressionRef, right: ExpressionRef): ExpressionRef {
+    left = guardRef(left, "string_eq.left");
+    right = guardRef(right, "string_eq.right");
     return binaryen._BinaryenStringEq(this.ref, StringEqOp.Equal, left, right);
   }
 
   string_compare(left: ExpressionRef, right: ExpressionRef): ExpressionRef {
+    left = guardRef(left, "string_compare.left");
     return binaryen._BinaryenStringEq(this.ref, StringEqOp.Compare, left, right);
   }
 
@@ -1484,6 +1791,7 @@ export class Module {
     op: UnaryOp,
     value: ExpressionRef
   ): ExpressionRef {
+    value = guardRef(value, "unary.value");
     if (op > UnaryOp._last) {
       let isWam64 = this.sizeType == TypeRef.I64;
       switch (op) {
@@ -1502,6 +1810,8 @@ export class Module {
     left: ExpressionRef,
     right: ExpressionRef
   ): ExpressionRef {
+    left = guardRef(left, "binary.left");
+    right = guardRef(right, "binary.right");
     if (op > BinaryOp._last) {
       let isWasm64 = this.sizeType == TypeRef.I64;
       switch (op) {
@@ -1596,6 +1906,7 @@ export class Module {
     isManaged: bool,
     type: TypeRef = -1,
   ): ExpressionRef {
+    value = guardRef(value, "local_tee.value");
     if (type == -1) type = binaryen._BinaryenExpressionGetType(value);
     if (isManaged && this.useShadowStack) {
       value = this.tostack(value);
@@ -1629,6 +1940,7 @@ export class Module {
     align: Index = bytes, // naturally aligned by default
     name: string = CommonNames.DefaultMemory
   ): ExpressionRef {
+    ptr = guardRef(ptr, "load.ptr");
     let cStr = this.allocStringCached(name);
     return binaryen._BinaryenLoad(this.ref, bytes, signed, offset, align, type, ptr, cStr);
   }
@@ -1642,6 +1954,8 @@ export class Module {
     align: Index = bytes, // naturally aligned by default
     name: string = CommonNames.DefaultMemory
   ): ExpressionRef {
+    ptr = guardRef(ptr, "store.ptr");
+    value = guardRef(value, "store.value");
     let cStr = this.allocStringCached(name);
     return binaryen._BinaryenStore(this.ref, bytes, offset, align, ptr, value, type, cStr);
   }
@@ -1731,6 +2045,7 @@ export class Module {
     value: ExpressionRef,
     isManaged: bool
   ): ExpressionRef {
+    value = guardRef(value, "local_set.value");
     if (isManaged && this.useShadowStack) {
       value = this.tostack(value);
     }
@@ -1741,6 +2056,7 @@ export class Module {
     name: string,
     value: ExpressionRef
   ): ExpressionRef {
+    value = guardRef(value, "global_set.value");
     let cStr = this.allocStringCached(name);
     return binaryen._BinaryenGlobalSet(this.ref, cStr, value);
   }
@@ -1759,6 +2075,28 @@ export class Module {
     children: ExpressionRef[],
     type: TypeRef = TypeRef.None
   ): ExpressionRef {
+    // **`block` is the one consumer that does not take ownership**, and the reason
+    // is a compiler idiom rather than a concession: `compileStatements`
+    // (`compiler.ts:3414`) *unwraps an unnamed block and re-parents its children*
+    // into the enclosing statement list. So a child of a block is consumed again,
+    // legitimately, as soon as that block is discarded — measured: a bare `for`
+    // loop does exactly this with its own initialiser, with the flag off.
+    // What is checked here instead is the one thing re-parenting cannot explain: a
+    // node appearing **twice in the same child list**.
+    if (refGuardNow() !== null && label === null && children.length > 1) {
+      for (let guardI = 0; guardI < children.length; ++guardI) {
+        let child = unchecked(children[guardI]);
+        if (!child) continue;
+        for (let otherI = guardI + 1; otherI < children.length; ++otherI) {
+          if (unchecked(children[otherI]) == child) {
+            assert(false,
+              "re-used ExpressionRef: children[" + guardI.toString() + "] and children[" +
+              binaryen._TensionRefGuardHint(otherI.toString()) + "] of one block are the " +
+              "same node. Binaryen's IR is a tree, so a node may appear once.");
+          }
+        }
+      }
+    }
     let cStr = this.allocStringCached(label);
     let cArr = allocPtrArray(children);
     let ret = binaryen._BinaryenBlock(this.ref, cStr, cArr, children.length, type);
@@ -1771,6 +2109,9 @@ export class Module {
     stmts: ExpressionRef[],
     type: TypeRef = TypeRef.None
   ): ExpressionRef {
+    // **Not guarded here.** `flatten` does not consume: it forwards the same refs
+    // to `block`, or returns `stmts[0]` outright. Ownership moves through it, so
+    // marking them here would report a legitimate hand-off as a re-use.
     let length = stmts.length;
     if (length == 0) return this.nop(); // usually filtered out again
     if (length == 1) {
@@ -1798,6 +2139,8 @@ export class Module {
     condition: ExpressionRef = 0,
     value: ExpressionRef = 0
   ): ExpressionRef {
+    condition = guardRef(condition, "br.condition");
+    value = guardRef(value, "br.value");
     let cStr = this.allocStringCached(label);
     return binaryen._BinaryenBreak(this.ref, cStr, condition, value);
   }
@@ -1805,6 +2148,7 @@ export class Module {
   drop(
     expression: ExpressionRef
   ): ExpressionRef {
+    expression = guardRef(expression, "drop.expression");
     return binaryen._BinaryenDrop(this.ref, expression);
   }
 
@@ -1837,6 +2181,7 @@ export class Module {
     label: string | null,
     body: ExpressionRef
   ): ExpressionRef {
+    body = guardRef(body, "loop.body");
     let cStr = this.allocStringCached(label);
     return binaryen._BinaryenLoop(this.ref, cStr, body);
   }
@@ -1846,6 +2191,9 @@ export class Module {
     ifTrue: ExpressionRef,
     ifFalse: ExpressionRef = 0
   ): ExpressionRef {
+    condition = guardRef(condition, "if.condition");
+    ifTrue = guardRef(ifTrue, "if.ifTrue");
+    ifFalse = guardRef(ifFalse, "if.ifFalse");
     return binaryen._BinaryenIf(this.ref, condition, ifTrue, ifFalse);
   }
 
@@ -1856,6 +2204,7 @@ export class Module {
   return(
     expression: ExpressionRef = 0
   ): ExpressionRef {
+    expression = guardRef(expression, "return.expression");
     return binaryen._BinaryenReturn(this.ref, expression);
   }
 
@@ -1864,6 +2213,9 @@ export class Module {
     ifFalse: ExpressionRef,
     condition: ExpressionRef
   ): ExpressionRef {
+    ifTrue = guardRef(ifTrue, "select.ifTrue");
+    ifFalse = guardRef(ifFalse, "select.ifFalse");
+    condition = guardRef(condition, "select.condition");
     return binaryen._BinaryenSelect(this.ref, condition, ifTrue, ifFalse);
   }
 
@@ -1873,6 +2225,8 @@ export class Module {
     condition: ExpressionRef,
     value: ExpressionRef = 0
   ): ExpressionRef {
+    condition = guardRef(condition, "switch.condition");
+    value = guardRef(value, "switch.value");
     let numNames = names.length;
     let strs = new Array<StringRef>(numNames);
     for (let i = 0; i < numNames; ++i) {
@@ -1891,6 +2245,11 @@ export class Module {
     returnType: TypeRef,
     isReturn: bool = false
   ): ExpressionRef {
+    if (refGuardNow() !== null && operands !== null) {
+      for (let guardI = 0; guardI < operands.length; ++guardI) {
+        guardRef(unchecked(operands[guardI]), "call.operands[]");
+      }
+    }
     let cStr = this.allocStringCached(target);
     let cArr = allocPtrArray(operands);
     let ret = isReturn
@@ -1959,6 +2318,9 @@ export class Module {
     destName: string = CommonNames.DefaultMemory,
     sourceName: string = CommonNames.DefaultMemory
   ): ExpressionRef {
+    dest = guardRef(dest, "memory_copy.dest");
+    source = guardRef(source, "memory_copy.source");
+    size = guardRef(size, "memory_copy.size");
     let cStr1 = this.allocStringCached(destName);
     let cStr2 = this.allocStringCached(sourceName);
     return binaryen._BinaryenMemoryCopy(this.ref, dest, source, size, cStr1, cStr2);
@@ -1970,6 +2332,9 @@ export class Module {
     size: ExpressionRef,
     name: string = CommonNames.DefaultMemory
   ): ExpressionRef {
+    dest = guardRef(dest, "memory_fill.dest");
+    value = guardRef(value, "memory_fill.value");
+    size = guardRef(size, "memory_fill.size");
     let cStr = this.allocStringCached(name);
     return binaryen._BinaryenMemoryFill(this.ref, dest, value, size, cStr);
   }
@@ -2114,7 +2479,7 @@ export class Module {
   ref_is_null(
     expr: ExpressionRef
   ): ExpressionRef {
-    return binaryen._BinaryenRefIsNull(this.ref, expr);
+    return guardProduce(binaryen._BinaryenRefIsNull(this.ref, expr), "ref.is_null");
   }
 
   ref_as(
@@ -2680,11 +3045,20 @@ export class Module {
       cStrs[i] = allocString(passes[i]);
     }
     let cArr = allocPtrArray(cStrs);
+    // **The ref guard is off while a pass runs.** A pass *transforms* the tree and
+    // re-parents nodes by design — `passes/shadowstack.ts:676` moves a `return`'s
+    // operand into a `local.set` — so a second use here is the pass doing its job.
+    // The guard's contract is "construction builds a tree", and it holds exactly
+    // where no pass has run yet. The records are dropped afterwards because the
+    // tree a pass leaves is not the tree it was given.
+    let guardWasActive = refGuardNow() !== null;
+    if (guardWasActive) refGuardLive = null;
     if (func) {
       binaryen._BinaryenFunctionRunPasses(func, this.ref, cArr, numNames);
     } else {
       binaryen._BinaryenModuleRunPasses(this.ref, cArr, numNames);
     }
+    if (guardWasActive) refGuardLive = new Map();
     binaryen._free(cArr);
     for (let i = numNames - 1; i >= 0; --i) binaryen._free(cStrs[i]);
   }
@@ -3710,6 +4084,28 @@ function allocI32Array(i32s: i32[] | null): usize {
   return ptr;
 }
 
+/**
+ * A C `bool*` array: **one byte per element**, not four.
+ *
+ * `BinaryenTypeBuilderSetStructType`'s `fieldMutables` parameter is `bool*` in
+ * the C API, and the glue declares `ArrayRef<bool>` — but AssemblyScript's
+ * `bool` is a 32-bit `i32`. Writing four bytes per field therefore lands the
+ * second field's flag three bytes past where the reader looks, and every field
+ * after the first reads as immutable. Measured with a two-field struct: the u32
+ * array validates to `struct.set field must be mutable` on field 1 and 0 on
+ * field 0, and the byte array validates 1. Nothing built a multi-field struct
+ * type before `--wasm-gc`, which is why it went unseen.
+ */
+function allocBoolArray(bools: bool[] | null): usize {
+  if (!bools) return 0;
+  let len = bools.length;
+  let ptr = binaryen._malloc(len);
+  for (let i = 0; i < len; ++i) {
+    binaryen.__i32_store8(ptr + i, unchecked(bools[i]) ? 1 : 0);
+  }
+  return ptr;
+}
+
 function allocU32Array(u32s: u32[] | null): usize {
   if (!u32s) return 0;
   let len = u32s.length;
@@ -3867,6 +4263,57 @@ export function ensureType(type: Type): TypeRef {
   let typeRef = tryEnsureBasicType(type);
   if (typeRef) return typeRef;
 
+  // **`String` is an `(array (mut u16))`** — one array type, shared with
+  // `StaticArray<u16>`, since a `String` is a bare block.
+  if (gcStringOf(type)) {
+    let owner = type.nonNullableType.classReference;
+    if (owner != null) return ensureGcArrayType(owner.program.module, Type.u16);
+  }
+
+  // **A function value is a reference to its `Function<T>` struct.** The wrapper is
+  // resolved per signature — the same resolution `getClassOrWrapper` performs wherever a
+  // function value is used — so the type builder has one struct type per signature.
+  let signature = type.signatureReference;
+  if (signature != null && gcFunctionValueUsable(type)) {
+    let fnWrapper = type.getClassOrWrapper(signature.program);
+    if (fnWrapper != null && isGcClass(fnWrapper)) {
+      // **Always nullable, whatever variant asked.** `Binaryen` derives a `struct.get`
+      // result from the field's own type, which is `(ref null $F)`; a non-nullable
+      // request therefore makes the getter's body and its declared result disagree
+      // (`function body type must match, if function returns` — measured). Nullability
+      // here is also the honest static type: a `(x) => y` field's zero is `ref.null`, and
+      // nothing proves it is assigned before it is read.
+      return ensureClassType(fnWrapper);
+    }
+  }
+
+  // **`StaticArray<T>` is a wasm GC array.** Answered here because the array type
+  // needs this module's builder cache, and `types.ts` is imported by this file.
+  {
+    let gcArrayElement = gcArrayElementOf(type);
+    if (gcArrayElement != null) {
+      let owner = type.nonNullableType.classReference;
+      if (owner != null) return ensureGcArrayType(owner.program.module, gcArrayElement);
+    }
+  }
+
+  // **A class is answered by its `Class`, before anything consults `Type.ref`.**
+  // `Type` objects are interned by kind and flags, and every class is a `Usize`
+  // reference, so two classes can share one `Type` — and then `Type.ref`, which
+  // is one field on that shared object, holds whichever class was built first.
+  // Measured: `Base`/`Derived`/`Sibling` in one file, `Derived` emitted with
+  // `Sibling`'s struct type. The class cache below is keyed by the class, so it
+  // cannot confuse the two.
+  {
+    let classReference = type.getClass();
+    if (classReference != null && isGcClass(classReference)) {
+      let built = ensureClassType(classReference);
+      return type.is(TypeFlags.Nullable)
+        ? built
+        : binaryen._BinaryenTypeFromHeapType(binaryen._BinaryenTypeGetHeapType(built), false);
+    }
+  }
+
   // From here on we are dealing with heap types independent of nullability.
   // Nullability is applied again when returning the final type.
   let originalType = type;
@@ -3896,7 +4343,6 @@ export function ensureType(type: Type): TypeRef {
     binaryen._free(out);
     throw new Error(`type builder error at index ${errorIndex}: ${TypeBuilderErrorReason.toString(errorReason)}`);
   }
-
   // Assign all the built types to their respective non-nullable type
   for (let _keys = Map_keys(seen), i = 0, k = _keys.length; i < k; ++i) {
     let seenType = _keys[i];
@@ -3905,28 +4351,6 @@ export function ensureType(type: Type): TypeRef {
     let fullType = binaryen._BinaryenTypeFromHeapType(heapType, false);
     assert(!seenType.ref);
     seenType.ref = fullType;
-    if (DEBUG_TYPEBUILDER) {
-      console.log(` set ${seenType.toString()}`);
-    }
-    let classInstance = seenType.getClass();
-    if (classInstance) {
-      let module = classInstance.program.module;
-      binaryen._BinaryenModuleSetTypeName(module.ref, heapType, module.allocStringCached(classInstance.internalName));
-      let members = classInstance.members;
-      if (members) {
-        let numFieldsInType = binaryen._BinaryenStructTypeGetNumFields(heapType);
-        let numFieldsInClass = 0;
-        for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-          let member = _values[i];
-          if (member.kind != ElementKind.PropertyPrototype) continue;
-          // only interested in fields (resolved during class finalization)
-          let property = (<PropertyPrototype>member).instance;
-          if (!property || !property.isField) continue;
-          binaryen._BinaryenModuleSetFieldName(module.ref, heapType, numFieldsInClass++, module.allocStringCached(property.name));
-        }
-        assert(numFieldsInType == numFieldsInClass);
-      }
-    }
   }
   binaryen._free(out);
 
@@ -3939,6 +4363,536 @@ export function ensureType(type: Type): TypeRef {
     binaryen._BinaryenTypeGetHeapType(typeRef),
     originalType.is(TypeFlags.Nullable) // apply nullability
   );
+}
+
+/**
+ * The wasm GC struct type for one class, built once and cached **by class**.
+ *
+ * # Order, and why it is not negotiable
+ *
+ * The base is built first, recursively, because `sub` requires the supertype to
+ * exist at a lower index — the type builder refuses a forward supertype
+ * reference. The fields are `gcFieldsOf`'s list: the base chain's first, then the
+ * class's own, which is the *same order* the supertype declared them in. That
+ * prefix is what makes a `(ref $Derived)` usable where a `(ref $Base)` is
+ * wanted, and therefore what makes `instanceof` a `ref.test` and a base-typed
+ * field read work on a derived instance.
+ *
+ * # Why the cache is on the `Class`
+ *
+ * Two classes can share one `Type` object (types are interned by kind and flags,
+ * and every class is a `Usize` reference), so a `Type`-keyed cache gave the
+ * second class the first one's struct. Measured with `Base`/`Derived`/`Sibling`:
+ * `Derived`'s constructor came out with `Sibling`'s type because `Sibling` was
+ * built first.
+ *
+ * # What it does not do
+ *
+ * No cycles. A class-typed field is resolved by recursing, so `A { b: B }` works
+ * when `B` is already built or is a leaf, and two classes that reference each
+ * other would recurse forever — that needs a forward-declaration pass and is a
+ * later problem, deliberately not papered over here.
+ */
+export function ensureClassType(classInstance: Class): TypeRef {
+  let module = classInstance.program.module;
+  let cached = module.gcTypeCache.get(classInstance);
+  if (cached) return cached;
+
+  // **A GC struct cannot be referenced from a pointer-shaped class.** The two ABIs
+  // store a field of this type differently, and emitting the pair aborts inside
+  // Binaryen with `isBasic() && "Basic type expected"` — a crash with no
+  // diagnostic. Refuse by name instead, naming both classes and the field's owner,
+  // so the reader knows which class has to migrate (usually one carrying a
+  // `String`).
+  let mixedReferrer = gcMixedAbiReferrer(classInstance);
+  if (mixedReferrer != null) {
+    throw new Error(
+      `${classInstance.internalName} is a wasm GC struct but ${mixedReferrer.internalName} ` +
+      `holds a field of its type and is not one: a pointer-shaped class cannot reference a ` +
+      `GC struct. Migrate ${mixedReferrer.internalName} (its own fields must all be value ` +
+      `types or GC structs) or keep ${classInstance.internalName} pointer-shaped.`
+    );
+  }
+
+  // **The recursion group**, and it is usually just this class. A class that
+  // references itself through another class (`A { b: B }`, `B { a: A }`) cannot be
+  // built one type at a time: each would need the other's heap type before either
+  // exists. All members of a strongly connected component are therefore built in
+  // one builder, as a wasm `rec` group, with every index allocated before any is
+  // filled.
+  let group = gcRecGroup(classInstance);
+
+  let builder = binaryen._TypeBuilderCreate(group.length);
+  // Pass 1 — a slot per member, so every member's heap type exists before any
+  // field or supertype refers to it.
+  let slots = new Array<HeapTypeRef>(group.length);
+  for (let i = 0, k = group.length; i < k; ++i) {
+    slots[i] = binaryen._TypeBuilderGetTempHeapType(builder, i);
+    // Recorded so a field referring to a class *inside* the group finds the slot
+    // instead of recursing into `ensureClassType` and starting a second builder.
+    module.gcPendingSlots.set(unchecked(group[i]), slots[i]);
+  }
+  if (group.length > 1) {
+    // A singleton needs no group; a cycle does. Wrapping only the cycle keeps
+    // every other type canonical, so the structural relationships that are
+    // already correct stay correct.
+    binaryen._TypeBuilderCreateRecGroup(builder, 0, group.length);
+  }
+
+  // Pass 2 — fill each slot. A base that is *not* in the group is already built
+  // (an earlier builder, therefore an earlier index); a base that *is* in the
+  // group has a slot, and `gcRecGroup` has ordered it before its descendants
+  // because the builder refuses a supertype at a higher index.
+  for (let i = 0, k = group.length; i < k; ++i) {
+    fillGcStructType(builder, i, unchecked(group[i]), slots);
+  }
+
+  let out = binaryen._malloc(max(4 * group.length, 8));
+  let built = binaryen._TypeBuilderBuildAndDispose(builder, out, out, out + 4);
+  // The slots are dead either way: built types supersede them, and on failure the
+  // builder has disposed itself.
+  for (let i = 0, k = group.length; i < k; ++i) {
+    module.gcPendingSlots.delete(unchecked(group[i]));
+  }
+  if (!built) {
+    // **A failed build is a diagnostic, never a silent empty module.** The reason
+    // and the index name the member whose slot the builder could not fill.
+    let errorIndex = binaryen.__i32_load(out);
+    let errorReason = binaryen.__i32_load(out + 4);
+    binaryen._free(out);
+    let named = errorIndex >= 0 && errorIndex < group.length
+      ? unchecked(group[errorIndex]).internalName
+      : "(index out of range)";
+    throw new Error(
+      `wasm GC type builder refused ${named} (index ${errorIndex}): ` +
+      TypeBuilderErrorReason.toString(errorReason)
+    );
+  }
+
+  // Assign each slot's heap type to its class.
+  for (let i = 0, k = group.length; i < k; ++i) {
+    let member = unchecked(group[i]);
+    let heapType = <HeapTypeRef>binaryen.__i32_load(out + 4 * i);
+    binaryen._BinaryenModuleSetTypeName(
+      module.ref, heapType, module.allocStringCached(member.internalName)
+    );
+    let numFieldsInType = binaryen._BinaryenStructTypeGetNumFields(heapType);
+    binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_BRAND_INDEX,
+      module.allocStringCached(GC_BRAND_NAME));
+    if (isGcArrayBufferClass(member)) {
+      // The synthesised `ArrayBuffer` layout: `dataStart`, `byteLength`. Not its declared
+      // fields — it declares none.
+      assert(numFieldsInType == 3);
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_ARRAYBUFFER_DATA_INDEX,
+        module.allocStringCached("dataStart"));
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_ARRAYBUFFER_LENGTH_INDEX,
+        module.allocStringCached("byteLength"));
+    } else if (gcDynamicArrayElementOf(member.type) != null) {
+      // The synthesised `Array` layout: `data`, then `length_`. Not its declared
+      // fields — those are the linear-memory ones and are not in the struct.
+      assert(numFieldsInType == 3);
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_ARRAY_DATA_INDEX,
+        module.allocStringCached("data"));
+      binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_ARRAY_LENGTH_INDEX,
+        module.allocStringCached("length_"));
+    } else {
+      let fields = gcFieldsOf(member);
+      assert(numFieldsInType == fields.length + 1);
+      for (let j = 0, n = fields.length; j < n; ++j) {
+        binaryen._BinaryenModuleSetFieldName(module.ref, heapType, GC_FIRST_FIELD_INDEX + j,
+          module.allocStringCached(unchecked(fields[j]).name));
+      }
+    }
+
+    // **Brands must be distinct.** A 32-bit hash over a handful of class names
+    // collides with negligible probability, which is not the same as never, and a
+    // collision would make two classes indistinguishable at exactly the dispatch
+    // this field exists to make correct. So it is checked, and a collision is a
+    // compile error naming both classes rather than a silent aliasing bug.
+    let brand = gcBrandOf(member);
+    let owner = module.gcBrandOwners.get(brand);
+    if (owner != null && owner != member) {
+      throw new Error(`wasm GC brand collision: ${owner.internalName} and ` +
+                      `${member.internalName} both hash to ${brand}`);
+    }
+    module.gcBrandOwners.set(brand, member);
+
+    // **Not stored on `member.type.ref`.** That field can be shared with another
+    // class (`Type` is interned by kind and flags), so writing it here would hand
+    // the next class this one's type — the defect this cache exists to avoid.
+    module.gcTypeCache.set(member, binaryen._BinaryenTypeFromHeapType(heapType, true));
+  }
+  binaryen._free(out);
+
+  return assert(module.gcTypeCache.get(classInstance));
+}
+
+/** Fills `builder` slot `index` with `member`'s struct type. */
+function fillGcStructType(
+  builder: binaryen.TypeBuilderRef,
+  index: i32,
+  member: Class,
+  slots: HeapTypeRef[]
+): void {
+  let module = member.program.module;
+  let fieldTypes = new Array<TypeRef>();
+  let packedTypes = new Array<u32>();
+  let fieldMutables = new Array<bool>();
+
+  // **Field 0 is the brand, and it is immutable.** Index 0 puts it inside the
+  // base prefix, so every derived struct repeats it at the same offset and
+  // `struct.get type 0` reads the runtime object's own brand whichever struct it
+  // is. Immutable because nothing may ever change an object's class — and
+  // `struct.new` sets it, so an immutable field costs no store.
+  fieldTypes.push(TypeRef.I32);
+  packedTypes.push(PackedType.NotPacked);
+  fieldMutables.push(false);
+
+  // **`ArrayBuffer` gets a synthesised layout too, and for a sharper reason: it
+  // declares no fields at all.** `byteLength` is an accessor over `rtSize` in the object
+  // header and the object pointer *is* the payload start, so there is nothing to
+  // synthesise *from* — the layout is `{ <brand>, dataStart, byteLength }`, the handle,
+  // and the payload stays where `__new` put it.
+  if (isGcArrayBufferClass(member)) {
+    fieldTypes.push(TypeRef.I32); // dataStart: the payload's address
+    packedTypes.push(PackedType.NotPacked);
+    // Mutable: `ArrayBuffer#slice` and the typed-array constructors build the handle and
+    // then write its fields, and `struct.new` at that point has no payload address yet.
+    fieldMutables.push(true);
+    fieldTypes.push(TypeRef.I32); // byteLength
+    packedTypes.push(PackedType.NotPacked);
+    fieldMutables.push(true);
+    finishStructType(builder, index, member, slots, fieldTypes, packedTypes, fieldMutables);
+    return;
+  }
+
+  // **A dynamic `Array<T>` gets a synthesised layout**, not its declared fields.
+  // `{ <brand>, data: (ref null (array (mut T))), length_ i32 }` — capacity is
+  // `array.len data`, the used count is field 2. The TS declaration is untouched,
+  // which is what keeps the flag-off layout identical by construction.
+  let arrayElement = gcDynamicArrayElementOf(member.type);
+  if (arrayElement != null) {
+    // data: a nullable ref to the element's GC array type.
+    fieldTypes.push(ensureGcArrayType(module, arrayElement));
+    packedTypes.push(PackedType.NotPacked);
+    // Mutable: growth swaps `data` for a bigger array.
+    fieldMutables.push(true);
+    // length_: the used count, mutable.
+    fieldTypes.push(TypeRef.I32);
+    packedTypes.push(PackedType.NotPacked);
+    fieldMutables.push(true);
+    finishStructType(builder, index, member, slots, fieldTypes, packedTypes, fieldMutables);
+    return;
+  }
+
+  let fields = gcFieldsOf(member);
+  for (let i = 0, k = fields.length; i < k; ++i) {
+    let field = unchecked(fields[i]);
+    let fieldType = field.type;
+    fieldTypes.push(gcFieldTypeRef(fieldType, slots, field));
+    packedTypes.push(determinePackedType(fieldType));
+    // Every declared field is mutable. A `readonly` field would need the
+    // mutability threaded from the declaration, and a `struct.get` on an
+    // immutable field costs the same — so this waits for a reason to be different.
+    fieldMutables.push(true);
+  }
+  finishStructType(builder, index, member, slots, fieldTypes, packedTypes, fieldMutables);
+}
+
+/** Sets the struct type for slot `index` and, if any, its supertype. */
+function finishStructType(
+  builder: binaryen.TypeBuilderRef,
+  index: i32,
+  member: Class,
+  slots: HeapTypeRef[],
+  fieldTypes: TypeRef[],
+  packedTypes: u32[],
+  fieldMutables: bool[]
+): void {
+  let cArrFT = allocPtrArray(fieldTypes);
+  let cArrPT = allocU32Array(packedTypes);
+  let cArrFM = allocBoolArray(fieldMutables);
+  binaryen._TypeBuilderSetStructType(builder, index, cArrFT, cArrPT, cArrFM, fieldTypes.length);
+  // Open, because a subtype may exist: Binaryen refuses `SetSubType` on a final
+  // type, and whether anything extends this class is a fact the type builder is
+  // asked for before the extenders are known. `sub` costs nothing.
+  binaryen._TypeBuilderSetOpen(builder, index);
+
+  let base = member.base;
+  if (base != null && isGcClass(base)) {
+    // In the group: its slot. Otherwise: built already, in an earlier builder.
+    let baseHeap = gcSlotOf(base, slots);
+    if (baseHeap) {
+      binaryen._TypeBuilderSetSubType(builder, index, baseHeap);
+    } else {
+      binaryen._TypeBuilderSetSubType(
+        builder, index,
+        binaryen._BinaryenTypeGetHeapType(ensureClassType(base))
+      );
+    }
+  }
+  binaryen._free(cArrFM);
+  binaryen._free(cArrPT);
+  binaryen._free(cArrFT);
+}
+
+/** A class's slot in the builder being filled, or 0 when it is not a member. */
+function gcSlotOf(cls: Class, slots: HeapTypeRef[]): HeapTypeRef {
+  let module = cls.program.module;
+  let pending = module.gcPendingSlots.get(cls);
+  if (pending != null) return pending;
+  return 0;
+}
+
+/**
+ * The strongly connected component of `cls` in the class reference graph —
+ * `cls` plus every class that can reach it *and* be reached from it.
+ *
+ * Edges are a class's base and the classes its fields are typed with. A component
+ * of one is the ordinary case and is built as a plain type; anything larger is
+ * mutually recursive and must be built as a `rec` group.
+ *
+ * Ordered **base first**: within a component that also has inheritance, the
+ * supertype's slot must be at a lower index or the builder refuses the reference
+ * (`ForwardSupertypeReference`). A pure cycle has no inheritance edges and any
+ * order works; this one is deterministic anyway.
+ */
+function gcRecGroup(cls: Class): Class[] {
+  let reachable = gcReachableFrom(cls);
+  let group = new Array<Class>();
+  for (let i = 0, k = reachable.length; i < k; ++i) {
+    let candidate = unchecked(reachable[i]);
+    // In the same SCC iff it reaches `cls` back.
+    if (candidate == cls || gcReachableFrom(candidate).includes(cls)) group.push(candidate);
+  }
+  // Base-first, by inheritance depth. A stable insertion sort keeps the order
+  // deterministic for equal depths, which two pure-cycle members always have.
+  for (let i = 1, k = group.length; i < k; ++i) {
+    let item = unchecked(group[i]);
+    let depth = gcDepth(item);
+    let j = i - 1;
+    while (j >= 0 && gcDepth(unchecked(group[j])) > depth) {
+      group[j + 1] = unchecked(group[j]);
+      --j;
+    }
+    group[j + 1] = item;
+  }
+  return group;
+}
+
+/** A class's inheritance depth, counting only GC ancestors. */
+function gcDepth(cls: Class): i32 {
+  let depth = 0;
+  let cursor = cls.base;
+  while (cursor != null && isGcClass(cursor)) {
+    ++depth;
+    cursor = cursor.base;
+  }
+  return depth;
+}
+
+/** Every GC class reachable from `cls` over base and field-type edges, `cls` included. */
+function gcReachableFrom(cls: Class): Class[] {
+  let seen = new Array<Class>();
+  let queue = new Array<Class>();
+  seen.push(cls);
+  queue.push(cls);
+  while (queue.length) {
+    let current = assert(queue.shift());
+    let base = current.base;
+    if (base != null && isGcClass(base) && !seen.includes(base)) {
+      seen.push(base);
+      queue.push(base);
+    }
+    let fields = gcFieldsOf(current);
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let fieldClass = unchecked(fields[i]).type.classReference;
+      if (fieldClass != null && isGcClass(fieldClass) && !seen.includes(fieldClass)) {
+        seen.push(fieldClass);
+        queue.push(fieldClass);
+      }
+    }
+  }
+  return seen;
+}
+
+/**
+ * The wasm GC array type for `StaticArray<T>`: `(ref null (array (mut T)))`.
+ *
+ * **Mutable element slots for every element kind.** Mutability is about the slot,
+ * not about tracing: `(array (mut (ref null $C)))` is traced exactly like
+ * `(array (ref null $C))`, and the elements are written by `__set`, `sort`,
+ * `copyWithin` and the constructors — an immutable element type would forbid the
+ * ordinary operations. It also keeps one type per element kind instead of two,
+ * which matters because wasm GC identity is structural.
+ *
+ * Nullable, like every other reference this slice emits: a `StaticArray` local or
+ * field starts as `ref.null`.
+ */
+export function ensureGcArrayType(module: Module, element: Type): TypeRef {
+  let cached = module.gcArrayTypeCache.get(element);
+  if (cached) return cached;
+  let builder = binaryen._TypeBuilderCreate(1);
+  binaryen._TypeBuilderSetArrayType(builder, 0, gcElementTypeRef(element), gcElementPackedType(element), true);
+  let out = binaryen._malloc(8);
+  if (!binaryen._TypeBuilderBuildAndDispose(builder, out, out, out + 4)) {
+    let errorIndex = binaryen.__i32_load(out);
+    let errorReason = binaryen.__i32_load(out + 4);
+    binaryen._free(out);
+    throw new Error(`wasm GC array builder refused ${element.toString()} ` +
+                    `(index ${errorIndex}): ${TypeBuilderErrorReason.toString(errorReason)}`);
+  }
+  let heapType = <HeapTypeRef>binaryen.__i32_load(out);
+  binaryen._free(out);
+  binaryen._BinaryenModuleSetTypeName(
+    module.ref, heapType, module.allocStringCached(`~gcarray/${element.toString()}`)
+  );
+  let nullable = binaryen._BinaryenTypeFromHeapType(heapType, true);
+  module.gcArrayTypeCache.set(element, nullable);
+  return nullable;
+}
+
+/** The wasm value type of one array element. */
+/**
+ * The storage width of one array element.
+ *
+ * `gcElementTypeRef` answers `i32` for every sub-word integer — there is no
+ * `_BinaryenTypeInt16` in this glue — so packedness is what separates a `u16`
+ * array from an `i32` array. Without it `String` and `StaticArray<i32>` both
+ * canonicalise to `(array (mut i32))`: one type for two element kinds, so a
+ * `String` would be structurally a `StaticArray<i32>` (exactly the kind of
+ * confusion the brand field exists to prevent), and every character would cost
+ * four bytes instead of two.
+ */
+function gcElementPackedType(element: Type): PackedType {
+  switch (element.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.U8: return PackedType.I8;
+    case TypeKind.I16:
+    case TypeKind.U16: return PackedType.I16;
+  }
+  return PackedType.NotPacked;
+}
+
+function gcElementTypeRef(element: Type): TypeRef {
+  // **A class is checked before the kind switch**, because a class reference's
+  // `kind` is `Usize` ("also the base of class types") — so the integer arms below
+  // would answer `i64` for `StaticArray<Item>` and produce `(array (mut i64))`.
+  // Measured: that is exactly what the first attempt emitted.
+  let elementClass = element.classReference;
+  if (elementClass != null && isGcClass(elementClass)) {
+    // Nullable, so `ref.null` is a legal element default — which is what
+    // `array.new` is given and what an unassigned slot reads as.
+    return binaryen._BinaryenTypeFromHeapType(
+      binaryen._BinaryenTypeGetHeapType(ensureClassType(elementClass)), true);
+  }
+  switch (element.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.U8:
+    case TypeKind.I16:
+    case TypeKind.U16:
+    case TypeKind.I32:
+    case TypeKind.U32: return TypeRef.I32;
+    case TypeKind.I64:
+    case TypeKind.U64:
+    case TypeKind.Isize:
+    case TypeKind.Usize: return TypeRef.I64;
+    case TypeKind.F32: return TypeRef.F32;
+    case TypeKind.F64: return TypeRef.F64;
+  }
+  assert(false); // `gcArrayElementSupported` refused this before we got here
+  return TypeRef.I32;
+}
+
+/** The `TypeRef` for one struct field. */
+function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[], field: Property | null = null): TypeRef {
+  // **A buffer view's `buffer` field is stored as an `i32` address.** Its declared
+  // type is `ArrayBuffer` — a linear-memory block — and a view's hold on it is the
+  // block's address, not a traced reference. That is the user's rule for a byte
+  // buffer, and it is what keeps `dataStart` an address every ABI site can use.
+  // Answered before the class test because `ArrayBuffer` is deliberately *not* a GC
+  // class, so the class arm below would fall through to the assertion.
+  if (field != null && isLinearBufferField(field)) return fieldType.size == 64 ? TypeRef.I64 : TypeRef.I32;
+  // **The one oracle, consulted before anything is emitted.** `gcFieldRefusal` is what
+  // `gcStructFieldSupported` answers eligibility with, so if this reports a refusal the
+  // two disagree — which is a compiler bug, not a program's problem, and it must say so
+  // with the field's reason rather than `assert(false)`. Measured before this check:
+  // `class H { cb: (x: i32) => void }` was reported on the GC ABI (a signature type's
+  // *kind* is `usizeType.kind`, so the old kind-switch called it numeric) and then died
+  // here at `assert(false)`.
+  if (field != null) {
+    let refusal = gcFieldRefusal(fieldType, field);
+    if (refusal != null) {
+      throw new Error(
+        `wasm GC struct field ${field.parent != null ? (<Class>field.parent).internalName : "?"}#` +
+        `${field.name} cannot be emitted: ${refusal.reason}${refusal.permanent ? " (permanent: a value has no address, so it cannot be a field of a reference type)" : ""}. ` +
+        `Eligibility said it could be a struct, so the two answers disagree — that is a compiler defect.`
+      );
+    }
+  }
+  // **An `@unmanaged` record is an address.** It declares its own linear layout, so a GC
+  // struct holds a pointer to it, exactly as under the pointer ABI — the same shape as a
+  // buffer view's `dataStart`. Without this the field reached the `assert(false)` at the
+  // bottom of this function: measured, `class HoldsBlob { blob: BlobLike }` with
+  // `@unmanaged class BlobLike` crashed the compiler at `gcFieldTypeRef` even though
+  // `gcFieldRefusal` had (correctly) called the field storable.
+  let recordClass = fieldType.classReference;
+  if (recordClass != null && recordClass.hasDecorator(DecoratorFlags.Unmanaged)) {
+    return fieldType.size == 64 ? TypeRef.I64 : TypeRef.I32;
+  }
+  // **A function-typed field is a reference to its `Function<T>` struct.** The wrapper
+  // class is resolved per signature — the same resolution `getClassOrWrapper` does
+  // wherever a function value is used, so this adds no resolution the compile would not
+  // do anyway — and it is a plain struct of two scalars, so there is no cycle to guard.
+  let fieldSignature = fieldType.signatureReference;
+  if (fieldSignature != null) {
+    let wrapper = fieldType.getClassOrWrapper(fieldSignature.program);
+    if (wrapper != null && isGcClass(wrapper)) {
+      let slot = gcSlotOf(wrapper, slots);
+      if (slot) return binaryen._BinaryenTypeFromHeapType(slot, true);
+      return ensureClassType(wrapper);
+    }
+  }
+  // **A `StaticArray<T>` field is a reference to a wasm array.** Its class is not a
+  // struct type (`isGcClass` answers false for it — it is standard library and not
+  // `Array`), so without this branch the field reached the same `assert(false)` the
+  // function-value case did. Found by the field-kind agreement test, which is why that
+  // test walks kinds rather than checking the one that was reported.
+  let element = gcArrayElementOf(fieldType);
+  if (element != null) {
+    let owner = fieldType.nonNullableType.classReference;
+    if (owner != null) return ensureGcArrayType(owner.program.module, assert(element));
+  }
+  // A class-typed field is a nullable ref to that class's struct. **In the group
+  // being built** the slot is already allocated, so the reference is to a temp
+  // heap type and the cycle closes; outside it, the class is built first and its
+  // heap type is final.
+  // `classReference`, not `getClass()`: `getClass()` insists the type is an
+  // *internal reference*, which a `B | null` field is not once the union has been
+  // formed — and a nullable class field is exactly what a cycle needs, since
+  // neither object can be constructed with the other already present.
+  // **A `String` field is an array reference.** `String` is `(array (mut u16))`
+  // under the flag — the same type `StaticArray<u16>` uses — so the field holds a
+  // `(ref null $~gcarray/u16)` and needs no class slot. Without this case the field
+  // reached the `assert(false)` below, which is the "unsupported field kind" guard,
+  // and a real class (`class App { name: string }`) crashed the compiler instead of
+  // being emitted.
+  if (gcStringOf(fieldType)) {
+    let strOwner = fieldType.nonNullableType.classReference;
+    if (strOwner != null) return ensureGcArrayType(strOwner.program.module, Type.u16);
+  }
+  let fieldClass = fieldType.classReference;
+  if (fieldClass != null && isGcClass(fieldClass)) {
+    let slot = gcSlotOf(fieldClass, slots);
+    if (slot) return binaryen._BinaryenTypeFromHeapType(slot, true);
+    return ensureClassType(fieldClass);
+  }
+  let basic = tryEnsureBasicType(fieldType);
+  if (basic) return basic;
+  assert(false); // a struct field of an unsupported kind is out of this slice
+  return TypeRef.I32;
 }
 
 /** Obtains the basic type of the given type, if any. */
@@ -4031,71 +4985,9 @@ function prepareType(builder: binaryen.TypeBuilderRef, seen: Map<Type,HeapTypeRe
   // directly representing an `ArrayBuffer` or `StaticArray`. TBD.
   let classReference = type.getClass();
   if (classReference) {
-    // Make sure the base type has been built prior, at a lower index
-    let base = classReference.base;
-    let baseRef: HeapTypeRef = 0;
-    if (base) baseRef = prepareType(builder, seen, base.type); // might be temporary, is non-nullable
-
-    // Block this index with a temporary type and cache
-    let index = binaryen._TypeBuilderGetSize(builder);
-    binaryen._TypeBuilderGrow(builder, 1);
-    if (DEBUG_TYPEBUILDER) {
-      console.log(` block [${index}]: ${type.toString()}`);
-    }
-    let heapTypeRef = binaryen._TypeBuilderGetTempHeapType(builder, index);
-    typeRef = binaryen._TypeBuilderGetTempRefType(builder, heapTypeRef, false);
-    seen.set(type, typeRef);
-
-    // Populate the struct type (TODO: names)
-    let fieldTypes = new Array<TypeRef>();
-    let packedTypes = new Array<PackedType>();
-    let fieldMutables = new Array<u32>();
-    let members = classReference.members;
-    if (members) {
-      for (let _values = Map_values(members), i = 0, k = _values.length; i < k; ++i) {
-        let member = _values[i];
-        if (member.kind != ElementKind.PropertyPrototype) continue;
-        // only interested in fields (resolved during class finalization)
-        let property = (<PropertyPrototype>member).instance;
-        if (!property || !property.isField) continue;
-        let fieldType = property.type;
-        if (DEBUG_TYPEBUILDER) {
-          console.log(`  field ${fieldType.toString()}`);
-        }
-        if (fieldType.is(TypeFlags.Nullable)) {
-          fieldTypes.push(
-            binaryen._TypeBuilderGetTempRefType(
-              builder,
-              binaryen._BinaryenTypeGetHeapType(
-                prepareType(builder, seen, fieldType.nonNullableType)
-              ),
-              true
-            )
-          );
-        } else {
-          fieldTypes.push(prepareType(builder, seen, fieldType));
-        }
-        packedTypes.push(determinePackedType(fieldType));
-        fieldMutables.push(1);
-      }
-    }
-    let cArrFT = allocPtrArray(fieldTypes);
-    let cArrPT = allocU32Array(packedTypes);
-    let cArrFM = allocU32Array(fieldMutables);
-    if (DEBUG_TYPEBUILDER) {
-      console.log(` concretize [${index}]: ${type.toString()}`);
-    }
-    binaryen._TypeBuilderSetStructType(builder, index, cArrFT, cArrPT, cArrFM, fieldTypes.length);
-    if (base) {
-      if (DEBUG_TYPEBUILDER) {
-        console.log(` set super [${index}]: ${type.toString()} <: ${base.type.toString()} ${baseRef == base.type.ref ? " (known)" : ""}`);
-      }
-      binaryen._TypeBuilderSetSubType(builder, index, binaryen._BinaryenTypeGetHeapType(baseRef));
-    }
-    binaryen._free(cArrFM);
-    binaryen._free(cArrPT);
-    binaryen._free(cArrFT);
-    return typeRef;
+    // One builder per class (`ensureClassType`), so a class referenced from a
+    // tuple or a signature is built by the same code that builds it as a class.
+    return ensureClassType(classReference);
   }
 
   // Respectively a new signature type
