@@ -27,7 +27,6 @@
   },
   "engineStrict": true,
   "dependencies": {
-    "binaryen": "131.0.0-nightly.20260721",
     "long": "^5.2.4"
   },
   "devDependencies": {
@@ -78,12 +77,15 @@
     "check:import": "tsc --noEmit --skipLibCheck --target ESNEXT --module nodenext --moduleResolution nodenext --experimentalDecorators tests/import/index",
     "check:headers": "bash scripts/check-headers.sh",
     "lint": "eslint --max-warnings 0 --ext js . && eslint --max-warnings 0 --ext ts .",
+    "prebuild": "node scripts/build-binaryen.js",
+    "binaryen:build": "node scripts/build-binaryen.js",
     "build": "node scripts/build",
     "watch": "node scripts/build --watch",
     "coverage": "npx c8 -- npm test",
     "pretest": "npm run check",
-    "test": "npm run test:parser && npm run test:flags && npm run test:async && npm run test:closure && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli && npm run test:gc",
+    "test": "npm run test:binaryen && npm run test:parser && npm run test:flags && npm run test:async && npm run test:closure && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli && npm run test:gc",
     "test:parser": "node --enable-source-maps tests/parser",
+    "test:binaryen": "node --enable-source-maps tests/binaryen.js",
     "test:flags": "node --enable-source-maps tests/flags.js",
     "test:async": "node --enable-source-maps tests/async/resolver.js && node --enable-source-maps tests/async/lower.js && node --enable-source-maps tests/async/runtime.js",
     "test:compiler": "node --enable-source-maps --no-warnings tests/compiler",

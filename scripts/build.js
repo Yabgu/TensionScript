@@ -200,9 +200,14 @@ const common = {
   target: "esnext",
   platform: "node",
   format: "esm",
+  // `binaryen` is not a dependency and not a bare specifier: it is vendored, built
+  // from `third_party/binaryen` by `scripts/build-binaryen.mjs`, and shipped beside
+  // `asc.js` as `dist/binaryen.js` (see `vendorBinaryenPlugin`). That is what makes
+  // `dist/` self-contained — the packed tarball `Tension` consumes carries no
+  // `node_modules`, so everything the compiler needs at runtime has to be inside
+  // `dist/`.
   external: [
     "@yabgu_gm/tensionscript",
-    "binaryen",
     "long"
   ],
   legalComments: "none",
@@ -210,6 +215,37 @@ const common = {
   sourcemap: true,
   treeShaking: true,
   minify: true
+};
+
+/**
+ * Emit the vendored Binaryen as a **sibling file**, `dist/binaryen.js`, rather than
+ * inlining it into `asc.js`.
+ *
+ * Inlining was tried first, because one file is the cleanest thing to ship, and it
+ * costs what a 13 MB module always costs: V8 parses it inside one enormous scope, so
+ * `node bin/tensionscript.js --version` went from 472 ms to 772 ms (1.64x, measured
+ * over five runs), and `dist/asc.js.map` grew to 34.9 MB, which the CLI then loads
+ * because `bin/tensionscript.js` runs node with `--enable-source-maps`. It also —
+ * and this is the part that decides it — **miscompiled**: the first real compile
+ * aborted inside Binaryen with
+ * `Assertion failed: it != indexes.memoryIndexes.end()` at `wasm-binary.cpp:727`,
+ * on a module holding no memory, while the same compiler with the same artifact
+ * loaded as its own module produced byte-identical output to `main`. That assertion
+ * is Binaryen seeing a module whose `SetMemory` never landed; I did not carry the
+ * diagnosis further, because the cost alone already rules the inlined form out.
+ *
+ * A sibling file keeps every property the inlining was for — `dist/` is still
+ * self-contained, there is still no npm dependency — and gives back the startup
+ * cost, because the artifact loads as its own module exactly as the npm package did.
+ */
+const vendorBinaryenPlugin = {
+  name: "vendor-binaryen",
+  setup(build) {
+    build.onResolve({ filter: /dist[\\/]binaryen\.js$/ }, () => ({
+      path: "./binaryen.js",
+      external: true,
+    }));
+  }
 };
 
 async function invokeBuild(options) {
@@ -227,7 +263,7 @@ const srcBuild = invokeBuild({
   tsconfig: "./src/tsconfig.json",
   outfile: "./dist/assemblyscript.js",
   banner: { js: prelude("The TensionScript compiler") },
-  plugins: [ diagnosticsPlugin, reportPlugin("src") ],
+  plugins: [ vendorBinaryenPlugin, diagnosticsPlugin, reportPlugin("src") ],
   ...common
 });
 
@@ -236,7 +272,7 @@ const cliBuild = invokeBuild({
   tsconfig: "./cli/tsconfig.json",
   outfile: "./dist/asc.js",
   banner: { js: prelude("The TensionScript frontend") },
-  plugins: [ stdlibPlugin, webPlugin, reportPlugin("cli") ],
+  plugins: [ vendorBinaryenPlugin, stdlibPlugin, webPlugin, reportPlugin("cli") ],
   ...common
 });
 
@@ -281,4 +317,18 @@ dts : TS definition bundles
 web : Example web template\n`);
 
 await Promise.all([ srcBuild, cliBuild ]);
+
+// The chunk the two bundles above point at. Copied rather than built here so the
+// artifact has exactly one producer (`scripts/build-binaryen.mjs`), and written to
+// `dist/` rather than `third_party/` because `dist/` is what gets packed.
+{
+  const artifact = "./third_party/binaryen-out/binaryen.js";
+  if (!fs.existsSync(artifact)) {
+    console.error(`${stdoutColors.red("ERROR")} ${artifact} is missing — run \`npm run binaryen:build\``);
+    process.exitCode = 1;
+  } else {
+    fs.copyFileSync(artifact, "./dist/binaryen.js");
+  }
+}
+
 buildDefinitions();
