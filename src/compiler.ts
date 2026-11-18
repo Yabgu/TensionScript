@@ -561,6 +561,33 @@ class LazyLocal {
   ) {}
 }
 
+/**
+ * One distinct string literal's pending start-time build, under `--wasmGc`.
+ *
+ * A literal that uses the GC ABI is an object living in a global, not a pointer
+ * into static memory, so the object is built once in `__start` from the bytes in
+ * the data segment. `ensureGcStringLiteral` runs wherever a literal is first
+ * seen, but the start function's body only exists during `compileStartFunction`,
+ * so the description of the build is recorded here and replayed by
+ * `emitGcStringBuilds` afterwards.
+ *
+ * A class rather than an inline object type on the `Array`, because this
+ * compiler does not parse `Array<{ ... }>` — the bootstrap found that, which is
+ * the failure it exists to catch.
+ */
+class GcStringBuild {
+  constructor(
+    /** Name of the global that holds the array once built. */
+    public globalName: string,
+    /** Offset in the data segment of the literal's UTF-16 bytes. */
+    public ptr: i64,
+    /** Number of UTF-16 code units, which is the array's length. */
+    public length: i32,
+    /** The string's class type, whose instance is the array. */
+    public type: Type
+  ) {}
+}
+
 export class Compiler extends DiagnosticEmitter {
 
   /** Program reference. */
@@ -2943,7 +2970,7 @@ export class Compiler extends DiagnosticEmitter {
   /** Distinct literal -> the global holding its array. */
   private gcStringLiterals: Map<string, string> = new Map();
   /** Literals whose start-time build has not been emitted yet. */
-  private gcStringBuilds: Array<{ globalName: string, ptr: i64, length: i32, type: Type }> = [];
+  private gcStringBuilds: Array<GcStringBuild> = [];
 
   /** Sequence for inlined `compareImpl` labels, so two loops in one body differ. */
   private gcCompareSeq: i32 = 0;
@@ -3829,7 +3856,7 @@ export class Compiler extends DiagnosticEmitter {
     // Deduplicated through the same segment map, so the bytes exist once.
     let ptr = this.ensureStaticStringPtr(stringValue);
     module.addGlobal(globalName, arrayTypeRef, true, this.makeFieldZero(stringType));
-    this.gcStringBuilds.push({ globalName, ptr, length: stringValue.length, type: stringType });
+    this.gcStringBuilds.push(new GcStringBuild(globalName, ptr, stringValue.length, stringType));
     this.gcStringLiterals.set(stringValue, globalName);
     return globalName;
   }
