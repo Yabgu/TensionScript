@@ -71,7 +71,17 @@ function compile(entry, out, extraArgs, env) {
   // table) is written into the scratch dir at test time. Resolve by existence rather
   // than by a flag, so both callers read the same.
   const source = existsSync(join(here, entry)) ? join(here, entry) : join(scratch, entry);
-  const args = [cli, source, "--outFile", join(scratch, out),
+  // `--noColors` because this harness asserts on the **text** of diagnostics
+  // (`/INFO TS6413: wasm-gc: 4 of 6 managed classes…/`). Without it the CLI
+  // decorates every `INFO`/`WARNING`/`ERROR` heading whenever it decides the
+  // output is a terminal — and `util/terminal.js` counts `CI` in the environment
+  // as one, deliberately, so colour appears in a CI transcript even though this
+  // child's stderr is a pipe. Measured: the same suite is 412/0/2 locally and 52
+  // failures under `CI=1`, every one of them an escape sequence in front of a
+  // string that was otherwise correct. Asking for undecorated output makes the
+  // assertion deterministic on every machine and removes the environment from the
+  // test, rather than teaching forty regexes to strip escapes.
+  const args = [cli, source, "--noColors", "--outFile", join(scratch, out),
     "--textFile", join(scratch, out.replace(/\.wasm$/, ".wat")),
     ...extraArgs];
   const result = spawnSync(process.execPath, args, {
