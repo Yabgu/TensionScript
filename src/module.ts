@@ -88,22 +88,65 @@ class RefGuardRecord {
 }
 
 /** Tracked refs, or `null` when the guard is off. */
-let refGuardLive: Map<ExpressionRef, RefGuardRecord> | null =
-  binaryen.TENSION_REF_GUARD ? new Map() : null;
+let refGuardLive: Map<ExpressionRef, RefGuardRecord> | null = null;
+
+/** Whether `refGuardLive` has been decided yet. Constant-initialised, see below. */
+let refGuardChecked: bool = false;
+
+/**
+ * Whether the guard was switched on, by `enableRefGuard` from the JS entry.
+ *
+ * **A setter rather than an environment read here**, and the reason is the
+ * self-compile: this file is compiled to WebAssembly, where the only modules the
+ * generated binding can call are Binaryen's own. A helper exported from
+ * `glue/binaryen.js` — the obvious place for an env read — is bound to
+ * `imports.binaryen`, the npm package, which does not have it, so the call traps
+ * (`__module0.tensionRefGuard is not a function`) the moment the guard is asked
+ * about. Keeping the decision outside the wasm graph is what lets `index-js.ts`
+ * read the environment while the self-hosted compiler simply never turns the
+ * guard on.
+ */
+let refGuardWanted: bool = false;
+
+/** Turns the re-used-`ExpressionRef` guard on or off. Called by the JS entry. */
+export function enableRefGuard(on: bool): void {
+  refGuardWanted = on;
+}
+
+/**
+ * The live map, decided on first use.
+ *
+ * **The decision cannot live in the declaration.** This compiler resolves a
+ * module-level `let` whose initialiser is not a constant *after* the functions
+ * that read it, and reports every such read as
+ * `TS2448: Variable 'src/module/refGuardLive' used before its declaration`
+ * (measured: with the flag read in the declaration, 5 × TS2448 + 8 cascading
+ * TS2339; with a constant `null` here and this function, none). The state is the
+ * same either way — the flag cannot change during a run — so the only thing the
+ * rewrite moves is *when* it is read, from module start to the first guarded
+ * call.
+ */
+function refGuardNow(): Map<ExpressionRef, RefGuardRecord> | null {
+  if (!refGuardChecked) {
+    refGuardChecked = true;
+    if (refGuardWanted) refGuardLive = new Map();
+  }
+  return refGuardLive;
+}
 
 /** Monotonic count of consumptions, so a violation can be placed in time. */
 let refGuardSeq: i32 = 0;
 
 /** Records `ref` as one this guard watches. Called by producers only. */
 function guardProduce(ref: ExpressionRef, site: string): ExpressionRef {
-  let live = refGuardLive;
+  let live = refGuardNow();
   if (live !== null && ref) live.set(ref, new RefGuardRecord(site, ++refGuardSeq));
   return ref;
 }
 
 /** Takes `ref` as an operand. Aborts if a tracked ref is taken a second time. */
 function guardRef(ref: ExpressionRef, site: string): ExpressionRef {
-  let live = refGuardLive;
+  let live = refGuardNow();
   if (live === null || !ref) return ref; // guard off, or an absent operand
   let record = live.get(ref);
   if (record == null) return ref; // not a tracked ref: ordinary block assembly
@@ -132,7 +175,7 @@ function guardRef(ref: ExpressionRef, site: string): ExpressionRef {
  * on resume because the tree a pass leaves is not the tree it was given.
  */
 export function suspendRefGuard(): bool {
-  let was = refGuardLive !== null;
+  let was = refGuardNow() !== null;
   refGuardLive = null;
   return was;
 }
@@ -1609,7 +1652,7 @@ export class Module {
    * accident.
    */
   struct_new(heapType: HeapTypeRef, operands: ExpressionRef[]): ExpressionRef {
-    if (refGuardLive !== null) {
+    if (refGuardNow() !== null) {
       for (let guardI = 0; guardI < operands.length; ++guardI) {
         guardRef(unchecked(operands[guardI]), "struct_new.operands[]");
       }
@@ -2040,7 +2083,7 @@ export class Module {
     // loop does exactly this with its own initialiser, with the flag off.
     // What is checked here instead is the one thing re-parenting cannot explain: a
     // node appearing **twice in the same child list**.
-    if (refGuardLive !== null && label === null && children.length > 1) {
+    if (refGuardNow() !== null && label === null && children.length > 1) {
       for (let guardI = 0; guardI < children.length; ++guardI) {
         let child = unchecked(children[guardI]);
         if (!child) continue;
@@ -2202,7 +2245,7 @@ export class Module {
     returnType: TypeRef,
     isReturn: bool = false
   ): ExpressionRef {
-    if (refGuardLive !== null && operands !== null) {
+    if (refGuardNow() !== null && operands !== null) {
       for (let guardI = 0; guardI < operands.length; ++guardI) {
         guardRef(unchecked(operands[guardI]), "call.operands[]");
       }
@@ -3008,7 +3051,7 @@ export class Module {
     // The guard's contract is "construction builds a tree", and it holds exactly
     // where no pass has run yet. The records are dropped afterwards because the
     // tree a pass leaves is not the tree it was given.
-    let guardWasActive = refGuardLive !== null;
+    let guardWasActive = refGuardNow() !== null;
     if (guardWasActive) refGuardLive = null;
     if (func) {
       binaryen._BinaryenFunctionRunPasses(func, this.ref, cArr, numNames);
@@ -4230,8 +4273,9 @@ export function ensureType(type: Type): TypeRef {
   // **A function value is a reference to its `Function<T>` struct.** The wrapper is
   // resolved per signature — the same resolution `getClassOrWrapper` performs wherever a
   // function value is used — so the type builder has one struct type per signature.
-  if (type.signatureReference != null && gcFunctionValueUsable(type)) {
-    let fnWrapper = type.getClassOrWrapper(type.signatureReference.program);
+  let signature = type.signatureReference;
+  if (signature != null && gcFunctionValueUsable(type)) {
+    let fnWrapper = type.getClassOrWrapper(signature.program);
     if (fnWrapper != null && isGcClass(fnWrapper)) {
       // **Always nullable, whatever variant asked.** `Binaryen` derives a `struct.get`
       // result from the field's own type, which is `(ref null $F)`; a non-nullable
@@ -4794,16 +4838,17 @@ function gcFieldTypeRef(fieldType: Type, slots: HeapTypeRef[], field: Property |
   // bottom of this function: measured, `class HoldsBlob { blob: BlobLike }` with
   // `@unmanaged class BlobLike` crashed the compiler at `gcFieldTypeRef` even though
   // `gcFieldRefusal` had (correctly) called the field storable.
-  if (fieldType.classReference != null &&
-      fieldType.classReference.hasDecorator(DecoratorFlags.Unmanaged)) {
+  let recordClass = fieldType.classReference;
+  if (recordClass != null && recordClass.hasDecorator(DecoratorFlags.Unmanaged)) {
     return fieldType.size == 64 ? TypeRef.I64 : TypeRef.I32;
   }
   // **A function-typed field is a reference to its `Function<T>` struct.** The wrapper
   // class is resolved per signature — the same resolution `getClassOrWrapper` does
   // wherever a function value is used, so this adds no resolution the compile would not
   // do anyway — and it is a plain struct of two scalars, so there is no cycle to guard.
-  if (fieldType.signatureReference != null) {
-    let wrapper = fieldType.getClassOrWrapper(fieldType.signatureReference.program);
+  let fieldSignature = fieldType.signatureReference;
+  if (fieldSignature != null) {
+    let wrapper = fieldType.getClassOrWrapper(fieldSignature.program);
     if (wrapper != null && isGcClass(wrapper)) {
       let slot = gcSlotOf(wrapper, slots);
       if (slot) return binaryen._BinaryenTypeFromHeapType(slot, true);

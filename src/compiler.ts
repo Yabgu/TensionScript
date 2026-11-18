@@ -3490,25 +3490,31 @@ export class Compiler extends DiagnosticEmitter {
     if (dest == null) return 0;
     let src = this.gcArraySliceOf(srcNode);
     if (src == null) return 0;
-    let log2 = this.gcElementLog2(dest.element);
+    let log2: i32 = this.gcElementLog2(dest.element);
     // Same element width on both sides, or this is not a buffer-to-buffer copy of
     // one type and the ordinary path should report it.
     if (log2 < 0 || log2 != this.gcElementLog2(src.element)) return 0;
     if (dest.element != src.element) return 0;
 
-    let module = this.module;
-    let heapType = module.heapType(dest.type.toRef());
+    // `module` is captured by `byteShift`, so its type must be declared: the
+    // closure lowering rebuilds a capture's environment field-by-field and an
+    // inferred type is not available to it.
+    let module: Module = this.module;
     let byteShift = (expr: ExpressionRef): ExpressionRef =>
       log2 ? module.binary(BinaryOp.ShrU32, expr, module.i32(log2)) : expr;
     let destRef = this.compileExpression(
       dest.refExpr, dest.type, Constraints.ConvImplicit);
-    let destOffset = dest.byteOffset
-      ? this.compileExpression(dest.byteOffset, this.options.usizeType, Constraints.ConvImplicit)
+    // The bound local is what the test narrows; reading `dest.byteOffset` twice
+    // leaves the second read `Expression | null` (TS2322).
+    let destOffsetExpr = dest.byteOffset;
+    let destOffset = destOffsetExpr != null
+      ? this.compileExpression(destOffsetExpr, this.options.usizeType, Constraints.ConvImplicit)
       : module.i32(0);
     let srcRef = this.compileExpression(
       src.refExpr, src.type, Constraints.ConvImplicit);
-    let srcOffset = src.byteOffset
-      ? this.compileExpression(src.byteOffset, this.options.usizeType, Constraints.ConvImplicit)
+    let srcOffsetExpr = src.byteOffset;
+    let srcOffset = srcOffsetExpr != null
+      ? this.compileExpression(srcOffsetExpr, this.options.usizeType, Constraints.ConvImplicit)
       : module.i32(0);
     let size = this.compileExpression(sizeNode, this.options.usizeType, Constraints.ConvImplicit);
     this.currentType = Type.void;
@@ -3539,21 +3545,25 @@ export class Compiler extends DiagnosticEmitter {
    */
   private compileGcHashStr(operands: ExpressionRef[], paramTypes: Type[]): ExpressionRef {
     if (operands.length != 1) return this.module.unreachable();
-    let module = this.module;
+    // Captured by all four arrows below; see `compileGcMemoryCopy`.
+    let module: Module = this.module;
     let flow = this.currentFlow;
     let strType = paramTypes[0];
-    let strRef = strType.toRef();
-    let heapType = module.heapType(strRef);
+    // Declared, not inferred: `wordAt`, `byteAt` and `mix` capture these, and the
+    // closure lowering needs a declared type for every capture (these six plus
+    // `module`, declared above).
+    let strRef: TypeRef = strType.toRef();
+    let heapType: HeapTypeRef = module.heapType(strRef);
 
     // P1..P5 and the seed, from `std/assembly/util/hash.ts`.
-    let P1 = module.i32(2654435761);
-    let P2 = module.i32(2246822519);
+    let P1: ExpressionRef = module.i32(2654435761);
+    let P2: ExpressionRef = module.i32(2246822519);
     let P3 = module.i32(3266489917);
     let P4 = module.i32(668265263);
     let P5 = module.i32(374761393);
     let SEED = module.i32(1514845233);
 
-    let key = flow.getTempLocal(strType).index;
+    let key: i32 = flow.getTempLocal(strType).index;
     let h = flow.getTempLocal(Type.i32).index;
     let len = flow.getTempLocal(Type.i32).index;
     let pos = flow.getTempLocal(Type.i32).index;
@@ -9949,8 +9959,8 @@ export class Compiler extends DiagnosticEmitter {
         this.currentType = Type.u32;
         return this.compileGcHashStr(operands, gcParamTypes);
       }
-      let gcOp = gcStringsAreArrays ? gcStringOperator(gcName) : null;
-      if (gcOp != null) {
+      let gcOp = gcStringsAreArrays ? gcStringOperator(gcName) : GcStringOp.None;
+      if (gcOp != GcStringOp.None) {
         // `currentType` is the *result* type of whatever was just compiled, and an
         // early return here does not pass through the assignment `makeCallDirect`
         // would have made. Leaving it as the operand's type made `a == b` resolve
@@ -18568,6 +18578,9 @@ export class Compiler extends DiagnosticEmitter {
       reportNode
     ); // TODO: throw
 
+    // Bound first: see `isLinearBufferField` — a property read does not stay
+    // narrowed across `a != null && f(a)` in this compiler.
+    let typeClass = type.classReference;
     if (type.isExternalReference) {
       let nonNullExpr = module.local_get(tempIndex, type.toRef());
       if (this.options.hasFeature(Feature.GC)) {
@@ -18580,7 +18593,7 @@ export class Compiler extends DiagnosticEmitter {
         staticAbortCallExpr,
         nonNullExpr
       );
-    } else if (type.classReference != null && isGcClass(type.classReference)) {
+    } else if (typeClass != null && isGcClass(typeClass)) {
       // **A reference is not a condition.** The pointer ABI tests `local.tee`'s
       // i32 for zero; a `(ref null $C)` has no truthiness in wasm, so the guard is
       // `ref.is_null` and this is the arm that a nullable class field needs.

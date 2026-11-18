@@ -574,7 +574,10 @@ export function isLinearBufferField(field: Property): bool {
   // **Not when the buffer is itself a GC handle.** Then the field is an ordinary traced
   // reference to a struct, and `gcFieldTypeRef`'s class branch emits it. Kept as a
   // separate question from `isGcBufferViewClass` so the two answers cannot drift.
-  if (field.type.classReference != null && isGcArrayBufferClass(field.type.classReference)) {
+  // Bound to a local first: this compiler does not narrow a property read across
+  // `a != null && f(a)`, and reports the second read as `Class | null` (TS2322).
+  let bufferClass = field.type.classReference;
+  if (bufferClass != null && isGcArrayBufferClass(bufferClass)) {
     return false;
   }
   // `parent` is an `Element`; a field's declaring class is what the shape test needs.
@@ -1267,7 +1270,12 @@ export const enum GcStringOp {
   /** `__gt` */
   Gt,
   /** `__lt` */
-  Lt
+  Lt,
+  /** Not one of the leaves. A member rather than a `| null` return, because this
+   *  compiler refuses a nullable `const enum` (`AS204`): the enum is an `i32`, so
+   *  "no operator" needs a value in it. Last, so every other member keeps the
+   *  value it had. */
+  None
 }
 
 /**
@@ -1276,13 +1284,13 @@ export const enum GcStringOp {
  * Only the leaves: `__ne`, `__gte` and `__lte` are one-line wrappers around these,
  * so their own bodies compile unchanged and reach the replacement by call.
  */
-export function gcStringOperator(internalName: string): GcStringOp | null {
+export function gcStringOperator(internalName: string): GcStringOp {
   switch (internalName) {
     case "~lib/string/String.__eq": return GcStringOp.Eq;
     case "~lib/string/String.__not": return GcStringOp.Not;
     case "~lib/string/String.__gt": return GcStringOp.Gt;
     case "~lib/string/String.__lt": return GcStringOp.Lt;
-    default: return null;
+    default: return GcStringOp.None;
   }
 }
 
