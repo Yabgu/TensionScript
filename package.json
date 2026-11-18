@@ -33,6 +33,7 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.1",
     "as-float": "^1.0.1",
+    "binaryen": "file:third_party/binaryen-shim",
     "diff": "^9.0.0",
     "esbuild": "^0.28.1",
     "eslint": "^10.7.0",

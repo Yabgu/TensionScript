@@ -41,6 +41,16 @@ sibling file costs nothing over the old npm package.
 
 **Requires** emscripten 7.0.0 (commit `777e6e5d`) to *build*, and nothing to *run*.
 
+## `binaryen-shim/` — the `binaryen` name, for the self-build
+
+Two files, no code of their own. When the compiler compiles **itself**
+(`src/asconfig.json`'s `*-bootstrap` targets), its binding generator names an imported
+JavaScript file after the file: `lib/binaryen.js` becomes `import … from "binaryen"`.
+`dist/` no longer contains that bare specifier, so this package — a `devDependency`
+pointing at `dist/binaryen.js` — is what makes the name resolve. It is a devDependency
+because a consumer of the published tarball never runs the self-build; it points at
+`dist/`, so it works after `npm run build`, which is when the bootstrap runs.
+
 **Delete this when TensionScript can compile itself.** The whole reason this exists
 is that the compiler's Binaryen is only reachable through its JS API. Once the
 compiler can emit wasm that calls Binaryen directly — a C interop rather than a

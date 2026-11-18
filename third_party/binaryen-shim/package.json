@@ -1,0 +1,8 @@
+{
+  "name": "binaryen",
+  "version": "131.0.0-nightly.20260721",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": { ".": "./index.js" }
+}
