@@ -272,7 +272,7 @@ That is a clock and an inbox. Compare with today's host loop, which chunks wake 
 writes three parallel arrays into arena scratch, and calls `__taskResume` per chunk — because
 the guest cannot dispatch for itself.
 
-## 7. The emission mechanism — the one real risk
+## 7. The emission mechanism — settled by spike (2026-11-18)
 
 Binaryen 131's **public JS API has no cont constructors**, verified:
 
@@ -282,36 +282,79 @@ node --input-type=module -e 'import * as b from "binaryen";
 → (none)          b.Features.StackSwitching = 65536   (the flag exists)
 ```
 
-`src/glue/binaryen.d.ts` exposes `_BinaryenModuleParse(text)` and `_BinaryenAddTag`, and
-nothing for `cont.new` / `resume` / `suspend`. This is C1's finding, still true.
+C1's finding stands — but the spike found the problem is **worse than a missing API**, and
+that settled the choice.
 
-Three ways to get the instructions in. **A spike settles this before any round commits to
-one** — C1's lesson was that assuming an API exists costs multiple rounds.
+**Binaryen cannot emit a runnable stack-switching module at all.** `parseText` *accepts*
+`cont` types; the binary it then emits is refused by wasmtime 50 at parse:
 
-- **(A) Extend our own glue.** Add a thin C++ shim over Binaryen's builder to expose
-  `ContNew`/`Suspend`/`Resume`/`Tag`. Cleanest IR, keeps optimisation and DWARF. Cost: the
-  glue is vendored emscripten output (`lib/binaryen.js`), so this means an emscripten
-  rebuild. **Highest value, highest build risk.**
-- **(B) Text splice + reparse.** Build IR → `emitText` → inject the cont functions → reparse
-  with `_BinaryenModuleParse`. No toolchain change. Cost: **text carries no DWARF**, so async
-  programs would lose debug info and source maps. Acceptable only if (A) and (C) fail.
-- **(C) Separate runtime module.** Ship `__coreloop` as hand-written `.wat`, compiled by the
-  host (wasmtime compiles `.wat` directly) and linked by importing the guest's `main`. The
-  guest contains **no cont instructions at all**, so the compiler needs no new API and debug
-  info is untouched. Cost: async programs are two modules; standalone Node tests need
-  `wasm-tools`; needs verification that `cont.new` on an *imported* function works.
+```
+wasm-tools validate --features all  → invalid continuation type (at offset 0x10)
+wasmtime 50.0.1 Module::from_file  → failed to parse WebAssembly module
+```
 
-**Recommendation: spike (C) and (A) in that order.** (C) is the only option that leaves the
-compiler's output a plain wasm module, which is worth a lot for debuggability and for the
-"works standalone" property. (A) is better long-term if the rebuild is reproducible.
+The type section reads `01 0a 03 60 00 00 5d 70 60 00 01 7f` — `5d 70`, the *pre-final*
+encoding (`cont` of a heaptype). The standard is `5d 00` (`cont` of a type index), which is
+what `wasm-tools 1.261` emits for the same module. Two further defects on the same path:
+**`elem declare` is dropped** on reparse, so `ref.func $body` becomes an undeclared function
+reference — and it is dropped from the binary too, not only from the text.
+
+So the three options resolve as:
+
+- **(A) Extend our own glue** — no longer a shim. It needs a fix *inside* Binaryen's type
+  encoding and element-segment handling, i.e. a patched C++ build, not an added export.
+  More expensive than this file assumed, and still an emscripten rebuild.
+- **(B) Text splice + reparse** — **dead.** The reparse yields a binary the engine refuses at
+  parse. That is not a debug-info trade-off; it does not run.
+- **(C) Separate runtime module** — **proven, and it is the design.**
+
+### 7.1 What (C) proves
+
+Three modules in one store (`abi ← guest ← coreloop`), each validated by
+`wasm-tools validate --features all`, then compiled and run by wasmtime 50.0.1:
+
+1. **`cont.new` on an imported function works.** The coreloop imports `guest.main` and does
+   `cont.new $ct (ref.func $main)`; `elem declare func $main` lives in the coreloop's own
+   text, where it survives.
+2. **A guest suspends by calling an imported function.** The runtime exports `do_yield`,
+   whose body is `(suspend $yield)`. The guest's `main` is `call $do_yield; i32.const 42` —
+   **no stack-switching instruction anywhere in the guest module.** Because the host call
+   runs on the guest's stack, the suspend suspends the *guest's* continuation. It parks,
+   resumes, and returns 42.
+3. **`spawn` crosses the boundary as a funcref.** The guest produces `ref.func $worker` and
+   passes it to `runtime.spawn`, which does `cont.new` on it and parks it in a runtime-owned
+   table; a later `step` resumes it. The worker ran, suspended, resumed, completed.
+
+Fact 2 is why (C) works at all: the guest needs **no continuation type, no `cont.new`, no
+`suspend`** — only an ordinary call to an imported function. The compiler needs no new
+Binaryen API, the guest stays a plain module, and DWARF is untouched. `ref.func` is already
+emitted by the compiler (`compiler.ts:11738`), so the spawn path needs no new capability.
+
+The costs (C) keeps: an async program is **two modules**, and a standalone `.wat` runtime
+must ship and be linked by whoever instantiates. The second is already how `tension::abi`
+is bound; the first is the price of not owning Binaryen.
+
+**Reproduction** (the spike is 3 `.wat` files and a 60-line wasmtime host, run on snowarch):
+`abi3.wat` owns the tag, `do_yield`, the context table and `spawn`/`step`; `guest3.wat`
+imports them and contains `call $do_yield` and `ref.func $worker`; `coreloop3.wat` imports
+`guest.main` and creates its continuation.
+
+### 7.2 What would change this
+
+If a future Binaryen fixes cont emission, (A) becomes worth revisiting for single-module
+output. Nothing in the design depends on it: the tag vocabulary, the parking rule and
+`__asyncPump` are identical either way. That is what the spike was for.
 
 ## 8. Phases
 
+
 Each phase is a round with its own gate. No phase starts before the previous one's tests pass.
 
-- **P0 — the spike.** Settle §7. Deliverable: one program, emitted by *some* mechanism, that
-  parks and resumes via a coreloop, with the mechanism's cost measured (bytes, debug info,
-  build steps). **No compiler integration.** This is the round that de-risks everything.
+- **P0 — the spike.** **Done 2026-11-18; see §7.** Mechanism (C) is proven: a guest with no
+  stack-switching instruction parks and resumes, `cont.new` on an imported function works,
+  and `spawn` carries a `ref.func` across the module boundary. (A) and (B) are closed for a
+  stronger reason than a missing API — Binaryen emits an invalid continuation type and drops
+  `elem declare`, so its binary is refused at parse. **No compiler integration in this round.**
 - **P1 — the shell.** `__start` rewritten, coreloop emitted, `main` resumed, `$done`/`$idle`
   correct, `__asyncPump` exported. A program with one await that returns a value.
 - **P2 — depth.** `main → a → b → await`, one capture. `try`/`catch` across an await.
