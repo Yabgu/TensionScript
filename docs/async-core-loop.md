@@ -323,11 +323,22 @@ emits `5d 00`. Same source, four masks, measured:
 | + ExceptionHandling | `... 5d 70 ...` | invalid continuation type |
 | + **GC** | `... 5d 00 ...` | valid — and runs |
 
-The second half of the landmine: **`_BinaryenModuleSetFeatures(module.ref, mask)` silently does
-nothing.** `module.setFeatures(mask)` is the call that applies. A spike using the former reads
-`5d 70` back, concludes Binaryen cannot express typed continuations, and is wrong — as this one
-briefly was. Anything that emits a continuation module must assert `getFeatures()` afterwards, or
-better, assert the emitted type section.
+The second half of the landmine, stated precisely because the first version of this section got it
+wrong: **in the public JS API the module pointer is `module.ptr`, not `module.ref`.** Passing
+`.ref` to `_BinaryenModuleSetFeatures` is a no-op (it is an object, not the pointer), `getFeatures()`
+stays `0`, and the writer generalizes. Measured with one mask, three ways:
+
+```
+module.setFeatures(mask)                  getFeatures=66880   5d 00 valid
+_BinaryenModuleSetFeatures(m.ptr, mask)   getFeatures=66880   5d 00 valid
+_BinaryenModuleSetFeatures(m.ref, mask)   getFeatures=0       5d 70 generalized
+```
+
+So there is no defect in the C API — the setter works when given the pointer. The trap is that the
+AssemblyScript side spells it `this.ref` (`module.ts:3038`, correct there) while the JS-facing object
+spells it `ptr`, so a spike that copies the pattern across reads `5d 70` and blames Binaryen. Rule:
+call `module.setFeatures(mask)`, then **assert `getFeatures()`** rather than assuming, or assert the
+emitted type section.
 
 There is no conflict with the tree's position on GC: wasm GC is already a hard dependency of this
 fork (the GC arc, `d96ac606`). Async simply makes the compiler *state* it.
