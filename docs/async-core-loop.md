@@ -343,31 +343,59 @@ fork (the GC arc, `d96ac606`). Async simply makes the compiler *state* it.
   the one the file always named: text carries no DWARF, so async programs lose debug info and
   source maps.
 - **(C) Separate runtime module.** **Proven, and preferred.** A hand-written `.wat` runtime owns
-  the tag, `do_yield`, the context table and `spawn`/`step`; the guest imports them and contains
-  **no stack-switching instruction at all**.
+  the tag, `do_yield`, the context table and `spawn`/`step`; the guest imports them, contains
+  **no stack-switching instruction at all**, and exports its entry point as a funcref value.
 
 **Recommendation: (C).** It needs no compiler API, keeps the guest a plain module, leaves DWARF
 untouched, and is already demonstrated — see §7.3.
 
 ### 7.3 What (C) proves
 
-Three modules in one store (`abi ← guest ← coreloop`), each validated, then run on wasmtime 50:
+**Two modules in one store**, each validated by `wasm-tools` and then run on wasmtime 50.0.1. The
+first draft of this spike used three, because the coreloop imported `guest.main`; it collapses to
+two by **passing the entry point as a value instead of importing it**, which is the shape the
+compiler wants anyway:
 
-1. **`cont.new` on an imported function works.** The coreloop imports `guest.main` and does
-   `cont.new $ct (ref.func $main)`; `elem declare func $main` lives in the coreloop's own text.
-2. **A guest suspends by calling an imported function.** The runtime exports `do_yield`, whose body
-   is `(suspend $yield)`. The guest's main is `call $do_yield; i32.const 42`. Because that call runs
-   on the guest's stack, the suspend suspends the *guest's* continuation. Parks, resumes, returns 42.
-3. **`spawn` crosses the boundary as a funcref.** The guest produces `ref.func $worker` and passes it
-   to `runtime.spawn`, which does `cont.new` on it and parks it in a runtime-owned table; a later
-   `step` resumes it.
+```
+runtime.wasm   hand-written once, ships with the host
+               exports: do_yield (suspend), spawn, step, run, done, the tag
+               imports: nothing
 
-Fact 2 is why (C) works: the guest needs no continuation type, no `cont.new`, no `suspend` — only an
-ordinary call to an imported function. `ref.func` is already emitted by the compiler
-(`compiler.ts:11738`), so spawn needs no new capability either.
+guest.wasm     what the compiler emits
+               exports: main_ref — (ref null $ft) holding ref.func $main
+               imports: do_yield, note, spawn
+               contains: zero stack-switching instructions
+```
 
-The costs (C) keeps: an async program is **two modules**, and the `.wat` runtime must ship and be
-linked by whoever instantiates. The second is already how `tension::abi` is bound.
+The host reads `main_ref` out of the guest as a `Val::FuncRef` and hands it to `runtime.run`. There
+is no import in either direction between guest and runtime beyond the runtime's own exports, so the
+dependency graph is acyclic and instantiation order is trivial.
+
+Measured, in one process:
+
+```
+root:   RESULT=1                      ; main parks once, resumes, completes
+spawn:  step1=1 step2=0 done=1        ; worker handed over as a funcref, stepped twice
+```
+
+1. **A guest suspends by calling an imported function.** The runtime exports `do_yield`, whose body
+   is `(suspend $yield)`. The guest's main is `call $do_yield`. Because that call runs on the
+   guest's stack, the suspend suspends the *guest's* continuation.
+2. **`cont.new` works on a funcref that arrived as a value.** The runtime does
+   `cont.new $ct (local.get $f))` where `$f` is a parameter. `elem declare` lives in the guest's own
+   text, where it is valid and where the compiler already knows how to emit it.
+3. **`spawn` is the same mechanism, one indirection further.** The guest's `worker_ref` is a
+   function returning `ref.func $worker`; the host passes it to `runtime.spawn`, which parks the
+   continuation in a runtime-owned table; `step` resumes it.
+
+Fact 1 is why (C) works at all: the guest needs **no continuation type, no `cont.new`, no
+`suspend`** — only an ordinary call to an imported function. The compiler needs no new Binaryen API,
+and `ref.func` is already emitted (`compiler.ts:11738`), so even the funcref handover needs no new
+capability. DWARF is untouched because the guest's own code is ordinary.
+
+The cost (C) keeps: **an async program is two modules**, and the runtime must ship and be linked by
+whoever instantiates. The second is already how `tension::abi` is bound — the new part is one more
+module in that set, not a new kind of dependency.
 
 ### 7.4 What would change this
 
