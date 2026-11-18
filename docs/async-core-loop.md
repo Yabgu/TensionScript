@@ -343,6 +343,27 @@ emitted type section.
 There is no conflict with the tree's position on GC: wasm GC is already a hard dependency of this
 fork (the GC arc, `d96ac606`). Async simply makes the compiler *state* it.
 
+### 7.1b Where Binaryen comes from now
+
+The compiler reaches Binaryen only through its JS API, which is Binaryen's C API built by
+emscripten. That API had no constructors for `cont.new` / `suspend` / `resume`, so the compiler
+could not emit them — and the JS API cannot fabricate an expression it has no constructor for.
+
+The fix, decided 2026-11-18 after the spike: **Binaryen lives at `third_party/binaryen` in this
+repo**, pinned to `https://github.com/Yabgu/binaryen` tag `tension-v131.0.0` — upstream's
+`108e796b` plus six C functions, 383 lines with the test. `scripts/build-binaryen.mjs` builds it
+with emcc; the npm `binaryen` dependency is deleted. One repo carrying both the patch and the glue
+that uses it, rather than a second package to publish and version.
+
+Measured before adopting: the patch adds **5,198 bytes** to `binaryen.js` (11,182,687 → 11,187,885
+on a reproducible build), the module it emits validates and runs on wasmtime 50, and for three
+existing programs — trivial, class+generic, and `async-closure-value` — the emitted wasm is
+**byte-identical** across the unpatched and patched builds.
+
+This layer is temporary and should be deleted: once TensionScript can compile itself and its own C
+interop can call Binaryen directly, `third_party/binaryen` and the emscripten build go away. The
+submodule is scaffolding for the async arc, not a permanent dependency.
+
 ### 7.2 The three options, re-ranked
 
 - **(A) Extend our own glue.** Still an emscripten rebuild — but for a **narrower** reason than the
@@ -353,12 +374,19 @@ fork (the GC arc, `d96ac606`). Async simply makes the compiler *state* it.
   functions → reparse → `emitBinary`, with GC in the feature mask. No toolchain change. The cost is
   the one the file always named: text carries no DWARF, so async programs lose debug info and
   source maps.
-- **(C) Separate runtime module.** **Proven, and preferred.** A hand-written `.wat` runtime owns
-  the tag, `do_yield`, the context table and `spawn`/`step`; the guest imports them, contains
-  **no stack-switching instruction at all**, and exports its entry point as a funcref value.
+- **(C) Separate runtime module.** **Proven.** A hand-written `.wat` runtime owns the tag,
+  `do_yield`, the context table and `spawn`/`step`; the guest imports them, contains **no
+  stack-switching instruction at all**, and exports its entry point as a funcref value.
 
-**Recommendation: (C).** It needs no compiler API, keeps the guest a plain module, leaves DWARF
-untouched, and is already demonstrated — see §7.3.
+**Decision: (A), carried inside this repo (§7.1b).** (A) was re-ranked once the spike showed the
+writer was sound and only the constructors were missing — 383 lines, and the module it builds
+validates and runs. The reasons (C) is no longer the recommendation are the ones a compiler
+actually cares about: **(A) emits one module, keeps DWARF, and lets the core loop itself be
+written in TensionScript** rather than hand-maintained as `.wat` forever.
+
+(C) stays as the **fallback and the oracle**: it needs no Binaryen build at all, and the `.wat`
+runtime is the second implementation any core loop should be tested against. Should the emscripten
+build ever become a burden, (C) is a working design, not a sketch — §7.3 is its proof.
 
 ### 7.3 What (C) proves
 
