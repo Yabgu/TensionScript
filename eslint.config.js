@@ -24,6 +24,12 @@ export default defineConfig([
     // AS sources too: `struct`/`@unmanaged` are not TypeScript, and the
     // reductions bench is deliberately not compilable by this compiler.
     "tests/benches/**",
+    // The GC fixtures are TensionScript sources: `@unmanaged` in a type position
+    // (`view: @unmanaged [u32 * 4]`) is this language, not TypeScript, and
+    // `tseslint.parser` stops at `Type expected`. Narrow on purpose — the
+    // directory also holds `wasm-gc.js`, the harness, which is ordinary
+    // JavaScript and is linted.
+    "tests/gc/**/*.ts",
     "lib/loader/tests/**",
 
     // FIXME: Tagged template literal tests with invalid escapes

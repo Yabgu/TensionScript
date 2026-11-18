@@ -57,12 +57,10 @@ import {
   MemoryModelCode,
   isGcClass,
   gcStringOf,
-  gcUniform,
   gcArrayElementOf,
   gcDynamicArrayElementOf,
   isGcArrayBufferClass,
-  GC_ARRAYBUFFER_DATA_INDEX,
-  GC_ARRAYBUFFER_LENGTH_INDEX
+  GC_ARRAYBUFFER_DATA_INDEX
 } from "./types";
 
 import {
