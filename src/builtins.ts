@@ -56,6 +56,7 @@ import {
   TypeFlags,
   MemoryModelCode,
   isGcClass,
+  gcClassesEnabled,
   gcStringOf,
   gcArrayElementOf,
   gcDynamicArrayElementOf,
@@ -3810,7 +3811,18 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   // `memory.copy`. So `changetype<usize>(instance)` is refused at compile time
   // with a message that says why, rather than emitted and failing at validation
   // with `type mismatch: expected i32, found (ref $type)`.
-  if (operands.length && isIntegerTarget(toType)) {
+  //
+  // **The latch is tested before the operand is resolved, and that ordering is
+  // load-bearing.** Every predicate below is a no-op with the flag off — an
+  // `i32` pointer is not a GC reference, so nothing here can fire — but the
+  // `resolveExpression` call underneath is not a no-op: re-resolving an already
+  // resolved operand reaches `Signature.create` for a nested call. Measured on
+  // the three-line reproducer (`fn.toString()` then `idof<(x: i32) => i32>()`),
+  // this branch allocated `(i32) => usize` — `changetype`'s own signature, at id
+  // 27 — which `main` never creates, shifting every `idof` after it by one and
+  // failing five `test:compiler` fixtures that never mention GC. The id is only
+  // recoverable before it is burned, so the guard has to be here.
+  if (gcClassesEnabled && operands.length && isIntegerTarget(toType)) {
     let sourceType = compiler.resolver.resolveExpression(
       operands[0], compiler.currentFlow
     );
