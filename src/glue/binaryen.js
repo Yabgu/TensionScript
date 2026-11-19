@@ -413,6 +413,14 @@ export const {
   _BinaryenRefFuncGetFunc,
   _BinaryenRefFuncSetFunc,
 
+  // Stack switching. Present only because the vendored Binaryen is the fork
+  // (`Yabgu/binaryen`, tag tension-v131.0.0); upstream 131 exports none of these.
+  _BinaryenContNew,
+  _BinaryenSuspend,
+  _BinaryenResume,
+  _BinaryenResumeWithHandlers,
+  _BinaryenResumeThrow,
+
   _BinaryenRefEq,
   _BinaryenRefEqGetLeft,
   _BinaryenRefEqSetLeft,
@@ -852,6 +860,7 @@ export const {
   _TypeBuilderSetSignatureType,
   _TypeBuilderSetStructType,
   _TypeBuilderSetArrayType,
+  _TypeBuilderSetContinuation,
   _TypeBuilderGetTempHeapType,
   _TypeBuilderGetTempTupleType,
   _TypeBuilderGetTempRefType,

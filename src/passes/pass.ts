@@ -91,6 +91,16 @@ import {
   _BinaryenThrowGetOperandAt,
   _BinaryenTupleMakeGetOperandAt,
   _BinaryenTupleMakeGetNumOperands,
+  _BinaryenTableGetGetIndex,
+  _BinaryenTableGetSetIndex,
+  _BinaryenTableSetGetIndex,
+  _BinaryenTableSetSetIndex,
+  _BinaryenTableSetGetValue,
+  _BinaryenTableSetSetValue,
+  _BinaryenTableGrowGetValue,
+  _BinaryenTableGrowSetValue,
+  _BinaryenTableGrowGetDelta,
+  _BinaryenTableGrowSetDelta,
   _BinaryenIfSetCondition,
   _BinaryenIfSetIfTrue,
   _BinaryenIfSetIfFalse,
@@ -1022,6 +1032,42 @@ export abstract class Visitor {
         this.visitTupleExtract(expr);
         break;
       }
+      // Stack switching. The fork's C API patch exposes the constructors but
+      // no child accessors, so these expressions are opaque to this walk.
+      // Sound for A1's shell — its operands are a function reference, a table
+      // slot and an i32 status, none of them managed — and a named limitation
+      // for P2: a resume carrying a managed operand needs accessors added to
+      // the patch before it needs rooting here.
+      case ExpressionId.ContNew:
+      case ExpressionId.Suspend:
+      case ExpressionId.Resume:
+      case ExpressionId.ResumeThrow:
+      case ExpressionId.StackSwitch: {
+        break;
+      }
+      case ExpressionId.TableGet: {
+        this.stack.push(expr);
+        this.visit(_BinaryenTableGetGetIndex(expr));
+        assert(this.stack.pop() == expr);
+        break;
+      }
+      case ExpressionId.TableSet: {
+        this.stack.push(expr);
+        this.visit(_BinaryenTableSetGetIndex(expr));
+        this.visit(_BinaryenTableSetGetValue(expr));
+        assert(this.stack.pop() == expr);
+        break;
+      }
+      case ExpressionId.TableGrow: {
+        this.stack.push(expr);
+        this.visit(_BinaryenTableGrowGetValue(expr));
+        this.visit(_BinaryenTableGrowGetDelta(expr));
+        assert(this.stack.pop() == expr);
+        break;
+      }
+      case ExpressionId.TableSize: {
+        break;
+      }
       case ExpressionId.RefI31: {
         this.stack.push(expr);
         this.visit(_BinaryenRefI31GetValue(expr));
@@ -1230,7 +1276,7 @@ export abstract class Visitor {
         this.visitStringSliceWTF(expr);
         break;
       }
-      default: throw new Error("unexpected expression kind");
+      default: throw new Error("unexpected expression kind " + _BinaryenExpressionGetId(expr).toString());
     }
     this._currentExpression = previousExpression;
   }
@@ -1830,6 +1876,48 @@ export function replaceChild(
       if (tuple == search) {
         _BinaryenTupleExtractSetTuple(parent, replacement);
         return tuple;
+      }
+      break;
+    }
+    // Stack switching: opaque for the same reason as in `visit` above.
+    case ExpressionId.ContNew:
+    case ExpressionId.Suspend:
+    case ExpressionId.Resume:
+    case ExpressionId.ResumeThrow:
+    case ExpressionId.StackSwitch: {
+      break;
+    }
+    case ExpressionId.TableGet: {
+      let index = _BinaryenTableGetGetIndex(parent);
+      if (index == search) {
+        _BinaryenTableGetSetIndex(parent, replacement);
+        return index;
+      }
+      break;
+    }
+    case ExpressionId.TableSet: {
+      let index = _BinaryenTableSetGetIndex(parent);
+      if (index == search) {
+        _BinaryenTableSetSetIndex(parent, replacement);
+        return index;
+      }
+      let value = _BinaryenTableSetGetValue(parent);
+      if (value == search) {
+        _BinaryenTableSetSetValue(parent, replacement);
+        return value;
+      }
+      break;
+    }
+    case ExpressionId.TableGrow: {
+      let value = _BinaryenTableGrowGetValue(parent);
+      if (value == search) {
+        _BinaryenTableGrowSetValue(parent, replacement);
+        return value;
+      }
+      let delta = _BinaryenTableGrowGetDelta(parent);
+      if (delta == search) {
+        _BinaryenTableGrowSetDelta(parent, replacement);
+        return delta;
       }
       break;
     }

@@ -199,6 +199,12 @@ export type ExpressionRef = binaryen.ExpressionRef;
 export type GlobalRef = binaryen.GlobalRef;
 /** Reference to a Binaryen tag. */
 export type TagRef = binaryen.TagRef;
+/** Reference to a Binaryen table. */
+export type TableRef = binaryen.TableRef;
+/** Reference to a Binaryen type builder. */
+export type TypeBuilderRef = binaryen.TypeBuilderRef;
+/** Reference to a Binaryen element segment. */
+export type ElementSegmentRef = binaryen.ElementSegmentRef;
 /** Reference to a Binaryen import. */
 export type ImportRef = binaryen.ImportRef;
 /** Reference to a Binaryen export. */
@@ -2507,6 +2513,67 @@ export class Module {
     return binaryen._BinaryenRefFunc(this.ref, cStr, binaryen._BinaryenTypeGetHeapType(type));
   }
 
+  // continuations (stack switching)
+
+  /** `(cont.new $ct $func)` — a suspended stack for `$func`, not yet started. */
+  cont_new(
+    contType: HeapTypeRef,
+    func: ExpressionRef
+  ): ExpressionRef {
+    return binaryen._BinaryenContNew(this.ref, contType, func);
+  }
+
+  /** `(suspend $tag args...)` — hand control to the nearest resumer of `$tag`. */
+  suspend(
+    tag: string,
+    args: ExpressionRef[]
+  ): ExpressionRef {
+    let cStr = this.allocStringCached(tag);
+    let numArgs = args.length;
+    let cArr = allocPtrArray(args);
+    let ret = binaryen._BinaryenSuspend(this.ref, cStr, cArr, numArgs);
+    binaryen._free(cArr);
+    return ret;
+  }
+
+  /** `(resume $ct $cont)` — no handler clauses; a suspension escapes. */
+  resume(
+    cont: ExpressionRef,
+    contType: HeapTypeRef
+  ): ExpressionRef {
+    return binaryen._BinaryenResume(this.ref, cont, contType);
+  }
+
+  /**
+   * `(resume $ct (on $tag $label) ... $cont)` — a suspension of `$tag` branches
+   * to the named block. The block's type must be the tag's parameters followed
+   * by the continuation reference, which is why the emitter owns the block.
+   */
+  resume_with_handlers(
+    cont: ExpressionRef,
+    contType: HeapTypeRef,
+    handlerTags: string[],
+    handlerBlocks: string[]
+  ): ExpressionRef {
+    assert(handlerTags.length == handlerBlocks.length);
+    let numHandlers = handlerTags.length;
+    let tagPtrs = new Array<StringRef>(numHandlers);
+    let blockPtrs = new Array<StringRef>(numHandlers);
+    for (let i = 0; i < numHandlers; ++i) {
+      unchecked(tagPtrs[i] = this.allocStringCached(handlerTags[i]));
+      unchecked(blockPtrs[i] = this.allocStringCached(handlerBlocks[i]));
+    }
+    let tagsArr = allocPtrArray(tagPtrs);
+    let blocksArr = allocPtrArray(blockPtrs);
+    let ret = binaryen._BinaryenResumeWithHandlers(
+      this.ref, cont, contType, tagsArr, blocksArr, numHandlers
+    );
+    binaryen._free(tagsArr);
+    binaryen._free(blocksArr);
+    return ret;
+  }
+
+
   i31_new(
     value: ExpressionRef
   ): ExpressionRef {
@@ -2559,6 +2626,48 @@ export class Module {
     return binaryen._BinaryenAddTag(this.ref, cStr, params, results);
   }
 
+  // tables
+
+  /**
+   * `(table $name initial maximum type)` — a table with an explicit element
+   * type, which `addFunctionTable` cannot express (it is always `funcref`).
+   *
+   * Needed for the continuation table: `(ref null $ct)` is a concrete reference
+   * type, so a `funcref` table cannot hold it. Returns the Binaryen table
+   * reference, so a caller can size or inspect it later.
+   */
+  addTable(
+    name: string,
+    initial: Index,
+    maximum: Index,
+    type: TypeRef
+  ): TableRef {
+    let cStr = this.allocStringCached(name);
+    return binaryen._BinaryenAddTable(this.ref, cStr, initial, maximum, type);
+  }
+
+  /**
+   * `(elem $name declare func $a $b ...)` — a passive segment whose only job is
+   * to make `ref.func $a` legal. A `ref.func` is only valid for a function in a
+   * declarative or active segment; the continuation constructor takes exactly
+   * such a reference.
+   */
+  addPassiveElementSegment(
+    name: string,
+    funcNames: string[]
+  ): ElementSegmentRef {
+    let cStr = this.allocStringCached(name);
+    let numNames = funcNames.length;
+    let names = new Array<StringRef>(numNames);
+    for (let i = 0; i < numNames; ++i) {
+      unchecked(names[i] = this.allocStringCached(funcNames[i]));
+    }
+    let cArr = allocPtrArray(names);
+    let ret = binaryen._BinaryenAddPassiveElementSegment(this.ref, cStr, cArr, numNames);
+    binaryen._free(cArr);
+    return ret;
+  }
+
   getTag(
     name: string
   ): TagRef {
@@ -2606,6 +2715,17 @@ export class Module {
   ): FunctionRef {
     let cStr = this.allocStringCached(name);
     return binaryen._BinaryenGetFunction(this.ref, cStr);
+  }
+
+  /**
+   * The heap type of a function's compiled signature, which `ref.func`/`cont.new`
+   * require **exactly**: Binaryen asserts `f->type.getHeapType() == type`, and a
+   * structurally equal type built elsewhere is not necessarily the same index.
+   */
+  getFunctionHeapType(name: string): HeapTypeRef {
+    let funcRef = this.getFunction(name);
+    assert(funcRef != 0);
+    return binaryen._BinaryenFunctionGetType(funcRef);
   }
 
   removeFunction(name: string): void {
@@ -3551,6 +3671,74 @@ export function expandType(type: TypeRef): TypeRef[] {
 
 export function isNullableType(type: TypeRef): bool {
   return binaryen._BinaryenTypeIsNullable(type);
+}
+
+/** A reference type built from a heap type, e.g. `(ref null $ct)`. */
+export function typeFromHeapType(heapType: HeapTypeRef, nullable: bool): TypeRef {
+  return binaryen._BinaryenTypeFromHeapType(heapType, nullable);
+}
+
+/**
+ * A Binaryen type builder: the only way to name types that depend on each
+ * other, which a continuation does — `(cont $ft)` needs `$ft`'s heap type, and
+ * both are built in one pass.
+ *
+ * The C API's builder is create → fill → build-and-dispose; the temporary heap
+ * types returned by {@link getTempHeapType} are only valid until
+ * {@link buildAndDispose}. Kept as a class so codegen states the sequence once
+ * instead of repeating the malloc/free dance at each site.
+ */
+export class TypeBuilder {
+  private ref: TypeBuilderRef;
+
+  constructor(size: Index) {
+    this.ref = binaryen._TypeBuilderCreate(size);
+  }
+
+  /** Sets slot `index` to a function signature type. */
+  setSignatureType(index: Index, paramTypes: TypeRef, resultTypes: TypeRef): void {
+    binaryen._TypeBuilderSetSignatureType(this.ref, index, paramTypes, resultTypes);
+  }
+
+  /** Gets the heap type of slot `index` before the builder is built. */
+  getTempHeapType(index: Index): HeapTypeRef {
+    return binaryen._TypeBuilderGetTempHeapType(this.ref, index);
+  }
+
+  /** Sets slot `index` to `(cont $funcType)`. */
+  setContinuation(index: Index, funcType: HeapTypeRef): void {
+    binaryen._TypeBuilderSetContinuation(this.ref, index, funcType);
+  }
+
+  /**
+   * Builds every slot and disposes the builder, returning the heap types in
+   * slot order. Throws on a builder error: a bad type graph is a compiler bug,
+   * and continuing would emit a module whose types do not exist.
+   */
+  buildAndDispose(): HeapTypeRef[] {
+    let size = binaryen._TypeBuilderGetSize(this.ref);
+    let arr = binaryen._malloc(<usize>size << 2);
+    let errorIndex = binaryen._malloc(4);
+    let errorReason = binaryen._malloc(4);
+    let ok = binaryen._TypeBuilderBuildAndDispose(this.ref, arr, errorIndex, errorReason);
+    let types = new Array<HeapTypeRef>(size);
+    for (let i: Index = 0; i < size; ++i) {
+      unchecked(types[i] = binaryen.__i32_load(arr + (<usize>i << 2)));
+    }
+    let errIndex: i32 = 0;
+    let errReason: i32 = 0;
+    if (!ok) {
+      errIndex = binaryen.__i32_load(errorIndex);
+      errReason = binaryen.__i32_load(errorReason);
+    }
+    binaryen._free(arr);
+    binaryen._free(errorIndex);
+    binaryen._free(errorReason);
+    if (!ok) {
+      throw new Error("TypeBuilder failed at " + errIndex.toString() + " (reason " + errReason.toString() + ")");
+    }
+    return types;
+  }
 }
 
 // expressions
