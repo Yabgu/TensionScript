@@ -37,7 +37,6 @@ import {
   ASYNC_CURRENT_RECORD,
   ASYNC_ARENA_BASE,
   ASYNC_ARENA_NEXT,
-  ASYNC_ARENA_SIZE,
   ASYNC_NEXT_SLOT
 } from "./compiler";
 
@@ -12275,6 +12274,16 @@ function builtin_async_setTaskRecord(ctx: BuiltinFunctionContext): ExpressionRef
   return module.store(4, task, record, TypeRef.I32, 0, 4);
 }
 builtinFunctions.set(BuiltinNames.asyncSetTaskRecord, builtin_async_setTaskRecord);
+
+/**
+ * 256 KiB of zeroed cell storage: enough for ~6k tasks at A2's record size.
+ *
+ * It lives here, next to the bounds check that enforces it, and is imported by
+ * the compiler for the segment it reserves. The other direction — exporting it
+ * from `compiler.ts` and importing it here — is a cycle `builtins` reaches
+ * before `compiler` has initialized it (`TS2448`, measured in the self-build).
+ */
+export const ASYNC_ARENA_SIZE = 256 * 1024;
 
 // __allocCell(size: i32) -> usize
 //

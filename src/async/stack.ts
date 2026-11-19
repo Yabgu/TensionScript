@@ -61,12 +61,6 @@
  * yet accept.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any --
- * The scanner walks AST node fields that are not part of the compiler's wasm
- * graph (`src/extra/ast.ts` is deliberately unavailable here). Each cast is a
- * field read on a `NodeKind` already narrowed by the switch; the alternative
- * is importing every statement/expression class just to restate fields this
- * file does not modify. */
 import { Parser } from "../parser";
 import { Program } from "../program";
 import { DiagnosticCode, Range } from "../diagnostics";
@@ -74,24 +68,47 @@ import { Token } from "../tokenizer";
 import { CommonFlags } from "../common";
 import {
   ArrowKind,
+  ArrayLiteralExpression,
+  AssertionExpression,
+  BinaryExpression,
   BlockStatement,
   CallExpression,
   ClassDeclaration,
+  CommaExpression,
   DeclarationStatement,
+  DoStatement,
+  ElementAccessExpression,
   Expression,
   ExpressionStatement,
+  ForOfStatement,
+  ForStatement,
   FunctionDeclaration,
   FunctionExpression,
-  MethodDeclaration,
+  IfStatement,
+  LiteralExpression,
   LiteralKind,
+  MethodDeclaration,
   NamedTypeNode,
+  NamespaceDeclaration,
+  NewExpression,
   Node,
   NodeKind,
+  ObjectLiteralExpression,
   ParameterKind,
   ParameterNode,
+  ParenthesizedExpression,
+  PropertyAccessExpression,
+  ReturnStatement,
   Statement,
+  SwitchStatement,
+  TernaryExpression,
+  ThrowStatement,
+  TryStatement,
   TypeNode,
-  VariableStatement
+  UnaryPostfixExpression,
+  UnaryPrefixExpression,
+  VariableStatement,
+  WhileStatement
 } from "../ast";
 
 /** Writes the handle's record without its managed setter (`async-stack.ts`). */
@@ -176,7 +193,7 @@ export class StackfulAsyncTransform {
         }
         case NodeKind.NamespaceDeclaration: {
           // `NamespaceDeclaration.members` is a statement list like any other.
-          this.transformStatements((<any>statement).members, parser);
+          this.transformStatements((<NamespaceDeclaration>statement).members, parser);
           out.push(statement);
           break;
         }
@@ -228,7 +245,8 @@ export class StackfulAsyncTransform {
     }
 
     let range = declaration.range;
-    if (declaration.typeParameters != null && declaration.typeParameters.length != 0) {
+    let typeParameters = declaration.typeParameters;
+    if (typeParameters != null && typeParameters.length != 0) {
       this.refuse(parser, range, "a generic async function (the stackful backend)");
       return null;
     }
@@ -633,7 +651,7 @@ export class StackfulAsyncTransform {
         return this.refuseUnsupportedAsyncConstructs((<ExpressionStatement>node).expression, parser);
       }
       case NodeKind.Return: {
-        let value = (<any>node).value;
+        let value = (<ReturnStatement>node).value;
         return value != null ? this.refuseUnsupportedAsyncConstructs(value, parser) : false;
       }
       case NodeKind.Variable: {
@@ -652,7 +670,7 @@ export class StackfulAsyncTransform {
         return false;
       }
       case NodeKind.If: {
-        let ifStatement = <any>node;
+        let ifStatement = <IfStatement>node;
         if (this.refuseUnsupportedAsyncConstructs(ifStatement.condition, parser)) return true;
         if (this.refuseUnsupportedAsyncConstructs(ifStatement.ifTrue, parser)) return true;
         return this.refuseUnsupportedAsyncConstructs(ifStatement.ifFalse, parser);
@@ -702,17 +720,17 @@ function assignField(owner: Expression, field: string, value: Expression, range:
 
 function isVoidTypeNode(type: TypeNode): bool {
   return type.kind == NodeKind.NamedType
-    && (<any>type).name.identifier.text == "void";
+    && (<NamedTypeNode>type).name.identifier.text == "void";
 }
 
 function isI32TypeNode(type: TypeNode): bool {
   return type.kind == NodeKind.NamedType
-    && (<any>type).name.identifier.text == "i32";
+    && (<NamedTypeNode>type).name.identifier.text == "i32";
 }
 
 function isOmittedTypeNode(type: TypeNode): bool {
   return type.kind == NodeKind.NamedType
-    && (<any>type).name.identifier.text == "";
+    && (<NamedTypeNode>type).name.identifier.text == "";
 }
 
 function declarationName(statement: Statement): string | null {
@@ -720,7 +738,7 @@ function declarationName(statement: Statement): string | null {
     case NodeKind.FunctionDeclaration:
     case NodeKind.ClassDeclaration:
     case NodeKind.NamespaceDeclaration:
-      return (<any>statement).name.text;
+      return (<DeclarationStatement>changetype<Node>(statement)).name.text;
   }
   return null;
 }
@@ -762,32 +780,36 @@ function containsAwait(node: Node | null): bool {
       return false;
     }
     case NodeKind.Return:
-      return containsAwait((<any>node).value);
+      return containsAwait((<ReturnStatement>node).value);
     case NodeKind.Throw:
-      return containsAwait((<any>node).value);
+      return containsAwait((<ThrowStatement>node).value);
     case NodeKind.If: {
-      let ifStatement = <any>node;
+      let ifStatement = <IfStatement>node;
       return containsAwait(ifStatement.condition)
         || containsAwait(ifStatement.ifTrue)
         || containsAwait(ifStatement.ifFalse);
     }
-    case NodeKind.While:
-      return containsAwait((<any>node).condition) || containsAwait((<any>node).body);
-    case NodeKind.Do:
-      return containsAwait((<any>node).body) || containsAwait((<any>node).condition);
+    case NodeKind.While: {
+      let whileStatement = <WhileStatement>node;
+      return containsAwait(whileStatement.condition) || containsAwait(whileStatement.body);
+    }
+    case NodeKind.Do: {
+      let doStatement = <DoStatement>node;
+      return containsAwait(doStatement.body) || containsAwait(doStatement.condition);
+    }
     case NodeKind.For: {
-      let forStatement = <any>node;
+      let forStatement = <ForStatement>node;
       return containsAwait(forStatement.initializer)
         || containsAwait(forStatement.condition)
         || containsAwait(forStatement.incrementor)
         || containsAwait(forStatement.body);
     }
     case NodeKind.ForOf: {
-      let forOf = <any>node;
+      let forOf = <ForOfStatement>node;
       return containsAwait(forOf.variable) || containsAwait(forOf.iterable) || containsAwait(forOf.body);
     }
     case NodeKind.Switch: {
-      let switchStatement = <any>node;
+      let switchStatement = <SwitchStatement>node;
       if (containsAwait(switchStatement.condition)) return true;
       let cases = switchStatement.cases;
       for (let i = 0, k = cases.length; i < k; ++i) {
@@ -800,7 +822,7 @@ function containsAwait(node: Node | null): bool {
       return false;
     }
     case NodeKind.Try: {
-      let tryStatement = <any>node;
+      let tryStatement = <TryStatement>node;
       if (containsAwaitInList(tryStatement.bodyStatements)) return true;
       if (containsAwaitInList(tryStatement.catchStatements)) return true;
       return containsAwaitInList(tryStatement.finallyStatements);
@@ -812,45 +834,52 @@ function containsAwait(node: Node | null): bool {
       }
       return false;
     }
-    case NodeKind.Binary:
-      return containsAwait((<any>node).left) || containsAwait((<any>node).right);
+    case NodeKind.Binary: {
+      let binary = <BinaryExpression>node;
+      return containsAwait(binary.left) || containsAwait(binary.right);
+    }
     case NodeKind.UnaryPrefix:
+      return containsAwait((<UnaryPrefixExpression>node).operand);
     case NodeKind.UnaryPostfix:
-      return containsAwait((<any>node).operand);
-    case NodeKind.Ternary:
-      return containsAwait((<any>node).condition)
-        || containsAwait((<any>node).ifThen)
-        || containsAwait((<any>node).ifElse);
+      return containsAwait((<UnaryPostfixExpression>node).operand);
+    case NodeKind.Ternary: {
+      let ternary = <TernaryExpression>node;
+      return containsAwait(ternary.condition)
+        || containsAwait(ternary.ifThen)
+        || containsAwait(ternary.ifElse);
+    }
     case NodeKind.PropertyAccess:
-      return containsAwait((<any>node).expression);
-    case NodeKind.ElementAccess:
-      return containsAwait((<any>node).expression) || containsAwait((<any>node).elementExpression);
+      return containsAwait((<PropertyAccessExpression>node).expression);
+    case NodeKind.ElementAccess: {
+      let elementAccess = <ElementAccessExpression>node;
+      return containsAwait(elementAccess.expression) || containsAwait(elementAccess.elementExpression);
+    }
     case NodeKind.Parenthesized:
+      return containsAwait((<ParenthesizedExpression>node).expression);
     case NodeKind.Assertion:
-      return containsAwait((<any>node).expression);
+      return containsAwait((<AssertionExpression>node).expression);
     case NodeKind.Comma: {
-      let expressions = (<any>node).expressions;
+      let expressions = (<CommaExpression>node).expressions;
       for (let i = 0, k = expressions.length; i < k; ++i) {
         if (containsAwait(expressions[i])) return true;
       }
       return false;
     }
     case NodeKind.New: {
-      let args = (<any>node).args;
+      let args = (<NewExpression>node).args;
       for (let i = 0, k = args.length; i < k; ++i) {
         if (containsAwait(args[i])) return true;
       }
       return false;
     }
     case NodeKind.Literal: {
-      let literal = <any>node;
-      if (literal.literalKind == LiteralKind.Array) {
-        let elements = literal.elementExpressions;
+      if ((<LiteralExpression>changetype<Node>(node)).literalKind == LiteralKind.Array) {
+        let elements = (<ArrayLiteralExpression>node).elementExpressions;
         for (let i = 0, k = elements.length; i < k; ++i) {
           if (containsAwait(elements[i])) return true;
         }
-      } else if (literal.literalKind == LiteralKind.Object) {
-        let values = literal.values;
+      } else if ((<LiteralExpression>changetype<Node>(node)).literalKind == LiteralKind.Object) {
+        let values = (<ObjectLiteralExpression>node).values;
         for (let i = 0, k = values.length; i < k; ++i) {
           if (containsAwait(values[i])) return true;
         }
@@ -874,7 +903,7 @@ function findTryAroundAwait(node: Node | null): Node | null {
   if (node == null) return null;
   switch (node.kind) {
     case NodeKind.Try: {
-      let tryStatement = <any>node;
+      let tryStatement = <TryStatement>node;
       if (containsAwaitInList(tryStatement.bodyStatements)
         || containsAwaitInList(tryStatement.catchStatements)
         || containsAwaitInList(tryStatement.finallyStatements)) return node;
@@ -887,16 +916,18 @@ function findTryAroundAwait(node: Node | null): Node | null {
     case NodeKind.Expression:
       return findTryAroundAwait((<ExpressionStatement>node).expression);
     case NodeKind.If: {
-      let ifStatement = <any>node;
+      let ifStatement = <IfStatement>node;
       return findTryAroundAwait(ifStatement.ifTrue)
         || findTryAroundAwait(ifStatement.ifFalse);
     }
     case NodeKind.While:
+      return findTryAroundAwait((<WhileStatement>node).body);
     case NodeKind.Do:
-      return findTryAroundAwait((<any>node).body);
+      return findTryAroundAwait((<DoStatement>node).body);
     case NodeKind.For:
+      return findTryAroundAwait((<ForStatement>node).body);
     case NodeKind.ForOf:
-      return findTryAroundAwait((<any>node).body);
+      return findTryAroundAwait((<ForOfStatement>node).body);
     case NodeKind.Call: {
       let args = (<CallExpression>node).args;
       for (let i = 0, k = args.length; i < k; ++i) {

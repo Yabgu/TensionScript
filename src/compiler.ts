@@ -17,7 +17,8 @@ import {
   builtinVariables_onCompile,
   compileVisitGlobals,
   compileVisitMembers,
-  compileRTTI
+  compileRTTI,
+  ASYNC_ARENA_SIZE
 } from "./builtins";
 
 import {
@@ -292,8 +293,6 @@ export const ASYNC_ARENA_BASE = "~asyncArenaBase";
 export const ASYNC_ARENA_NEXT = "~asyncArenaNext";
 /** The next continuation slot `__installCont` hands out; slot 0 is main. */
 export const ASYNC_NEXT_SLOT = "~asyncNextSlot";
-/** 256 KiB of zeroed cell storage: enough for ~6k tasks at A2's record size. */
-export const ASYNC_ARENA_SIZE = 256 * 1024;
 /** A canonical `() -> i32` function, so `$ct` exists before any body compiles. */
 const ASYNC_SIG = "~asyncSig";
 
