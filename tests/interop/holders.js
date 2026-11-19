@@ -15,7 +15,10 @@
 //   @unmanaged / @managed      same layout, fresh instance reads 0
 //   class C { a: @unmanaged
 //             [u32 * 4]; }     accepted without `!`, pointer slot is zero
-//   managed leaf in inline     still refused, by name, in all three positions
+//   managed leaf in inline     refused at the record's **declaration** since
+//                              round VT6 (`a struct cannot hold a GC reference`),
+//                              and the positional backstops still fire for a
+//                              leaf the declaration check cannot name
 //   class B { s: [S * 2]; }    offsets 0/16, two elements 134332211,
 //                              three elements 123456
 //   [[i32 * 4] * 2]            round-trip 1040508; every other position is a
@@ -176,40 +179,58 @@ for (const gc of [false, true]) {
   check(`@unmanaged [T*N] field: round-trip [${tag}]`, run(compiled, "round").value, 709);
 }
 
-// --- 3. the guarantee that makes the plain-class arm safe ----------------
+// --- 3. the guarantee that makes the plain-class arm safe --------------
+//
+// Round VT4 pinned three *positions*. Round VT6 moved the refusal one hop
+// earlier — to the record's own declaration — so every position below now
+// reports the same message, at the record, once: there is no type left to
+// place. The positional arms are kept as the net and are pinned at the end of
+// this section with a leaf the declaration check cannot name (a function type:
+// `isManaged`, but with no class reference).
 
 refused(
-  "managed leaf in a plain-class inline field",
+  "GC-reference leaf: refused at the declaration, in a plain-class inline field",
   `class M { v: i32; }
 @inline struct S { m: M; }
 class C { s: S; }
 export function run(): i32 { const c = new C(); return c.s.m.v; }`,
-  "an @inline struct field 'm' of 'S' is a GC reference"
+  "a struct cannot hold a GC reference"
 );
 refused(
-  "managed leaf in an @unmanaged record's inline field",
+  "GC-reference leaf: refused at the declaration, in an @unmanaged record's inline field",
   `class M { v: i32; }
 @inline struct S { m: M; }
 @unmanaged class R { s: S; }
 export function run(): i32 { const r = new R(); return r.s.m.v; }`,
-  "an @inline struct field 'm' of 'S' is a GC reference"
+  "a struct cannot hold a GC reference"
 );
 refused(
-  "managed leaf in an inline array element",
+  "GC-reference leaf: refused at the declaration, in an inline array element",
   `class M { v: i32; }
 @inline struct S { m: M; }
 class B { s: [S * 2]; }
 export function run(): i32 { const b = new B(); return b.s[0].m.v; }`,
-  [
-    "an inline array (T[N]) whose element 'S' has a GC-reference field 'm'",
-    "the C-ABI record S holds a GC reference in field `m`",
-  ]
+  "a struct cannot hold a GC reference"
 );
 refused(
-  "managed leaf in a bare inline-struct local",
+  "GC-reference leaf: refused at the declaration, in a bare inline-struct local",
   `class M { v: i32; }
 @inline struct S { m: M; }
 export function run(): i32 { let s: S = { m: new M() }; return s.m.v; }`,
+  "a struct cannot hold a GC reference"
+);
+// The backstops, still reachable: a leaf the declaration check cannot name.
+refused(
+  "backstop: a function leaf in a plain-class inline field",
+  `@inline struct S { f: () => void; }
+class C { s: S; }
+export function run(): i32 { const c = new C(); return 0; }`,
+  "an @inline struct field 'f' of 'S' is a GC reference"
+);
+refused(
+  "backstop: a function leaf in a bare inline-struct local",
+  `@inline struct S { f: () => void; }
+export function run(): i32 { let s: S; return 0; }`,
   "a GC-reference field in an @inline struct"
 );
 

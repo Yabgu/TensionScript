@@ -11,6 +11,13 @@
 //      (`link`), so a collected object could be stored into a local the
 //      collector has no reason to trace. Refused rather than emitted unsafely.
 //
+//      Since round VT6 a **class**-typed field (`m: Managed` here, until this
+//      round) is refused one hop earlier — where the record is laid out — so this
+//      arm is reached through a field `Type#isManaged` calls a reference but the
+//      declaration check cannot name: a **function type** carries no
+//      `classReference`, and the leaf still has to be refused at the local.
+//      Declaring the class field instead is pinned in `inline-struct-managed-leaf.ts`.
+//
 //   3. **A whole value in a value position** (`let n: u32 = p`). There is no
 //      local to read and no address to take; the value exists only as its
 //      fields. This is the refusal that makes the representation coherent —
@@ -24,10 +31,8 @@
 }
 
 @inline struct WithManaged {
-  m: Managed;                       // a @managed struct: a GC reference
+  f: () => void;                    // a function reference: isManaged, no class
 }
-
-@managed struct Managed { v: u32 = 0; }
 
 @inline struct Plain { x: u32 = 0; }
 
@@ -39,7 +44,7 @@ function usesArray(): void {
 
 // 2. a GC-reference field
 function usesManaged(): void {
-  let m: WithManaged = new WithManaged();
+  let m: WithManaged;
 }
 
 // 3. the whole value in a value position

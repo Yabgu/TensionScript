@@ -9,13 +9,12 @@
 //     and not new: the flat case refuses identically (measured), because the
 //     callee's operands are read out of a local's leaves and a `new` has none;
 //   - a **GC-reference leaf** at any depth — a bare `local.set` would skip the
-//     barrier;
+//     barrier. Since round VT6 a *class*-typed leaf is refused where the record
+//     is laid out, so the leaf here is a function type: `isManaged`, with no
+//     class reference for the declaration check to see, which is the case this
+//     backstop is for;
 //   - `changetype<usize>(value)` — Phase D's design decision: an inline value
 //     has no address to lend; `copyInto(dest, value)` is the alternative.
-
-class C {
-  v: i32 = 0;
-}
 
 struct Inner {
   x: f32 = 0;
@@ -28,7 +27,7 @@ struct Outer1 {
 }
 
 struct BadInner {
-  s: C = new C();
+  s!: () => void;
 }
 
 struct BadOuter {

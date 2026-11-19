@@ -4744,6 +4744,67 @@ export class Resolver extends DiagnosticEmitter {
                   }
                 }
                 if (needsLayout) {
+                  // === A record's field slots are bytes, so a GC reference is
+                  // refused here, at the declaration ==========================
+                  //
+                  // A `struct` is a C interop type: a binary blob with known
+                  // offsets, and nothing inside it is traced. A GC reference in
+                  // one of its slots is a word the collector never sees — it is
+                  // free to reclaim the object while the record still holds the
+                  // pointer, and the next read dereferences freed memory. That is
+                  // the same hazard `resolveFixedArrayType` /
+                  // `resolveUnmanagedArrayType` refuse for `[T *]` and
+                  // `[T * N]`, and the fix is the same shape: refuse it by name
+                  // where the storage is decided.
+                  //
+                  // **Why here and not at the use.** Before this check the type
+                  // resolved for *introspection* and was refused for every use:
+                  // `struct S { s: string }` compiled, `sizeof<S>()` answered 4
+                  // and `offsetof<S>("s")` answered 0, while `let s: S` and
+                  // `s.s = "x"` were refused later (`compiler.ts`,
+                  // `fillSroaFieldLocals`; `resolver.ts`, the inline-field
+                  // nesting check). Two answers for one declaration, and the
+                  // number `sizeof` gave invited the wrong conclusion — that a
+                  // 4-byte blob with an untraced GC pointer is fine to size a
+                  // buffer with. The layout is where the extent is decided, so it
+                  // is where the claim is false, and refusing before the offset
+                  // is banked means `sizeof` and `offsetof` have nothing wrong to
+                  // report: the record never gets an extent at all.
+                  //
+                  // **Which records.** `InlineStruct` is exactly the plain
+                  // `struct` and `@inline struct` (the parser makes them one
+                  // declaration: `@inline @unmanaged class`), which are the
+                  // forms whose bytes are the record. `@managed struct` is a
+                  // GC-record whose fields `__visit` walks, so a reference there
+                  // is traced and stays accepted; a plain class is not a record
+                  // at all. `@unmanaged class` and `@unmanaged struct` are
+                  // pointer-layout records and are deliberately left out of this
+                  // check — see the round report, where that question is stated
+                  // rather than decided.
+                  //
+                  // **A class reference, not every `isManaged` type.** A field
+                  // of function type is `isManaged` too (`Type#isManaged`, via
+                  // the signature), and its slot holds a table index under the
+                  // pointer ABI — not a collectable pointer. The class form is
+                  // the one that names all five shapes the message lists:
+                  // `string`, a user class, `Array<T>`, and a `@managed struct`
+                  // are all internal class references.
+                  //
+                  // A `@managed [T * N]` field is refused a few lines above
+                  // (`Landing 5c`), before any offset is taken, so it never
+                  // reaches this check.
+                  if (
+                    instance.hasDecorator(DecoratorFlags.InlineStruct) &&
+                    fieldType.isManaged &&
+                    fieldType.classReference != null
+                  ) {
+                    this.error(
+                      DiagnosticCode.Not_implemented_0,
+                      assert(boundPrototype.fieldDeclaration).type!.range,
+                      "a struct cannot hold a GC reference (`string`, a class, `Array<T>`, `@managed struct`); a C record is not scanned, so the reference would dangle. Use `[u8*N]` for an inline char array, `[u8*]` for a char pointer, `usize` for an opaque word, or an `@unmanaged` record"
+                    );
+                    break;
+                  }
                   // === Inline nesting, sub-phase A ==========================
                   // A field whose **type** is an `@inline struct` stores the
                   // value's bytes inline instead of a 4-byte pointer. The

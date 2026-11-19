@@ -1,8 +1,9 @@
 {
   "asc_flags": [],
   "stderr": [
-    "AS100: Not implemented: an @inline struct field 'm' of 'HasRef' is a GC reference, and an inline field's GC pointer is invisible to the collector",
-    "AS100: Not implemented: an @inline struct field 'm' of 'HasRef' is a GC reference, and an inline field's GC pointer is invisible to the collector",
-    "AS100: Not implemented: an inline array (T[N]) whose element 'HasRef' has a GC-reference field 'm'"
+    "AS100: Not implemented: a struct cannot hold a GC reference (`string`, a class, `Array<T>`, `@managed struct`); a C record is not scanned, so the reference would dangle. Use `[u8*N]` for an inline char array, `[u8*]` for a char pointer, `usize` for an opaque word, or an `@unmanaged` record",
+    "AS100: Not implemented: an @inline struct field 'f' of 'HasFn' is a GC reference, and an inline field's GC pointer is invisible to the collector",
+    "AS100: Not implemented: an @inline struct field 'f' of 'HasFn' is a GC reference, and an inline field's GC pointer is invisible to the collector",
+    "AS100: Not implemented: an inline array (T[N]) whose element 'HasFn' has a GC-reference field 'f'"
   ]
 }
