@@ -8,17 +8,20 @@ export function buildWeb() {
   const pkg = JSON.parse(fs.readFileSync(join(__dirname, "../package-lock.json")));
 
   const mainVersion = pkg.version;
-  const binaryenVersion = pkg.packages["node_modules/binaryen"].version || pkg.dependencies.binaryen.version;
   const longVersion = pkg.packages["node_modules/long"].version || pkg.dependencies.long.version;
 
   const distUrl = mainVersion === "0.0.0" ? `./` : `https://cdn.jsdelivr.net/npm/@yabgu_gm/tensionscript@${mainVersion}/dist/`;
-  const binaryenUrl = `https://cdn.jsdelivr.net/npm/binaryen@${binaryenVersion}/index.js`;
   const longUrl = `https://cdn.jsdelivr.net/npm/long@${longVersion}/index.js`;
+  // **No `binaryen` entry.** Binaryen is bundled into `dist/asc.js` and
+  // `dist/assemblyscript.js` (it is built from `third_party/binaryen`, not fetched
+  // from a registry), so there is no bare specifier left for an import map to
+  // resolve. A CDN URL here would point at a package version this tree no longer
+  // consumes, which is worse than no entry: it would load a *different* Binaryen
+  // under the name the bundled build already provides.
   const importmap = {
     "imports": {
       "@yabgu_gm/tensionscript": `${distUrl}assemblyscript.js`,
       "@yabgu_gm/tensionscript/asc": `${distUrl}asc.js`,
-      "binaryen": binaryenUrl,
       "long": longUrl
     }
   };

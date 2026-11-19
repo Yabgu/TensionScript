@@ -1,5 +1,11 @@
 node_modules/
 *debug.log
+
+# Binaryen, built from third_party/binaryen by scripts/build-binaryen.mjs. A build
+# product of a gitlink, 13 MB, gitignored for the same reason dist/ is: `npm run
+# build` makes it, and a copy in history would be a second record of a fact the
+# submodule already pins.
+third_party/binaryen-out/
 build/
 raw/
 .history
@@ -14,5 +20,6 @@ dist/*.generated.d.ts
 dist/*.map
 dist/asc.js
 dist/assemblyscript.js
+dist/binaryen.js
 dist/importmap.json
 dist/web.js

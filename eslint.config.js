@@ -34,6 +34,11 @@ export default defineConfig([
 
     // FIXME: Tagged template literal tests with invalid escapes
     "tests/compiler/templateliteral.ts",
+
+    // Vendored, not ours: the Binaryen submodule (a gitlink — its own repo, its own
+    // lint config) and the artifact `scripts/build-binaryen.js` writes into
+    // `third_party/binaryen-out/`. Both used to be outside this tree.
+    "third_party/**",
   ]),
 
   js.configs.recommended,
