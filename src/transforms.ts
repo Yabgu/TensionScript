@@ -22,9 +22,11 @@
  */
 
 import { Program } from "./program";
+import { Feature } from "./common";
 import { ClosureLowerTransform } from "./closure/lower";
 import { LazyAwaitTransform } from "./lazy/lower";
 import { AsyncLowerTransform } from "./async/lower";
+import { StackfulAsyncTransform } from "./async/stack";
 
 import {
   NodeKind,
@@ -340,7 +342,19 @@ export function applyInTreeTransforms(program: Program): void {
   closure.program = program;
   closure.afterParse(program.parser);
   // Then the async lowering, against the already-lowered tree.
-  let asyncLower = new AsyncLowerTransform();
-  asyncLower.program = program;
-  asyncLower.afterParse(program.parser);
+  //
+  // **Which lowering is a feature decision, not a version one.** A program
+  // that opts into continuations with `--enable stack-switching` gets the
+  // stackful backend; every other program — including one with an `await`
+  // today — keeps Backend A byte for byte. That is the whole compatibility
+  // story of the round, and it is checked by comparing the two builds.
+  if (program.hasAwait && program.options.hasFeature(Feature.StackSwitching)) {
+    let stackful = new StackfulAsyncTransform();
+    stackful.program = program;
+    stackful.afterParse(program.parser);
+  } else {
+    let asyncLower = new AsyncLowerTransform();
+    asyncLower.program = program;
+    asyncLower.afterParse(program.parser);
+  }
 }

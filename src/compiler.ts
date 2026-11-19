@@ -17,7 +17,8 @@ import {
   builtinVariables_onCompile,
   compileVisitGlobals,
   compileVisitMembers,
-  compileRTTI
+  compileRTTI,
+  ASYNC_ARENA_SIZE
 } from "./builtins";
 
 import {
@@ -275,10 +276,25 @@ export const defaultFeatures = Feature.MutableGlobals
 // so the two cannot drift apart silently.
 export const ASYNC_IDLE_TAG = "idle";
 export const ASYNC_DONE_TAG = "done";
+/** The A2 suspension tag: its payload is the awaited task's record address. */
+export const ASYNC_AWAIT_TAG = "await";
 export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
 export const ASYNC_STATUS = "~asyncStatus";
 export const ASYNC_STATUS_EXPORT = "__asyncStatus";
+/** The status the last normal `resume` returned (A2's core loop reads it). */
+export const ASYNC_LAST_STATUS = "~asyncLastStatus";
+/** The record of the task the core loop is currently resuming. */
+export const ASYNC_CURRENT_RECORD = "~asyncCurrentRecord";
+/** The zero-argument wrapper around `main`, so every continuation is `() -> i32`. */
+export const ASYNC_MAIN_START = "~asyncMainStart";
+/** The task-cell arena: its base and its bump pointer (A2 allocates no heap). */
+export const ASYNC_ARENA_BASE = "~asyncArenaBase";
+export const ASYNC_ARENA_NEXT = "~asyncArenaNext";
+/** The next continuation slot `__installCont` hands out; slot 0 is main. */
+export const ASYNC_NEXT_SLOT = "~asyncNextSlot";
+/** A canonical `() -> i32` function, so `$ct` exists before any body compiles. */
+const ASYNC_SIG = "~asyncSig";
 
 /** Compiler options. */
 /**
@@ -653,6 +669,14 @@ export class Compiler extends DiagnosticEmitter {
    * rather than a shape to guess at.
    */
   asyncShellPrepared: bool = false;
+  /** Whether the surviving shell is A2's (suspension) rather than A1's. */
+  asyncShellSuspends: bool = false;
+  /** Whether `main$start` was installed (false after a named shell refusal). */
+  asyncShellStartReady: bool = false;
+  /** The `f$start` functions `__installCont` has installed, for the elem segment. */
+  asyncStartFunctions: Set<string> = new Set<string>();
+  /** Disambiguates the handler block of each `__resumeSlot` in one function. */
+  asyncResumeLabels: i32 = 0;
   /** Whether `main`'s compiled signature returns a value the status can carry. */
   asyncMainReturnsValue: bool = false;
   /** Heap type of `main`'s compiled signature, as `ref.func` requires it. */
@@ -798,7 +822,12 @@ export class Compiler extends DiagnosticEmitter {
    */
   private shouldEmitAsyncShell(): bool {
     let program = this.program;
-    if (!program.hasAsync || program.hasAwait) return false;
+    // A2 is opt-in: continuations are the stack-switching feature, so a
+    // program that uses `await` today keeps Backend A unless it asks for them.
+    if (program.hasAwait) {
+      return this.asyncShellSuspends && this.mainFunction != null;
+    }
+    if (!program.hasAsync) return false;
     return this.mainFunction != null;
   }
 
@@ -812,6 +841,10 @@ export class Compiler extends DiagnosticEmitter {
    * empty by the time `__start` is built.
    */
   private prepareAsyncShell(): void {
+    if (this.asyncShellSuspends) {
+      this.prepareAsyncStackShell();
+      return;
+    }
     let module = this.module;
     let main = assert(this.mainFunction);
     let signature = main.signature;
@@ -999,12 +1032,227 @@ export class Compiler extends DiagnosticEmitter {
     body.push(module.drop(idleBlock));
   }
 
+  /**
+   * A2's shell: continuations that can suspend.
+   *
+   * The uniform continuation signature is `() -> i32`. `main` is wrapped in
+   * `$~asyncMainStart` so a `void` main and an `i32` main produce the same
+   * continuation type — the table holds one element type, and the status the
+   * `$done` handler carries is `main$start`'s i32 result.
+   *
+   * Every async function's `f$start` is also `() -> i32`; `__installCont`
+   * derives its heap type from the compiled function and asserts the equality
+   * `cont.new` requires. The argument cell is a per-task `TaskRecord` subclass,
+   * not a global: two parks are live as soon as `main` awaits a function that
+   * awaits another, and a single park cell would overwrite the outer one.
+   */
+  private prepareAsyncStackPrologue(): void {
+    let module = this.module;
+    let features = module.getFeatures()
+      | FeatureFlags.StackSwitching
+      | FeatureFlags.GC
+      | FeatureFlags.ReferenceTypes
+      | FeatureFlags.ExceptionHandling
+      | FeatureFlags.MultiValue
+      | FeatureFlags.MutableGlobals;
+    module.setFeatures(features);
+    assert((module.getFeatures() & FeatureFlags.StackSwitching) != 0);
+
+    // **`$ct` exists before any body is compiled.** `main` is compiled while
+    // the entry file's module exports are compiled, and an `await` in it, or a
+    // transformed `f`'s `__installCont`, needs the continuation type then. A
+    // canonical `() -> i32` function supplies it; `main$start`, every `f$start`
+    // and this signature are the same canonical function type.
+    module.addFunction(ASYNC_SIG, TypeRef.None, TypeRef.I32, null, module.i32(0));
+    let ft = module.getFunctionHeapType(ASYNC_SIG);
+    let builder = new TypeBuilder(1);
+    builder.setContinuation(0, ft);
+    let ct = unchecked(builder.buildAndDispose()[0]);
+    this.asyncFtMainHeap = ft;
+    this.asyncCtMainHeap = ct;
+    this.asyncCtMainRef = typeFromHeapType(ct, true);
+    // The signature function's only job was to make the type exist. The type
+    // is interned independently of the definition, so the body can go.
+    module.removeFunction(ASYNC_SIG);
+
+    // $await carries the awaited task's record address; $idle/$done are A1's.
+    module.addTag(ASYNC_IDLE_TAG, TypeRef.None, TypeRef.None);
+    module.addTag(ASYNC_DONE_TAG, TypeRef.I32, TypeRef.None);
+    module.addTag(ASYNC_AWAIT_TAG, TypeRef.I32, TypeRef.None);
+
+    // A2's table is slot-addressed and grows on demand in `__installCont`.
+    module.addTable(ASYNC_CONT_TABLE, 16, 65536, this.asyncCtMainRef);
+
+    module.addGlobal(ASYNC_LAST_STATUS, TypeRef.I32, true, module.i32(0));
+    module.addGlobal(ASYNC_CURRENT_RECORD, TypeRef.I32, true, module.i32(0));
+    module.addGlobal(ASYNC_NEXT_SLOT, TypeRef.I32, true, module.i32(1));
+    module.addGlobal(ASYNC_STATUS, TypeRef.I32, true, module.i32(0));
+    module.addGlobalExport(ASYNC_STATUS, ASYNC_STATUS_EXPORT);
+
+    // Task cells come from a static, zeroed arena. `new` would pull the
+    // runtime and its `env.abort` import into every module that starts a task;
+    // a module that cannot instantiate without a host stub is not the shape
+    // A1 established, and the round's tests run it on plain wasmtime. The
+    // arena is reserved as a data segment, so `__data_end` and the heap start
+    // after it and no allocator is involved.
+    // A cell address of 0 is the core loop's "main" sentinel, so the arena
+    // must not start at 0. It does only when the program explicitly asks for
+    // `--memoryBase 0`; a padding segment moves it to 8.
+    if (i64_low(this.memoryOffset) == 0 && i64_high(this.memoryOffset) == 0) {
+      this.addAlignedMemorySegment(new Uint8Array(8), 8);
+    }
+    let arena = new Uint8Array(ASYNC_ARENA_SIZE);
+    let arenaSegment = this.addAlignedMemorySegment(arena, 8);
+    let arenaBase = i64_low(arenaSegment.offset);
+    module.addGlobal(ASYNC_ARENA_BASE, TypeRef.I32, false, module.i32(arenaBase));
+    module.addGlobal(ASYNC_ARENA_NEXT, TypeRef.I32, true, module.i32(arenaBase));
+
+    this.asyncShellPrepared = true;
+  }
+
+  private prepareAsyncStackShell(): void {
+    let module = this.module;
+    let main = assert(this.mainFunction);
+    let signature = main.signature;
+    if (signature.parameterTypes.length != 0) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        main.declaration.name.range,
+        "an async program whose main takes parameters (the core loop resumes a () -> status function)"
+      );
+      return;
+    }
+
+    // `main$start` — the zero-argument wrapper that makes every continuation
+    // `() -> i32`. It calls main (which is never called from anywhere else)
+    // and turns the result into the status word.
+    let returnType = signature.returnType;
+    let mainBody: ExpressionRef;
+    if (returnType == Type.void) {
+      mainBody = module.block(null, [
+        module.call(main.internalName, [], TypeRef.None),
+        module.i32(0)
+      ], TypeRef.I32);
+    } else if (!returnType.isReference && returnType.toRef() == TypeRef.I32) {
+      mainBody = module.call(main.internalName, [], TypeRef.I32);
+    } else {
+      mainBody = module.block(null, [
+        module.drop(module.call(main.internalName, [], returnType.toRef())),
+        module.i32(0)
+      ], TypeRef.I32);
+    }
+    module.addFunction(ASYNC_MAIN_START, TypeRef.None, TypeRef.I32, null, mainBody);
+    // The canonical function type is what every `cont.new` names; a wrapper
+    // with a different signature would be a silent layout change, so say so
+    // here rather than let Binaryen's ref.func assertion carry the message.
+    let ftMainStart = module.getFunctionHeapType(ASYNC_MAIN_START);
+    if (ftMainStart != this.asyncFtMainHeap) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        main.declaration.name.range,
+        "an async main whose compiled signature does not match () -> i32 (the stackful backend)"
+      );
+      return;
+    }
+
+    this.asyncShellSuspends = true;
+    this.asyncShellPrepared = true;
+    this.asyncShellStartReady = true;
+    let program = this.program;
+    let coreloop = program.requireFunction(BuiltinNames.asyncCoreloopAwait);
+    this.compileFunction(coreloop);
+    let pump = program.requireFunction(BuiltinNames.asyncPump);
+    this.compileFunction(pump);
+    if (!module.hasExport("__asyncPump")) {
+      module.addFunctionExport(pump.internalName, "__asyncPump");
+    }
+
+    let ftCore = module.getFunctionHeapType(coreloop.internalName);
+    let coreBuilder = new TypeBuilder(1);
+    coreBuilder.setContinuation(0, ftCore);
+    let ctCore = unchecked(coreBuilder.buildAndDispose()[0]);
+    this.asyncFtCoreHeap = ftCore;
+    this.asyncCtCoreHeap = ctCore;
+    this.asyncCtCoreRef = typeFromHeapType(ctCore, true);
+
+    this.asyncStartFunctions.add(ASYNC_MAIN_START);
+    this.asyncStartFunctions.add(coreloop.internalName);
+  }
+
+  /**
+   * Rewrites `__start` for the suspending shell: install `main$start` at slot
+   * 0, then resume `__coreloopAwait` with the `$idle`/`$done` handlers.
+   *
+   * The core loop is the resumer of every task; the `$await` handler lives
+   * inside its per-task `resume` (emitted by `__resumeSlot`), so a suspension
+   * never escapes to `__start`.
+   */
+  private emitAsyncStackShellStart(body: ExpressionRef[]): void {
+    let module = this.module;
+    let coreloop = this.program.requireFunction(BuiltinNames.asyncCoreloopAwait);
+
+    body.push(
+      module.table_set(
+        ASYNC_CONT_TABLE,
+        module.i32(0),
+        module.cont_new(
+          this.asyncCtMainHeap,
+          module.ref_func(ASYNC_MAIN_START, typeFromHeapType(this.asyncFtMainHeap, false))
+        )
+      )
+    );
+
+    let doneHandlers = new Array<string>(2);
+    unchecked(doneHandlers[0] = ASYNC_IDLE_TAG);
+    unchecked(doneHandlers[1] = ASYNC_DONE_TAG);
+    let doneLabels = new Array<string>(2);
+    unchecked(doneLabels[0] = "on_idle");
+    unchecked(doneLabels[1] = "on_done");
+
+    let doneBlock = module.block("on_done", [
+      module.resume_with_handlers(
+        module.cont_new(
+          this.asyncCtCoreHeap,
+          module.ref_func(coreloop.internalName, typeFromHeapType(this.asyncFtCoreHeap, false))
+        ),
+        this.asyncCtCoreHeap,
+        doneHandlers,
+        doneLabels
+      ),
+      module.return()
+    ], createType([ TypeRef.I32, this.asyncCtCoreRef ]));
+
+    let idleBlock = module.block("on_idle", [
+      module.global_set(ASYNC_STATUS, module.tuple_extract(doneBlock, 0)),
+      module.return()
+    ], this.asyncCtCoreRef);
+
+    body.push(module.drop(idleBlock));
+  }
+
+  /** Declares every function `cont.new` references, as `ref.func` requires. */
+  private emitAsyncStartElements(): void {
+    let names = Set_values(this.asyncStartFunctions);
+    if (names.length == 0) return;
+    let list = new Array<string>(names.length);
+    for (let i = 0, k = names.length; i < k; ++i) unchecked(list[i] = unchecked(names[i]));
+    this.module.addPassiveElementSegment("~asyncStart", list);
+  }
+
   /** Performs compilation of the underlying {@link Program} to a {@link Module}. */
   compile(): Module {
     let options = this.options;
     let module = this.module;
     let program = this.program;
     let resolver = this.resolver;
+
+    // **The backend choice is made before the first body is compiled.** `main`
+    // is compiled while the entry file's module exports are compiled, and that
+    // happens *before* `prepareAsyncShell` (which needs `mainFunction` to be
+    // recorded). An `await` in `main` therefore has to know which backend it
+    // belongs to at its own compile time, not the shell's.
+    this.asyncShellSuspends = program.hasAwait && options.hasFeature(Feature.StackSwitching);
+    if (this.asyncShellSuspends) this.prepareAsyncStackPrologue();
 
     // Register a dummy memory so Binaryen's EffectAnalyzer can read
     // memory.shared on loads/stores emitted during compilation. The real
@@ -1081,7 +1329,19 @@ export class Compiler extends DiagnosticEmitter {
     // below exactly as it is for every other compiled function. Emitting here
     // also means `main` is known: it was recorded while its module export was
     // compiled above.
-    if (this.shouldEmitAsyncShell()) this.prepareAsyncShell();
+    if (this.asyncShellSuspends && this.mainFunction == null) {
+      // The suspending shell has one root: the continuation `__start`
+      // installs. A library module with an `await` and no exported `main` has
+      // nothing to resume, and saying so beats a validator error about a
+      // `$await` nobody handles.
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        null,
+        "the stackful backend requires an exported main (there is no root continuation to resume)"
+      );
+    } else if (this.shouldEmitAsyncShell()) {
+      this.prepareAsyncShell();
+    }
 
     // compile and export runtime if requested or necessary
     if (this.options.exportRuntime || (this.options.bindingsHint && this.desiresExportRuntime)) {
@@ -1270,7 +1530,16 @@ export class Compiler extends DiagnosticEmitter {
     // The shell's `__start` rewrite is the last thing appended, so every
     // initializer runs first — the continuation must not start before the
     // module's own top-level state exists.
-    if (this.asyncShellPrepared) this.emitAsyncShellStart(startFunctionBody);
+    if (this.asyncShellPrepared) {
+      if (this.asyncShellSuspends) {
+        if (this.asyncShellStartReady) {
+          this.emitAsyncStartElements();
+          this.emitAsyncStackShellStart(startFunctionBody);
+        }
+      } else {
+        this.emitAsyncShellStart(startFunctionBody);
+      }
+    }
 
     let startIsEmpty = !startFunctionBody.length;
     let exportStart = options.exportStart;
@@ -6007,7 +6276,12 @@ export class Compiler extends DiagnosticEmitter {
         break;
       }
       case NodeKind.Await: {
-        expr = this.compileLoweredAwaitExpression(<AwaitExpression>expression);
+        // A2's path sits beside Backend A's, keyed on the shell it belongs to.
+        // Backend A's method is untouched: its `awaitSites` table is filled by
+        // its lowering, and a shell program has no such table.
+        expr = this.asyncShellSuspends
+          ? this.compileShellAwaitExpression(<AwaitExpression>expression, contextualType, constraints)
+          : this.compileLoweredAwaitExpression(<AwaitExpression>expression);
         break;
       }
       case NodeKind.Lazy: {
@@ -12129,6 +12403,119 @@ export class Compiler extends DiagnosticEmitter {
    * producers cannot supply guest pointers, so a reference is obtained from the
    * capability's own reader at the await site instead.
    */
+  /**
+   * Compiles an `await` under the suspending shell.
+   *
+   * The operand is a `Task<R>` when it names a may-suspend call. The task's
+   * record is the value's home: the continuation writes it, the caller reads it
+   * after the park. The `$await` payload is the awaited task's table slot, not
+   * a continuation reference, because the slot is what the core loop uses to
+   * address the table and what the handler uses to store the suspended
+   * continuation back. A1's table + i32 slot design is the reason.
+   *
+   * If the operand is not a `Task` — `await g()` where `g` cannot suspend, or
+   * `await 1` — the resolver's rule already types the expression as the
+   * operand's type, and the emission is the operand: there is no work to wait
+   * for.
+   */
+  private compileShellAwaitExpression(
+    expression: AwaitExpression,
+    contextualType: Type,
+    constraints: Constraints
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let resolver = this.resolver;
+    let operandType = resolver.resolveExpression(expression.operand, flow, Type.auto, ReportMode.Report);
+    if (!operandType) return module.unreachable();
+
+    let taskProto = this.program.taskPrototype;
+    let taskClass = operandType.getClass();
+    let typeArguments = taskClass != null && taskProto != null
+      ? taskClass.getTypeArgumentsTo(taskProto)
+      : null;
+    if (typeArguments == null || typeArguments.length != 1) {
+      // Not a task: the operand is its own value.
+      return this.compileExpression(expression.operand, contextualType, constraints);
+    }
+    let valueType = unchecked(typeArguments[0]);
+    if (valueType != Type.void && valueType != Type.i32 && valueType != Type.bool) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "an await whose Task value is not i32 or void (the stackful backend stores the result in TaskRecord.payload)"
+      );
+      return module.unreachable();
+    }
+
+    // Evaluate the task once, then work from its record. The record is a
+    // `TaskRecord`; `_record` is the handle's one field.
+    let taskExpr = this.compileExpression(expression.operand, operandType, Constraints.ConvImplicit);
+    let taskLocal = flow.getTempLocal(operandType);
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(taskLocal.index, taskExpr, operandType.isManaged));
+    let recordProto = assert(this.program.taskRecordPrototype);
+    let recordType = assert(resolver.resolveClass(recordProto, null)).type;
+    // `Task<T>` is a std class (pointer layout) whose `_record` field is laid
+    // out at `memoryOffset`. Reading it with a load rather than its getter
+    // matters: the generated getter carries the `!` null check, which imports
+    // `env.abort` into a module that never allocates. The arena cell's field is
+    // written by the entry before the handle escapes, so the check would never
+    // fire anyway.
+    let taskMembers = assert(assert(taskClass).members);
+    let recordMember = assert(taskMembers.get("_record"));
+    let recordOffset = assert((<PropertyPrototype>recordMember).instance).memoryOffset;
+    let recordExpr = module.load(
+      4, false,
+      module.local_get(taskLocal.index, operandType.toRef()),
+      TypeRef.I32,
+      recordOffset, 4
+    );
+    let recordLocal = flow.getTempLocal(recordType);
+    stmts.push(module.local_set(recordLocal.index, recordExpr, false));
+
+    let doneExpr = this.taskRecordField("done", module.local_get(recordLocal.index, recordType.toRef()), expression);
+
+    // Park only if the task has not already completed. `done` is 1 on
+    // completion, so `!done` is the park condition. The tag carries the
+    // awaited task's record address (an i32 under the pointer ABI), which is
+    // what the core loop needs to resume it and what its own entry reads as
+    // the current record.
+    stmts.push(module.if(
+      module.unary(UnaryOp.EqzI32, doneExpr),
+      module.suspend(ASYNC_AWAIT_TAG, [ module.local_get(recordLocal.index, recordType.toRef()) ]),
+      module.nop()
+    ));
+
+    if (valueType == Type.void) {
+      this.currentType = Type.void;
+      return module.block(null, stmts, TypeRef.None);
+    }
+
+    let payload = this.taskRecordField("payload", module.local_get(recordLocal.index, recordType.toRef()), expression);
+    stmts.push(payload);
+    this.currentType = valueType;
+    return module.block(null, stmts, valueType.toRef());
+  }
+
+  /** Reads one `TaskRecord` field through its generated getter. */
+  private taskRecordField(
+    name: string,
+    record: ExpressionRef,
+    reportNode: Node
+  ): ExpressionRef {
+    let prototype = assert(this.program.taskRecordPrototype);
+    let instance = assert(this.resolver.resolveClass(prototype, null));
+    let members = assert(instance.members);
+    let member = members.get(name);
+    if (!member) {
+      this.error(DiagnosticCode.Not_implemented_0, reportNode.range, "TaskRecord." + name + " is missing");
+      return this.module.unreachable();
+    }
+    let property = assert((<PropertyPrototype>member).instance);
+    return this.compileCallDirect(assert(property.getterInstance), [], reportNode, record);
+  }
+
   private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {
     let site = getMapEntry(awaitSites(), expression);
     if (!site) {

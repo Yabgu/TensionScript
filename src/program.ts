@@ -652,6 +652,26 @@ export class Program extends DiagnosticEmitter {
   }
   private _taskPrototype: ClassPrototype | null = null;
 
+  /**
+   * Gets the standard `TaskRecord` prototype, or `null` when the program does
+   * not provide it.
+   *
+   * A2's task cell. The compiler reads `payload`, `done` and `key` through the
+   * generated getters so the access agrees with the representation the class
+   * was laid out in — the same reason the await read goes through a getter
+   * rather than a hand-computed offset.
+   */
+  get taskRecordPrototype(): ClassPrototype | null {
+    let cached = this._taskRecordPrototype;
+    if (!cached) {
+      let element = getMapEntry(this.elementsByName, "TaskRecord");
+      if (!element || element.kind != ElementKind.ClassPrototype) return null;
+      this._taskRecordPrototype = cached = <ClassPrototype>element;
+    }
+    return cached;
+  }
+  private _taskRecordPrototype: ClassPrototype | null = null;
+
   /** Gets the standard `Int8Array` prototype. */
   get int8ArrayPrototype(): ClassPrototype {
     let cached = this._int8ArrayPrototype;
