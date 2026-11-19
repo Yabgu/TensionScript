@@ -55,10 +55,13 @@
  *
  * Everything else in the language is refused **by name** here rather than
  * silently left to a backend that will not run: async methods, async arrows and
- * function expressions, generic async functions, parameters that cannot be
- * stored in a field, and results other than `i32`/`void`. The mechanism is
- * complete for the shapes it accepts; the refusals mark the shapes it does not
- * yet accept.
+ * function expressions, generic async functions, and parameters that cannot be
+ * stored in a field. Results are not restricted: `T` is carried by the task's
+ * `value` field, whose accessors are monomorphized from it, and a `void` result
+ * instantiates no field at all (the resolver omits a field whose type parameter
+ * is `void`), so `Task<void>` costs nothing and `await` yields nothing. The
+ * mechanism is complete for the shapes it accepts; the refusals mark the shapes
+ * it does not yet accept.
  */
 
 import { Parser } from "../parser";
@@ -137,6 +140,18 @@ const BIND_TASK = "__bindTask";
 const PARK_ON = "__parkOn";
 /** Suspends the current task on an awaited slot (`std/assembly/async-stack.ts`). */
 const SUSPEND_AWAIT = "__suspendAwait";
+/**
+ * The local holding the awaited slot across the suspend.
+ *
+ * The slot is read in its own statement rather than inline in the `suspend`
+ * payload. The shadow-stack pass cannot walk a `Suspend`'s children (the fork's
+ * C API patch exposes no accessor), so a managed receiver read nested there —
+ * `this.slot` is `TaskBase#get:slot(tostack(this))` under the pointer ABI — is
+ * never instrumented and leaves a call to a `__tostack` that was not compiled:
+ * `[wasm-validator] call target must exist`. A local statement puts the getter
+ * call where the pass does visit it, and the suspend sees a plain `i32` local.
+ */
+const AWAIT_SLOT_LOCAL = "$awaitSlot";
 /** Installs a continuation at a slot (`src/builtins.ts`). */
 const INSTALL_CONT = "__installCont";
 /** `Task<R>` — the task type (`std/assembly/task.ts`). */
@@ -270,14 +285,6 @@ export class StackfulAsyncTransform {
       this.refuse(parser, range, "an async function without a declared return type (the stackful backend)");
       return null;
     }
-    if (!isVoidTypeNode(returnType) && !isI32TypeNode(returnType)) {
-      this.refuse(
-        parser, returnType.range,
-        "an async function whose result is not i32 or void (the stackful backend stores the result in TaskRecord.payload; A2 carries one i32)"
-      );
-      return null;
-    }
-
     let parameters = declaration.signature.parameters;
     for (let i = 0, k = parameters.length; i < k; ++i) {
       let parameter = parameters[i];
@@ -361,11 +368,15 @@ export class StackfulAsyncTransform {
         parameter.range
       ));
     }
-    // `drive(): void { if (!this.settled) { __parkOn(this); __suspendAwait(this.slot); } }`
+    // `drive(): void { if (!this.settled) { let $awaitSlot = this.slot;
+    //                                   __parkOn(this); __suspendAwait($awaitSlot); } }`
     //
     // The guard matters: `await` never drives a settled task, but a ready entry
     // can outlive a settlement (two waiters on one task), and driving a settled
     // task would park the caller on something that will never complete again.
+    //
+    // The slot is read into a local **before** the suspend for the shadow
+    // stack's sake, not for ordering: see `AWAIT_SLOT_LOCAL`.
     let driveBody = Node.createBlockStatement([
       Node.createIfStatement(
         Node.createUnaryPrefixExpression(
@@ -378,6 +389,23 @@ export class StackfulAsyncTransform {
           range
         ),
         Node.createBlockStatement([
+          Node.createVariableStatement(
+            null,
+            [
+              Node.createVariableDeclaration(
+                Node.createIdentifierExpression(AWAIT_SLOT_LOCAL, range),
+                null, CommonFlags.Let,
+                typeNode("i32", range),
+                Node.createPropertyAccessExpression(
+                  Node.createThisExpression(range),
+                  Node.createIdentifierExpression(SLOT_FIELD, range),
+                  range
+                ),
+                range
+              )
+            ],
+            range
+          ),
           Node.createExpressionStatement(
             Node.createCallExpression(
               Node.createIdentifierExpression(PARK_ON, range),
@@ -391,11 +419,7 @@ export class StackfulAsyncTransform {
               Node.createIdentifierExpression(SUSPEND_AWAIT, range),
               null,
               [
-                Node.createPropertyAccessExpression(
-                  Node.createThisExpression(range),
-                  Node.createIdentifierExpression(SLOT_FIELD, range),
-                  range
-                )
+                Node.createIdentifierExpression(AWAIT_SLOT_LOCAL, range)
               ],
               range
             )
@@ -603,12 +627,14 @@ export class StackfulAsyncTransform {
     //     let $t = f();
     //     $t.home = 0;        // this executor; Gate 4 takes it from the server
     //     $t.drive();         // run it; a suspension parks *this* slot
-    //     return $t.value;
+    //     return 0;           // the status slot, mirroring `f$start`
     //   }
     //
     // `$t.drive()` parks the current task on `$t`, and the current task here is
     // the served slot itself, so when `$t` settles the executor resumes this
-    // continuation and the `return` reads the value.
+    // continuation and the `return` answers the **status**, not the value: the
+    // value lives in the task (written by `f$start`), and the entry's `i32` is
+    // a status word in every generated continuation.
     let artifacts = new Array<Statement>();
     artifacts.push(recordClass);
     artifacts.push(bodyFunction);
@@ -658,14 +684,9 @@ export class StackfulAsyncTransform {
           range
         )
       ));
-      spawnStatements.push(Node.createReturnStatement(
-        Node.createPropertyAccessExpression(
-          Node.createIdentifierExpression("$spawnTask", range),
-          Node.createIdentifierExpression("value", range),
-          range
-        ),
-        range
-      ));
+      // The status slot: `0` for now. Reserved for a failure code from a
+      // cross-thread task; the value is never carried here.
+      spawnStatements.push(Node.createReturnStatement(intLiteral(0, range), range));
       let spawnFunction = Node.createFunctionDeclaration(
         Node.createIdentifierExpression(spawnName, declaration.name.range),
         null, CommonFlags.None,
@@ -820,11 +841,6 @@ function assignField(owner: Expression, field: string, value: Expression, range:
 function isVoidTypeNode(type: TypeNode): bool {
   return type.kind == NodeKind.NamedType
     && (<NamedTypeNode>type).name.identifier.text == "void";
-}
-
-function isI32TypeNode(type: TypeNode): bool {
-  return type.kind == NodeKind.NamedType
-    && (<NamedTypeNode>type).name.identifier.text == "i32";
 }
 
 function isOmittedTypeNode(type: TypeNode): bool {

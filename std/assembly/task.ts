@@ -223,16 +223,15 @@ export abstract class TaskBase {
  *
  * For the stackful backend a task is one object: the entry allocates a
  * per-function subclass of this class and returns it, its body's result lands
- * in `value` (an `i32`; the stackful backend carries `i32` and `void` results
- * only), and `await t` is `if (!t.settled) t.drive(); return t.value`.
+ * in `value`, and `await t` is `if (!t.settled) t.drive(); return t.value`.
  *
- * **`value` is `i32`, not `T`.** The type argument is still what the type
- * checker uses (`await` is typed by `T`), but a field of type `T` cannot be
- * instantiated for `Task<void>` — measured: the compiler rejects the `void`
- * instantiation at the field declaration (`TS1110`). Backend A's interface
- * (`Task<void>` in its tests and in user code) must keep compiling, and the
- * stackful backend already refuses every result type except `i32`/`void`, so
- * one word is the exact representation both need.
+ * **`value` is `T`.** The accessors are monomorphized from the declared field
+ * type, so a `Task<P>` read is a `P` read with no cast, offset or runtime
+ * check. A type parameter substituted with `void` instantiates no field at all
+ * (`Task<void>` has no `value`, no getter and no setter): the resolver omits a
+ * field whose type parameter is `void`, so the declaration below costs a
+ * `Task<void>` nothing and the body's `void` result has nowhere to be stored.
+ * Every other `T` gets the ordinary field and its `get:value`/`set:value`.
  *
  * `_record` remains for Backend A, whose state machine stores its lowered
  * record on the handle. The stackful backend does not create one.
@@ -240,8 +239,8 @@ export abstract class TaskBase {
 export class Task<T> extends TaskBase {
   /** Backend A's record for this task. Unused by the stackful backend. */
   _record!: TaskRecord;
-  /** The stackful backend's result word. Valid once `settled` is true. */
-  value: i32 = 0;
+  /** The stackful backend's result. Valid once `settled` is true. */
+  value!: T;
 
   /**
    * Backend A's handle is never driven; the stackful per-function subclass

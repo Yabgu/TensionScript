@@ -12655,14 +12655,6 @@ export class Compiler extends DiagnosticEmitter {
       return this.compileExpression(expression.operand, contextualType, constraints);
     }
     let valueType = unchecked(typeArguments[0]);
-    if (valueType != Type.void && valueType != Type.i32 && valueType != Type.bool) {
-      this.error(
-        DiagnosticCode.Not_implemented_0,
-        expression.range,
-        "an await whose Task value is not i32 or void (the stackful backend stores one i32 word in Task.value)"
-      );
-      return module.unreachable();
-    }
 
     // Evaluate the task once. One object per execution: `settled` and `value`
     // are its fields and `drive` runs or resumes it, so the await is
@@ -12772,9 +12764,10 @@ export class Compiler extends DiagnosticEmitter {
       expression.range
     );
     stmts.push(this.compileExpression(valueAccess, valueType, Constraints.None));
-    // The stackful backend carries one i32/void word; the type checker keeps
-    // the declared `T` (i32 or bool here).
-    this.currentType = valueType.kind == TypeKind.Bool ? Type.bool : Type.i32;
+    // The await expression has exactly the task's value type: the accessor is
+    // monomorphized from the declared field type (there is no cast, offset or
+    // runtime check), so the value the getter hands back *is* `T`.
+    this.currentType = valueType;
     return module.block(null, stmts, valueType.toRef());
   }
 
@@ -14501,6 +14494,29 @@ export class Compiler extends DiagnosticEmitter {
             }
           }
         } else if (property.is(CommonFlags.DefinitelyAssigned)) {
+          // **A field declared with a type parameter is exempt.** `value!: T`
+          // on a generic class is not provably unnecessary at the declaration:
+          // the substitution decides whether the assertion is a no-op (i32), a
+          // runtime check (a reference) or forbidden (void, where the field is
+          // omitted entirely). Warning per instantiation would make a generic
+          // class's own declaration the source of diagnostics the instantiation
+          // cannot avoid — measured: `Task<T>`'s `value!: T` reported AS906 at
+          // every `Task<i32>` and failed the Backend A suites.
+          let declaredTypeNode = property.prototype.fieldDeclaration != null
+            ? property.prototype.fieldDeclaration.type
+            : null;
+          if (declaredTypeNode != null && declaredTypeNode.kind == NodeKind.NamedType) {
+            let named = <NamedTypeNode>declaredTypeNode;
+            let typeParameters = classInstance.prototype.typeParameterNodes;
+            if (named.name.next == null && typeParameters != null) {
+              let name = named.name.identifier.text;
+              let isTypeParameter = false;
+              for (let j = 0, l = typeParameters.length; j < l; ++j) {
+                if (unchecked(typeParameters[j]).name.text == name) { isTypeParameter = true; break; }
+              }
+              if (isTypeParameter) continue;
+            }
+          }
           if (property.type.isReference) {
             this.warning( // involves a runtime check
               DiagnosticCode.Property_0_is_always_assigned_before_being_used,

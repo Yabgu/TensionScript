@@ -4652,6 +4652,26 @@ export class Resolver extends DiagnosticEmitter {
           case ElementKind.PropertyPrototype: {
             let boundPrototype = (<PropertyPrototype>member).toBound(instance);
             if (boundPrototype.isField) { // resolve and lay out
+              // A field whose **type parameter** was substituted with `void`
+              // has no storage, and no accessors either: `Task<T>` declares
+              // `value!: T`, so `Task<void>` must instantiate without a
+              // `value` member rather than rejecting the declaration (the
+              // implicit setter's `void` parameter used to report TS1110).
+              // Only a direct type-parameter use is omitted; a field written
+              // `x: void` is still the error it always was.
+              let declaredTypeNode = boundPrototype.typeNode;
+              if (declaredTypeNode != null && declaredTypeNode.kind == NodeKind.NamedType) {
+                let named = <NamedTypeNode>declaredTypeNode;
+                let ctxTypes = instance.contextualTypeArguments;
+                if (
+                  named.name.next == null &&
+                  ctxTypes != null &&
+                  ctxTypes.has(named.name.identifier.text) &&
+                  ctxTypes.get(named.name.identifier.text) == Type.void
+                ) {
+                  break; // zero-size: no member, no get/set
+                }
+              }
               let boundInstance = this.resolveProperty(boundPrototype, reportMode);
               if (boundInstance) {
                 let fieldType = boundInstance.type;
