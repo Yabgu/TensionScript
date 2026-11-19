@@ -1,7 +1,15 @@
 # The async core loop — footprint
 
-> **Status: design.** Nothing here is implemented. This page is the blueprint the
-> implementation rounds are briefed from, and the record of the decisions it rests on.
+> **Status: partly implemented.** The shell is real and executes. As of A1 (PR #64, `main`
+> at `d2749db8`) the compiler emits the tags, the continuation table, `__coreloop` and a
+> rewritten `__start` that **resumes** `main` instead of calling it; `__asyncStatus` carries
+> the result out; the module runs on wasmtime 50.0.2. The loop's policy is TensionScript in
+> `std/assembly/async.ts`, compiled in only when referenced. What is **not** implemented:
+> `await` still goes through Backend A's state machine, so §5's "what the compiler emits"
+> describes the target, not the current output, for any program that awaits.
+>
+> The rest of this page is the blueprint the implementation rounds are briefed from, and
+> the record of the decisions it rests on.
 >
 > Replaces the role of Backend A (the state-machine lowering) as the *target*. Backend A
 > stays as the reference implementation the contract is validated against; it is no longer
@@ -436,66 +444,89 @@ The cost (C) keeps: **an async program is two modules**, and the runtime must sh
 whoever instantiates. The second is already how `tension::abi` is bound — the new part is one more
 module in that set, not a new kind of dependency.
 
-### 7.4 The runtime is not "all wasm" — only its spine is
+### 7.4 The division is mechanism vs policy — and the boundary is an intrinsic, not a module
 
-"Hand-written `.wat` runtime" is too broad and it was the wrong thing to write down. What the
-runtime module must contain is exactly the instructions the language cannot express:
+Written before (A) landed, this section argued for a hand-written `.wat` runtime module. Half of it
+survives and half of it does not.
 
-- the tag, and `do_yield` — whose body is one `(suspend $yield)`;
-- the continuation **table**, because only this module can name `(cont $ft)`;
-- `cont.new` and `resume`, i.e. `spawn(slot, f)` and `step(slot) → alive`.
+**Survives: the division itself.** What the language cannot express is exactly:
 
-Everything else is policy, and policy is ordinary code with no special instructions. Measured:
-`guest5.wat` contains **zero** stack-switching instructions and *is* the scheduler —
+- the tags (`$idle`, `$done`, and `$await` when an await exists);
+- `cont.new`, `suspend`, `resume` — the instructions;
+- the continuation **table**, because only the thing that names `(cont $ft)` can hold it.
 
-```wat
-(func (export "pump") (result i32) (local $alive i32)
-  (drop (call $spawn (i32.const 0) (call $worker_ref)))
-  (loop $again
-    (local.set $alive (call $step (i32.const 0)))
-    (br_if $again (local.get $alive)))
-  (global.get $ticks))
-```
+Everything else is policy: the loop, the ready queue, fairness, `join`, pools. All of it is a `loop`
+and a `br_if`, because resuming is just a call. Measured in the spike: `guest5.wat` contains **zero**
+stack-switching instructions and *is* the scheduler, with `rt2.wasm` + `guest5.wasm` reaching
+`TICKS=10` on wasmtime 50.0.1.
 
-`rt2.wasm` + `guest5.wasm`, wasmtime 50.0.1: `TICKS=10` — the worker parked once, resumed, and ran
-to completion, with the loop living in the guest.
+**Does not survive: "must be `.wat`".** That was a claim about (C), where the mechanism had to live
+in a second module because the compiler could not emit it. With (A) the compiler *can*, so the
+mechanism is emitted into the program's own module and the policy — a real TensionScript file — is
+compiled in beside it.
 
-So the division is not "runtime in wasm, program in TensionScript". It is:
+So the boundary moved from a **module** boundary to an **intrinsic** boundary:
 
-- **mechanism** (must be `.wat`): the tag, `suspend`, the continuation table, `cont.new`, `resume`;
-- **policy** (should be TensionScript): the ready queue, fairness, `join`, pools, `__asyncPump`'s
-  loop — all of it a `loop` and a `br_if` over slot ids, because resuming is just a call.
+- **mechanism** — compiler-side, reached from the library as `@builtin` intrinsics that lower to
+  Binaryen expressions. `__`-prefixed, following the tree's existing convention (`__visit`, `__new`,
+  `__closureInit`);
+- **policy** — `std/assembly/async.ts`, ordinary TensionScript, **compiled in only when referenced**.
+  This is the `__closureInit` pattern: `src/closure/lower.ts` holds the helper's name, and a program
+  that never triggers the rule never compiles the helper. Async costs nothing when unused, and the
+  cost is measured per round rather than asserted.
 
-Which is also why `rt2.wat` has **no memory, no imports and no start function**: it holds no data.
-Continuations sit in its table; every other byte of state belongs to the guest.
+Two properties this buys that the module split could not:
 
-### 7.5 Why the spine cannot be TensionScript today
+- **One module, one memory.** The spike's cost — "two memories per program, or `--importMemory` to
+  invert ownership" — does not exist, because there is no second module.
+- **The policy is editable as source.** P3's ready queue, P4's park-table integration and the pool
+  work are edits to a loop in a `.ts` file, not to hand-written instructions.
 
-1. **It is circular.** The language has no syntax, intrinsic or builtin for `suspend` / `cont.new` /
-   `resume` (grep of `src/` is empty). Adding one means the compiler must *emit* those instructions,
-   which needs Binaryen constructors that do not exist. Writing the spine in TensionScript
-   presupposes solving the exact problem the spine exists to avoid.
-2. **It would depend on Backend A.** A compiled `async function` imports `scheduler.park`
-   (`std/assembly/task-rt.ts:145`) — measured on a two-function probe, whose only imports were
-   `env.abort` and `scheduler.park`. A runtime built out of TensionScript async code would rest on
-   the state machine it is replacing.
-3. **It would carry a heap.** Every compiled module defines and exports a memory — the trivial
-   `export function one(): i32` above emits `(memory 0) 0` and `(export "memory" (memory 0))`.
-   Two memories per program, or `--importMemory` (`cli/index.js:317`) to invert ownership of the
-   guest's heap. The spine needs neither.
-4. **It would move with the compiler.** The spine is an ABI artifact versioned with the host, not
-   per program. Hand-written, it is fixed and reviewable; generated, a compiler regression could
-   break async for programs that never use async.
+What it costs: the intrinsics are a compiler surface that does not exist in the language's syntax, so
+they are a thing to keep small and to refuse from user code. A1's admission check keys on source
+path, which a file at `~lib/async.ts` could shadow — named there as an open issue rather than
+solved, because closing it is a privilege model.
 
-When (A) lands — Binaryen exposing the constructors — the spine could be written in TensionScript
-and compiled, with the `.wat` kept as the oracle its output is tested against. That is a real
-successor, not a rejection.
+### 7.5 Why the spine "could not" be TensionScript — four objections, and what happened to them
 
-### 7.4 What would change this
+This section used to explain why the spine had to be `.wat`. It was written before (A), and each of
+its four reasons is now either false or a testable property. Keeping the list, and answering it,
+because the reasons were not stupid — they were correct about (C).
 
-If the compiler ever wants single-module async output with debug info, (A) is the path and the
-writer is already correct. Nothing in the design depends on it: the tag vocabulary, the parking
-rule and `__asyncPump` are identical across (A), (B) and (C).
+1. **"It is circular."** The language had no syntax or builtin for `suspend` / `cont.new` / `resume`,
+   so the compiler could not emit them, so a runtime written in TensionScript presupposed the thing
+   it existed to avoid. **Resolved by patching Binaryen's C API** (six functions, `third_party/binaryen`
+   pinned at tag `tension-v131.0.0`), after which the compiler *can* emit them, so the circularity
+   is gone. That was (A), and it is the decision the project took.
+2. **"It would depend on Backend A."** True of a runtime built out of compiled `async function`s: a
+   lowered async function imports `scheduler.park` (`std/assembly/task-rt.ts:145`), so it would rest
+   on the state machine it replaces. **Avoided by construction** — `std/assembly/async.ts` contains no
+   `async function` and no await. Its suspension is the `__suspendDone` / `__suspendIdle` intrinsics,
+   which lower straight to `suspend`. Measured in A1: the emitted module's only import is `env.abort`.
+3. **"It would carry a heap."** Every compiled module defines and exports a memory — the trivial
+   `export function one(): i32` emits `(memory $0 0)` and `(export "memory" (memory $0))`. With a
+   second module that means either two memories or `--importMemory`. **Dissolved** — there is one
+   module, and the program's memory is the only heap. The continuation table holds the stacks;
+   nothing else needs storage.
+4. **"It would move with the compiler."** The spine is ABI-ish, and generated code can regress. This
+   one stands as a *risk*, not an objection, and the answer is mechanism rather than argument: the
+   shell is emitted only when the program uses async, and a program that does not use it is required
+   to be **byte-identical** to what it emitted before the feature existed. That gate runs every
+   round. A regression that changes non-async output fails a diff.
+
+**What (C) is now.** Nothing ships (C). It stays written down as an oracle: it proves the guest can
+park and resume while containing zero stack-switching instructions, which is the strongest available
+evidence that the *shape* — `$idle`/`$done`, coreloop parks only when idle, `main` resumed not
+called — is correct independently of how it is emitted. If (A) ever regresses, (C) is the fallback
+that needs no compiler support at all.
+
+### 7.6 What would change this
+
+Nothing in the design now depends on the emission path: the tag vocabulary, the parking rule and
+`__asyncPump` are identical across (A), (B) and (C). (A) was chosen because it is single-module and
+puts the policy in editable source; if it becomes unmaintainable, (C) remains a working fallback with
+a known cost of two modules and two memories.
+
 
 ## 8. Phases
 
@@ -507,8 +538,18 @@ Each phase is a round with its own gate. No phase starts before the previous one
   *can* emit a valid, runnable continuation module through the text path, but only with **GC in
   the feature mask** — without it the writer generalizes to `5d 70` and every engine refuses
   the module at parse. **No compiler integration in this round.**
-- **P1 — the shell.** `__start` rewritten, coreloop emitted, `main` resumed, `$done`/`$idle`
-  correct, `__asyncPump` exported. A program with one await that returns a value.
+- **P1 — the shell.** **Done 2026-11-19 (A1, PR #64).** `__start` rewritten, coreloop emitted,
+  `main` resumed, `$done`/`$idle` correct, `__asyncPump` exported, the status observable through
+  `__asyncStatus`, executed on wasmtime 50.0.2. A program with no async emits none of it —
+  byte-identical output, which is the gate that keeps the feature free when unused.
+  **Narrowed from the original text**, which said "a program with one await that returns a
+  value": every await bottoms out in a leaf suspension, and the only leaves in this plan are
+  P3's `spawn` and P4's host contract. A guest-to-guest await needs no leaf — `resume`
+  returning normally *is* completion — so that case is split out as P1b, below.
+- **P1b — one await, one value.** `let t = f(); await t;` where `f` may suspend. Proves the
+  park/resume protocol and the value crossing it: a call runs nothing, the await parks the
+  caller, the callee runs to completion, the value returns. An `async` function whose body
+  cannot suspend still compiles inline (P1's byte-identical gate, applied to `async`).
 - **P2 — depth.** `main → a → b → await`, one capture. `try`/`catch` across an await.
   Loops with awaits. This is what Backend A cannot do, so it is the proof.
 - **P3 — `spawn`.** Multiple continuations, a ready queue, `join` via await. Still
