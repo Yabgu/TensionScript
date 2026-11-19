@@ -12572,20 +12572,75 @@ export class Compiler extends DiagnosticEmitter {
     );
     let settledExpr = this.compileExpression(settledAccess, Type.bool, Constraints.None);
 
-    // A fresh property-access node per use: the identifier compiles to its own
-    // `local.get`, so no IR node is shared between the two operands.
-    let driveCall = Node.createCallExpression(
+    // **The awaiter is stored, and the fallback is not** (`docs/policy-and-threads.md`
+    // §1/§3). `suspend` lands at the `on` label of whoever resumed, so the
+    // fallback needs no storage; what `await` must know is *this task's*
+    // policy. Absent (`null`) means the default, and the default is the inline
+    // park/resume that has always run here.
+    //
+    // Emitted as source-level AST so the field and the virtual call resolve
+    // through the ordinary resolver: a fresh node per use, because Binaryen's IR
+    // is a tree and one node in two operands asserts in `LocalCSE` at `-O2`.
+    //
+    // The policy is read through a local and narrowed by `changetype`: this
+    // compiler does not narrow a nullable *field* to non-null (`TS2322`,
+    // measured), and the check just above is what makes the cast honest.
+    let policyName = "$policy$" + expression.range.start.toString();
+    let policyType = Node.createNamedType(
+      Node.createSimpleTypeName("TaskPolicy", expression.range),
+      null,
+      true, // `TaskPolicy | null`
+      expression.range
+    );
+    let policyDecl = Node.createVariableDeclaration(
+      Node.createIdentifierExpression(policyName, expression.range),
+      null, CommonFlags.Let,
+      policyType,
       Node.createPropertyAccessExpression(
         Node.createIdentifierExpression(taskName, expression.range),
-        Node.createIdentifierExpression("drive", expression.range),
+        Node.createIdentifierExpression("policy", expression.range),
+        expression.range
+      ),
+      expression.range
+    );
+    let policyStmt = Node.createVariableStatement(
+      null, [ policyDecl ], expression.range
+    );
+
+    let policyAwaitCall = Node.createCallExpression(
+      Node.createPropertyAccessExpression(
+        Node.createCallExpression(
+          Node.createIdentifierExpression("changetype", expression.range),
+          [ Node.createNamedType(Node.createSimpleTypeName("TaskPolicy", expression.range), null, false, expression.range) ],
+          [ Node.createIdentifierExpression(policyName, expression.range) ],
+          expression.range
+        ),
+        Node.createIdentifierExpression("await", expression.range),
         expression.range
       ),
       null,
-      [],
+      [ Node.createIdentifierExpression(taskName, expression.range) ],
       expression.range
     );
-    let driveExpr = this.compileExpression(driveCall, Type.void, Constraints.None);
-    stmts.push(module.if(settledExpr, module.nop(), driveExpr));
+    let inlineAwaitCall = Node.createCallExpression(
+      Node.createIdentifierExpression("__inlineAwait", expression.range),
+      null,
+      [ Node.createIdentifierExpression(taskName, expression.range) ],
+      expression.range
+    );
+    // `if (policy) policy.await(t); else __inlineAwait(t)`
+    let awaiterStmt = Node.createIfStatement(
+      Node.createIdentifierExpression(policyName, expression.range),
+      Node.createExpressionStatement(policyAwaitCall),
+      Node.createExpressionStatement(inlineAwaitCall),
+      expression.range
+    );
+
+    let parkExpr = module.block(null, [
+      this.compileStatement(policyStmt),
+      this.compileStatement(awaiterStmt)
+    ], TypeRef.None);
+    stmts.push(module.if(settledExpr, module.nop(), parkExpr));
 
     if (valueType == Type.void) {
       this.currentType = Type.void;

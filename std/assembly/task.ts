@@ -70,6 +70,56 @@ export function setWakeSink(sink: (exec: i32, slot: i32) => void): void {
 }
 
 /**
+ * What a task's `await` does, and what happens the moment the task is created.
+ *
+ * `docs/policy-and-threads.md` §3. Two moments, two methods, and **no generic
+ * methods in the virtual surface**: the compiler allocates the concrete task
+ * (`f$Rec`, whose `R` it knows) and hands the policy a `TaskBase`, so the vtable
+ * stays monomorphic and the value never crosses it.
+ *
+ * A task whose `policy` is `null` is on the default policy — inline, on the
+ * current executor. **The absence is the default**: there is no singleton
+ * instance to allocate, compare against, or shadow, and the hot path costs one
+ * null compare.
+ */
+export abstract class TaskPolicy {
+  /**
+   * Declared by the class, read by the compiler: every argument captured for a
+   * task on this policy crosses a thread boundary and must therefore be
+   * addressable rather than a reference into the caller's heap.
+   */
+  readonly crossesThreads: bool = false;
+
+  /**
+   * Called at the call site, once the task object exists and before any body
+   * runs. This is where a policy decides **eagerness**: the default does
+   * nothing (so `f()` runs no body), while a parallel policy submits here, which
+   * is what makes `let t = f() on pool; ...; await t` overlap.
+   */
+  abstract create(task: TaskBase): void;
+
+  /**
+   * Called by `await` when the task is not settled. Must return with it settled
+   * (or with `status` set to a failure): the task's own awaiter handles its own
+   * await, which is the "generator" seam.
+   */
+  abstract await(task: TaskBase): void;
+}
+
+/**
+ * The default policy's `await`: park the current task on `task` and let the
+ * executor resume it.
+ *
+ * `docs/policy-and-threads.md` §3: a null policy *is* this, so the compiler's
+ * lowering is `if (!t.settled) (t.policy == null ? __inlineAwait(t) : t.policy.await(t))`.
+ * It is `drive()` — the same seam the null arm has always used — named here so
+ * the lowering reads as what it means.
+ */
+export function __inlineAwait(task: TaskBase): void {
+  task.drive();
+}
+
+/**
  * The common part of every task: one object per execution, with the fields the
  * scheduler owns and the single abstract operation that runs it.
  *
@@ -90,6 +140,13 @@ export abstract class TaskBase {
   status: i32 = 0;
   /** Tasks parked on this one, or `null` when nobody is waiting. */
   waiters: Array<Waiter> | null = null;
+  /**
+   * The policy this task was created under, or `null` for the default.
+   *
+   * Readable after the fact by design (`docs/policy-and-threads.md` §2): nothing
+   * about where a task runs is hidden from the caller who asked for it.
+   */
+  policy: TaskPolicy | null = null;
 
   /** Runs, or resumes, this task on the current thread. */
   abstract drive(): void;
