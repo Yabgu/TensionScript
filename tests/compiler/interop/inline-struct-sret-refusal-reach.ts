@@ -66,9 +66,10 @@ function storeInArray(): i32 {
   return 0;
 }
 
-// 4b. storing the result in a field: inline nesting, refused at the field's
-// declaration (a class is a heap record; an inline field would need the value's
-// bytes inline, which this phase does not lay out).
+// 4b. storing the result in a field: the class field itself is legal as of
+// round VT4 (the slot is a byte offset and the constructor zero-fills it), and
+// what refuses is the whole-value write -- the field is bytes, so there is no
+// single store that could copy `make(5)` into it.
 class Holder {
   field: P = new P();
 }

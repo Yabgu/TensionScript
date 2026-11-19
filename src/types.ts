@@ -2274,6 +2274,12 @@ export class Type {
       case TypeKind.F32:
       case TypeKind.F64:
       case TypeKind.V128: return true;
+      // A fixed array is a memory type: it has bytes and an alignment, and its
+      // own `alignLog2` already carries its element's (see the comment above it).
+      // Without this, a fixed array cannot be an element of another one --
+      // `[[i32 * 4] * 2]` was refused as "a fixed-size array of '[i32 * 4]'"
+      // even though the inner array is exactly 16 inline bytes.
+      case TypeKind.FixedArray: return true;
     }
     return false;
   }
@@ -2819,11 +2825,20 @@ export class Type {
         // address, and there is no slot that can carry N x sizeof(T) bytes
         // until Landing 5b gives it inline storage (a stack slot, copy at the
         // ABI, sret for a return). The assert is defensive rather than a
-        // placeholder: it means any 5a.5 path that reaches here with a value
-        // form is a bug, not an unimplemented feature — Landing 5a had this
+        // placeholder: it means a path that reaches here with a value form is a
+        // bug, not an unimplemented feature — Landing 5a had this
         // arm answering `I32` for every form, which is how
         // `changetype<[T * N]>(p)` came to compile and make a value-typed thing
         // carry an address.
+        //
+        // **No accepted position reaches it.** Every storage position that would
+        // need a slot is refused before this call (`Compiler#checkFixedArrayStorage
+        // Position`: a global, a parameter, a return, a local, a nested element
+        // of one); a *field* or an *element* compiles to its address instead
+        // (`Compiler#compilePropertyAccess`, `#compileFixedArrayElementAccess`),
+        // and a value-form local is SROA'd into one WASM local per leaf. What is
+        // left is the invariant: the compiler must not *accept* a type that has
+        // nowhere to live.
         //
         // A fixed array's `size` cannot answer the pointer width here the way
         // `UnmanagedArray`'s does: for the value form `size` is the extent,

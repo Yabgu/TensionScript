@@ -813,19 +813,16 @@ export class Resolver extends DiagnosticEmitter {
     );
     if (!elementType) return null;
     if (isValueForm) {
-      if (
-        elementType.classReference != null &&
-        assert(elementType.classReference).hasDecorator(DecoratorFlags.InlineStruct)
-      ) {
-        if (reportMode == ReportMode.Report) {
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            node.elementType.range,
-            "an inline array (T[N]) of an @inline struct (elements by value are a later phase)"
-          );
-        }
-        return null;
-      }
+      // An `@inline struct` element is **accepted**: the array's size is built
+      // from the element's `inlineExtentBytes`, so `[S * 2]` over an 8-byte `S`
+      // is 16 bytes of inline storage -- the same layout `[U * 2]` over an
+      // `@unmanaged struct U` always had. Element access is the address
+      // `base + i * sizeof(S)` (`Compiler#compileFixedArrayElementAccess`), and
+      // the stride is the extent, not the 4-byte reference, or the elements
+      // would alias. The GC-reference hazard is the one a *record* element
+      // carries, and it is refused below: an inline element's GC pointer has
+      // nowhere for the collector to find it.
+      //
       // A record element is the same claim one step further out, and it used to
       // reach `Type.fixedArray` because nothing between here and there asked
       // what the element *is*: a class type's kind is `TypeKind.Usize`
@@ -873,6 +870,28 @@ export class Resolver extends DiagnosticEmitter {
           );
         }
         return null;
+      }
+      // An **inline value** element carries the same GC-reference hazard one
+      // step further out: N copies of a value whose leaf is a collected pointer
+      // would be N references with nowhere for the collector to find them --
+      // an inline array is bytes. Refused by name, as the field form is.
+      if (
+        elementClass != null &&
+        elementClass.hasDecorator(DecoratorFlags.InlineStruct)
+      ) {
+        let managedLeaf = this.findManagedLeaf(elementType, new Set<Class>());
+        if (managedLeaf != null) {
+          if (reportMode == ReportMode.Report) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              node.elementType.range,
+              "an inline array (T[N]) whose element '" + elementClass.name +
+                "' has a GC-reference field '" + managedLeaf.name +
+                "' (the elements are inline bytes, and an inline field's GC pointer is invisible to the collector)"
+            );
+          }
+          return null;
+        }
       }
       // **A record that is still being laid out has no extent yet.**
       //
@@ -4944,50 +4963,33 @@ export class Resolver extends DiagnosticEmitter {
                 // (other checks are performed once an element is compiled)
                 let typeNode = assert(boundPrototype.fieldDeclaration).type;
                 if (typeNode) {
-                  // An `@inline struct` field is **accepted** when the outer is
-                  // a pointer-layout record (`@unmanaged` / `@managed`): the
-                  // layout branch above gives it the value's own extent and
-                  // alignment, which is the C inline-nesting shape
+                  // An `@inline struct` field is **accepted** wherever a field
+                  // slot is a byte offset: a pointer-layout record
+                  // (`@unmanaged` / `@managed`), and a plain class. The layout
+                  // branch above gives it the value's own extent and alignment,
+                  // which is the C inline-nesting shape
                   // (`struct Outer { struct Inner inner; }`).
                   //
-                  // Inside an **`@inline`** outer it is refused by name: that
+                  // Inside an **`@inline`** outer it is accepted as well: that
                   // outer is itself a value, stored as one WASM local per
-                  // field, so the inner would have to be flattened into the
-                  // outer's own leaves -- SROA flattening, sub-phase B. The
-                  // cycle and GC-reference hazards were already checked above,
-                  // before this field took an extent.
-                  if (
-                    declaredMemoryModelOf(fieldType) == MemoryModel.Inline
-                  ) {
-                    if (instance.hasDecorator(DecoratorFlags.InlineStruct)) {
-                      // Accepted: an inline value nested in an inline value is
-                      // flattened, one WASM local per **leaf**. The outer's SROA
-                      // local creation recurses through the nesting
-                      // (`Compiler#compileSroaLocal`), and a field read walks the
-                      // access chain to the leaf (`#resolveSroaReceiver`).
-                      //
-                      // The two hazards the flat case guards still apply and are
-                      // checked above this branch: a cycle would have no finite
-                      // extent, and a GC-reference leaf has no write barrier under
-                      // a bare `local.set`. Both are refused there, for the inner
-                      // as for the outer.
-                    } else if (
-                      !instance.hasDecorator(DecoratorFlags.Unmanaged) &&
-                      !instance.hasDecorator(DecoratorFlags.ManagedStruct)
-                    ) {
-                      // A plain class: its fields are heap slots reached through a
-                      // reference, so an inline field would be inline *in the heap* --
-                      // the class's allocation size, its `__visit` and its
-                      // constructors would all have to learn about it. That is the
-                      // deferred inline-in-heap case, refused by name so it cannot
-                      // ship as a silently pointer-sized slot.
-                      this.error(
-                        DiagnosticCode.Not_implemented_0,
-                        typeNode.range,
-                        "an @inline struct as a class field (a class field is a pointer slot; inline-in-heap is a separate, deferred case -- use an @unmanaged or @managed record field)"
-                      );
-                    }
-                  }
+                  // field, so the inner is flattened into the outer's own
+                  // leaves. The cycle and GC-reference hazards were already
+                  // checked above, before this field took an extent.
+                  //
+                  // **A plain class is no different.** Its field slot is a byte
+                  // offset into its allocation, so an inline field is inline in
+                  // the heap -- the class's extent (already computed above), its
+                  // constructor's zero fill
+                  // (`Compiler#makeFieldInitializationInConstructor`) and its
+                  // accessors all take the offset like any other field. There is
+                  // no `__visit` hazard to guard: a managed leaf inside an inline
+                  // struct is refused separately and precisely above
+                  // (`findManagedLeaf`), which is the guarantee that makes this
+                  // arm safe.
+                  // To reach here an inline type had to take an extent above,
+                  // which is true for every outer. Nothing else is left to
+                  // check: the cycle and the GC-reference leaf are refused
+                  // there, before the extent is banked.
                   this.program.checkTypeSupported(fieldType, typeNode);
                 }
               }

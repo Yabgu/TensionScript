@@ -1,0 +1,8 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: an @inline struct field 'm' of 'HasRef' is a GC reference, and an inline field's GC pointer is invisible to the collector",
+    "AS100: Not implemented: an @inline struct field 'm' of 'HasRef' is a GC reference, and an inline field's GC pointer is invisible to the collector",
+    "AS100: Not implemented: an inline array (T[N]) whose element 'HasRef' has a GC-reference field 'm'"
+  ]
+}

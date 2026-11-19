@@ -22,8 +22,12 @@
 //   - ~~a field of an `@inline` value~~ **now accepted** (deep SROA Phase A:
 //     the nesting is flattened one local per leaf — see
 //     `inline-nesting-nested.ts`)
-//   - a field of a plain class (inline-in-heap; deferred)
-//   - `T[N]` of an `@inline struct`
+//   - ~~a field of a plain class~~ **now accepted** (the field slot is a byte
+//     offset, exactly as in a record — see `inline-struct-as-class-field.ts`)
+//   - ~~`T[N]` of an `@inline struct`~~ **now accepted** (the element stride is
+//     its inline extent — see `fixed-array-inline-struct.ts`)
+//   - an initializer on an `@inline struct` field (the field is bytes; a whole
+//     value has no store)
 //   - `Array<T>` (a type argument is a pointer slot)
 //   - `changetype` to one (a value has no address to reinterpret)
 //   - inheritance from one
@@ -57,16 +61,19 @@ function makes(): P { return new P(); }
   p: P = {};
 }
 
-// A field of a plain class: the class field is a pointer slot, so an inline
-// field would be inline *in the heap* — its allocation size, `__visit` and
-// constructors would all have to learn about it. Deferred; refused by name.
+// A field of a plain class is **accepted** now: the slot is a byte offset, the
+// constructor zero-fills the extent (`inline-struct-as-class-field.ts`). What is
+// still refused is a whole-value initializer — the field is bytes and has no
+// single store — which is the one case this fixture pins here.
 class Holder {
   p: P = new P();
 }
 
-// `T[N]` of an `@inline struct`: elements by value
+// `T[N]` of an `@inline struct` is **accepted** too (the element stride is the
+// inline extent, `fixed-array-inline-struct.ts`). A record holding one is laid
+// out and constructed; `new Arrays()` below forces that path.
 @unmanaged struct Arrays {
-  arr: P[2] = [{}, {}];
+  arr: P[2];
 }
 
 // `Array<T>`: a type argument is a pointer slot
@@ -96,4 +103,5 @@ export function run(): void {
   let n: u32 = sizeof<NestedOuter>() + sizeof<Arrays>();
   if (n == 1) globalValue = new P();
   if (n == 2) new Holder();
+  if (n == 3) new Arrays();
 }

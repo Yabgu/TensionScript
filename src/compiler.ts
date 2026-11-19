@@ -11650,28 +11650,32 @@ export class Compiler extends DiagnosticEmitter {
         expression, sroaArray, isWrite, contextualType, constraints, valueExpression, valueRef
       );
     }
-    // A record element is only reachable in the **view** form: the value form
-    // refuses one at resolution (it would have to lay N records out inline,
-    // Landing 5b). In the view form `y[i]` is the *address* of a record, exactly
-    // as it is for `[T *]`, so the load below must not happen — loading a
-    // record's first four bytes and calling them the record is the mistake that
-    // arm's own comment describes. Same rule, same shape, keyed on the model
-    // here because only this kind has two forms.
-    let isViewForm = arrayType.fixedMemoryModel == MemoryModelCode.Unmanaged ||
-      arrayType.fixedMemoryModel == MemoryModelCode.Managed;
-    let isRecordElement = isViewForm && this.isRecordValueType(elementType);
-    if (isWrite && isRecordElement) {
+    // A record element is reachable in both forms now, and a **nested fixed
+    // array** element is storage for the same reason: `y[i]` of either is an
+    // address, not a loaded value. A record's `toRef` is its 4-byte reference
+    // (loading there would read the record's first field and call it a pointer),
+    // and a value-form array has no slot representation at all (`Type#toRef`),
+    // so both compile to `base + i * sizeof(E)`, typed as the element. A chained
+    // read (`.field`, or a further `[j]`) then indexes from that address.
+    let isAddressElement = this.isRecordValueType(elementType) ||
+      elementType.kind == TypeKind.FixedArray;
+    if (isWrite && isAddressElement) {
       this.error(
         DiagnosticCode.Not_implemented_0,
         expression.range,
-        "whole-record assignment to a `@unmanaged [T * N]` element — `y[i]` of a record is an address, not a value slot; use copyInto(y + i*sizeof(T), v), or write one field with `y[i].field = v`"
+        "whole-element assignment to a `[T * N]` element — `y[i]` of a record or of a nested array is an address, not a value slot; write a field (`y[i].field = v`) or index further (`y[i][j] = v`)"
       );
       this.currentType = Type.void;
       return module.unreachable();
     }
-    let elementSize = elementType.byteSize;
+    // The **extent**, not `byteSize`: those differ for a record (`byteSize` is
+    // the 4-byte reference) and that difference is the element stride. Reading
+    // `byteSize` here made `[S * 2]`'s two elements alias -- both indices landed
+    // in the same 4-byte slot -- while the array's own size, built from
+    // `inlineExtentBytes`, was right.
+    let elementSize = elementType.inlineExtentBytes;
     let address = this.compileFixedArrayElementAddress(expression, arrayType);
-    if (isRecordElement) {
+    if (isAddressElement) {
       this.currentType = elementType;
       return address;
     }
@@ -11746,20 +11750,16 @@ export class Compiler extends DiagnosticEmitter {
     // view form (`@unmanaged [Pair * 2]`) makes it ordinary, so the general form
     // is used whenever the two disagree. Scalar elements keep the shift, which is
     // why Landing 1's wat does not move.
-    let elementSize = elementType.byteSize;
-    // `byteSize` is a *reference* size (4) for a record, exactly as it is
-    // everywhere else in the type system — `sizeof<Pair>()` reads
-    // `nextMemoryOffset` instead (`builtins.ts`, `builtin_sizeof`). The stride
-    // has to be the extent, so the extent is what is read here.
-    let elementClass = elementType.classReference;
-    if (
-      elementClass != null &&
-      (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
-       elementClass.hasDecorator(DecoratorFlags.ManagedStruct))
-    ) {
-      elementSize = <i32>elementClass.nextMemoryOffset;
-    }
-    let shifts = elementSize == (1 << elementType.alignLog2);
+    let elementSize = elementType.inlineExtentBytes;
+    // `inlineExtentBytes` is the **extent** an element occupies in this array:
+    // `byteSize` for a scalar (and for a nested array, whose `size` is already
+    // its extent), but the record's layout size for a record element -- `byteSize`
+    // there is the 4-byte reference, exactly as it is everywhere else in the
+    // type system (`sizeof<Pair>()` reads `nextMemoryOffset` instead). Reading
+    // `byteSize` here made a `[S * 2]` index every element into the first one:
+    // measured, writing both elements and reading both back gave `134334433`
+    // where `134332211` is right.
+    let shifts = elementSize == (1 << elementType.inlineAlignLog2);
     let extendedIndex = this.options.isWasm64
       ? module.unary(UnaryOp.ExtendU32ToU64, index)
       : index;
@@ -11768,8 +11768,8 @@ export class Compiler extends DiagnosticEmitter {
           BinaryOp.ShlSize,
           extendedIndex,
           this.options.isWasm64
-            ? module.i64(elementType.alignLog2)
-            : module.i32(elementType.alignLog2)
+            ? module.i64(elementType.inlineAlignLog2)
+            : module.i32(elementType.inlineAlignLog2)
         )
       : module.binary(
           BinaryOp.MulSize,
@@ -16056,6 +16056,23 @@ export class Compiler extends DiagnosticEmitter {
       // A pointer. Exactly `@unmanaged T` semantics: nothing to refuse here.
       return true;
     }
+    // A **nested** value-form array has no leaf representation yet: its element
+    // is itself several leaves, so binding it is the deep-SROA phase. Without
+    // this check a parameter of `[[i32 * 4] * 2]` was accepted and then crashed
+    // in `bindSroaArrayParameterLeaves` -- the element was bound as one local of
+    // an array type, and `Type#toRef` asserts on the value form. A type the
+    // compiler accepts must never reach that assert.
+    if (
+      type.fixedElementType != null &&
+      type.fixedElementType.kind == TypeKind.FixedArray
+    ) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        reportNode.range,
+        "a nested `[T * N]` value as " + position + " (a nested element is several leaves per element, and selecting between them is the deep-SROA phase). Use `@unmanaged [T * N]` for a pointer view"
+      );
+      return false;
+    }
     // A **parameter** of the value form works: the signature flattens to one
     // WASM parameter per element leaf and the callee binds them as SROA locals,
     // so the argument is copied at the call and nothing is aliased.
@@ -17839,15 +17856,18 @@ export class Compiler extends DiagnosticEmitter {
       this.currentType = elementType;
       return module.unreachable();
     }
-    if (elementType.getClass() != null) {
+    if (elementType.getClass() != null || elementType.kind == TypeKind.FixedArray) {
       // A record element selected at runtime is several leaves per element, so a
       // single-value `br_table` cannot express it — `arr[i]` alone has no value.
       // Reading a field through the index is supported by the property path,
-      // which selects the *leaf* per block.
+      // which selects the *leaf* per block. A nested array element is the same
+      // claim one step out (deep SROA).
       this.error(
         DiagnosticCode.Not_implemented_0,
         expression.range,
-        "reading or writing a record element of a `[T * N]` value as a whole (an element is several leaves, not one value; read or write one of its fields, `arr[i].x`)"
+        elementType.kind == TypeKind.FixedArray
+          ? "selecting a nested `[T * N]` element of a `[T * N]` value by a runtime index (deep SROA). Use a constant index, or `@unmanaged [T * N]` for a pointer view"
+          : "reading or writing a record element of a `[T * N]` value as a whole (an element is several leaves, not one value; read or write one of its fields, `arr[i].x`)"
       );
       this.currentType = elementType;
       return module.unreachable();
@@ -18904,6 +18924,47 @@ export class Compiler extends DiagnosticEmitter {
     return module.struct_new(module.heapType(classTypeRef), operands);
   }
 
+  /**
+   * Emits a zero fill over an inline field's extent at `this + offset`.
+   *
+   * A field whose type is inline bytes -- an `@inline struct`, or a value-form
+   * `[T * N]` -- has no value representation, so its setter cannot assign it.
+   * The constructor defines those bytes the way it defines a scalar's slot: by
+   * writing zero. Doing it here rather than relying on the allocator matters
+   * because `__new`'s `memory.fill` is a runtime promise, and the stub runtime's
+   * `__alloc` does not keep it (`std/assembly/rt/stub.ts`). Without the fill a
+   * plain declaration compiled but its bytes were whatever the bump allocator
+   * left behind -- measured, a fresh instance read a stale 4 bytes.
+   */
+  makeInlineFieldZeroFill(
+    /** The field whose extent is zeroed. */
+    property: Property,
+    /** Index of the `this` local. */
+    thisIndex: i32,
+    /** Type of the `this` local. */
+    thisRef: TypeRef
+  ): ExpressionRef {
+    let module = this.module;
+    let offset = property.memoryOffset;
+    let extent = property.type.inlineExtentBytes;
+    // An empty value has no bytes to define; a zero-length fill would be valid
+    // but noise in every wat that holds one.
+    if (extent <= 0) return module.nop();
+    let addr: ExpressionRef = module.local_get(thisIndex, thisRef);
+    if (offset) {
+      addr = module.binary(
+        BinaryOp.AddSize,
+        addr,
+        this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+      );
+    }
+    return module.memory_fill(
+      addr,
+      module.i32(0),
+      this.options.isWasm64 ? module.i64(extent) : module.i32(extent)
+    );
+  }
+
   /** Makes the initializers for a class's fields within the constructor. */
   makeFieldInitializationInConstructor(
     /** Class being initialized. */
@@ -18938,36 +18999,58 @@ export class Compiler extends DiagnosticEmitter {
       // value has no address and the field has no single scalar width — so the
       // two cases are separated rather than skipped alike:
       //
-      //   `= {}` (or no initializer): nothing to store. `__new` hands back
-      //      zeroed memory and every leaf is zero, which is exactly what an
-      //      empty literal means. This is the idiom a `@managed` record needs to
-      //      satisfy the definite-assignment rule (TS2564), so it must compile.
+      //   `= {}` (or no initializer): zero, written by the constructor over the
+      //      field's whole extent (`makeInlineFieldZeroFill`). That is what an
+      //      empty literal means, and it is the idiom that satisfies the
+      //      definite-assignment rule (TS2564), so it must compile.
       //
-      //   anything else: a named refusal. Before this branch existed the field
-      //      was refused at declaration, so the skip could not lose anything;
-      //      now the declaration is legal, and a silent skip would compile a
-      //      record whose initializer never ran — measured: `inner: Good =
-      //      { a: 11, b: 22 }` read back 0 with no diagnostic.
+      //   anything else: a named refusal. The declaration itself is legal, so a
+      //      silent skip would compile a record whose initializer never ran —
+      //      measured: `inner: Good = { a: 11, b: 22 }` read back 0 with no
+      //      diagnostic.
       if (this.isInlineStructType(property.type)) {
         let fieldInitializer = property.initializerNode;
-        // A class field is refused by name at declaration (inline-in-heap), so
-        // there is nothing to say here: reporting the initializer too would make
-        // one mistake look like two.
-        let isRecordField = classInstance.hasDecorator(DecoratorFlags.Unmanaged) ||
-          classInstance.hasDecorator(DecoratorFlags.ManagedStruct);
-        if (fieldInitializer != null && isRecordField) {
-          if (
+        // The field is bytes inside this object -- a plain class's heap
+        // allocation, or an `@unmanaged` / `@managed` record's block. No store
+        // can copy a whole value there (the value has no address and the slot
+        // has no single scalar width), so the two cases are separated:
+        //
+        //   `= {}` (or no initializer): zero. The constructor writes that zero
+        //      itself (`makeInlineFieldZeroFill` below), which is what makes the
+        //      bytes defined under every runtime -- the stub's `__alloc` does
+        //      not zero, and `__new` cannot be relied on for a record either.
+        //      `= {}` is the idiom that satisfies TS2564, so it must compile.
+        //
+        //   anything else: a named refusal. A silent skip would compile a
+        //      record whose initializer never ran -- measured: `inner: Good =
+        //      { a: 11, b: 22 }` read back 0 with no diagnostic.
+        if (
+          fieldInitializer != null &&
+          !classInstance.hasDecorator(DecoratorFlags.InlineStruct)
+        ) {
+          let isEmptyLiteral =
             fieldInitializer.kind == NodeKind.Literal &&
             (<LiteralExpression>fieldInitializer).isLiteralKind(LiteralKind.Object) &&
-            (<ObjectLiteralExpression>fieldInitializer).names.length == 0
-          ) {
-            continue; // `= {}`: all zero, which is what the allocation already is
+            (<ObjectLiteralExpression>fieldInitializer).names.length == 0;
+          if (!isEmptyLiteral) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              fieldInitializer.range,
+              "an initializer on an @inline struct field (the value is stored inline and has no address to copy into; the allocation is already zero, so `= {}` is allowed -- assign the field's own fields after construction)"
+            );
           }
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            fieldInitializer.range,
-            "an initializer on an @inline struct field (the value is stored inline and has no address to copy into; the allocation is already zero, so `= {}` is allowed -- assign the field's own fields after construction)"
+        }
+        // An `@inline` outer has no address: its fields are the constructor's
+        // own SROA locals, created by `compileSroaLocal`, so there is nothing to
+        // fill (and `this` is not a pointer to fill through).
+        if (
+          !classInstance.hasDecorator(DecoratorFlags.InlineStruct) &&
+          !isGcClass(classInstance)
+        ) {
+          stmts.push(
+            this.makeInlineFieldZeroFill(property, thisLocalIndex, sizeTypeRef)
           );
+          flow.setThisFieldFlag(property, FieldFlags.Initialized);
         }
         continue;
       }
@@ -19017,12 +19100,13 @@ export class Compiler extends DiagnosticEmitter {
         // emitter entirely — it would store `sizeof(array)` bytes from a
         // pointer-shaped operand, which the validator rejects.
         //
-        // Nothing needs emitting instead: the record's payload comes back **zeroed**
-        // (`__new` runs `memory.fill(ptr, 0, size)`, `std/assembly/rt/itcms.ts`),
-        // and a value's zero is all-zero bytes. Measured: `new H()` then `h.arr[0]`
-        // is 0. An explicit initializer is not supported yet — it would have to
-        // write the value's leaves into `this + offsetof`, which is the
-        // field-write path, not this one.
+        // Nothing needs a value store instead: the record's payload comes back
+        // **zeroed** under `itcms` (`__new` runs `memory.fill(ptr, 0, size)`),
+        // and a value's zero is all-zero bytes. The constructor writes that zero
+        // itself below anyway (`makeInlineFieldZeroFill`), because the stub
+        // runtime's allocator does not zero. An explicit initializer is not
+        // supported yet — it would have to write the value's leaves into
+        // `this + offsetof`, which is the field-write path, not this one.
         if (fieldType.kind == TypeKind.FixedArray &&
             (fieldType.fixedMemoryModel == MemoryModelCode.None ||
              fieldType.fixedMemoryModel == MemoryModelCode.Inline)) {
@@ -19033,6 +19117,12 @@ export class Compiler extends DiagnosticEmitter {
               "an initializer on a `[T * N]` field in a `new`-constructed record (the field is inline bytes; assign its elements after construction instead, `h.arr[0] = ...`)"
             );
           }
+          if (!isGcClass(classInstance)) {
+            stmts.push(
+              this.makeInlineFieldZeroFill(field, thisLocalIndex, sizeTypeRef)
+            );
+          }
+          flow.setThisFieldFlag(field, FieldFlags.Initialized);
           continue;
         }
         let setterInstance = assert(field.setterInstance);
@@ -19046,6 +19136,12 @@ export class Compiler extends DiagnosticEmitter {
           expr = module.drop(expr);
         }
         stmts.push(expr);
+        // The setter above wrote the field's zero (a null address for the view
+        // form `@unmanaged [T * N]`), which is the same defined zero a scalar
+        // field gets for free -- so it satisfies the definite-assignment rule.
+        if (fieldType.kind == TypeKind.FixedArray) {
+          flow.setThisFieldFlag(field, FieldFlags.Initialized);
+        }
       }
     }
 

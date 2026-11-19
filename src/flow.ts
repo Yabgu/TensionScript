@@ -18,7 +18,8 @@
 import {
   Type,
   TypeFlags,
-  TypeKind
+  TypeKind,
+  Signature
 } from "./types";
 
 import {
@@ -598,6 +599,13 @@ export class Flow {
           property.prototype.parameterIndex != -1 ||
           // is safe to initialize with zero
           property.type.isAny(TypeFlags.Value | TypeFlags.Nullable) ||
+          // An **inline value** field (`@inline struct`) or a value-form
+          // `[T * N]` is inline bytes with no value representation: nothing can
+          // assign it as a whole, and the constructor zero-fills its extent
+          // (`Compiler#makeInlineFieldZeroFill`). Its zero is therefore defined
+          // by construction, the same claim the scalar clause above makes.
+          Signature.isInlineStructRef(property.type) ||
+          property.type.kind == TypeKind.FixedArray ||
           // A `[T *]` is an address, and its zero is the null pointer -- the
           // same claim `Compiler#makeZero` answers with a zero constant. The
           // flag test above is about *values* (`TypeFlags.Value`) and nullable

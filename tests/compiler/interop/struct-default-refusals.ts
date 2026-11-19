@@ -10,17 +10,19 @@
 // **2. Capturing a plain struct in a closure.** Before the flip this compiled
 // and **silently aliased**: the environment class held the record's 4-byte
 // pointer, so a write after the capture was visible through the closure
-// (measured: 997 where a copy gives 57). After the flip the environment class
-// would have to hold the value *inline in the heap* — the deferred
-// inline-in-heap case — so the capture is refused instead.
+// (measured: 997 where a copy gives 57). The environment class is an ordinary
+// class, and as of round VT4 a class field may hold an `@inline struct` inline
+// in the heap -- so the *declaration* is legal. What the capture still cannot do
+// is write the value into that field: a whole-value assignment has no store, so
+// the initializer is refused by name.
 //
 //     silent wrong value  ->  compile error
 //
 // The messages come from the environment class, not from a capture-specific
 // check: `ClosureLowerTransform` runs before resolution and holds no resolved
 // `Type`, so a "captured by value" diagnostic needs a post-resolution site. It
-// is filed as `closure-capture-of-value` (B.2) and the two messages pinned here
-// are what the tree says today. Pinning them means B.2 changes this fixture
+// is filed as `closure-capture-of-value` (B.2) and the messages pinned here are
+// what the tree says today. Pinning them means B.2 changes this fixture
 // deliberately rather than silently.
 //
 // The control that matters is measured, not pinned here (it must compile, and a
