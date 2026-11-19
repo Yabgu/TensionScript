@@ -158,6 +158,43 @@ jobs:
         ASC_FEATURES: threads,reference-types,gc,exception-handling
       run: |
         npm run test:compiler features/threads features/reference-types features/gc features/exception-handling bindings/esm bindings/raw
+  coreloop:
+    name: "Async core loop"
+    runs-on: ubuntu-latest
+    needs: [check, binaryen]
+    env:
+      # Pinned, not `latest`: the whole point is a module that one engine version
+      # compiles and runs, and the text/validation surface of stack switching is
+      # still moving. `package.json`'s `config.wasmtime` records the same version
+      # for local runs.
+      WASMTIME_VERSION: "v50.0.2"
+      # Make the test fail, not skip, if the binary is missing: this is the job
+      # that exists to execute the shell.
+      REQUIRE_WASMTIME: "1"
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: true
+    - name: "Download the vendored Binaryen"
+      uses: actions/download-artifact@v4
+      with:
+        name: binaryen-out
+        path: third_party/binaryen-out
+    - uses: actions/setup-node@v6
+      with:
+        node-version: current
+    - name: Install dependencies
+      run: npm ci --no-audit
+    - name: Build
+      run: npm run build
+    - name: "Install wasmtime (pinned)"
+      run: |
+        curl -fsSL https://wasmtime.dev/install.sh | bash -s -- --version "$WASMTIME_VERSION"
+        echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+    - name: "Run the async core loop test"
+      run: |
+        wasmtime --version
+        npm run test:coreloop
   runtimes:
     name: "Runtimes"
     runs-on: ubuntu-latest
