@@ -1833,6 +1833,46 @@ function xfail(name, condition, reason, detail) {
     built.output.split("\n").find((l) => /TS641/.test(l)) ?? "(none)");
 }
 
+// 64 — virtual dispatch: the override stub keys on the brand under GC --------
+//
+// The stub used to read the pointer-ABI header (`*(this - 8)` → rtId) and pass
+// `this` as a pointer-width `i32`. Under wasm GC neither exists: the receiver is
+// a reference and the dispatch key is its brand field. Five shapes are exercised,
+// because they failed differently: a concrete base with a base-typed variable, an
+// abstract class with a concrete method, an abstract method, an interface-typed
+// receiver, and extenders that inherit an override (their own brands must get a
+// case of their own or they fall through to the default arm).
+{
+  const built = compile("virtual.ts", "virt-gc.wasm", ["--wasmGc"]);
+  check("virtual dispatch compiles with --wasmGc and validation on", built.ok, built.output);
+  if (built.ok) {
+    const wat = readFileSync(join(scratch, "virt-gc.wat"), "utf8");
+    check("the override stub reads the brand (struct.get), not an object header",
+      /struct\.get \S+ \$<brand>/.test(wat) &&
+          !/func \S*#m@override[\s\S]{0,400}?i32\.load/.test(wat),
+      wat.split("\n").slice(0, 3).join("\n"));
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "virt-gc.wasm")), imports);
+    const e = instance.exports;
+    check("abstract class: two concrete shapes dispatch by brand",
+      e.shapes() === 46, `shapes() = ${e.shapes()} (expected 46)`);
+    check("three levels, an extender and a sibling override branch",
+      e.hierarchy() === 12222, `hierarchy() = ${e.hierarchy()} (expected 12222)`);
+    check("interface-typed receiver dispatches to the implementer",
+      e.iface() === 300, `iface() = ${e.iface()} (expected 300)`);
+  }
+  const plain = compile("virtual.ts", "virt-plain.wasm", []);
+  check("the same fixture compiles on the pointer ABI", plain.ok, plain.output);
+  if (plain.ok) {
+    const { instance } = await WebAssembly.instantiate(
+      readFileSync(join(scratch, "virt-plain.wasm")), imports);
+    const e = instance.exports;
+    check("pointer ABI: the same answers",
+      e.shapes() === 46 && e.hierarchy() === 12222 && e.iface() === 300,
+      `shapes=${e.shapes()} hierarchy=${e.hierarchy()} iface=${e.iface()}`);
+  }
+}
+
 // 63 — two fixes whose fixtures are blocked by a named defect ---------------
 //
 // Both were needed the moment the latch turned on for the 2D guest, and both are improvements

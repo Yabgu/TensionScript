@@ -10201,9 +10201,33 @@ export class Compiler extends DiagnosticEmitter {
     let numParameters = parameterTypes.length;
     let tempIndex = 1 + assert(instance.signature).wasmParamCount(); // incl. `this` and the hidden dest
 
-    // Switch over this's rtId and map it to the respective overload
-    let builder = new SwitchBuilder(this.module,
-      module.load(4, false,
+    // **Under wasm GC the receiver is a reference, not a pointer.** There is no
+    // object header to read (`*(this - 8)` is an i32 load through a ref), and
+    // `this` is not an i32 local. The dispatch key is the struct's brand field
+    // instead: `struct.get $<brand>` at `GC_BRAND_INDEX`, which every class in
+    // the hierarchy carries at field 0, so reading through the stub's own `this`
+    // type is well-typed for every override. `ref.test` cannot do this job —
+    // structural type identity makes it true for a sibling with the same layout
+    // (`makeGcBrandTest` documents the measurement) — so the compare is the
+    // brand, exactly.
+    let thisType = instance.signature.thisType;
+    let gcDispatch = isGcReferenceType(thisType);
+    let thisTypeRef = gcDispatch ? assert(thisType).toRef() : sizeTypeRef;
+
+    // Switch over this's rtId (pointer ABI) or brand (GC) and map it to the
+    // respective overload. `SwitchBuilder.render` stores the condition in
+    // `tempIndex` before comparing, so the brand is read exactly once — a
+    // `struct.get` reused in two compares would assert in `LocalCSE` at `-O2`.
+    let condition: ExpressionRef;
+    if (gcDispatch) {
+      condition = module.struct_get(
+        module.heapType(thisTypeRef),
+        GC_BRAND_INDEX,
+        module.local_get(0, thisTypeRef),
+        TypeRef.I32
+      );
+    } else {
+      condition = module.load(4, false,
         module.binary(
           sizeTypeRef == TypeRef.I64
             ? BinaryOp.SubI64
@@ -10214,8 +10238,9 @@ export class Compiler extends DiagnosticEmitter {
             : module.i32(8)
         ),
         TypeRef.I32
-      )
-    );
+      );
+    }
+    let builder = new SwitchBuilder(this.module, condition);
     let overrideInstances = this.resolver.resolveOverrides(instance);
     if (overrideInstances) {
       let mostRecentInheritanceMapping = new Map<Class, Class>();
@@ -10237,7 +10262,15 @@ export class Compiler extends DiagnosticEmitter {
         let overrideParameterTypes = overrideSignature.parameterTypes;
         let overrideNumParameters = overrideParameterTypes.length;
         let paramExprs = new Array<ExpressionRef>(1 + overrideNumParameters);
-        paramExprs[0] = module.local_get(0, sizeTypeRef); // this
+        // The override's `this` is its own class's ref type under GC, which is a
+        // subtype of the stub's. An argument of the stub's (super)type does not
+        // satisfy that parameter, so the brand-proven value is cast down to it.
+        paramExprs[0] = gcDispatch
+          ? module.ref_cast(
+              module.local_get(0, thisTypeRef),
+              assert(overrideSignature.thisType).toRef()
+            )
+          : module.local_get(0, sizeTypeRef); // this
         for (let n = 1; n <= numParameters; ++n) {
           paramExprs[n] = module.local_get(n, parameterTypes[n - 1].toRef());
         }
@@ -10271,7 +10304,7 @@ export class Compiler extends DiagnosticEmitter {
           );
         }
         let classInstance = assert(overrideInstance.getBoundClassOrInterface());
-        builder.addCase(classInstance.id, stmts);
+        builder.addCase(gcDispatch ? gcBrandOf(classInstance) : classInstance.id, stmts);
         // Also alias each extender inheriting this exact overload
         let extenders = classInstance.extenders;
         if (extenders) {
@@ -10286,7 +10319,7 @@ export class Compiler extends DiagnosticEmitter {
               !assert(mostRecentInheritanceMapping.get(extender)).extends(classInstance)
             ) {
               mostRecentInheritanceMapping.set(extender, classInstance);
-              builder.addOrReplaceCase(extender.id, stmts);
+              builder.addOrReplaceCase(gcDispatch ? gcBrandOf(extender) : extender.id, stmts);
             }
           }
         }
@@ -10301,7 +10334,7 @@ export class Compiler extends DiagnosticEmitter {
     let instanceClass = instance.getBoundClassOrInterface();
     if (!instance.is(CommonFlags.Abstract) && !(instanceClass && instanceClass.kind == ElementKind.Interface)) {
       let paramExprs = new Array<ExpressionRef>(numParameters);
-      paramExprs[0] = module.local_get(0, sizeTypeRef); // this
+      paramExprs[0] = module.local_get(0, thisTypeRef); // this
       for (let i = 0, k = parameterTypes.length; i < k; ++i) {
         paramExprs[1 + i] = module.local_get(1 + i, parameterTypes[i].toRef());
       }
