@@ -229,6 +229,35 @@ export async function main(): i32 {
   }
 }
 
+/** Runs one exported function after start and asserts its result. */
+function invokeAfterStart(wasmPath, bytes, name, args, expected, afterGlobals = [], gc = false) {
+  let escaped = "";
+  for (let i = 0; i < bytes.length; ++i) {
+    escaped += "\\" + bytes[i].toString(16).padStart(2, "0");
+  }
+  const wastPath = join(dirname(wasmPath), "probe.invoke.wast");
+  const argList = args.map((a) => `(i32.const ${a})`).join(" ");
+  writeFileSync(wastPath, [
+    gc
+      ? `(module $env (type $str (array (mut i16))) (func (export "abort") (param (ref null $str) (ref null $str) i32 i32)))`
+      : `(module $env (func (export "abort") (param i32 i32 i32 i32)))`,
+    `(register "env" $env)`,
+    `(module $m binary "${escaped}")`,
+    `(register "m" $m)`,
+    `(assert_return (invoke $m "${name}" ${argList}) (i32.const ${expected}))`,
+    // The same instance, after the invoke: a global the call wrote is only
+    // evidence if it is read here rather than in a second instantiation.
+    ...afterGlobals.map(([g, v]) => `(assert_return (get $m "${g}") (i32.const ${v}))`),
+    "",
+  ].join("\n"));
+  try {
+    execFileSync("wasmtime", ["wast", "-W", "stack-switching=y", wastPath], { stdio: "pipe" });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, output: `${error.stderr ?? ""}${error.stdout ?? ""}` };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 3c. `Executor.step` — one iteration, programmable, observed.
 // ---------------------------------------------------------------------------
@@ -287,6 +316,74 @@ export async function main(): i32 {
           [["firstCount", 6], ["secondCount", 3]]);
         check("the counting step ran 6 iterations, then 3 with two drives each",
           first.ok, true);
+      }
+    } finally {
+      built.dispose();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3d. A posted request, served: the guest half of the threading ABI.
+// ---------------------------------------------------------------------------
+
+console.log("\n# 3d a self-spawned request is served");
+{
+  // No thread, no host: `__spawnOn` posts an index into main's inbox ring, and
+  // main's step drains it with `__serveOne`, which turns `$starts[index]` into a
+  // continuation in this store. The served body awaits, so the value can only
+  // arrive if the whole chain works.
+  const source = `
+import { __spawnOn, mainStep, mainExecutor } from "~lib/thread";
+
+export let served: i32 = -1;
+
+async function leaf(): i32 { return 0; }
+async function work(): i32 {
+  await leaf();
+  served = 4242;
+  return 4242;
+}
+
+export function trySpawn(index: i32): i32 {
+  __spawnOn(0, index, 0, 0);
+  let guard = 0;
+  while (mainExecutor().ready.depth > 0 || mainExecutor().inbox.depth > 0) {
+    if (mainStep(mainExecutor())) break;
+    if (++guard > 10000) break;
+  }
+  return served;
+}
+
+export async function main(): i32 { return 0; }
+`;
+  const built = compile(source);
+  check("the spawn-target fixture compiles", built.error === undefined, true);
+  if (!built.error) {
+    try {
+      // The index is a compile-time fact of the table: read it from the element
+      // segment rather than hard-coding one, so a change to the order is caught
+      // here instead of silently serving the wrong function.
+      const elem = built.wat.match(/\(elem \$\$starts\$elem[^\n]*/);
+      // The index is the function's position in the **whole** table, so the
+      // count starts after `func` — the segment's own `$starts$elem`/`$starts`
+      // names come before it. `[^\s)]` stops each match at the closing
+      // parenthesis, which `\S+` swallows (measured).
+      const tail = elem ? (elem[0].split(" func ")[1] ?? "") : "";
+      const names = tail.match(/\$[^\s)]+/g) ?? [];
+      const index = names.indexOf("$probe/work$spawnStart");
+      check("the transform synthesized a spawn start for the parameterless task",
+        index >= 0, true);
+      check("posting and serving use the guest primitives",
+        /__spawnOn/.test(built.wat) && /__serveOne/.test(built.wat), true);
+      if (wasmtime != null && index >= 0) {
+        // `served` is written *inside* the body after its own await, so reading
+        // it in the same instance proves the served task ran: a faked return
+        // would leave it at -1.
+        const ran = invokeAfterStart(built.wasmPath, built.bytes, "trySpawn", [index], 4242,
+          [["served", 4242]]);
+        check("the posted request is served and its value observed (4242)",
+          ran.ok, true);
       }
     } finally {
       built.dispose();

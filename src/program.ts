@@ -535,6 +535,20 @@ export class Program extends DiagnosticEmitter {
    */
   hasAwait: bool = false;
 
+  /**
+   * The synthesized `$spawnStart` declarations the stackful transform emitted —
+   * one per parameterless may-suspend function (`docs/task-design.md` §8.5's
+   * "compiler-synthesized start", narrowed to what Gate 3 needs). Declarations,
+   * not names: the compiler resolves them through `elementsByDeclaration`, which
+   * is the one map that cannot disagree with mangling.
+   *
+   * The compiler adds each to the `$starts` table so a request can name it by
+   * index, and compiles it: nothing else references it, so ordinary
+   * reachability would drop it. Registration order is transform order, which is
+   * program order, which is what makes the index deterministic (§3).
+   */
+  asyncSpawnStarts: DeclarationStatement[] = [];
+
   // Lookup maps
 
   /** Files by unique internal name. */

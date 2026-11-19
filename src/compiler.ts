@@ -1175,6 +1175,31 @@ export class Compiler extends DiagnosticEmitter {
 
     this.asyncStartFunctions.add(ASYNC_MAIN_START);
     this.asyncStartFunctions.add(coreloop.internalName);
+
+    // **The spawn starts, compiled here and not by reachability.** Nothing in
+    // the program references `f$spawnStart`: a request names it by *index* in
+    // `$starts`, which no call site can express. So they are compiled
+    // explicitly, before the lazy queue is drained, exactly as `__installCont`
+    // compiles the `f$start` it installs.
+    let spawnStarts = program.asyncSpawnStarts;
+    let spawnElements = program.elementsByDeclaration;
+    for (let i = 0, k = spawnStarts.length; i < k; ++i) {
+      let element = spawnElements.get(unchecked(spawnStarts[i]));
+      if (!element) continue;
+      // The map holds the **prototype** at this point (`FunctionPrototype`),
+      // not the instance: `initialize` registers declarations, and an instance
+      // exists only once something resolves it. Resolving here is the same act
+      // `__installCont` performs for the `f$start` it installs.
+      let instance: Function | null = null;
+      if (element.kind == ElementKind.Function) {
+        instance = <Function>element;
+      } else if (element.kind == ElementKind.FunctionPrototype) {
+        instance = this.resolver.resolveFunction(<FunctionPrototype>element, null);
+      }
+      if (!instance) continue;
+      this.compileFunction(instance);
+      this.asyncStartFunctions.add(instance.internalName);
+    }
   }
 
   /**

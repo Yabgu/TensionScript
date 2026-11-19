@@ -117,6 +117,8 @@ const BODY_SUFFIX = "$body";
 const START_SUFFIX = "$start";
 /** Suffix of the synthesized task subclass. */
 const RECORD_SUFFIX = "$Rec";
+/** Suffix of the synthesized spawn entry (Gate 3d; §8.5's `f$spawnStart`). */
+const SPAWN_SUFFIX = "$spawnStart";
 /** The task's continuation slot (`TaskBase.slot`). */
 const SLOT_FIELD = "slot";
 /** The task's completion flag (`TaskBase.settled`). */
@@ -588,7 +590,105 @@ export class StackfulAsyncTransform {
     declaration.signature.returnType = taskTypeNode(returnType, range);
     declaration.isAsync = false;
 
-    return [ recordClass, bodyFunction, startFunction, declaration ];
+    // --- the spawn start (Gate 3d) ------------------------------------------
+    //
+    // A request that crossed a thread boundary names a function by **index** in
+    // `$starts`, so the function it names must be self-contained: no arguments,
+    // a task it owns, and a value it returns. That is `docs/task-design.md`
+    // §8.5's `f$spawnStart`, narrowed to what this gate needs — **no
+    // parameters**. Gate 4 generalises it to `argSlot` (the captured
+    // environment) and to closures.
+    //
+    //   function f$spawnStart(): i32 {
+    //     let $t = f();
+    //     $t.home = 0;        // this executor; Gate 4 takes it from the server
+    //     $t.drive();         // run it; a suspension parks *this* slot
+    //     return $t.value;
+    //   }
+    //
+    // `$t.drive()` parks the current task on `$t`, and the current task here is
+    // the served slot itself, so when `$t` settles the executor resumes this
+    // continuation and the `return` reads the value.
+    let artifacts = new Array<Statement>();
+    artifacts.push(recordClass);
+    artifacts.push(bodyFunction);
+    artifacts.push(startFunction);
+    if (parameters.length == 0) {
+      let spawnName = name + SPAWN_SUFFIX;
+      let takenCollision = false;
+      for (let i = 0, k = declared.length; i < k; ++i) {
+        if (unchecked(declared[i]) == spawnName) takenCollision = true;
+      }
+      if (takenCollision) {
+        this.refuse(parser, declaration.name.range, "an async function whose synthesized spawn entry name is taken (the stackful backend)");
+        return null;
+      }
+      let taskIdentSpawn = Node.createIdentifierExpression("$spawnTask", range);
+      let spawnStatements = new Array<Statement>();
+      spawnStatements.push(Node.createVariableStatement(
+        null,
+        [
+          Node.createVariableDeclaration(
+            Node.createIdentifierExpression("$spawnTask", range),
+            null, CommonFlags.Let,
+            taskTypeNode(returnType, range),
+            Node.createCallExpression(
+              Node.createIdentifierExpression(name, declaration.name.range),
+              null,
+              [],
+              range
+            ),
+            range
+          )
+        ],
+        range
+      ));
+      spawnStatements.push(Node.createExpressionStatement(
+        assignField(taskIdentSpawn, "home", intLiteral(0, range), range)
+      ));
+      spawnStatements.push(Node.createExpressionStatement(
+        Node.createCallExpression(
+          Node.createPropertyAccessExpression(
+            taskIdentSpawn,
+            Node.createIdentifierExpression("drive", range),
+            range
+          ),
+          null,
+          [],
+          range
+        )
+      ));
+      spawnStatements.push(Node.createReturnStatement(
+        Node.createPropertyAccessExpression(
+          Node.createIdentifierExpression("$spawnTask", range),
+          Node.createIdentifierExpression("value", range),
+          range
+        ),
+        range
+      ));
+      let spawnFunction = Node.createFunctionDeclaration(
+        Node.createIdentifierExpression(spawnName, declaration.name.range),
+        null, CommonFlags.None,
+        null,
+        Node.createFunctionType(
+          new Array<ParameterNode>(),
+          typeNode("i32", range),
+          null, false,
+          range
+        ),
+        Node.createBlockStatement(spawnStatements, range),
+        ArrowKind.None,
+        range
+      );
+      artifacts.push(spawnFunction);
+      // The declaration, not the name: the compiler resolves it after
+      // initialization, when the internal name exists. The simple name is still
+      // what the collision check above used, because that is what a source
+      // declaration owns.
+      this.program.asyncSpawnStarts.push(spawnFunction);
+    }
+    artifacts.push(declaration);
+    return artifacts;
   }
 
   /** Refuses an async method; clears the modifier on a non-suspending one. */
