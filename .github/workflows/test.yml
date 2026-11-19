@@ -195,6 +195,7 @@ jobs:
       run: |
         wasmtime --version
         npm run test:coreloop
+        npm run test:await
   runtimes:
     name: "Runtimes"
     runs-on: ubuntu-latest

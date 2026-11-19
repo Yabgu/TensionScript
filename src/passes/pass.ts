@@ -1033,11 +1033,30 @@ export abstract class Visitor {
         break;
       }
       // Stack switching. The fork's C API patch exposes the constructors but
-      // no child accessors, so these expressions are opaque to this walk.
-      // Sound for A1's shell — its operands are a function reference, a table
-      // slot and an i32 status, none of them managed — and a named limitation
-      // for P2: a resume carrying a managed operand needs accessors added to
-      // the patch before it needs rooting here.
+      // no child accessors, so these expressions remain opaque to this walk.
+      //
+      // **A2's outcome is the proof arm, not the accessor arm.** Every operand
+      // the suspending shell can place on these nodes is a non-managed value:
+      //
+      //   ContNew  — `ref.func $f$start`, a function reference. It is not a
+      //              class/array/string, so the pass has nothing to root; the
+      //              shadow stack's set is the managed heap objects, not
+      //              funcrefs.
+      //   Suspend  — the `$await` payload, an i32 record address. The record
+      //              itself is a static-arena cell, not an operand of this
+      //              node and not on the managed heap; the awaiting task's
+      //              `TaskRecord` pointer is a local on the captured stack.
+      //   Resume   — the continuation from `table.get $~asyncCont`. A
+      //              continuation reference is a stack handle, not a managed
+      //              class/array/string/function value.
+      //
+      // This stays true for A3's depth case because the depth is carried by
+      // more records in the same arena and more slots in the same table, not
+      // by a different operand kind. If a later round makes a suspended cell a
+      // *managed* class reachable only through one of these operands, the
+      // accessors have to be added to the patch before that lands; the comment
+      // is the checkpoint, and `tests/async/await.js` asserts the emitted
+      // shapes (i32 payload, ref.func/cont.new, table.get/resume).
       case ExpressionId.ContNew:
       case ExpressionId.Suspend:
       case ExpressionId.Resume:
@@ -1879,7 +1898,8 @@ export function replaceChild(
       }
       break;
     }
-    // Stack switching: opaque for the same reason as in `visit` above.
+    // Stack switching: opaque for the same reason as in `visit` above; the
+    // operands are ref.func, an i32 payload and a cont ref, none managed.
     case ExpressionId.ContNew:
     case ExpressionId.Suspend:
     case ExpressionId.Resume:
