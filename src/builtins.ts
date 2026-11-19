@@ -27,7 +27,11 @@ import {
   Compiler,
   Constraints,
   RuntimeFeatures,
-  UncheckedBehavior
+  UncheckedBehavior,
+  ASYNC_IDLE_TAG,
+  ASYNC_DONE_TAG,
+  ASYNC_CONT_TABLE,
+  ASYNC_MAIN_SLOT
 } from "./compiler";
 
 import {
@@ -741,6 +745,14 @@ export namespace BuiltinNames {
   export const visit_globals = "~lib/rt/__visit_globals";
   export const visit_members = "~lib/rt/__visit_members";
   export const tostack = "~lib/rt/__tostack";
+
+  // std/async.ts — the core loop's mechanism half. Not exported from the
+  // library and refused from any other source (see the handlers below).
+  export const asyncResumeMain = "~lib/async/__resumeMain";
+  export const asyncSuspendDone = "~lib/async/__suspendDone";
+  export const asyncSuspendIdle = "~lib/async/__suspendIdle";
+  export const asyncCoreloop = "~lib/async/__coreloop";
+  export const asyncPump = "~lib/async/__asyncPump";
 
   // std/number.ts
   export const NaN = "~lib/number/NaN";
@@ -11998,6 +12010,115 @@ function checkTypeOptional(ctx: BuiltinFunctionContext, setCurrentTypeOnError: b
   }
   return 0;
 }
+
+// === Async core loop ========================================================================
+//
+// The mechanism half of `std/assembly/async.ts` (docs/async-core-loop.md §7.4).
+// The compiler owns the tags, the continuation table and the continuation
+// types; these three builtins are the only way the policy half can touch them,
+// and they read the shape from the compiler's latches rather than re-deriving
+// it. A call reached from anywhere but the async library is refused: the
+// declarations are not exported from `~lib/async`, and this check is what
+// catches a bare global-name reference that the resolver would otherwise find.
+
+/**
+ * Shared admission check. Returns `1` on refusal.
+ *
+ * **Two gates, and what they do not cover.** The declarations in
+ * `std/assembly/async.ts` are `declare function`s without `export`, so no
+ * source can import them; the resolver reports `TS2305`/`TS2304` for an
+ * ordinary file that tries. This check catches what the resolver cannot: a
+ * *global* name match, which is how the closure lowering's `__closureInit` is
+ * reached, and it is stated by source path because a path is the only identity
+ * a call site has.
+ *
+ * The gap that leaves, named rather than hidden: a user library that shadows
+ * `~lib/async.ts` would make its own members "the async library" and could call
+ * these. Closing that needs a privilege model — a per-file capability the
+ * resolver carries — which is a larger change than this round, and one whose
+ * absence today costs a program that is deliberately lying about its path.
+ */
+function checkAsyncIntrinsic(ctx: BuiltinFunctionContext): i32 {
+  let compiler = ctx.compiler;
+  if (ctx.reportNode.range.source.internalPath != "~lib/async") {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.range,
+      ctx.prototype.internalName + " is internal to the async core loop (std/assembly/async.ts)"
+    );
+    return 1;
+  }
+  if (!compiler.asyncShellPrepared) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.range,
+      ctx.prototype.internalName + " requires the async shell, which this program does not emit"
+    );
+    return 1;
+  }
+  return 0;
+}
+
+// __resumeMain() -> i32
+function builtin_async_resumeMain(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.i32;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 0) |
+    checkAsyncIntrinsic(ctx)
+  ) return module.unreachable();
+  let cont = module.table_get(
+    ASYNC_CONT_TABLE,
+    module.global_get(ASYNC_MAIN_SLOT, TypeRef.I32),
+    compiler.asyncCtMainRef
+  );
+  let resumed = module.resume(cont, compiler.asyncCtMainHeap);
+  // A `void` main has no value to carry; the status is 0. A main whose result
+  // is neither `void` nor i32-shaped (an async `main` lowered to `Task<T>`, for
+  // one) is evaluated and its value dropped. Either way the intrinsic keeps a
+  // uniform `i32` result, so the library is written once.
+  if (compiler.asyncMainReturnsValue) return resumed;
+  if (compiler.asyncMainDropsResult) {
+    return module.block(null, [ module.drop(resumed), module.i32(0) ], TypeRef.I32);
+  }
+  return module.block(null, [ resumed, module.i32(0) ], TypeRef.I32);
+}
+builtinFunctions.set(BuiltinNames.asyncResumeMain, builtin_async_resumeMain);
+
+// __suspendDone(status: i32) -> void
+function builtin_async_suspendDone(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.void;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 1) |
+    checkAsyncIntrinsic(ctx)
+  ) return module.unreachable();
+  let status = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
+  // Compiling the operand leaves `currentType` at the operand's type; the
+  // call's own result is `void` (the expression statement would otherwise
+  // wrap an unreachable `suspend` in a `drop`, which the validator rejects).
+  compiler.currentType = Type.void;
+  return module.suspend(ASYNC_DONE_TAG, [ status ]);
+}
+builtinFunctions.set(BuiltinNames.asyncSuspendDone, builtin_async_suspendDone);
+
+// __suspendIdle() -> void
+function builtin_async_suspendIdle(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.void;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 0) |
+    checkAsyncIntrinsic(ctx)
+  ) return module.unreachable();
+  return module.suspend(ASYNC_IDLE_TAG, []);
+}
+builtinFunctions.set(BuiltinNames.asyncSuspendIdle, builtin_async_suspendIdle);
 
 /** Checks a call that is not generic. Returns `1` on error. */
 function checkTypeAbsent(ctx: BuiltinFunctionContext): i32 {

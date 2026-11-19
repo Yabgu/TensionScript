@@ -247,6 +247,7 @@
       " gc                  Garbage collection (WIP).",
       " stringref           String reference types.",
       " relaxed-simd        Relaxed SIMD operations.",
+      " stack-switching     Continuations (used by async; enabling it also enables gc).",
       ""
     ],
     "TODO_doesNothingYet": [

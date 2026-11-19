@@ -457,6 +457,14 @@ export declare function _BinaryenRefFunc(module: ModuleRef, funcName: StringRef,
 export declare function _BinaryenRefFuncGetFunc(expr: ExpressionRef): StringRef;
 export declare function _BinaryenRefFuncSetFunc(expr: ExpressionRef, funcName: StringRef): void;
 
+// Stack switching. Added by the fork's C API patch (Yabgu/binaryen,
+// tension-v131.0.0); upstream Binaryen 131 exposes none of these.
+export declare function _BinaryenContNew(module: ModuleRef, type: HeapTypeRef, func: ExpressionRef): ExpressionRef;
+export declare function _BinaryenSuspend(module: ModuleRef, tag: StringRef, args: ArrayRef<ExpressionRef>, numArgs: Index): ExpressionRef;
+export declare function _BinaryenResume(module: ModuleRef, cont: ExpressionRef, contType: HeapTypeRef): ExpressionRef;
+export declare function _BinaryenResumeWithHandlers(module: ModuleRef, cont: ExpressionRef, contType: HeapTypeRef, handlerTags: ArrayRef<StringRef>, handlerBlocks: ArrayRef<StringRef>, numHandlers: Index): ExpressionRef;
+export declare function _BinaryenResumeThrow(module: ModuleRef, cont: ExpressionRef, contType: HeapTypeRef, tag: StringRef, args: ArrayRef<ExpressionRef>, numArgs: Index): ExpressionRef;
+
 export declare function _BinaryenRefEq(module: ModuleRef, leftExpr: ExpressionRef, rightExpr: ExpressionRef): ExpressionRef;
 export declare function _BinaryenRefEqGetLeft(expr: ExpressionRef): ExpressionRef;
 export declare function _BinaryenRefEqSetLeft(expr: ExpressionRef, leftExpr: ExpressionRef): void;
@@ -896,6 +904,7 @@ export declare function _TypeBuilderGetSize(builder: TypeBuilderRef): Index;
 export declare function _TypeBuilderSetSignatureType(builder: TypeBuilderRef, index: Index, paramTypes: TypeRef, resultTypes: TypeRef): void;
 export declare function _TypeBuilderSetStructType(builder: TypeBuilderRef, index: Index, fieldTypes: ArrayRef<TypeRef>, fieldPackedTypes: ArrayRef<PackedType>, fieldMutables: ArrayRef<bool>, numFields: i32): void;
 export declare function _TypeBuilderSetArrayType(builder: TypeBuilderRef, index: Index, elementType: TypeRef, elementPackedTyype: PackedType, elementMutable: bool): void;
+export declare function _TypeBuilderSetContinuation(builder: TypeBuilderRef, index: Index, funcType: HeapTypeRef): void;
 export declare function _TypeBuilderGetTempHeapType(builder: TypeBuilderRef, index: Index): HeapTypeRef;
 export declare function _TypeBuilderGetTempTupleType(builder: TypeBuilderRef, types: ArrayRef<TypeRef>, numTypes: Index): TypeRef;
 export declare function _TypeBuilderGetTempRefType(builder: TypeBuilderRef, heapType: HeapTypeRef, nullable: bool): TypeRef;
