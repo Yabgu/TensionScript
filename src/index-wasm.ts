@@ -210,6 +210,8 @@ export const FEATURE_EXTENDED_CONST = Feature.ExtendedConst;
 export const FEATURE_STRINGREF = Feature.Strings;
 /** Shared-everything threads. */
 export const FEATURE_SHARED_EVERYTHING = Feature.SharedEverything;
+/** Stack switching (continuations). */
+export const FEATURE_STACK_SWITCHING = Feature.StackSwitching;
 /** All features. */
 export const FEATURES_ALL = Feature.All;
 /** Default features. */
