@@ -8727,6 +8727,7 @@ export class Compiler extends DiagnosticEmitter {
     contextualType: Type
   ): ExpressionRef {
     let program = this.program;
+    let module = this.module;
     let resolver = program.resolver;
     let flow = this.currentFlow;
 
@@ -8769,6 +8770,34 @@ export class Compiler extends DiagnosticEmitter {
           elementAccess, arrayType, true,
           contextualType, Constraints.None, valueExpression
         );
+      }
+      // `arr[i] = value` on `Array<Res>` where the element is an `@inline
+      // struct`: the SROA -> memory copy at `dataStart + i * sizeof(Res)`.
+      // Before the GC and index-signature arms, both of which take the element
+      // as a value with no representation.
+      if (arrayType != null && contextualType == Type.void) {
+        let inlineElement = this.inlineStructArrayElementOf(arrayType);
+        if (inlineElement != null) {
+          let sourceTree = this.sroaTreeOf(valueExpression);
+          if (sourceTree == null) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              valueExpression.range,
+              "assigning this expression to an Array element of an @inline struct type (only a value held in a local can be stored: a value has no address, so there are no leaves to copy)"
+            );
+            this.currentType = Type.void;
+            return module.unreachable();
+          }
+          let address = this.compileInlineStructArrayElementAddress(
+            elementAccess, arrayType, inlineElement
+          );
+          let addrLocal = flow.getTempLocal(this.options.usizeType);
+          let writeStmts = new Array<ExpressionRef>();
+          writeStmts.push(module.local_set(addrLocal.index, address, false));
+          this.copySroaToMemory(inlineElement, sourceTree, addrLocal.index, 0, writeStmts);
+          this.currentType = Type.void;
+          return module.flatten(writeStmts, TypeRef.None);
+        }
       }
       // **`a[i] = v` on a wasm GC `StaticArray<T>`: `array.set`.** Intercepted
       // here, before the index-signature lookup — that lookup resolves `__set`,
@@ -8894,6 +8923,55 @@ export class Compiler extends DiagnosticEmitter {
       }
       case ElementKind.Property: {
         let propertyInstance = <Property>target;
+        // `obj.field = value` where `field` holds inline bytes in a
+        // **pointer-layout** object and `value` is an SROA local: the memory <-
+        // SROA direction of the whole-value copy. `$rec.value = $r` in the
+        // stackful async lowering is exactly this shape — the task object's
+        // inline result field — and compiling `value` first would read it as a
+        // whole, which is the refusal this replaces.
+        //
+        // Only statement position is taken: an assignment used as a value would
+        // need this copy to produce one, and an inline struct has no value
+        // representation to produce. That shape keeps its named refusal.
+        if (
+          contextualType == Type.void &&
+          propertyInstance.isField &&
+          this.isInlineStructType(propertyInstance.type) &&
+          thisExpression != null
+        ) {
+          let sourceTree = this.sroaTreeOf(valueExpression);
+          if (sourceTree != null) {
+            let sourceType = resolver.resolveExpression(valueExpression, this.currentFlow);
+            if (sourceType == null || !sourceType.equals(propertyInstance.type)) {
+              this.error(
+                DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+                valueExpression.range,
+                sourceType != null ? sourceType.toString() : "unknown",
+                propertyInstance.type.toString()
+              );
+              return module.unreachable();
+            }
+            let receiverType = resolver.resolveExpression(thisExpression, this.currentFlow);
+            if (receiverType == null) return module.unreachable();
+            let receiver = this.compileExpression(
+              thisExpression, receiverType, Constraints.ConvImplicit
+            );
+            let offset = propertyInstance.memoryOffset;
+            let address = offset
+              ? module.binary(
+                  BinaryOp.AddSize,
+                  receiver,
+                  this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+                )
+              : receiver;
+            let addrLocal = flow.getTempLocal(this.options.usizeType);
+            let stmts = new Array<ExpressionRef>();
+            stmts.push(module.local_set(addrLocal.index, address, false));
+            this.copySroaToMemory(propertyInstance.type, sourceTree, addrLocal.index, 0, stmts);
+            this.currentType = Type.void;
+            return module.flatten(stmts, TypeRef.None);
+          }
+        }
         if (propertyInstance.isField) {
           if (this.pendingElements.has(target)) {
             this.error(
@@ -8943,6 +9021,52 @@ export class Compiler extends DiagnosticEmitter {
 
         assert(parameterTypes.length == 2); // parser must guarantee this
         targetType = parameterTypes[1];     // 2nd parameter is the element
+
+        // `arr[i] = value` where the element is an `@inline struct` and the
+        // value is an SROA local. The setter takes the value **by value**, so
+        // the direct call expands the leaves — the same `expandSroaArgument`
+        // path every other by-value call uses. Compiling `value` first would
+        // read it as a whole, which is the refusal this replaces; `Array<Res>`
+        // is this shape (`Array#__set`).
+        if (
+          contextualType == Type.void &&
+          this.isInlineStructType(targetType)
+        ) {
+          let sourceTree = this.sroaTreeOf(valueExpression);
+          if (sourceTree == null) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              valueExpression.range,
+              "assigning this expression to an Array element of an @inline struct type (only a value held in a local can be stored: a value has no address, so there are no leaves to copy)"
+            );
+            this.currentType = Type.void;
+            return module.unreachable();
+          }
+          if (sourceTree != null) {
+            let sourceType = resolver.resolveExpression(valueExpression, this.currentFlow);
+            if (sourceType == null || !sourceType.equals(targetType)) {
+              this.error(
+                DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+                valueExpression.range,
+                sourceType != null ? sourceType.toString() : "unknown",
+                targetType.toString()
+              );
+              return module.unreachable();
+            }
+            let setterThisType = assert(indexedSet.signature.thisType);
+            let setterThis = this.compileExpression(
+              assert(thisExpression), setterThisType,
+              Constraints.ConvImplicit | Constraints.IsThis
+            );
+            this.currentType = Type.void;
+            return this.compileCallDirect(
+              indexedSet,
+              [ assert(elementExpression), valueExpression ],
+              expression,
+              setterThis
+            );
+          }
+        }
 
         if (indexedSet.hasDecorator(DecoratorFlags.Unsafe)) this.checkUnsafe(expression);
         if (!isUnchecked && this.options.pedantic) {
@@ -9910,6 +10034,32 @@ export class Compiler extends DiagnosticEmitter {
       return this.module.unreachable();
     }
     if (instance.hasDecorator(DecoratorFlags.Unsafe)) this.checkUnsafe(reportNode);
+
+    // **`Array<Res>` methods other than the index operators are refused by
+    // name.** The std bodies index with `i << alignof<T>()`, which is the
+    // element's size only for a power-of-two scalar; an `@inline struct` element
+    // is inline bytes whose size and alignment can disagree. The compiler emits
+    // `[]`/`[]=` itself, and the layout accessors below are unaffected; every
+    // other method would address the wrong bytes.
+    let arrayThisType = signature.thisType;
+    if (arrayThisType != null) {
+      let arrayElement = this.inlineStructArrayElementOf(arrayThisType);
+      if (
+        arrayElement != null &&
+        !this.isInlineStructArrayMethodAllowed(instance.prototype.name)
+      ) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          reportNode.range,
+          "calling '" + instance.prototype.name + "' on an Array<" +
+            arrayElement.toString() + "> whose element is an @inline struct " +
+            "(the std body indexes elements by alignment, not by sizeof; the " +
+            "index operator `arr[i]` is the supported path)"
+        );
+        this.currentType = signature.returnType;
+        return this.module.unreachable();
+      }
+    }
 
     // Sret: take the destination address **now**, before any argument is
     // compiled. An argument that is itself an sret call allocates its own slot
@@ -11720,6 +11870,131 @@ export class Compiler extends DiagnosticEmitter {
     );
   }
 
+  /**
+   * The element type of a std `Array<T>` whose `T` is an `@inline struct`, or
+   * `null`.
+   *
+   * Answered from the `Array` prototype's type arguments, so a user class that
+   * extends `Array<T>` is covered too. Everything else — a typed array, a
+   * `@managed @dynamic`, an `Array` of references — is not this shape.
+   */
+  private inlineStructArrayElementOf(type: Type): Type | null {
+    let classReference = type.classReference;
+    if (classReference == null) return null;
+    let typeArguments = classReference.getTypeArgumentsTo(this.program.arrayPrototype);
+    if (typeArguments == null || typeArguments.length != 1) return null;
+    let element = unchecked(typeArguments[0]);
+    return this.isInlineStructType(element) ? element : null;
+  }
+
+  /**
+   * Whether a method of a std `Array<T>` is correct for an `@inline struct`
+   * element.
+   *
+   * The index operators never reach their std bodies (the compiler emits them),
+   * and the layout accessors are plain field reads whose answer does not depend
+   * on the element's size. Everything else in `Array<T>` indexes with
+   * `i << alignof<T>()`, which equals the element's size only for
+   * power-of-two-sized scalars: `Res{i32,i32}` is 8 bytes at alignment 4, so
+   * `push`, `at`, `slice`, … would address every other element. Named refusal,
+   * never a silent miscompile.
+   */
+  private isInlineStructArrayMethodAllowed(name: string): bool {
+    return name == "constructor" ||
+      name == "__get" ||
+      name == "__uget" ||
+      name == "__set" ||
+      name == "get:length" ||
+      name == "get:length_" ||
+      name == "set:length_" ||
+      name == "get:dataStart" ||
+      name == "get:buffer" ||
+      name == "get:byteLength";
+  }
+
+  /**
+   * The address of `arr[index]` for `Array<Res>` where `Res` is an `@inline
+   * struct`: a bounds check against `length_`, then `dataStart + index *
+   * sizeof(Res)`.
+   *
+   * `sizeof`, not `1 << alignof`. The stride is the element's **extent**
+   * (`inlineExtentBytes`, which for an inline struct is the record's layout
+   * size), the same number `sizeof<Res>()` answers and the same one the C side
+   * uses — a shift by the alignment would land every second element on the same
+   * bytes for a record like `Res{i32,i32}`.
+   *
+   * An out-of-range write does **not** grow the array here: growth would have to
+   * reallocate the buffer with the correct byte size and update the header
+   * fields, which is `Array#push`'s job — and `push` is refused by name for this
+   * element kind (`isInlineStructArrayMethodAllowed`). The trap is the honest
+   * answer for an index past `length`.
+   */
+  private compileInlineStructArrayElementAddress(
+    expression: ElementAccessExpression,
+    arrayType: Type,
+    elementType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classReference = assert(arrayType.classReference);
+    let members = classReference.members;
+    assert(members != null);
+    assert(members!.has("dataStart") && members!.has("length_"));
+    let dataOffset = (<PropertyPrototype>assert(members!.get("dataStart")))
+      .instance!.memoryOffset;
+    let lengthOffset = (<PropertyPrototype>assert(members!.get("length_")))
+      .instance!.memoryOffset;
+    let refLocal = flow.getTempLocal(arrayType);
+    let indexLocal = flow.getTempLocal(Type.i32);
+    let length = module.load(
+      4, false, module.local_get(refLocal.index, TypeRef.I32), TypeRef.I32, lengthOffset, 4
+    );
+    let base = module.load(
+      4, false, module.local_get(refLocal.index, TypeRef.I32), TypeRef.I32, dataOffset, 4
+    );
+    let indexRef = module.local_get(indexLocal.index, TypeRef.I32);
+    let elementSize = elementType.inlineExtentBytes;
+    let scaled = module.binary(
+      BinaryOp.MulSize,
+      this.options.isWasm64 ? module.unary(UnaryOp.ExtendU32ToU64, indexRef) : indexRef,
+      this.options.isWasm64 ? module.i64(elementSize) : module.i32(elementSize)
+    );
+    let setup = module.block(null, [
+      module.local_set(
+        refLocal.index,
+        this.compileExpression(expression.expression, arrayType, Constraints.ConvImplicit),
+        false
+      ),
+      module.local_set(
+        indexLocal.index,
+        this.compileExpression(expression.elementExpression, Type.i32, Constraints.ConvImplicit),
+        false
+      ),
+      flow.is(FlowFlags.UncheckedContext)
+        ? module.nop()
+        : module.if(
+            module.binary(
+              BinaryOp.GeU32,
+              module.local_get(indexLocal.index, TypeRef.I32),
+              length
+            ),
+            this.makeAbort(
+              Node.createStringLiteralExpression(
+                "Array index out of bounds",
+                expression.range
+              ),
+              expression
+            ),
+            0
+          )
+    ], TypeRef.None);
+    this.currentType = elementType;
+    return module.block(null, [
+      setup,
+      module.binary(BinaryOp.AddSize, base, scaled)
+    ], TypeRef.I32);
+  }
+
   /** Compiles the byte address of `array[index]`. */
   private compileFixedArrayElementAddress(
     expression: ElementAccessExpression,
@@ -11840,6 +12115,17 @@ export class Compiler extends DiagnosticEmitter {
       if (this.isManagedDynamicArrayType(targetType)) {
         return this.compileDynamicArrayElementAccess(
           expression, targetType, false, contextualType, constraints
+        );
+      }
+      // **`Array<Res>` indexed where `Res` is an `@inline struct`.** The element
+      // is inline bytes, so its address is `dataStart + i * sizeof(Res)` — and
+      // `sizeof`, not the alignment std's generic `[]` shifts by. The read yields
+      // the element's **address** typed as the element; a consumer copies the
+      // fields out of it (or reads one field, which is a load at that address).
+      let inlineArrayElement = this.inlineStructArrayElementOf(targetType);
+      if (inlineArrayElement != null) {
+        return this.compileInlineStructArrayElementAddress(
+          expression, targetType, inlineArrayElement
         );
       }
       // **A dynamic `Array<T>` indexed: `array.get data[i]`**, checked against
@@ -12767,8 +13053,19 @@ export class Compiler extends DiagnosticEmitter {
     // The await expression has exactly the task's value type: the accessor is
     // monomorphized from the declared field type (there is no cast, offset or
     // runtime check), so the value the getter hands back *is* `T`.
+    //
+    // An `@inline struct` has no value-stack representation, so the `T.value`
+    // read yields the **address** of the inline bytes (the property path's
+    // inline-nesting branch), and the block's type is a pointer — not
+    // `valueType.toRef()`, which would assert. The consumer (`let q: Res = await
+    // t`) copies the fields out of that address; nothing here knows or cares
+    // that the bytes live in a task object.
     this.currentType = valueType;
-    return module.block(null, stmts, valueType.toRef());
+    return module.block(
+      null,
+      stmts,
+      this.isInlineStructType(valueType) ? TypeRef.I32 : valueType.toRef()
+    );
   }
 
   /**
@@ -16817,9 +17114,24 @@ export class Compiler extends DiagnosticEmitter {
       for (let j = 0, n = fields.length; j < n; ++j) {
         let field = unchecked(fields[j]);
         let to = getMapEntry(fieldLocals, field.name);
-        // A field refused at declaration (a `T[N]` or GC-reference field) has
-        // no local: it was never part of the value.
+        // A field refused at declaration (a view array or GC-reference field)
+        // has no local: it was never part of the value.
         if (!to) continue;
+        if (to.index < 0) {
+          let nested = to.fieldLocals;
+          if (nested != null) {
+            if (this.isValueFormFixedArray(field.type)) {
+              this.copyArrayMemoryToSroa(
+                field.type, nested, pointerLocal.index, field.memoryOffset, stmts
+              );
+            } else {
+              this.copyMemoryToSroa(
+                field.type, nested, pointerLocal.index, field.memoryOffset, stmts
+              );
+            }
+          }
+          continue;
+        }
         stmts.push(module.local_set(
           to.index,
           module.load(
@@ -16875,9 +17187,15 @@ export class Compiler extends DiagnosticEmitter {
       if (entry.index < 0) {
         let nested = entry.fieldLocals;
         if (nested != null) {
-          this.emitTempArgumentLeaves(
-            field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
-          );
+          if (this.isValueFormFixedArray(field.type)) {
+            this.emitTempArrayArgumentLeaves(
+              field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
+            );
+          } else {
+            this.emitTempArgumentLeaves(
+              field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
+            );
+          }
         }
         continue;
       }
@@ -16892,6 +17210,38 @@ export class Compiler extends DiagnosticEmitter {
         module.local_get(entry.index, entry.type.toRef()),
         field.type.toRef(),
         field.memoryOffset
+      ));
+    }
+  }
+
+  /** {@link emitTempArgumentLeaves}'s `[T * N]` arm: one store per element leaf. */
+  private emitTempArrayArgumentLeaves(
+    arrayType: Type,
+    elementLocals: Map<string, Local>,
+    markLocal: Local,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let entry = getMapEntry(elementLocals, i.toString());
+      if (entry == null) continue;
+      let offset = baseOffset + i * elementSize;
+      if (Signature.isInlineStructRef(elementType)) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitTempArgumentLeaves(elementType, nested, markLocal, offset, stmts);
+        }
+        continue;
+      }
+      stmts.push(module.store(
+        elementType.byteSize,
+        this.makeSretAddressPlus(markLocal, offset),
+        module.local_get(entry.index, entry.type.toRef()),
+        entry.type.toRef(),
+        0
       ));
     }
   }
@@ -17092,9 +17442,20 @@ export class Compiler extends DiagnosticEmitter {
       module.binary(BinaryOp.AddI32, module.local_get(markLocal.index, TypeRef.I32), module.i32(size))
     ));
     stmts.push(this.makeSretGuard(markLocal, size, callExpression));
+    // Save the destination a **caller** may have armed before compiling this
+    // one. `sretDestSlot` is per-compiler, not per-flow, and compiling the call
+    // below can compile other functions (`compileFunction` runs a callee's body
+    // lazily), whose own sret calls would otherwise clear an outer arm. The
+    // outer consumer then sees its slot as un-consumed and reads the wrong
+    // address — measured on `let a: Res = await inner()`: `inner$start`'s own
+    // sret write cleared `work$body`'s armed destination, and the field loads
+    // read the mark instead of `t.value`.
+    let previousDest = this.sretDestSlot;
     this.sretDestSlot = this.makeSretAddress(markLocal);
     let callExpr = this.compileCallExpression(callExpression, Type.auto, Constraints.None);
-    if (this.sretDestSlot != 0) {
+    let consumed = this.sretDestSlot == 0;
+    this.sretDestSlot = previousDest;
+    if (!consumed) {
       // The call did not consume its destination: it was refused before
       // reaching `compileCallDirect` (a function value, a virtual call). The
       // refusal is already reported; there is no slot use to emit. The
@@ -17259,6 +17620,23 @@ export class Compiler extends DiagnosticEmitter {
           into.set(field.name, placeholder);
           continue;
         }
+        // A value-form `[T * N]` field is N element leaves behind a placeholder,
+        // the same shape `fillSroaArrayLocals` gives a whole array value. It is
+        // **not** one leaf: an array is an extent, and a single WASM local could
+        // only hold a pointer to bytes this value does not own. The copy helper
+        // (`copyMemoryToSroa` / `copySroaToMemory`) walks the placeholder's
+        // element entries at `i * elementExtent`, so the value stays a value.
+        if (this.isValueFormFixedArray(fieldType)) {
+          let nested = new Map<string, Local>();
+          if (!this.fillSroaArrayLocals(fieldType, fieldPath, declaration, flow, nested)) {
+            refused = true;
+            continue;
+          }
+          let placeholder = new Local(fieldPath, -1, fieldType, flow.targetFunction, declaration);
+          placeholder.fieldLocals = nested;
+          into.set(field.name, placeholder);
+          continue;
+        }
         let fieldDeclaration = assert(field.prototype.fieldDeclaration);
         let fieldTypeNode = fieldDeclaration.type;
         this.error(
@@ -17267,7 +17645,7 @@ export class Compiler extends DiagnosticEmitter {
             ? fieldTypeNode.range
             : fieldDeclaration.name.range,
           fieldType.kind == TypeKind.FixedArray
-            ? "a T[N] field in an @inline struct (SROA keeps one WASM local per field; array fields are the deep-SROA phase)"
+            ? "an `@unmanaged [T * N]` field in an @inline struct (a view is an address, which a value type cannot own; declare it `[T * N]` to store the bytes inline)"
             : "a GC-reference field in an @inline struct (a bare local.set skips the write barrier; deferred)"
         );
         refused = true;
@@ -17317,14 +17695,198 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * **The whole-value copy primitive: memory -> SROA locals.**
+   *
+   * An `@inline struct` value has exactly two representations in this compiler —
+   * one WASM local per leaf, or bytes at an address — and every whole-value use
+   * reduces to a copy between them:
+   *
+   * - `let q: Res = t.value` (an inline field of a heap object),
+   * - `let q: Res = await t` (`t.value` is that same inline field),
+   * - `let value = load<Res>(ptr)` inside `Array<Res>#__get`,
+   * - `let q: Res = arr[0]` (an sret getter, read out of its slot).
+   *
+   * Each field is loaded at the offset the resolver laid it out at (`offsetof`
+   * is the same number) with the field's own load type, straight into its leaf
+   * local — no temporary slot, which is what makes the old message's remedy
+   * ("read a field") inapplicable to a whole-value copy.
+   *
+   * A nested `@inline struct` field is **not** a leaf: it recurses, exactly as
+   * `copySroaValue` does for the local-to-local copy. A value-form `[T * N]`
+   * field recurses per element at `i * elementExtent`; a `memory.copy` of the
+   * extent would need the destination to be an address, and the destination here
+   * is a set of locals, so the elements are copied one leaf at a time (see
+   * `copyArrayMemoryToSroa`).
+   *
+   * **No write barrier is needed and none is emitted.** A managed leaf cannot
+   * reach here: `fillSroaFieldLocals` / `bindSroaParameterLeaves` refuse a
+   * GC-reference field by name, so the tree has no entry for one. The assert
+   * makes that a compiler bug rather than a silent unbarriered store.
+   */
+  copyMemoryToSroa(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    addrIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    let pointerRef = this.options.usizeType.toRef();
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      // A field refused at declaration was never part of the value; the
+      // diagnostic was already reported where the local was created.
+      if (entry == null) continue;
+      let fieldType = field.type;
+      let offset = baseOffset + field.memoryOffset;
+      if (Signature.isInlineStructRef(fieldType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copyMemoryToSroa(fieldType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      if (this.isValueFormFixedArray(fieldType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copyArrayMemoryToSroa(fieldType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      assert(!fieldType.isManaged); // refused at declaration, never in the tree
+      stmts.push(module.local_set(
+        entry.index,
+        module.load(
+          fieldType.byteSize,
+          fieldType.isSignedIntegerValue,
+          module.local_get(addrIndex, pointerRef),
+          fieldType.toRef(),
+          offset
+        ),
+        false
+      ));
+    }
+  }
+
+  /** {@link copyMemoryToSroa}'s `[T * N]` arm: one leaf per element. */
+  private copyArrayMemoryToSroa(
+    arrayType: Type,
+    elementLocals: Map<string, Local>,
+    addrIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    let pointerRef = this.options.usizeType.toRef();
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let entry = getMapEntry(elementLocals, i.toString());
+      if (entry == null) continue;
+      let offset = baseOffset + i * elementSize;
+      if (Signature.isInlineStructRef(elementType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copyMemoryToSroa(elementType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      stmts.push(module.local_set(
+        entry.index,
+        module.load(
+          elementType.byteSize,
+          elementType.isSignedIntegerValue,
+          module.local_get(addrIndex, pointerRef),
+          elementType.toRef(),
+          offset
+        ),
+        false
+      ));
+    }
+  }
+
+  /**
+   * **The mirror: SROA locals -> memory.**
+   *
+   * `obj.field = local`, `store<T>(ptr, local)` and `$rec.value = $r` in the
+   * async lowering all end here: the leaves are stored at the layout offsets the
+   * C side reads, with each leaf's own store type. The sibling of
+   * {@link copyMemoryToSroa}; the shape and the recursion are the same, so a
+   * nested field or an array field cannot be handled by one direction and
+   * silently dropped by the other.
+   */
+  copySroaToMemory(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    addrIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    let pointerRef = this.options.usizeType.toRef();
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      if (entry == null) continue;
+      let fieldType = field.type;
+      let offset = baseOffset + field.memoryOffset;
+      if (Signature.isInlineStructRef(fieldType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copySroaToMemory(fieldType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      if (this.isValueFormFixedArray(fieldType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copyArraySroaToMemory(fieldType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      assert(!fieldType.isManaged);
+      stmts.push(module.store(
+        fieldType.byteSize,
+        module.local_get(addrIndex, pointerRef),
+        module.local_get(entry.index, entry.type.toRef()),
+        entry.type.toRef(),
+        offset
+      ));
+    }
+  }
+
+  /** {@link copySroaToMemory}'s `[T * N]` arm: one leaf per element. */
+  private copyArraySroaToMemory(
+    arrayType: Type,
+    elementLocals: Map<string, Local>,
+    addrIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    let pointerRef = this.options.usizeType.toRef();
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let entry = getMapEntry(elementLocals, i.toString());
+      if (entry == null) continue;
+      let offset = baseOffset + i * elementSize;
+      if (Signature.isInlineStructRef(elementType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copySroaToMemory(elementType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      stmts.push(module.store(
+        elementType.byteSize,
+        module.local_get(addrIndex, pointerRef),
+        module.local_get(entry.index, entry.type.toRef()),
+        entry.type.toRef(),
+        offset
+      ));
+    }
+  }
+
+  /**
    * Stores a `fieldLocals` tree's leaves into the hidden destination slot at
    * `destIndex`, one store per leaf.
    *
-   * The third destination shape for the same recursion: `emitSroaStores` writes
-   * to a compiled `usize`, `emitTempArgumentLeaves` to a call-temp address, and
-   * this one to a **parameter** — the sret slot a `return p` fills. The address
-   * is a fresh `local.get` per store, because Binaryen's passes assume one
-   * parent per node.
+   * The sret slot a `return p` fills. Delegates to {@link copySroaToMemory} so a
+   * `[T * N]` field is written at the same offsets the read side uses.
    */
   emitSroaStoresToLocal(
     type: Type,
@@ -17333,32 +17895,7 @@ export class Compiler extends DiagnosticEmitter {
     baseOffset: i32,
     stmts: ExpressionRef[]
   ): void {
-    let module = this.module;
-    let fields = this.inlineStructFieldsOf(type);
-    if (fields == null) return;
-    for (let i = 0, k = fields.length; i < k; ++i) {
-      let field = unchecked(fields[i]);
-      let entry = getMapEntry(fieldLocals, field.name);
-      // A field refused at declaration was never part of the value; there is
-      // nothing to store and no representation to store it as.
-      if (entry == null) continue;
-      if (entry.index < 0) {
-        let nested = entry.fieldLocals;
-        if (nested != null) {
-          this.emitSroaStoresToLocal(
-            field.type, nested, destIndex, baseOffset + field.memoryOffset, stmts
-          );
-        }
-        continue;
-      }
-      stmts.push(module.store(
-        field.type.byteSize,
-        module.local_get(destIndex, TypeRef.I32),
-        module.local_get(entry.index, entry.type.toRef()),
-        field.type.toRef(),
-        baseOffset + field.memoryOffset
-      ));
-    }
+    this.copySroaToMemory(type, fieldLocals, destIndex, baseOffset, stmts);
   }
 
   /**
@@ -17370,6 +17907,10 @@ export class Compiler extends DiagnosticEmitter {
    * fields is what zeroes a nested field's leaves: measured before this,
    * `return new Outer1()` with `Inner{x,y}` stored only offset 0 and left
    * offsets 4 and 8 holding whatever was there.
+   *
+   * A `[T * N]` field is zeroed per element for the same reason: the element
+   * leaves are separate slots in the value's representation, so "all zeroes"
+   * means one zero store per element.
    */
   emitSroaZerosToLocal(type: Type, destIndex: i32, baseOffset: i32, stmts: ExpressionRef[]): void {
     let module = this.module;
@@ -17377,10 +17918,13 @@ export class Compiler extends DiagnosticEmitter {
     if (fields == null) return;
     for (let i = 0, k = fields.length; i < k; ++i) {
       let field = unchecked(fields[i]);
+      let offset = baseOffset + field.memoryOffset;
       if (Signature.isInlineStructRef(field.type)) {
-        this.emitSroaZerosToLocal(
-          field.type, destIndex, baseOffset + field.memoryOffset, stmts
-        );
+        this.emitSroaZerosToLocal(field.type, destIndex, offset, stmts);
+        continue;
+      }
+      if (this.isValueFormFixedArray(field.type)) {
+        this.emitSroaArrayZerosToLocal(field.type, destIndex, offset, stmts);
         continue;
       }
       if (!this.isSroaFieldType(field.type)) continue;
@@ -17389,7 +17933,42 @@ export class Compiler extends DiagnosticEmitter {
         module.local_get(destIndex, TypeRef.I32),
         this.makeZero(field.type),
         field.type.toRef(),
-        baseOffset + field.memoryOffset
+        offset
+      ));
+    }
+  }
+
+  /** {@link emitSroaZerosToLocal}'s `[T * N]` arm. */
+  private emitSroaArrayZerosToLocal(
+    arrayType: Type,
+    destIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let offset = baseOffset + i * elementSize;
+      if (Signature.isInlineStructRef(elementType)) {
+        this.emitSroaZerosToLocal(elementType, destIndex, offset, stmts);
+        continue;
+      }
+      if (this.isValueFormFixedArray(elementType)) {
+        // A nested value-form array: zero each of its elements at the nested
+        // stride. Only reachable from `return new P()`'s type walk, because a
+        // local refuses a nested array field by name — but zeroing is a type
+        // walk, so it must not silently skip the bytes either.
+        this.emitSroaArrayZerosToLocal(elementType, destIndex, offset, stmts);
+        continue;
+      }
+      if (!this.isSroaFieldType(elementType)) continue;
+      stmts.push(module.store(
+        elementType.byteSize,
+        module.local_get(destIndex, TypeRef.I32),
+        this.makeZero(elementType),
+        elementType.toRef(),
+        offset
       ));
     }
   }
@@ -17399,8 +17978,9 @@ export class Compiler extends DiagnosticEmitter {
    * field locals, one load per leaf.
    *
    * The mirror of {@link emitSroaStoresToLocal}: `let q = make()` reads the slot
-   * back into the leaf locals a read path walks. A fresh slot address per load,
-   * for the same one-parent-per-node reason.
+   * back into the leaf locals a read path walks. Delegates to
+   * {@link copyMemoryToSroa}, with the mark local itself as the address (the
+   * slot's base is the mark — see `makeSretAddress`).
    */
   emitSretLoadsInto(
     type: Type,
@@ -17409,33 +17989,7 @@ export class Compiler extends DiagnosticEmitter {
     baseOffset: i32,
     stmts: ExpressionRef[]
   ): void {
-    let fields = this.inlineStructFieldsOf(type);
-    if (fields == null) return;
-    for (let i = 0, k = fields.length; i < k; ++i) {
-      let field = unchecked(fields[i]);
-      let entry = getMapEntry(fieldLocals, field.name);
-      if (entry == null) continue;
-      if (entry.index < 0) {
-        let nested = entry.fieldLocals;
-        if (nested != null) {
-          this.emitSretLoadsInto(
-            field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
-          );
-        }
-        continue;
-      }
-      stmts.push(this.module.local_set(
-        entry.index,
-        this.module.load(
-          field.type.byteSize,
-          false,
-          this.makeSretAddress(markLocal),
-          field.type.toRef(),
-          baseOffset + field.memoryOffset
-        ),
-        false
-      ));
-    }
+    this.copyMemoryToSroa(type, fieldLocals, markLocal.index, baseOffset, stmts);
   }
 
   /**
@@ -17453,15 +18007,10 @@ export class Compiler extends DiagnosticEmitter {
   /**
    * Stores an inline value's leaves at `dest + offset`.
    *
-   * The third leaf consumer, beside `copySroaValue` (local-to-local) and the
-   * read path (local-to-stack): same tree, same recursion, an expression
-   * reference instead of a destination map. The offsets come from the **type**
-   * (`property.memoryOffset`, the layout the C side sees), so what lands in
-   * memory is the wire layout, not a packing of the locals.
-   *
-   * Leaves whose local is missing are skipped rather than stored as `-1`: a
-   * field refused at declaration was never part of the value (`isSroaFieldType`
-   * has already reported why), and the caller has been told.
+   * `copyInto(dest, record)` and `store<T>(dest, record)` are the callers: same
+   * tree, same recursion, a compiled address instead of a destination map —
+   * evaluated once into a temp so every store reads the same address and a
+   * side-effecting destination is not recomputed per leaf.
    */
   emitSroaStores(
     type: Type,
@@ -17477,10 +18026,15 @@ export class Compiler extends DiagnosticEmitter {
       let field = unchecked(fields[i]);
       let entry = getMapEntry(fieldLocals, field.name);
       if (entry == null) continue;
+      let offset = baseOffset + field.memoryOffset;
       if (entry.index < 0) {
         let nested = entry.fieldLocals;
         if (nested != null) {
-          this.emitSroaStores(field.type, nested, dest, baseOffset + field.memoryOffset, stmts);
+          if (this.isValueFormFixedArray(field.type)) {
+            this.emitSroaArrayStores(field.type, nested, dest, offset, stmts);
+          } else {
+            this.emitSroaStores(field.type, nested, dest, offset, stmts);
+          }
         }
         continue;
       }
@@ -17488,8 +18042,38 @@ export class Compiler extends DiagnosticEmitter {
         field.type.byteSize,
         dest,
         module.local_get(entry.index, entry.type.toRef()),
-        field.type.toRef(),
-        baseOffset + field.memoryOffset
+        entry.type.toRef(),
+        offset
+      ));
+    }
+  }
+
+  /** {@link emitSroaStores}'s `[T * N]` arm: one store per element leaf. */
+  private emitSroaArrayStores(
+    arrayType: Type,
+    elementLocals: Map<string, Local>,
+    dest: ExpressionRef,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let entry = getMapEntry(elementLocals, i.toString());
+      if (entry == null) continue;
+      let offset = baseOffset + i * elementSize;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) this.emitSroaStores(elementType, nested, dest, offset, stmts);
+        continue;
+      }
+      stmts.push(module.store(
+        elementType.byteSize,
+        dest,
+        module.local_get(entry.index, entry.type.toRef()),
+        entry.type.toRef(),
+        offset
       ));
     }
   }
@@ -17754,8 +18338,12 @@ export class Compiler extends DiagnosticEmitter {
    * address and goes through the ordinary path).
    */
   private resolveSroaValueArray(expression: Expression): Local | null {
-    if (expression.kind != NodeKind.Identifier) return null;
-    let local = this.currentFlow.lookupLocal((<IdentifierExpression>expression).text);
+    // A **path** as well as a bare name: an `@inline struct` field may be a
+    // value-form `[T * N]`, and its element entries live behind the field's
+    // placeholder (`fillSroaFieldLocals` builds that map). `resolveSroaReceiver`
+    // already walks field hops one at a time and returns the placeholder, so the
+    // same tree serves the whole-array local and the field.
+    let local = this.resolveSroaReceiver(expression);
     if (local == null || local.fieldLocals == null) return null;
     return this.isValueFormFixedArray(local.type) ? local : null;
   }
@@ -18388,25 +18976,170 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
-    // `let q: P = p`: a field-wise copy. Not a single `local.set` — there is no
-    // single local — and not a pointer copy, which is the aliasing this whole
-    // phase exists to remove.
-    if (initializerNode.kind == NodeKind.Identifier) {
-      let source = flow.lookupLocal((<IdentifierExpression>initializerNode).text);
-      if (source && source.fieldLocals) {
-        // One `local.set` per **leaf**, through the nesting. `q` has fresh
-        // locals from `fillSroaFieldLocals`, so the copy cannot alias.
-        this.copySroaValue(assert(source.fieldLocals), fieldLocals, initializers);
+    // Any other expression that resolves to an @inline struct value: a copy out
+    // of **memory**. Three shapes reach here, and they differ only in where the
+    // bytes are:
+    //
+    //   `let q: Res = t.value`   — an inline field of a heap object (an address),
+    //   `let q: Res = await t`   — that same field, through the await lowering,
+    //   `let q: Res = arr[0]`    — an sret getter (a slot the call fills),
+    //   `let v = load<Res>(ptr)` — inside `Array<Res>#__get` (an address).
+    //
+    // An SROA **path** (`p.inner`) is still a local copy, not a memory read, so
+    // it is handled first: its leaves already exist as locals, and copying them
+    // cannot alias. Everything below only ever reads bytes, so a value that
+    // lives in memory is copied leaf by leaf into this declaration's own locals.
+    let sourceType = this.resolver.resolveExpression(initializerNode, this.currentFlow);
+    if (sourceType != null && this.isInlineStructType(sourceType)) {
+      if (!sourceType.equals(type)) {
+        this.error(
+          DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+          initializerNode.range,
+          sourceType.toString(), type.toString()
+        );
         return true;
       }
+      let sourceTree = this.sroaTreeOf(initializerNode);
+      if (sourceTree != null) {
+        // One `local.set` per **leaf**, through the nesting. `q` has fresh
+        // locals from `fillSroaFieldLocals`, so the copy cannot alias.
+        this.copySroaValue(sourceTree, fieldLocals, initializers);
+        return true;
+      }
+      let loadAddress = this.inlineStructLoadAddress(initializerNode);
+      if (loadAddress != null) {
+        initializers.push(this.makeMemoryToSroaBlock(loadAddress, type, fieldLocals));
+        return true;
+      }
+      initializers.push(this.makeInlineValueBlock(initializerNode, type, fieldLocals));
+      return true;
     }
 
     this.error(
       DiagnosticCode.Not_implemented_0,
       initializerNode.range,
-      "initialising an @inline struct local from this expression (only `new P(…)`, another @inline struct value, or no initialiser)"
+      "initialising an @inline struct local from this expression (only `new P(…)`, another @inline struct value, an @inline struct-returning call or getter, an inline field, or no initialiser)"
     );
     return true;
+  }
+
+  /**
+   * The address operand of a builtin `load<T>(ptr)` whose `T` is an `@inline
+   * struct`, or `null`.
+   *
+   * `Array<T>#__get` is written in source as `load<T>(this.dataStart + …)`, and
+   * that call cannot produce a value — an inline struct has no value-stack
+   * representation. The declaration that consumes it (`let value = load<T>(…)`)
+   * is therefore the place the copy is emitted: the address is compiled here and
+   * the leaves are loaded into the local's tree. Only the one-argument form is
+   * recognised; a call with an immediate offset is reported by `load` itself,
+   * which is where the refusal belongs.
+   */
+  private inlineStructLoadAddress(expression: Expression): Expression | null {
+    if (expression.kind != NodeKind.Call) return null;
+    let call = <CallExpression>expression;
+    let callee = call.expression;
+    if (callee.kind != NodeKind.Identifier) return null;
+    let target = this.resolver.lookupExpression(
+      callee, this.currentFlow, Type.auto, ReportMode.Swallow
+    );
+    if (target == null || target.kind != ElementKind.FunctionPrototype) return null;
+    let prototype = <FunctionPrototype>target;
+    if (!prototype.hasDecorator(DecoratorFlags.Builtin)) return null;
+    if (prototype.internalName != BuiltinNames.load) return null;
+    let args = call.args;
+    if (args.length != 1) return null;
+    return args[0];
+  }
+
+  /**
+   * Copies an address expression's bytes into an SROA local tree (the `load<T>`
+   * shape). The address is evaluated **once**, into a temp, so a side-effecting
+   * pointer expression cannot run per leaf.
+   */
+  private makeMemoryToSroaBlock(
+    addressExpression: Expression,
+    type: Type,
+    fieldLocals: Map<string, Local>
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let address = flow.getTempLocal(this.options.usizeType);
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(
+      address.index,
+      this.compileExpression(addressExpression, Type.auto),
+      false
+    ));
+    this.copyMemoryToSroa(type, fieldLocals, address.index, 0, stmts);
+    this.currentType = Type.void;
+    return module.block(null, stmts);
+  }
+
+  /**
+   * Materialises an `@inline struct` expression into SROA locals, whether the
+   * expression names memory or fills a call slot.
+   *
+   * The expression is compiled with a call-temp slot **armed** as the hidden
+   * destination. A callee that declares one — any function or getter returning
+   * the record by value (`arr[0]` goes through `Array#__get`) — consumes it, and
+   * the leaves are read out of the slot while it is live. An expression that
+   * declares none — an inline field of a pointer-layout object, or the await
+   * lowering's `t.value` — leaves the slot untouched, and its compiled value is
+   * the **address** of the bytes; those are read instead. Either way the bump
+   * pointer is restored afterwards, so a nested copy in the same statement gets
+   * its own slot.
+   */
+  private makeInlineValueBlock(
+    expression: Expression,
+    type: Type,
+    fieldLocals: Map<string, Local>
+  ): ExpressionRef {
+    let module = this.module;
+    this.ensureSretStack();
+    let global = assert(this.sretStackGlobal);
+    let size = this.sretSizeOf(type);
+    let flow = this.currentFlow;
+    let markLocal = flow.getTempLocal(Type.u32);
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(markLocal.index, module.global_get(global, TypeRef.I32), false));
+    stmts.push(module.global_set(global, module.binary(
+      BinaryOp.AddI32,
+      module.local_get(markLocal.index, TypeRef.I32),
+      module.i32(size)
+    )));
+    stmts.push(this.makeSretGuard(markLocal, size, expression));
+    let previousDest = this.sretDestSlot;
+    this.sretDestSlot = this.makeSretAddress(markLocal);
+    let value = this.compileExpression(expression, Type.auto);
+    let consumed = this.sretDestSlot == 0;
+    this.sretDestSlot = previousDest;
+    if (consumed) {
+      // A callee consumed the destination: the value was written to the slot.
+      stmts.push(value);
+      this.copyMemoryToSroa(type, fieldLocals, markLocal.index, 0, stmts);
+    } else {
+      // Nothing consumed it: the compiled value *is* the address of existing
+      // bytes (an inline field, or the await expression's `t.value`).
+      let valueTypeRef = getExpressionType(value);
+      if (valueTypeRef == TypeRef.Unreachable) {
+        return module.unreachable();
+      }
+      if (valueTypeRef != TypeRef.I32 && valueTypeRef != TypeRef.I64) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          expression.range,
+          "copying an @inline struct value from this expression (it is neither an address into memory nor a call that fills a destination slot)"
+        );
+        return module.unreachable();
+      }
+      let address = flow.getTempLocal(this.options.usizeType);
+      stmts.push(module.local_set(address.index, value, false));
+      this.copyMemoryToSroa(type, fieldLocals, address.index, 0, stmts);
+    }
+    stmts.push(module.global_set(global, module.local_get(markLocal.index, TypeRef.I32)));
+    this.currentType = Type.void;
+    return module.block(null, stmts);
   }
 
   /**
@@ -18465,10 +19198,9 @@ export class Compiler extends DiagnosticEmitter {
    *
    * Scalars (i8..f64, bool) and references (a `struct` pointer, a `@managed
    * struct` reference, a class reference) each occupy one local. A `T[N]` field
-   * does not — it is an extent, not a value — and is refused by name rather than
-   * decomposed, because decomposing it is the deep-SROA phase (a `T[N]` of
-   * scalars would become N locals, which needs a `makeZero` case this phase does
-   * not add; `compiler.ts` `makeZero` still has no `FixedArray` arm).
+   * does not — it is an extent, not a value — so it is not a leaf either: the
+   * caller recurses into its elements instead (`fillSroaFieldLocals` builds the
+   * element map, and the copy walkers descend it).
    */
   isSroaFieldType(type: Type): bool {
     if (type.kind == TypeKind.FixedArray) return false;

@@ -1104,7 +1104,15 @@ function builtin_isReference(ctx: BuiltinFunctionContext): ExpressionRef {
   let type = checkConstantType(ctx);
   compiler.currentType = Type.bool;
   if (!type) return module.unreachable();
-  return reifyConstantType(ctx, module.i32(type.isReference ? 1 : 0));
+  // An `@inline struct` has a reference-shaped `Type` (a class reference) but
+  // **is a value**: it is stored by value wherever it appears, has no address of
+  // its own and can never be null. Answering `true` here made `Array<Res>#__get`
+  // compile its null-hole check — `changetype<usize>(value)` on a whole value,
+  // which is exactly the read the representation forbids.
+  let classReference = type.classReference;
+  let isValue = classReference != null &&
+    classReference.hasDecorator(DecoratorFlags.InlineStruct);
+  return reifyConstantType(ctx, module.i32(type.isReference && !isValue ? 1 : 0));
 }
 builtinFunctions.set(BuiltinNames.isReference, builtin_isReference);
 
@@ -2762,6 +2770,38 @@ function builtin_store(ctx: BuiltinFunctionContext): ExpressionRef {
   let typeArguments = ctx.typeArguments;
   let contextualType = ctx.contextualType;
   let type = typeArguments![0];
+  // **`store<T>(ptr, value)` where `T` is an `@inline struct`.** The value is a
+  // value: it has no address and no WASM operand, so the store is one store per
+  // leaf at the record's layout offsets — the mirror of `copyInto`, and the
+  // reason `Array<Res>#__set` (written in std as `store<T>(…, value)`) works.
+  // The source must be SROA-tracked; anything else is refused by name, because
+  // there is no representation to load the leaves from.
+  let typeClass = type.classReference;
+  if (typeClass != null && typeClass.hasDecorator(DecoratorFlags.InlineStruct)) {
+    let dest = compiler.compileExpression(operands[0], compiler.options.usizeType, Constraints.ConvImplicit);
+    let sourceTree = compiler.sroaTreeOf(operands[1]);
+    if (sourceTree == null) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        operands[1].range,
+        "storing this expression as an @inline struct value (only a value held in a local can be stored: a value has no address, so there are no leaves to copy)"
+      );
+      compiler.currentType = Type.void;
+      return module.unreachable();
+    }
+    let inlineOffset = 0;
+    if (numOperands >= 3) {
+      inlineOffset = evaluateImmediateOffset(operands[2], compiler); // reports
+      if (inlineOffset < 0) {
+        compiler.currentType = Type.void;
+        return module.unreachable();
+      }
+    }
+    let inlineStmts = new Array<ExpressionRef>();
+    compiler.emitSroaStores(type, sourceTree, dest, inlineOffset, inlineStmts);
+    compiler.currentType = Type.void;
+    return module.flatten(inlineStmts, TypeRef.None);
+  }
   let arg0 = compiler.compileExpression(operands[0], compiler.options.usizeType, Constraints.ConvImplicit);
   let arg1 = ctx.contextIsExact
     ? compiler.compileExpression(operands[1],

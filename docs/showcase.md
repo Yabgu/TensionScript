@@ -204,7 +204,15 @@ Refused / limitations:
   refused — `AS100: passing this expression as an @inline struct argument (only a
   local value can be passed)` — because a value has no address, so an expression
   result has nothing to hand over. Assign to a local first, as `demo` does.
-- **Fields that are `T[N]` or GC references** are refused in this phase (§9).
+- **A whole value copied out of memory.** `let q: Vec3 = t.value` and
+  `let q: Vec3 = arr[0]` copy field by field out of the bytes at that address —
+  no temporary and no alias. This is what lets `Task<Vec3>` carry a value inline
+  and `Array<Vec3>` hold an element at `dataStart + i * sizeof(Vec3)`. The mirror
+  (`t.value = q`, `arr[0] = q`) stores the fields back.
+- **A `T[N]` field is accepted.** It is N element leaves in the value's local
+  representation, and the copy walkers descend it element by element.
+- **A GC-reference field** is still refused in this phase (§9): a bare
+  `local.set` would skip the write barrier.
 
 ---
 
@@ -553,7 +561,7 @@ repository.
 | Item | Why it is deferred |
 |---|---|
 | **Inline nesting** — an `@inline struct` as a field of another record | A field of a value type has no address of its own; the nesting needs the same no-address reasoning as §3's refusals. Measured today: a struct field is a 4-byte pointer, not inline. |
-| **`T[N]` fields in `@inline struct`** | Deep SROA: N locals per array field, plus a `makeZero` arm for `FixedArray` (which asserts today). |
+| ~~**`T[N]` fields in `@inline struct`**~~ | **Implemented**: N element leaves behind a placeholder, a zero arm that walks them, and a memory <-> SROA copy that descends both. |
 | **GC-reference fields in `@inline struct`** | An SROA'd field lives in a WASM local, and the write barrier's `__link` needs an **address**; the implementable options are a mixed representation or refusal. Refused for now. |
 | **Closure capture of an `@inline` value** | Needs inline nesting first — the environment is a class, and a value-typed field in one is nesting. |
 | **`@external` return of `@inline struct`** | An ABI version: the host would have to write `sizeof<T>` bytes into a slot it never allocated. |

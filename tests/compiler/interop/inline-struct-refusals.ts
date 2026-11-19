@@ -28,7 +28,10 @@
 //     its inline extent — see `fixed-array-inline-struct.ts`)
 //   - an initializer on an `@inline struct` field (the field is bytes; a whole
 //     value has no store)
-//   - `Array<T>` (a type argument is a pointer slot)
+//   - ~~`Array<T>`~~ **the index operator is accepted** now: an `@inline struct`
+//     element is inline bytes at `dataStart + i * sizeof(T)`, and `[]`/`[]=` are
+//     emitted by the compiler. Other `Array<T>` methods are still refused by
+//     name, because std bodies index by alignment (`i << alignof<T>()`).
 //   - `changetype` to one (a value has no address to reinterpret)
 //   - inheritance from one
 //
@@ -76,7 +79,9 @@ class Holder {
   arr: P[2];
 }
 
-// `Array<T>`: a type argument is a pointer slot
+// `Array<T>`: the index operator is the supported path (an `@inline struct`
+// element is inline bytes); constructing one is legal, and so is `a[i]` when the
+// value is held in a local.
 function arrayOf(): void {
   let a = new Array<P>();
 }

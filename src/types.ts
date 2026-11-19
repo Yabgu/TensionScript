@@ -278,6 +278,28 @@ export function isStdlibClass(cls: Class): bool {
 }
 
 /**
+ * Whether any of a class's type arguments is an `@inline struct`.
+ *
+ * Such a container holds **inline bytes**, not references: an `Array<Res>`'s
+ * element is a C-layout record and a wasm GC array's element is a value ref,
+ * which an inline struct does not have. Both the eligibility answer and the
+ * emission answer consult this, so the program falls back to the linear ABI as a
+ * whole instead of emitting half a struct.
+ */
+function hasInlineStructTypeArgument(cls: Class): bool {
+  let typeArguments = cls.typeArguments;
+  if (typeArguments == null) return false;
+  for (let i = 0, k = typeArguments.length; i < k; ++i) {
+    let argumentClass = unchecked(typeArguments[i]).classReference;
+    if (
+      argumentClass != null &&
+      argumentClass.hasDecorator(DecoratorFlags.InlineStruct)
+    ) return true;
+  }
+  return false;
+}
+
+/**
  * Whether a class is emitted as a wasm GC struct.
  *
  * **One exclusion, and it is the whole chain.** `~lib/` keeps the pointer ABI:
@@ -320,6 +342,9 @@ export function isGcClass(cls: Class): bool {
     // exactly when its fields are storable. Nothing else about it being standard library
     // matters.
     if (hasNonStructGcRepresentation(cls)) return false;
+    // An `@inline struct` element means inline bytes on the C layout; a wasm
+    // array's element is a value ref, which the value type does not have.
+    if (hasInlineStructTypeArgument(cls)) return false;
     if (isStdlibGcClass(cls)) return true;
     let stdlibBase = cls.base;
     if (stdlibBase != null && !cls.prototype.implicitlyExtendsObject && !isGcClass(stdlibBase)) {
@@ -669,6 +694,7 @@ function isGcEligibleImpl(cls: Class): bool {
     // answered by `toRef`/`ensureType` before any class arm, so this only keeps the
     // eligibility answer from claiming a struct exists for them.
     if (hasNonStructGcRepresentation(cls)) return false;
+    if (hasInlineStructTypeArgument(cls)) return false;
     if (isStdlibGcClass(cls)) return true;
     // Otherwise: fall through to the ordinary base-chain and field test, exactly as a
     // user-declared class.
@@ -764,6 +790,31 @@ export function gcUniform(program: Program): bool {
     let proto = cls.prototype;
     if (proto != program.mapPrototype && proto != program.setPrototype) continue;
     if (gcContainerHoldsReference(cls)) { result = false; break; }
+  }
+  // **A program that declares an `@inline struct` stays linear.** The value
+  // type's storage machinery is the C layout: sret call-temps and inline fields
+  // are linear addresses, and its containers (`Array<Res>`, `Task<Res>`) are
+  // pointer-shaped even when the rest of the program could be GC structs.
+  // `managedClassesOf` deliberately excludes `~lib/` classes and exempt records,
+  // so neither the container's nor the value's own ineligibility would reach the
+  // latch — and the mixed result is not a working module: measured, a linear
+  // `Array<Res>` inside a GC program compiles the std constructor, whose
+  // `changetype<usize>(buffer)` on a GC `ArrayBuffer` aborts inside Binaryen.
+  // One representation for the whole program, and the value type names it.
+  if (result) {
+    let elements = program.elementsByDeclaration;
+    for (let _v = Map_values(elements), i = 0, k = _v.length; i < k; ++i) {
+      let element = unchecked(_v[i]);
+      if (element.kind != ElementKind.ClassPrototype) continue;
+      if (element.hasDecorator(DecoratorFlags.InlineStruct)) { result = false; break; }
+    }
+  }
+  if (result) {
+    for (let _v = Map_values(instances), i = 0, k = _v.length; i < k; ++i) {
+      let element = unchecked(_v[i]);
+      if (element.kind != ElementKind.Class) continue;
+      if (hasInlineStructTypeArgument(<Class>element)) { result = false; break; }
+    }
   }
   let classes = result ? managedClassesOf(program) : [];
   for (let i = 0, k = classes.length; i < k; ++i) {
@@ -1342,6 +1393,17 @@ export function gcDynamicArrayElementOf(type: Type | null): Type | null {
   let typeArguments = cls.getTypeArgumentsTo(program.arrayPrototype);
   if (typeArguments == null || !typeArguments.length) return null;
   let element = unchecked(typeArguments[0]);
+  // **An `@inline struct` element keeps the array linear.** Its elements are
+  // inline bytes on the C layout; a wasm array's element is a value ref, which
+  // the value type does not have. This is also the answer at *emission* time,
+  // so it does not depend on the program-wide latch having been computed after
+  // `Array<Res>` was resolved (measured: it had not been, and
+  // `array.new` was asked for a non-reference element).
+  let elementClass = element.classReference;
+  if (
+    elementClass != null &&
+    elementClass.hasDecorator(DecoratorFlags.InlineStruct)
+  ) return null;
   return gcArrayElementSupported(element) ? element : null;
 }
 
@@ -3528,6 +3590,24 @@ export class Signature {
       let fieldType = property.type;
       if (Signature.isInlineStructRef(fieldType)) {
         Signature.leafTypesOf(fieldType, out);
+      } else if (
+        fieldType.kind == TypeKind.FixedArray &&
+        (fieldType.fixedMemoryModel == MemoryModelCode.None ||
+         fieldType.fixedMemoryModel == MemoryModelCode.Inline)
+      ) {
+        // A value-form `[T * N]` field is N element leaves, the same order
+        // `fillSroaFieldLocals` creates them in. Without this arm the field
+        // would contribute one "leaf" of array type — a type with no WASM
+        // representation — and the call's arity would disagree with its body.
+        let elementType = assert(fieldType.fixedElementType);
+        let elementClass = elementType.classReference;
+        let isRecordElement = elementClass != null &&
+          (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
+           elementClass.hasDecorator(DecoratorFlags.ManagedStruct));
+        for (let j = 0, n = fieldType.fixedLength; j < n; ++j) {
+          if (isRecordElement) Signature.leafTypesOf(elementType, out);
+          else out.push(elementType);
+        }
       } else {
         out.push(fieldType);
       }

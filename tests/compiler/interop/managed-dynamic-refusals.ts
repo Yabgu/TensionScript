@@ -25,10 +25,11 @@
 //      field; answering the reference size would look like a legitimate
 //      pointer size.
 //
-//   5. A **bare `struct` element** — bare structs are `@inline`, and an
-//      `@inline` value cannot be a class type argument. The same limitation
-//      `Array<BareStruct>` has; the collision solver declares `@unmanaged
-//      struct BodyState`, so the primary case is unaffected.
+//   5. ~~A **bare `struct` element**~~ **accepted now**: an `@inline struct`
+//      element is inline bytes at the element address, and `y[i].field` /
+//      `let q = y[i]` go through the same address-then-copy paths an
+//      `@unmanaged` record element uses. Whole-element assignment (`y[i] = v`)
+//      is still refused by name where the storage decision is made.
 
 class GcRef {
   x: i32 = 0;
@@ -70,7 +71,8 @@ export function sizeOfView(y: @managed @dynamic [u32 * n]): usize {
   return sizeof<@managed @dynamic [u32 * n]>();
 }
 
-// 5. A bare (inline) struct element.
+// 5. A bare (inline) struct element: the declaration is legal now; element
+//    access is the address path, and a whole-element store is refused by name.
 export function inlineElement(y: @managed @dynamic [InlineRecord * n]): i32 {
   return 0;
 }

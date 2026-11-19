@@ -2170,12 +2170,19 @@ export class Program extends DiagnosticEmitter {
         let typeArguments = classReference.typeArguments;
         if (typeArguments) {
           for (let i = 0, k = typeArguments.length; i < k; ++i) {
-            // A type-argument position is a pointer slot (`Array<T>`'s buffer
-            // holds references), so an `@inline struct` there would be stored
-            // by reference — the deferred inline-in-heap case.
-            if (!this.checkInlineStructValue(
-              typeArguments[i], reportNode, "a type argument (Array<T>)"
-            )) return false;
+            // A type argument is **not** inherently a pointer slot. That premise
+            // was `Array<T>`'s (its buffer held references), and it is false for
+            // `Task<P>`, whose `value!: P` is an inline field since VT4 — the
+            // instantiated field, not the type argument, is where the storage
+            // decision is made. The blanket check here therefore refused a
+            // legal shape (`Task<Res>`) for a reason that did not apply to it.
+            //
+            // Removing it loses no safety: every unsupported use is refused
+            // where the storage decision actually is (an inline-array element,
+            // a dynamic-array element, a whole-value read/assignment, a local
+            // initialiser), and `Array<Res>` was measured to hit those refusals
+            // rather than miscompile. `checkInlineStructValue` itself stays for
+            // the `a global` call site, where two globals would alias.
             if (!this.checkTypeSupported(typeArguments[i], reportNode)) {
               return false;
             }
@@ -4269,6 +4276,23 @@ export class Function extends TypedElement {
       if (Signature.isInlineStructRef(fieldType)) {
         let nested = new Map<string, Local>();
         let inner = this.bindSroaParameterLeaves(
+          fieldType, fieldPath, nested, localIndex + consumed, flow
+        );
+        consumed += inner.leafCount;
+        let placeholder = new Local(fieldPath, -1, fieldType, flow.sourceFunction);
+        placeholder.fieldLocals = nested;
+        into.set(property.name, placeholder);
+        continue;
+      }
+      // A value-form `[T * N]` field is N element leaves, bound element-major —
+      // the order `Signature.leafTypesOf` declares and the caller pushes.
+      if (
+        fieldType.kind == TypeKind.FixedArray &&
+        (fieldType.fixedMemoryModel == MemoryModelCode.None ||
+         fieldType.fixedMemoryModel == MemoryModelCode.Inline)
+      ) {
+        let nested = new Map<string, Local>();
+        let inner = this.bindSroaArrayParameterLeaves(
           fieldType, fieldPath, nested, localIndex + consumed, flow
         );
         consumed += inner.leafCount;

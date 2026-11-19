@@ -84,7 +84,7 @@
     "watch": "node scripts/build --watch",
     "coverage": "npx c8 -- npm test",
     "pretest": "npm run check",
-    "test": "npm run test:binaryen && npm run test:parser && npm run test:flags && npm run test:async && npm run test:coreloop && npm run test:await && npm run test:regress && npm run test:returnvalues && npm run test:threads && npm run test:policy && npm run test:closure && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli && npm run test:gc && npm run test:holders",
+    "test": "npm run test:binaryen && npm run test:parser && npm run test:flags && npm run test:async && npm run test:coreloop && npm run test:await && npm run test:regress && npm run test:returnvalues && npm run test:threads && npm run test:policy && npm run test:closure && npm run test:compiler -- --parallel && npm run test:browser && npm run test:asconfig && npm run test:transform && npm run test:cli && npm run test:gc && npm run test:holders && npm run test:inlinevalue",
     "test:parser": "node --enable-source-maps tests/parser",
     "test:binaryen": "node --enable-source-maps tests/binaryen.js",
     "test:flags": "node --enable-source-maps tests/flags.js",
@@ -117,7 +117,8 @@
     "bootstrap:rtraced": "node bin/tensionscript.js --config src/asconfig.json --target rtraced && node bin/tensionscript.js --config src/asconfig.json --target rtraced --wasm ./build/assemblyscript.rtraced.js",
     "test:closure": "node --enable-source-maps tests/closure/lower.js",
     "prepublishOnly": "npm run build && npm run publish:verify",
-    "publish:verify": "node scripts/verify-dist.js"
+    "publish:verify": "node scripts/verify-dist.js",
+    "test:inlinevalue": "node --enable-source-maps tests/interop/inline-whole-value.js"
   },
   "files": [
     "bin/",

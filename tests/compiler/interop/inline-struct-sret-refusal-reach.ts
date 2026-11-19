@@ -15,8 +15,9 @@
 //   3. `return f()` in an  TS2322 — the function's return type is i32, and a
 //      i32-returning        value type is not assignable to it.
 //      function
-//   4. `a[i] = f()`        AS100 — `Array<P>` is a refused type argument, and
-//                          the store reads the value as a whole.
+//   4. `a[i] = f()`        AS100 — assigning an expression to an `Array<P>`
+//                          element (the store needs a local's leaves; a call
+//                          result is a value with no address).
 //
 //   5. bare `f()`          **compiles**, and is safe: it allocates the slot,
 //                          passes its address as the hidden destination, calls,
@@ -24,7 +25,8 @@
 //                          See `discard()` in `inline-struct-sret.ts`, which
 //                          asserts the unwind.
 //
-// The fallback for (1) and (4) is the whole-value refusal; (2) and (3) are
+// (1) and (4) are refused by the same rule — a by-value use needs a value held
+// in a local — restated where each storage decision is made. (2) and (3) are
 // stopped by the type checker before codegen. Nothing here reaches the slot's
 // address as a value.
 
