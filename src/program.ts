@@ -514,6 +514,27 @@ export class Program extends DiagnosticEmitter {
   /** An indicator if the program has been initialized. */
   initialized: bool = false;
 
+  /**
+   * Whether any source declares an `async` function.
+   *
+   * Latched **before** the async lowering runs (`src/transforms.ts`), because
+   * the lowering clears `declaration.isAsync` on every function it lowers. It
+   * is a whole-program fact, not a reachability one: A1's shell is emitted for
+   * a program that *contains* a may-suspend declaration even when no call to it
+   * survives.
+   */
+  hasAsync: bool = false;
+
+  /**
+   * Whether any source contains an `await` expression, latched at the same
+   * point as {@link hasAsync}.
+   *
+   * A1 distinguishes the two: a program that contains an `await` belongs to
+   * Backend A and must stay byte-identical, while an await-free async program
+   * is what the continuation shell can run today.
+   */
+  hasAwait: bool = false;
+
   // Lookup maps
 
   /** Files by unique internal name. */

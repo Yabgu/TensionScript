@@ -65,6 +65,8 @@ import {
   isConstExpressionNaN,
   ensureType,
   createType,
+  typeFromHeapType,
+  TypeBuilder,
   getConstValueInteger
 } from "./module";
 
@@ -268,6 +270,16 @@ export const defaultFeatures = Feature.MutableGlobals
                              | Feature.NontrappingF2I
                              | Feature.BulkMemory;
 
+// Names the async shell gives its mechanism artifacts. Shared with
+// `src/builtins.ts`, which emits `table.get`/`suspend` from inside the library,
+// so the two cannot drift apart silently.
+export const ASYNC_IDLE_TAG = "idle";
+export const ASYNC_DONE_TAG = "done";
+export const ASYNC_CONT_TABLE = "~asyncCont";
+export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
+export const ASYNC_STATUS = "~asyncStatus";
+export const ASYNC_STATUS_EXPORT = "__asyncStatus";
+
 /** Compiler options. */
 /**
  * A GC array reference plus a byte offset, recovered from `changetype<usize>(x) + k`.
@@ -407,6 +419,13 @@ export class Options {
       if (feature & Feature.GC) feature |= Feature.ReferenceTypes;
       // Enabling Relaxed SIMD also enables SIMD
       if (feature & Feature.RelaxedSimd) feature |= Feature.Simd;
+      // **Enabling stack switching also enables GC and reference types.** A
+      // continuation type `(cont $ft)` is a concrete heap type, and Binaryen's
+      // writer generalizes every concrete heap type to its top without GC in
+      // the mask (`HeapType::asWrittenGivenFeatures`, Binaryen 131) — the type
+      // then encodes as the pre-final `5d 70` and every engine refuses the
+      // module at parse. Measured in `docs/async-core-loop.md` §7.1.
+      if (feature & Feature.StackSwitching) feature |= Feature.GC | Feature.ReferenceTypes;
       this.features |= feature;
     } else {
       // Disabling Reference Types also disables GC
@@ -624,6 +643,35 @@ export class Compiler extends DiagnosticEmitter {
   staticGcObjectOffsets: Map<i32, Set<i32>> = new Map();
   /** Function table being compiled. First elem is blank. */
   functionTable: Function[] = [];
+
+  /**
+   * Async shell state, filled by `prepareAsyncShell` and read by the async
+   * intrinsics in `src/builtins.ts`.
+   *
+   * The intrinsics are compiled *after* the types exist, so a zero here means
+   * "the shell was not prepared" — and a call to one is then a compiler bug
+   * rather than a shape to guess at.
+   */
+  asyncShellPrepared: bool = false;
+  /** Whether `main`'s compiled signature returns a value the status can carry. */
+  asyncMainReturnsValue: bool = false;
+  /** Heap type of `main`'s compiled signature, as `ref.func` requires it. */
+  asyncFtMainHeap: HeapTypeRef = 0;
+  /** Heap type of `(cont $ftMain)`. */
+  asyncCtMainHeap: HeapTypeRef = 0;
+  /** `(ref null $ctMain)` — the continuation table's element type. */
+  asyncCtMainRef: TypeRef = 0;
+  /** Heap type of the core loop's compiled signature. */
+  asyncFtCoreHeap: HeapTypeRef = 0;
+  /** Heap type of the core loop continuation `(cont (func))`. */
+  asyncCtCoreHeap: HeapTypeRef = 0;
+  /** `(ref null $ctCore)` — the type the handler blocks receive. */
+  asyncCtCoreRef: TypeRef = 0;
+  /** Whether `main` returns a value the status cannot carry and must be dropped. */
+  asyncMainDropsResult: bool = false;
+
+  /** The program's exported `main`, recorded when the module export is compiled. */
+  private mainFunction: Function | null = null;
   /** Arguments length helper global. */
   builtinArgumentsLength: GlobalRef = 0;
   /** Environment global delivering a captured `this` into an arrow function. */
@@ -700,6 +748,7 @@ export class Compiler extends DiagnosticEmitter {
     if (options.hasFeature(Feature.ExtendedConst)) featureFlags |= FeatureFlags.ExtendedConst;
     if (options.hasFeature(Feature.Strings)) featureFlags |= FeatureFlags.Strings;
     if (options.hasFeature(Feature.SharedEverything)) featureFlags |= FeatureFlags.SharedEverything;
+    if (options.hasFeature(Feature.StackSwitching)) featureFlags |= FeatureFlags.StackSwitching;
     module.setFeatures(featureFlags);
 
     // set up the main start function
@@ -731,6 +780,223 @@ export class Compiler extends DiagnosticEmitter {
    */
   get gcActive(): bool {
     return this.options.wasmGc && gcUniform(this.program);
+  }
+
+  /**
+   * Whether this program gets the continuation shell.
+   *
+   * Three conditions, each deliberate:
+   *
+   * - **A may-suspend declaration exists.** That is `program.hasAsync`, latched
+   *   before the lowering clears `isAsync`. A program that declares no `async`
+   *   function keeps emitting exactly the bytes it emitted before this round.
+   * - **It contains no `await`.** A1 is the shell without suspension; a program
+   *   with an `await` belongs to Backend A and must stay byte-identical (gate
+   *   of the round). P2 removes this condition together with Backend A.
+   * - **It exports `main`.** `main` is what is resumed; a library module with
+   *   an async function but no entry point has no continuation to start.
+   */
+  private shouldEmitAsyncShell(): bool {
+    let program = this.program;
+    if (!program.hasAsync || program.hasAwait) return false;
+    return this.mainFunction != null;
+  }
+
+  /**
+   * Emits the mechanism half of the shell: the continuation types, the tags,
+   * the table, the globals, the passive element segment, and the two library
+   * functions the compiler owns the names of.
+   *
+   * Called **before** the lazy-function queue is drained, because compiling
+   * `__coreloop` can queue lazy helpers of its own, and every queue must be
+   * empty by the time `__start` is built.
+   */
+  private prepareAsyncShell(): void {
+    let module = this.module;
+    let main = assert(this.mainFunction);
+    let signature = main.signature;
+    if (signature.parameterTypes.length != 0) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        main.declaration.name.range,
+        "an async program whose main takes parameters (the core loop resumes a () -> status function)"
+      );
+      return;
+    }
+
+    // What the entry continuation returns. `void` carries no status (0); an
+    // i32-shaped scalar return *is* the status; anything else — f64, i64, a
+    // class reference such as the `Task<T>` an `async main` is lowered to — is
+    // evaluated and dropped, with 0 as the status. **Not `toRef()`**: under the
+    // pointer ABI a class reference is also `TypeRef.I32`, and a pointer is not
+    // a status.
+    let returnType = signature.returnType;
+    let returnsI32 = returnType != Type.void
+      && !returnType.isReference
+      && returnType.toRef() == TypeRef.I32;
+    this.asyncMainReturnsValue = returnsI32;
+    this.asyncMainDropsResult = returnType != Type.void && !returnsI32;
+
+    // **The feature mask is the compiler's business, not the user's.** A
+    // continuation type is a concrete heap type: without GC, Binaryen's writer
+    // generalizes it to the pre-final `5d 70` and every engine refuses the
+    // module at parse (`docs/async-core-loop.md` §7.1). The handler blocks use
+    // multi-value results, and the exported status global is mutable.
+    let features = module.getFeatures()
+      | FeatureFlags.StackSwitching
+      | FeatureFlags.GC
+      | FeatureFlags.ReferenceTypes
+      | FeatureFlags.ExceptionHandling
+      | FeatureFlags.MultiValue
+      | FeatureFlags.MutableGlobals;
+    module.setFeatures(features);
+    assert((module.getFeatures() & FeatureFlags.StackSwitching) != 0);
+
+    // $ctMain = (cont $ftMain), $ctCore = (cont $ftCore).
+    //
+    // **$ftMain is the function's own heap type, not one built here.** Binaryen
+    // asserts `f->type.getHeapType() == type` in `BinaryenRefFunc`, and a
+    // structurally equal signature built through a TypeBuilder is not
+    // necessarily the same type index — measured: `main`'s `() -> void` from
+    // the compiler did not compare equal to a builder-shaped `(none, none)`,
+    // and the compile aborted inside Binaryen. Taking the compiled function's
+    // type is also what makes `cont.new`'s element type agree with `ref.func`.
+    //
+    // The core loop's continuation takes no operands because the C API's
+    // `BinaryenResume` sends none (Binaryen's `makeResume` has a `sentTypes`
+    // vector the C wrapper does not expose). The main slot therefore travels
+    // through a global — a shape §3.1's `__coreloop(mainCont)` also allows,
+    // since §3.4's syntax is explicitly not normative.
+    let ftMain = module.getFunctionHeapType(main.internalName);
+    let builder = new TypeBuilder(1);
+    builder.setContinuation(0, ftMain);
+    let ctMain = unchecked(builder.buildAndDispose()[0]);
+    this.asyncFtMainHeap = ftMain;
+    this.asyncCtMainHeap = ctMain;
+    this.asyncCtMainRef = typeFromHeapType(ctMain, true);
+
+    // $idle : () -> void, $done : (i32) -> void. `$await` is deliberately
+    // absent: it carries a continuation and belongs to the round that can
+    // suspend on one.
+    module.addTag(ASYNC_IDLE_TAG, TypeRef.None, TypeRef.None);
+    module.addTag(ASYNC_DONE_TAG, TypeRef.I32, TypeRef.None);
+
+    // One slot for one continuation. `addTable`, not `addFunctionTable`: the
+    // element type is `(ref null $ctMain)`, which a `funcref` table cannot hold.
+    module.addTable(ASYNC_CONT_TABLE, 1, 1, this.asyncCtMainRef);
+
+    // The slot the resumed core loop reads, and the status `$start` publishes.
+    module.addGlobal(ASYNC_MAIN_SLOT, TypeRef.I32, true, module.i32(0));
+    module.addGlobal(ASYNC_STATUS, TypeRef.I32, true, module.i32(0));
+    module.addGlobalExport(ASYNC_STATUS, ASYNC_STATUS_EXPORT);
+
+    // The library is compiled here, and only here: the call in `__start` is
+    // what makes it reachable, exactly as `__closureInit` is pulled in by the
+    // call the closure lowering emits. `asyncShellPrepared` must be true before
+    // the intrinsics inside it are compiled.
+    this.asyncShellPrepared = true;
+    let program = this.program;
+    let coreloop = program.requireFunction(BuiltinNames.asyncCoreloop);
+    this.compileFunction(coreloop);
+    let pump = program.requireFunction(BuiltinNames.asyncPump);
+    this.compileFunction(pump);
+    if (!module.hasExport("__asyncPump")) {
+      module.addFunctionExport(pump.internalName, "__asyncPump");
+    }
+
+    // The core loop's continuation type is built **after** it is compiled, for
+    // the same `ref.func` reason as main's above.
+    let ftCore = module.getFunctionHeapType(coreloop.internalName);
+    let coreBuilder = new TypeBuilder(1);
+    coreBuilder.setContinuation(0, ftCore);
+    let ctCore = unchecked(coreBuilder.buildAndDispose()[0]);
+    this.asyncFtCoreHeap = ftCore;
+    this.asyncCtCoreHeap = ctCore;
+    this.asyncCtCoreRef = typeFromHeapType(ctCore, true);
+
+    // `ref.func` is only legal for a function in a segment. Declarative, so no
+    // table slot is claimed for either body.
+    let declared = new Array<string>(2);
+    unchecked(declared[0] = main.internalName);
+    unchecked(declared[1] = coreloop.internalName);
+    module.addPassiveElementSegment("~asyncDeclare", declared);
+  }
+
+  /**
+   * Rewrites `__start`: start `main`'s continuation on the core loop, and
+   * publish the `$done` status.
+   *
+   * `main` is never **called**; `cont.new (ref.func $main)` creates its stack
+   * without executing an instruction, and the resume inside the core loop is
+   * what runs it. The `$idle` handler returns to the host with the core loop's
+   * continuation discarded (nothing parks in A1); the `$done` handler receives
+   * `(status, continuation)` and stores the status.
+   *
+   * Shape, with the handler arities made explicit:
+   *
+   * ```wat
+   * (block $on_done (result i32 (ref null $ctCore))
+   *   (block $on_idle (result (ref null $ctCore))
+   *     (table.set $cont (i32.const 0) (cont.new $ctMain (ref.func $main)))
+   *     (resume $ctCore (on $idle $on_idle) (on $done $on_done)
+   *       (cont.new $ctCore (ref.func $__coreloop)))
+   *     (return))
+   *   (tuple.extract 0)   ;; $done's status; the continuation is dropped
+   *   (global.set $__asyncStatus)
+   *   (return))
+   * ```
+   */
+  private emitAsyncShellStart(body: ExpressionRef[]): void {
+    let module = this.module;
+    let main = assert(this.mainFunction);
+    let coreloop = this.program.requireFunction(BuiltinNames.asyncCoreloop);
+
+    // main's continuation goes into slot 0 before the core loop can read it.
+    body.push(
+      module.global_set(ASYNC_MAIN_SLOT, module.i32(0))
+    );
+    body.push(
+      module.table_set(
+        ASYNC_CONT_TABLE,
+        module.i32(0),
+        module.cont_new(
+          this.asyncCtMainHeap,
+          module.ref_func(main.internalName, typeFromHeapType(this.asyncFtMainHeap, false))
+        )
+      )
+    );
+
+    let doneHandlers = new Array<string>(2);
+    unchecked(doneHandlers[0] = ASYNC_IDLE_TAG);
+    unchecked(doneHandlers[1] = ASYNC_DONE_TAG);
+    let doneLabels = new Array<string>(2);
+    unchecked(doneLabels[0] = "on_idle");
+    unchecked(doneLabels[1] = "on_done");
+
+    let doneBlock = module.block("on_done", [
+      module.resume_with_handlers(
+        module.cont_new(
+          this.asyncCtCoreHeap,
+          module.ref_func(coreloop.internalName, typeFromHeapType(this.asyncFtCoreHeap, false))
+        ),
+        this.asyncCtCoreHeap,
+        doneHandlers,
+        doneLabels
+      ),
+      // A core loop that returns normally never runs a handler; exiting the
+      // start function is the only sensible continuation.
+      module.return()
+    ], createType([ TypeRef.I32, this.asyncCtCoreRef ]));
+
+    let idleBlock = module.block("on_idle", [
+      module.global_set(ASYNC_STATUS, module.tuple_extract(doneBlock, 0)),
+      module.return()
+    ], this.asyncCtCoreRef);
+
+    // The idle branch leaves the core loop's continuation on the block; none
+    // of it is used in A1, and `drop` is also what makes the block a statement
+    // rather than a value the start function would have to return.
+    body.push(module.drop(idleBlock));
   }
 
   /** Performs compilation of the underlying {@link Program} to a {@link Module}. */
@@ -809,6 +1075,13 @@ export class Compiler extends DiagnosticEmitter {
         this.compileModuleExports(file);
       }
     }
+
+    // **The async shell, before the lazy queue is drained.** Its library
+    // functions can queue lazy helpers of their own, and the queue is flushed
+    // below exactly as it is for every other compiled function. Emitting here
+    // also means `main` is known: it was recorded while its module export was
+    // compiled above.
+    if (this.shouldEmitAsyncShell()) this.prepareAsyncShell();
 
     // compile and export runtime if requested or necessary
     if (this.options.exportRuntime || (this.options.bindingsHint && this.desiresExportRuntime)) {
@@ -993,6 +1266,11 @@ export class Compiler extends DiagnosticEmitter {
     // `reportGcCoverage` is never reached, which is what keeps the flag-off output
     // byte-identical — including its diagnostic stream.
     if (this.options.wasmGc) this.reportGcCoverage();
+
+    // The shell's `__start` rewrite is the last thing appended, so every
+    // initializer runs first — the continuation must not start before the
+    // module's own top-level state exists.
+    if (this.asyncShellPrepared) this.emitAsyncShellStart(startFunctionBody);
 
     let startIsEmpty = !startFunctionBody.length;
     let exportStart = options.exportStart;
@@ -1254,6 +1532,10 @@ export class Compiler extends DiagnosticEmitter {
             this.runtimeFeatures |= RuntimeFeatures.setArgumentsLength;
           }
           this.compileFunction(functionInstance);
+          // The entry point, remembered for the async shell. `prefix` is empty
+          // for a file's own exports, so a re-export of some other module's
+          // `main` cannot claim the slot.
+          if (prefix.length == 0 && name == "main") this.mainFunction = functionInstance;
           if (functionInstance.is(CommonFlags.Compiled)) {
             let exportName = prefix + name;
             if (!module.hasExport(exportName)) {
