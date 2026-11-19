@@ -1049,13 +1049,21 @@ export class Compiler extends DiagnosticEmitter {
    */
   private prepareAsyncStackPrologue(): void {
     let module = this.module;
+    // **The executor's queues are atomic by design** (`docs/task-design.md`
+    // §8.5: `SlotRing` is CAS on the tail, atomic store on the head), so a
+    // program that can suspend needs the atomics feature. It is *implied* by
+    // the shell rather than asked for: a user who writes `await` should not have
+    // to know the ring's implementation. The memory stays unshared — atomics on
+    // an unshared memory are valid, and sharing it is the host's decision (T0).
+    this.options.setFeature(Feature.Threads);
     let features = module.getFeatures()
       | FeatureFlags.StackSwitching
       | FeatureFlags.GC
       | FeatureFlags.ReferenceTypes
       | FeatureFlags.ExceptionHandling
       | FeatureFlags.MultiValue
-      | FeatureFlags.MutableGlobals;
+      | FeatureFlags.MutableGlobals
+      | FeatureFlags.Atomics;
     module.setFeatures(features);
     assert((module.getFeatures() & FeatureFlags.StackSwitching) != 0);
 

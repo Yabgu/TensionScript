@@ -91,14 +91,16 @@ function compile(source, extraArgs = []) {
  * path names `env.abort`; the fixtures never take it, and the script supplies a
  * stub so instantiation succeeds.
  */
-function globalsAfterStart(wasmPath, bytes, wants) {
+function globalsAfterStart(wasmPath, bytes, wants, gc = false) {
   let escaped = "";
   for (let i = 0; i < bytes.length; ++i) {
     escaped += "\\" + bytes[i].toString(16).padStart(2, "0");
   }
   const wastPath = join(dirname(wasmPath), "probe.globals.wast");
   writeFileSync(wastPath, [
-    `(module $env (func (export "abort") (param i32 i32 i32 i32)))`,
+    gc
+      ? `(module $env (type $str (array (mut i16))) (func (export "abort") (param (ref null $str) (ref null $str) i32 i32)))`
+      : `(module $env (func (export "abort") (param i32 i32 i32 i32)))`,
     `(register "env" $env)`,
     `(module $m binary "${escaped}")`,
     `(register "m" $m)`,
@@ -167,6 +169,62 @@ export async function main(): i32 {
       }
     } finally {
       built.dispose();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3b. `SlotRing`: a bounded ring of i32 slot indices over atomics.
+// ---------------------------------------------------------------------------
+
+console.log("\n# 3b the slot ring");
+{
+  // `--enable threads` is *not* passed: the shell implies the atomics feature
+  // (§8.5 — the ring is the executor's queue), and a user who writes `await`
+  // should not have to know that.
+  const source = `
+import { SlotRing } from "~lib/thread";
+async function leaf(): i32 { return 0; }
+export async function main(): i32 {
+  await leaf();
+  let r = new SlotRing(4);
+  let emptyOk = r.pop() == -1;
+  r.push(10); r.push(20); r.push(30);
+  let depthOk = r.depth == 3;
+  let orderOk = r.pop() + r.pop() + r.pop() == 60;
+  r.push(1); r.push(2); r.push(3); r.push(4);
+  let fullOk = !r.push(5) && r.depth == 4;
+  return (emptyOk ? 1 : 0) + (depthOk ? 10 : 0) + (orderOk ? 100 : 0) + (fullOk ? 1000 : 0);
+}
+`;
+  const built = compile(source);
+  check("a program using SlotRing compiles without --enable threads",
+    built.error === undefined, true);
+  if (!built.error) {
+    try {
+      check("the ring's accesses are atomic",
+        /i32\.atomic\.(load|store|rmw)/.test(built.wat), true);
+      check("the ring's storage is an Int32Array over linear memory",
+        /\$~lib\/typedarray\/Int32Array#constructor/.test(built.wat), true);
+      if (wasmtime != null) {
+        const ran = globalsAfterStart(built.wasmPath, built.bytes, [["__asyncStatus", 1111]]);
+        // empty (-1) + depth + FIFO order + full-refuses, as four bits.
+        check("push/pop/depth/-1/full: the answer is 1111", ran.ok, true);
+      }
+    } finally {
+      built.dispose();
+    }
+  }
+  const gc = compile(source, ["--wasmGc"]);
+  check("the same ring compiles on the GC ABI", gc.error === undefined, true);
+  if (!gc.error) {
+    try {
+      if (wasmtime != null) {
+        const ran = globalsAfterStart(gc.wasmPath, gc.bytes, [["__asyncStatus", 1111]], true);
+        check("the GC ABI answers 1111 too", ran.ok, true);
+      }
+    } finally {
+      gc.dispose();
     }
   }
 }
