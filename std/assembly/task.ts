@@ -3,38 +3,16 @@
 /**
  * The base class of a task's on-heap record.
  *
- * The eight fields are `docs/async-await-plan-v2.md` §3.2's layout, verbatim and
- * in order — the byte offsets are the contract codegen's typed read depends on
- * (`src/compiler.ts:8025-8027` reads `payload` at 8 for the integer and `bool`
- * kinds, and `f0`/`f1` at 16 for `f32` and the 64-bit kinds), so the declaration
- * order and the types below are load-bearing:
+ * **Backend A's record.** The `await`-lowered (state-machine) backend reads and
+ * writes this class at fixed byte offsets (§3.2): `payload` at 8, `f0`/`f1` at
+ * 16, `done` at 28. The stackful backend (`--enable stack-switching`) no longer
+ * uses it — it has one `TaskBase` object per execution and reads fields — but
+ * the offsets are still the contract for Backend A, so the declaration order
+ * and types below are unchanged.
  *
- * | field | offset | meaning |
- * |---|---|---|
- * | `class_` | 0 | the class the completion arrived as; 0 before delivery |
- * | `key` | 4 | the producer's submit-time id (§3.1) |
- * | `payload` | 8 | the producer's `b`, verbatim |
- * | `status` | 12 | 0, or the capability's errno (§3.4) |
- * | `f0` | 16 | the producer's `f0` |
- * | `f1` | 20 | the producer's `f1` |
- * | `tag` | 24 | the await tag; 0 today |
- * | `done` | 28 | 0 = parked, 1 = settled |
- *
- * **Why std and not the framework** (Phase 4 ruling, plan §3.2): §7.1 gives the
- * task machine to std and §3.2 gives it these offsets; a machine that must read
- * `payload` at 8 cannot be written over a class that declares no fields. A
- * capability that needs more subclasses `TaskRecord` — a subclass's fields start
- * after the base's, so the offsets above are unchanged — and
- * `__taskBindRecordFactory` (`task-rt.ts`) is how `__taskRegister` comes to
- * allocate that subclass.
- *
- * It is a *managed* class so that `Task<T>._record` is a traced reference: a
- * class-typed field is visited by the compiler-generated visitor (the
- * `fieldType.isManaged` arm, `builtins.ts:10951-10962`), where a `usize` would
- * not be. That trace is the bottom half of §4.4's root chain — task table →
- * `TaskRecord` → state struct → environment — and it is what keeps a suspended
- * task's record, state struct and environment alive when the only remaining
- * reference is a handle the guest is holding.
+ * The class is managed so a handle's `_record` is a traced reference. A
+ * capability's record subclasses it; a subclass's fields start after the base's,
+ * so the offsets above stay fixed.
  */
 export class TaskRecord {
   /** Offset 0: the class the completion arrived as; 0 before delivery. */
@@ -56,35 +34,135 @@ export class TaskRecord {
 }
 
 /**
+ * A parked waiter: the executor that owns it and the continuation slot to
+ * resume there.
+ *
+ * A slot, not an object reference, so the same entry is meaningful to the
+ * scheduler regardless of the guest program's class representation, and so a
+ * cross-thread wake can carry it (design §3/§4). `exec` is the executor id;
+ * `0` is main until `spawn` gives a worker its own id.
+ */
+export class Waiter {
+  /** The executor that will resume this waiter. */
+  exec: i32 = 0;
+  /** The waiter's continuation slot in that executor's table. */
+  slot: i32 = 0;
+}
+
+/** The ready queue (executor 0's, until Gate 3 adds per-executor queues). */
+let ready: Array<i32> | null = null;
+
+/**
+ * Push a continuation slot onto executor 0's ready queue.
+ *
+ * **At most one entry per slot.** A task can be queued by several waiters and
+ * by the task that parked on it; resuming a continuation twice would advance a
+ * suspended body twice. The queue is small (the number of runnable tasks), so
+ * the membership scan is cheaper than a set and needs no allocation.
+ */
+export function __readyPush(slot: i32): void {
+  let queue = ready;
+  if (!queue) {
+    queue = new Array<i32>();
+    ready = queue;
+  }
+  for (let i = 0, k = queue.length; i < k; ++i) {
+    if (unchecked(queue[i]) == slot) return;
+  }
+  queue.push(slot);
+}
+
+/** Pop a ready slot, or `-1` when the queue is empty. */
+export function __readyPop(): i32 {
+  let queue = ready;
+  if (!queue || queue.length == 0) return -1;
+  return queue.pop();
+}
+
+/** Whether the ready queue has anything to run. */
+export function __readyEmpty(): bool {
+  let queue = ready;
+  return !queue || queue.length == 0;
+}
+
+/**
+ * The common part of every task: one object per execution, with the fields the
+ * scheduler owns and the single abstract operation that runs it.
+ *
+ * The stackful lowering declares a subclass per `async function` — a
+ * `f$Rec extends Task<R>` — carrying the function's captured parameters as
+ * fields and implementing `drive`. There is no second record: the object the
+ * entry allocates *is* the task, and the continuation's captured parameters are
+ * its fields, reached by field access rather than by literal byte offsets.
+ */
+export abstract class TaskBase {
+  /** The task's continuation slot in the executor's table. `-1` before it is installed. */
+  slot: i32 = -1;
+  /** The executor that owns this task. `0` is main. */
+  home: i32 = 0;
+  /** Whether the task has completed (its result is available). */
+  settled: bool = false;
+  /** The completion status; 0 on success. */
+  status: i32 = 0;
+  /** Tasks parked on this one, or `null` when nobody is waiting. */
+  waiters: Array<Waiter> | null = null;
+
+  /** Runs, or resumes, this task on the current thread. */
+  abstract drive(): void;
+
+  /**
+   * Marks the task settled and releases every waiter onto its own executor.
+   *
+   * Called by the task's continuation immediately before it returns, after the
+   * value has been written. Waking here — rather than in the executor loop — is
+   * what lets a completion on one thread release a waiter on another: the wake
+   * is a queue push to the waiter's `exec`, and Gate 3's inbox carries it.
+   */
+  settle(status: i32): void {
+    this.status = status;
+    this.settled = true;
+    let list = this.waiters;
+    if (list) {
+      for (let i = 0, k = list.length; i < k; ++i) {
+        let waiter = unchecked(list[i]);
+        // Gate 2 is single-executor by construction, so every waiter's `exec`
+        // is 0 and the global queue is its queue. Gate 3 routes by `exec`.
+        __readyPush(waiter.slot);
+      }
+      list.length = 0;
+    }
+  }
+}
+
+/**
  * A handle to an asynchronous operation's result.
  *
- * `Task<T>` is what a call to an `async function f(): T` produces, and what a
- * capability's reader returns for work the host completes later
- * (`docs/async-await-plan-v2.md` §1.2 rule 2 and §3.3). One handle type, one
- * name: the design has no `Promise` and no second `Awaitable<T>` (§2.4).
+ * For the stackful backend a task is one object: the entry allocates a
+ * per-function subclass of this class and returns it, its body's result lands
+ * in `value` (an `i32`; the stackful backend carries `i32` and `void` results
+ * only), and `await t` is `if (!t.settled) t.drive(); return t.value`.
  *
- * The type argument exists for the type checker. The layout is identical for
- * every `T` — one word — exactly as `Function<T>`'s is (`std/assembly/function.ts`):
- * the runtime's task record holds the value, and `await` reads it back through
- * the record's typed read (§3.2).
+ * **`value` is `i32`, not `T`.** The type argument is still what the type
+ * checker uses (`await` is typed by `T`), but a field of type `T` cannot be
+ * instantiated for `Task<void>` — measured: the compiler rejects the `void`
+ * instantiation at the field declaration (`TS1110`). Backend A's interface
+ * (`Task<void>` in its tests and in user code) must keep compiling, and the
+ * stackful backend already refuses every result type except `i32`/`void`, so
+ * one word is the exact representation both need.
  *
- * The runtime table, not this field, is the record's strong reference while a
- * task is parked; a settled record nothing references is ordinary garbage (§3.2).
- * The field is nonetheless a traced managed reference rather than an opaque
- * `usize` (the divergence §2.4's "single opaque `usize` field" left open, resolved
- * in favor of §3.2's "managed reference to the owning `TaskRecord`"): a `usize`
- * field is not traced by the generated visitor, so a handle the guest holds across
- * a suspension would be the *only* path to the record and the collector could not
- * see through it — the record, its state struct and its environment could be
- * collected while the task was still parked, and the resume would be a
- * use-after-free. As a class-typed field it is traced, and the handle alone keeps
- * the chain alive. The layout is unchanged: one word, identical for every `T`.
- *
- * Not `private`: the runtime that creates the record owns the handle's
- * construction, and the lowering reads it from generated code (§4.1's
- * `state.handle`). Nothing else may touch it.
+ * `_record` remains for Backend A, whose state machine stores its lowered
+ * record on the handle. The stackful backend does not create one.
  */
-@final export class Task<T> {
-  /** Managed reference to the runtime's record for this task. */
+export class Task<T> extends TaskBase {
+  /** Backend A's record for this task. Unused by the stackful backend. */
   _record!: TaskRecord;
+  /** The stackful backend's result word. Valid once `settled` is true. */
+  value: i32 = 0;
+
+  /**
+   * Backend A's handle is never driven; the stackful per-function subclass
+   * overrides this. Declared concretely so `Task<T>` stays instantiable for
+   * Backend A's tests and user code.
+   */
+  drive(): void {}
 }

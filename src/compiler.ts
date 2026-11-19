@@ -17,8 +17,7 @@ import {
   builtinVariables_onCompile,
   compileVisitGlobals,
   compileVisitMembers,
-  compileRTTI,
-  ASYNC_ARENA_SIZE
+  compileRTTI
 } from "./builtins";
 
 import {
@@ -276,7 +275,7 @@ export const defaultFeatures = Feature.MutableGlobals
 // so the two cannot drift apart silently.
 export const ASYNC_IDLE_TAG = "idle";
 export const ASYNC_DONE_TAG = "done";
-/** The A2 suspension tag: its payload is the awaited task's record address. */
+/** The A2 suspension tag: its payload is the awaited task's continuation slot. */
 export const ASYNC_AWAIT_TAG = "await";
 export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
@@ -284,13 +283,10 @@ export const ASYNC_STATUS = "~asyncStatus";
 export const ASYNC_STATUS_EXPORT = "__asyncStatus";
 /** The status the last normal `resume` returned (A2's core loop reads it). */
 export const ASYNC_LAST_STATUS = "~asyncLastStatus";
-/** The record of the task the core loop is currently resuming. */
-export const ASYNC_CURRENT_RECORD = "~asyncCurrentRecord";
+/** The slot of the task the executor is currently resuming (0 = main). */
+export const ASYNC_CURRENT_SLOT = "~asyncCurrentSlot";
 /** The zero-argument wrapper around `main`, so every continuation is `() -> i32`. */
 export const ASYNC_MAIN_START = "~asyncMainStart";
-/** The task-cell arena: its base and its bump pointer (A2 allocates no heap). */
-export const ASYNC_ARENA_BASE = "~asyncArenaBase";
-export const ASYNC_ARENA_NEXT = "~asyncArenaNext";
 /** The next continuation slot `__installCont` hands out; slot 0 is main. */
 export const ASYNC_NEXT_SLOT = "~asyncNextSlot";
 /** A canonical `() -> i32` function, so `$ct` exists before any body compiles. */
@@ -1084,28 +1080,17 @@ export class Compiler extends DiagnosticEmitter {
     module.addTable(ASYNC_CONT_TABLE, 16, 65536, this.asyncCtMainRef);
 
     module.addGlobal(ASYNC_LAST_STATUS, TypeRef.I32, true, module.i32(0));
-    module.addGlobal(ASYNC_CURRENT_RECORD, TypeRef.I32, true, module.i32(0));
+    // The slot the executor is resuming. `f$start` reads the task object from
+    // the slot table through this index (resume sends no operands).
+    module.addGlobal(ASYNC_CURRENT_SLOT, TypeRef.I32, true, module.i32(0));
     module.addGlobal(ASYNC_NEXT_SLOT, TypeRef.I32, true, module.i32(1));
     module.addGlobal(ASYNC_STATUS, TypeRef.I32, true, module.i32(0));
     module.addGlobalExport(ASYNC_STATUS, ASYNC_STATUS_EXPORT);
 
-    // Task cells come from a static, zeroed arena. `new` would pull the
-    // runtime and its `env.abort` import into every module that starts a task;
-    // a module that cannot instantiate without a host stub is not the shape
-    // A1 established, and the round's tests run it on plain wasmtime. The
-    // arena is reserved as a data segment, so `__data_end` and the heap start
-    // after it and no allocator is involved.
-    // A cell address of 0 is the core loop's "main" sentinel, so the arena
-    // must not start at 0. It does only when the program explicitly asks for
-    // `--memoryBase 0`; a padding segment moves it to 8.
-    if (i64_low(this.memoryOffset) == 0 && i64_high(this.memoryOffset) == 0) {
-      this.addAlignedMemorySegment(new Uint8Array(8), 8);
-    }
-    let arena = new Uint8Array(ASYNC_ARENA_SIZE);
-    let arenaSegment = this.addAlignedMemorySegment(arena, 8);
-    let arenaBase = i64_low(arenaSegment.offset);
-    module.addGlobal(ASYNC_ARENA_BASE, TypeRef.I32, false, module.i32(arenaBase));
-    module.addGlobal(ASYNC_ARENA_NEXT, TypeRef.I32, true, module.i32(arenaBase));
+    // **No cell arena.** A task is one object allocated by its entry with
+    // `new` — `struct.new` on the GC ABI, the guest allocator otherwise — and
+    // its fields are the captured parameters. The 256 KiB static arena and its
+    // exhaustion trap are gone with the record it existed for.
 
     this.asyncShellPrepared = true;
   }
@@ -12476,77 +12461,68 @@ export class Compiler extends DiagnosticEmitter {
       this.error(
         DiagnosticCode.Not_implemented_0,
         expression.range,
-        "an await whose Task value is not i32 or void (the stackful backend stores the result in TaskRecord.payload)"
+        "an await whose Task value is not i32 or void (the stackful backend stores one i32 word in Task.value)"
       );
       return module.unreachable();
     }
 
-    // Evaluate the task once, then work from its record. The record is a
-    // `TaskRecord`; `_record` is the handle's one field.
+    // Evaluate the task once. One object per execution: `settled` and `value`
+    // are its fields and `drive` runs or resumes it, so the await is
+    // `if (!t.settled) t.drive(); return t.value` — field access only, no
+    // offsets, no record, no arena.
     let taskExpr = this.compileExpression(expression.operand, operandType, Constraints.ConvImplicit);
-    let taskLocal = flow.getTempLocal(operandType);
     let stmts = new Array<ExpressionRef>();
+
+    // A named scoped local, so the source-level property facts below resolve
+    // through the ordinary resolver: a `PropertyAccessExpression` whose
+    // receiver is an identifier is how fields, getters, pointer offsets and GC
+    // `struct.get`s are all decided, and the transform's own IR temp has no
+    // name for the resolver to bind. The name is unique per await.
+    let taskName = "$await$" + expression.range.start.toString();
+    let taskLocal = flow.addScopedLocal(taskName, operandType);
     stmts.push(module.local_set(taskLocal.index, taskExpr, operandType.isManaged));
-    let recordProto = assert(this.program.taskRecordPrototype);
-    let recordType = assert(resolver.resolveClass(recordProto, null)).type;
-    // `Task<T>` is a std class (pointer layout) whose `_record` field is laid
-    // out at `memoryOffset`. Reading it with a load rather than its getter
-    // matters: the generated getter carries the `!` null check, which imports
-    // `env.abort` into a module that never allocates. The arena cell's field is
-    // written by the entry before the handle escapes, so the check would never
-    // fire anyway.
-    let taskMembers = assert(assert(taskClass).members);
-    let recordMember = assert(taskMembers.get("_record"));
-    let recordOffset = assert((<PropertyPrototype>recordMember).instance).memoryOffset;
-    let recordExpr = module.load(
-      4, false,
-      module.local_get(taskLocal.index, operandType.toRef()),
-      TypeRef.I32,
-      recordOffset, 4
+    // The store above is IR, not an assignment the flow analysis saw; without
+    // this the property accesses below are "used before being assigned".
+    flow.setLocalFlag(taskLocal.index, LocalFlags.Initialized);
+    let taskIdent = Node.createIdentifierExpression(taskName, expression.range);
+
+    let settledAccess = Node.createPropertyAccessExpression(
+      taskIdent,
+      Node.createIdentifierExpression("settled", expression.range),
+      expression.range
     );
-    let recordLocal = flow.getTempLocal(recordType);
-    stmts.push(module.local_set(recordLocal.index, recordExpr, false));
+    let settledExpr = this.compileExpression(settledAccess, Type.bool, Constraints.None);
 
-    let doneExpr = this.taskRecordField("done", module.local_get(recordLocal.index, recordType.toRef()), expression);
-
-    // Park only if the task has not already completed. `done` is 1 on
-    // completion, so `!done` is the park condition. The tag carries the
-    // awaited task's record address (an i32 under the pointer ABI), which is
-    // what the core loop needs to resume it and what its own entry reads as
-    // the current record.
-    stmts.push(module.if(
-      module.unary(UnaryOp.EqzI32, doneExpr),
-      module.suspend(ASYNC_AWAIT_TAG, [ module.local_get(recordLocal.index, recordType.toRef()) ]),
-      module.nop()
-    ));
+    // A fresh property-access node per use: the identifier compiles to its own
+    // `local.get`, so no IR node is shared between the two operands.
+    let driveCall = Node.createCallExpression(
+      Node.createPropertyAccessExpression(
+        Node.createIdentifierExpression(taskName, expression.range),
+        Node.createIdentifierExpression("drive", expression.range),
+        expression.range
+      ),
+      null,
+      [],
+      expression.range
+    );
+    let driveExpr = this.compileExpression(driveCall, Type.void, Constraints.None);
+    stmts.push(module.if(settledExpr, module.nop(), driveExpr));
 
     if (valueType == Type.void) {
       this.currentType = Type.void;
       return module.block(null, stmts, TypeRef.None);
     }
 
-    let payload = this.taskRecordField("payload", module.local_get(recordLocal.index, recordType.toRef()), expression);
-    stmts.push(payload);
-    this.currentType = valueType;
+    let valueAccess = Node.createPropertyAccessExpression(
+      Node.createIdentifierExpression(taskName, expression.range),
+      Node.createIdentifierExpression("value", expression.range),
+      expression.range
+    );
+    stmts.push(this.compileExpression(valueAccess, valueType, Constraints.None));
+    // The stackful backend carries one i32/void word; the type checker keeps
+    // the declared `T` (i32 or bool here).
+    this.currentType = valueType.kind == TypeKind.Bool ? Type.bool : Type.i32;
     return module.block(null, stmts, valueType.toRef());
-  }
-
-  /** Reads one `TaskRecord` field through its generated getter. */
-  private taskRecordField(
-    name: string,
-    record: ExpressionRef,
-    reportNode: Node
-  ): ExpressionRef {
-    let prototype = assert(this.program.taskRecordPrototype);
-    let instance = assert(this.resolver.resolveClass(prototype, null));
-    let members = assert(instance.members);
-    let member = members.get(name);
-    if (!member) {
-      this.error(DiagnosticCode.Not_implemented_0, reportNode.range, "TaskRecord." + name + " is missing");
-      return this.module.unreachable();
-    }
-    let property = assert((<PropertyPrototype>member).instance);
-    return this.compileCallDirect(assert(property.getterInstance), [], reportNode, record);
   }
 
   private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {

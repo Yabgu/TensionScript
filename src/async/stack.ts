@@ -2,45 +2,45 @@
  * Backend B of the async lowering: the **stackful** transform.
  *
  * A1 built the shell — `main` is resumed on a continuation, never called.
- * A2 makes a call to a may-suspend `async function` create that continuation
- * and stash its arguments in a task cell, so the call itself runs none of the
- * body (`docs/async-core-loop.md` §4.1). The body is a separate ordinary
- * function, `f$body`, called by the synthesized zero-argument continuation
- * `f$start`; because a resumed continuation cannot be handed arguments
- * (§3.1's note, A1's `BinaryenResume` limitation), the arguments live in a
- * per-task record that `f$start` reads on entry.
+ * A2 made a call to a may-suspend `async function` create a continuation and
+ * stash its arguments in a task cell, so the call itself runs none of the body
+ * (`docs/async-core-loop.md` §4.1). VT1 replaces the cell with **one task
+ * object per execution**: a per-function subclass of `Task<R>` whose fields are
+ * the captured parameters, whose `drive` is the only scheduler entry, and whose
+ * `value`/`settled` are read directly by `await`.
  *
  * There is **no state machine**. The continuation's own stack holds every local
  * across a suspension; the transform only splits the call path from the body
- * path and gives the body a cell.
+ * path and gives the body a task.
  *
  * ## What is emitted, per `async function f(...): R` that contains an `await`
  *
  * ```ts
- * class f$Rec extends TaskRecord { $p0: T0; ... }   // the arguments
+ * class f$Rec extends Task<R> {                      // the task (and arguments)
+ *   $p0: T0; ...
+ *   drive(): void { if (!this.settled) { __parkOn(this); __suspendAwait(this.slot); } }
+ * }
  * function f$body(...): R { <the original body> }    // the body, unchanged
  * function f$start(): i32 {                          // the continuation
- *   let $rec = changetype<f$Rec>(__currentRecord());
+ *   let $rec = changetype<f$Rec>(__currentTask());
  *   let $r = f$body($rec.$p0, ...);
- *   $rec.payload = $r; $rec.done = 1;
+ *   $rec.value = $r; $rec.settle(0);
  *   return 0;
  * }
  * function f(...): Task<R> {                         // the entry (the call site)
- *   let $rec = new f$Rec(args...);
- *   let $task = new Task<R>();
- *   $task._record = $rec;
- *   let $slot = __asyncSlotFor($rec);
- *   __installCont($slot, f$start);
- *   $rec.key = $slot;
- *   return $task;
+ *   let $rec = new f$Rec();
+ *   $rec.$p0 = a; ...
+ *   $rec.slot = __installCont(f$start);
+ *   __bindTask($rec.slot, $rec);
+ *   return $rec;
  * }
  * ```
  *
- * `await` reads `$task._record` after the suspend and loads the value the
- * continuation wrote. That is the whole value path: the call parks the caller
- * with the awaited continuation's slot, the coreloop resumes it, the
- * continuation writes its result into its own record and completes, and the
- * caller — whose record reference is on its suspended stack — reads it back.
+ * `await t` compiles to `if (!t.settled) t.drive(); return t.value` — fields,
+ * by name. `drive` parks the current task on `t` (a `Waiter` carrying the
+ * caller's slot) and suspends with `$await(t.slot)`; the executor resumes `t`,
+ * and `t.settle` pushes the caller's slot back onto its executor's ready queue.
+ * No record, no arena, no literal byte offset.
  *
  * ## What is *not* transformed
  *
@@ -56,7 +56,7 @@
  * Everything else in the language is refused **by name** here rather than
  * silently left to a backend that will not run: async methods, async arrows and
  * function expressions, generic async functions, parameters that cannot be
- * stored in a record, and results other than `i32`/`void`. A2's mechanism is
+ * stored in a field, and results other than `i32`/`void`. The mechanism is
  * complete for the shapes it accepts; the refusals mark the shapes it does not
  * yet accept.
  */
@@ -111,30 +111,34 @@ import {
   WhileStatement
 } from "../ast";
 
-/** Writes the handle's record without its managed setter (`async-stack.ts`). */
-const SET_RECORD = "__setTaskRecord";
 /** Suffix of the synthesized body function. */
 const BODY_SUFFIX = "$body";
 /** Suffix of the synthesized continuation function. */
 const START_SUFFIX = "$start";
-/** Suffix of the synthesized argument record class. */
+/** Suffix of the synthesized task subclass. */
 const RECORD_SUFFIX = "$Rec";
-/** The cell's slot field (`TaskRecord.key`, `std/assembly/task.ts`). */
-const SLOT_FIELD = "key";
-/** The cell's completion flag. */
-const DONE_FIELD = "done";
-/** The cell's integer result slot. */
-const PAYLOAD_FIELD = "payload";
-/** The current task record (`std/assembly/async-stack.ts`). */
-const CURRENT_RECORD = "__currentRecord";
-/** Bump-allocates a zeroed task cell (`std/assembly/async-stack.ts`). */
-const ALLOC_CELL = "__allocCell";
+/** The task's continuation slot (`TaskBase.slot`). */
+const SLOT_FIELD = "slot";
+/** The task's completion flag (`TaskBase.settled`). */
+const SETTLED_FIELD = "settled";
+/** The task's result word (`Task.value`). */
+const VALUE_FIELD = "value";
+/** The task's completion method (`TaskBase.settle`). */
+const SETTLE_METHOD = "settle";
+/** The task's run/resume method (`TaskBase.drive`). */
+const DRIVE_METHOD = "drive";
+/** The executing task (`std/assembly/task-rt.ts`). */
+const CURRENT_TASK = "__currentTask";
+/** Registers a task under its slot (`std/assembly/task-rt.ts`). */
+const BIND_TASK = "__bindTask";
+/** Parks the current task on another (`std/assembly/task-rt.ts`). */
+const PARK_ON = "__parkOn";
+/** Suspends the current task on an awaited slot (`std/assembly/async-stack.ts`). */
+const SUSPEND_AWAIT = "__suspendAwait";
 /** Installs a continuation at a slot (`src/builtins.ts`). */
 const INSTALL_CONT = "__installCont";
-/** `Task<R>` — the handle type (`std/assembly/task.ts`). */
+/** `Task<R>` — the task type (`std/assembly/task.ts`). */
 const TASK_NAME = "Task";
-/** The base record (`std/assembly/task.ts`). */
-const TASK_RECORD_NAME = "TaskRecord";
 
 export class StackfulAsyncTransform {
 
@@ -336,53 +340,87 @@ export class StackfulAsyncTransform {
       range
     );
 
-    // --- the argument record ----------------------------------------------
+    // --- the task subclass ------------------------------------------------
 
+    // `class f$Rec extends Task<R> { $p0..$pn; drive(): void { ... } }`
+    //
+    // One object per execution. The entry allocates it with `new` (a GC
+    // `struct.new` under `--wasmGc`), the captured parameters are its fields —
+    // reached by name, not by `32 + 4i` — and `drive` is the only operation the
+    // scheduler needs. There is no second record and no arena.
     let recordFields = new Array<DeclarationStatement>(parameters.length + 1);
-    let ctorParameters = new Array<ParameterNode>(parameters.length);
-    let ctorStatements = new Array<Statement>(parameters.length + 1);
-    ctorStatements[0] = Node.createExpressionStatement(
-      Node.createCallExpression(Node.createSuperExpression(range), null, [], range)
-    );
     for (let i = 0, k = parameters.length; i < k; ++i) {
       let parameter = parameters[i];
-      let fieldName = parameterFieldName(i);
       unchecked(recordFields[i] = Node.createFieldDeclaration(
-        Node.createIdentifierExpression(fieldName, parameter.name.range),
+        Node.createIdentifierExpression(parameterFieldName(i), parameter.name.range),
         null, CommonFlags.Instance,
         parameter.type,
         null,
         parameter.range
       ));
-      unchecked(ctorParameters[i] = Node.createParameter(
-        ParameterKind.Default,
-        Node.createIdentifierExpression(parameter.name.text, parameter.name.range),
-        parameter.type,
-        null,
-        parameter.range
-      ));
-      unchecked(ctorStatements[i + 1] = Node.createExpressionStatement(
-        assignField(
-          Node.createThisExpression(parameter.range),
-          fieldName,
-          Node.createIdentifierExpression(parameter.name.text, parameter.range),
-          parameter.range
-        )
-      ));
     }
+    // `drive(): void { if (!this.settled) { __parkOn(this); __suspendAwait(this.slot); } }`
+    //
+    // The guard matters: `await` never drives a settled task, but a ready entry
+    // can outlive a settlement (two waiters on one task), and driving a settled
+    // task would park the caller on something that will never complete again.
+    let driveBody = Node.createBlockStatement([
+      Node.createIfStatement(
+        Node.createUnaryPrefixExpression(
+          Token.Exclamation,
+          Node.createPropertyAccessExpression(
+            Node.createThisExpression(range),
+            Node.createIdentifierExpression(SETTLED_FIELD, range),
+            range
+          ),
+          range
+        ),
+        Node.createBlockStatement([
+          Node.createExpressionStatement(
+            Node.createCallExpression(
+              Node.createIdentifierExpression(PARK_ON, range),
+              null,
+              [ Node.createThisExpression(range) ],
+              range
+            )
+          ),
+          Node.createExpressionStatement(
+            Node.createCallExpression(
+              Node.createIdentifierExpression(SUSPEND_AWAIT, range),
+              null,
+              [
+                Node.createPropertyAccessExpression(
+                  Node.createThisExpression(range),
+                  Node.createIdentifierExpression(SLOT_FIELD, range),
+                  range
+                )
+              ],
+              range
+            )
+          )
+        ], range),
+        null,
+        range
+      )
+    ], range);
     unchecked(recordFields[parameters.length] = Node.createMethodDeclaration(
-      Node.createConstructorExpression(range),
-      null, CommonFlags.Constructor | CommonFlags.Instance,
+      Node.createIdentifierExpression(DRIVE_METHOD, range),
+      null, CommonFlags.Instance,
       null,
-      Node.createFunctionType(ctorParameters, typeNode("void", range), null, false, range),
-      Node.createBlockStatement(ctorStatements, range),
+      Node.createFunctionType(
+        new Array<ParameterNode>(),
+        typeNode("void", range),
+        null, false,
+        range
+      ),
+      driveBody,
       range
     ));
     let recordClass = Node.createClassDeclaration(
       Node.createIdentifierExpression(recordName, declaration.name.range),
       null, CommonFlags.None,
       null,
-      typeNode(TASK_RECORD_NAME, range),
+      taskTypeNode(returnType, range),
       null,
       recordFields,
       range
@@ -390,6 +428,9 @@ export class StackfulAsyncTransform {
 
     // --- the continuation --------------------------------------------------
 
+    // `function f$start(): i32 { let $rec = <f$Rec>__currentTask();
+    //                             let $r = f$body($rec.$p0, ...);
+    //                             $rec.value = $r; $rec.settle(0); return 0; }`
     let recIdent = Node.createIdentifierExpression("$rec", range);
     let startStatements = new Array<Statement>();
     startStatements.push(Node.createVariableStatement(
@@ -402,7 +443,7 @@ export class StackfulAsyncTransform {
           Node.createCallExpression(
             Node.createIdentifierExpression("changetype", range),
             [ typeNode(recordName, range) ],
-            [ Node.createCallExpression(Node.createIdentifierExpression(CURRENT_RECORD, range), null, [], range) ],
+            [ Node.createCallExpression(Node.createIdentifierExpression(CURRENT_TASK, range), null, [], range) ],
             range
           ),
           range
@@ -439,13 +480,22 @@ export class StackfulAsyncTransform {
         range
       ));
       startStatements.push(Node.createExpressionStatement(
-        assignField(recIdent, PAYLOAD_FIELD, Node.createIdentifierExpression("$r", range), range)
+        assignField(recIdent, VALUE_FIELD, Node.createIdentifierExpression("$r", range), range)
       ));
     } else {
       startStatements.push(Node.createExpressionStatement(bodyCall));
     }
     startStatements.push(Node.createExpressionStatement(
-      assignField(recIdent, DONE_FIELD, intLiteral(1, range), range)
+      Node.createCallExpression(
+        Node.createPropertyAccessExpression(
+          recIdent,
+          Node.createIdentifierExpression(SETTLE_METHOD, range),
+          range
+        ),
+        null,
+        [ intLiteral(0, range) ],
+        range
+      )
     ));
     startStatements.push(Node.createReturnStatement(intLiteral(0, range), range));
     let startFunction = Node.createFunctionDeclaration(
@@ -465,6 +515,10 @@ export class StackfulAsyncTransform {
 
     // --- the entry (the declaration itself) --------------------------------
 
+    // `function f(...): Task<R> { let $rec = new f$Rec();
+    //                             $rec.$p0 = a; ...
+    //                             $rec.slot = __installCont(f$start);
+    //                             __bindTask($rec.slot, $rec); return $rec; }`
     let entryStatements = new Array<Statement>();
     let recVar = Node.createIdentifierExpression("$rec", range);
     entryStatements.push(Node.createVariableStatement(
@@ -474,25 +528,10 @@ export class StackfulAsyncTransform {
           Node.createIdentifierExpression("$rec", range),
           null, CommonFlags.Let,
           typeNode(recordName, range),
-          Node.createCallExpression(
-            Node.createIdentifierExpression("changetype", range),
-            [ typeNode(recordName, range) ],
-            [ Node.createCallExpression(
-              Node.createIdentifierExpression(ALLOC_CELL, range),
-              null,
-              [ Node.createCallExpression(
-                Node.createIdentifierExpression("changetype", range),
-                [ typeNode("i32", range) ],
-                [ Node.createCallExpression(
-                  Node.createIdentifierExpression("sizeof", range),
-                  [ typeNode(recordName, range) ],
-                  [],
-                  range
-                ) ],
-                range
-              ) ],
-              range
-            ) ],
+          Node.createNewExpression(
+            Node.createSimpleTypeName(recordName, range),
+            null,
+            [],
             range
           ),
           range
@@ -500,7 +539,6 @@ export class StackfulAsyncTransform {
       ],
       range
     ));
-    // The record is zeroed by the arena; the entry writes only what it owns.
     for (let i = 0, k = parameters.length; i < k; ++i) {
       entryStatements.push(Node.createExpressionStatement(
         assignField(
@@ -511,66 +549,8 @@ export class StackfulAsyncTransform {
         )
       ));
     }
-    let taskVar = Node.createIdentifierExpression("$task", range);
-    entryStatements.push(Node.createVariableStatement(
-      null,
-      [
-        Node.createVariableDeclaration(
-          Node.createIdentifierExpression("$task", range),
-          null, CommonFlags.Let,
-          taskTypeNode(returnType, range),
-          Node.createCallExpression(
-            Node.createIdentifierExpression("changetype", range),
-            [ taskTypeNode(returnType, range) ],
-            [ Node.createCallExpression(
-              Node.createIdentifierExpression(ALLOC_CELL, range),
-              null,
-              [ Node.createCallExpression(
-                Node.createIdentifierExpression("changetype", range),
-                [ typeNode("i32", range) ],
-                [ Node.createCallExpression(
-                  Node.createIdentifierExpression("sizeof", range),
-                  [ taskTypeNode(returnType, range) ],
-                  [],
-                  range
-                ) ],
-                range
-              ) ],
-              range
-            ) ],
-            range
-          ),
-          range
-        )
-      ],
-      range
-    ));
-    // Direct store, not `$task._record = $rec`: the generated setter calls the
-    // runtime's `__link`, which a static-arena cell does not need and which
-    // would pull the runtime into a module that otherwise imports nothing.
-    entryStatements.push(Node.createExpressionStatement(
-      Node.createCallExpression(
-        Node.createIdentifierExpression(SET_RECORD, range),
-        null,
-        [
-          Node.createCallExpression(
-            Node.createIdentifierExpression("changetype", range),
-            [ typeNode("i32", range) ],
-            [ taskVar ],
-            range
-          ),
-          Node.createCallExpression(
-            Node.createIdentifierExpression("changetype", range),
-            [ typeNode("i32", range) ],
-            [ recVar ],
-            range
-          )
-        ],
-        range
-      )
-    ));
-    // `rec.key = __installCont(rec, f$start)` — the slot is the continuation
-    // table entry; the record address is what a park carries.
+    // `$rec.slot = __installCont(f$start)` — the slot is the task's identity in
+    // the executor's continuation table.
     entryStatements.push(Node.createExpressionStatement(
       assignField(
         recVar,
@@ -586,8 +566,24 @@ export class StackfulAsyncTransform {
         range
       )
     ));
-    entryStatements.push(Node.createReturnStatement(taskVar, range));
-
+    // `__bindTask($rec.slot, $rec)` — `f$start` reads the task from the slot
+    // table, because a resumed continuation is handed no operands.
+    entryStatements.push(Node.createExpressionStatement(
+      Node.createCallExpression(
+        Node.createIdentifierExpression(BIND_TASK, range),
+        null,
+        [
+          Node.createPropertyAccessExpression(
+            recVar,
+            Node.createIdentifierExpression(SLOT_FIELD, range),
+            range
+          ),
+          recVar
+        ],
+        range
+      )
+    ));
+    entryStatements.push(Node.createReturnStatement(recVar, range));
     declaration.body = Node.createBlockStatement(entryStatements, range);
     declaration.signature.returnType = taskTypeNode(returnType, range);
     declaration.isAsync = false;

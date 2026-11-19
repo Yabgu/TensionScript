@@ -17,10 +17,11 @@
 // shells out to `wasmtime` (50.0.2, `-W stack-switching=y`). A missing
 // `wasmtime` is a named skip; `REQUIRE_WASMTIME=1` turns it into a failure.
 //
-// The modules are compiled with `--runtime stub`: A2's task cells come from a
-// static arena, so a module that starts a task still has no imports and
-// instantiates on a bare wasmtime. `--enable stack-switching` selects this
-// backend; without it an `await` stays on Backend A, byte for byte.
+// The modules are compiled with `--runtime stub`. The task object is allocated
+// with `new` (the arena is gone), so the stub allocator's OOM path imports
+// `env.abort`; the fixtures never take it, and the runner supplies the import.
+// `--enable stack-switching` selects this backend; without it an `await` stays
+// on Backend A, byte for byte.
 //
 // Run: npm run test:await (or `node tests/async/await.js`).
 
@@ -123,7 +124,11 @@ if (wasmtime == null) {
 
 function runWasm(wasmPath) {
   try {
-    execFileSync("wasmtime", ["run", "-W", "stack-switching=y", wasmPath], { stdio: "pipe" });
+    // A task-starting module now allocates its task object with `new` (the
+    // arena is gone), and `--runtime stub`'s allocator names `env.abort` for
+    // the out-of-memory path. The path is never taken by these fixtures; the
+    // engine still has to be told what the import is.
+    execFileSync("wasmtime", ["run", "-W", "stack-switching=y", "-W", "unknown-imports-trap=y", wasmPath], { stdio: "pipe" });
     return 0;
   } catch (e) {
     if (typeof e.status === "number") return e.status;
@@ -143,6 +148,8 @@ function expectStatus(wasmPath, bytes, expected, label) {
   }
   const wastPath = join(dirname(wasmPath), label + ".wast");
   writeFileSync(wastPath, [
+    `(module $env (func (export "abort") (param i32 i32 i32 i32)))`,
+    `(register "env" $env)`,
     `(module $m binary "${escaped}")`,
     `(register "m" $m)`,
     `(assert_return (get $m "__asyncStatus") (i32.const ${expected}))`,
@@ -202,20 +209,23 @@ try {
   check("f$start exists", functionBody(wat, "probe/f$start") != null, true);
   check("f is the entry", functionBody(wat, "probe/f") != null, true);
   const start = functionBody(wat, "probe/f$start");
-  check("f$start reads the current record", start != null && /__currentRecord/.test(start), true);
+  check("f$start reads the current task", start != null && /__currentTask/.test(start), true);
   check("f$start calls f$body", start != null && /call \$probe\/f\$body\b/.test(start), true);
   const entry = functionBody(wat, "probe/f");
   check("the entry installs f$start's continuation",
     entry != null && /ref\.func \$probe\/f\$start\b/.test(entry) && /cont\.new\b/.test(entry), true);
   check("the entry does not call f$body", entry != null && !/call \$probe\/f\$body\b/.test(entry), true);
   const main = functionBody(wat, "probe/main");
-  check("main parks on $await", main != null && /suspend \$await\b/.test(main), true);
-  check("main's await is guarded by the task's done flag",
-    main != null && /TaskRecord#get:done/.test(main) && /if\b/.test(main), true);
+  const drive = functionBody(wat, "probe/f$Rec#drive");
+  check("the task's drive parks on $await",
+    drive != null && /suspend \$await\b/.test(drive), true);
+  check("main's await is guarded by the task's settled flag",
+    main != null && /TaskBase#get:settled/.test(main) && /if\b/.test(main), true);
   const startFn = functionBody(wat, "~start");
   check("__start resumes main$start, not main",
     startFn != null && /ref\.func \$~asyncMainStart\b/.test(startFn) && !/ref\.func \$probe\/main\b/.test(startFn), true);
-  check("no imports", /\(import /.test(wat), false);
+  check("the only import is the allocator's abort",
+    (wat.match(/\(import "[^"]+" "[^"]+"/g) || []).every((line) => line.includes('"env" "abort"')), true);
   if (wasmtime != null) {
     check("the module runs on wasmtime (exit 0)", runWasm(wasmPath), 0);
     expectStatus(wasmPath, bytes, 7, "one");
@@ -315,7 +325,8 @@ export async function main(): i32 {
 `);
 try {
   const { wat, bytes, wasmPath } = order;
-  check("main suspends exactly once", (functionBody(wat, "probe/main") || "").match(/suspend \$await\b/g)?.length, 1);
+  check("the task's drive suspends exactly once",
+    (functionBody(wat, "probe/f$Rec#drive") || "").match(/suspend \$await\b/g)?.length, 1);
   if (wasmtime != null) {
     check("the module runs on wasmtime (exit 0)", runWasm(wasmPath), 0);
     expectStatus(wasmPath, bytes, 7, "order");
