@@ -2668,6 +2668,33 @@ export class Module {
     return ret;
   }
 
+  /**
+   * `(elem $name (table $table) (i32.const offset) func $a $b ...)` — an active
+   * segment, so the named table **holds** the functions at runtime rather than
+   * merely declaring them (which is what `addPassiveElementSegment` does).
+   *
+   * The shared start table needs this: `table.get $starts k` is how a served
+   * request resolves its `funcIndex`.
+   */
+  addActiveElementSegment(
+    tableName: string,
+    name: string,
+    funcNames: string[],
+    offset: ExpressionRef
+  ): ElementSegmentRef {
+    let cTable = this.allocStringCached(tableName);
+    let cStr = this.allocStringCached(name);
+    let numNames = funcNames.length;
+    let names = new Array<StringRef>(numNames);
+    for (let i = 0; i < numNames; ++i) {
+      unchecked(names[i] = this.allocStringCached(funcNames[i]));
+    }
+    let cArr = allocPtrArray(names);
+    let ret = binaryen._BinaryenAddActiveElementSegment(this.ref, cTable, cStr, cArr, numNames, offset);
+    binaryen._free(cArr);
+    return ret;
+  }
+
   getTag(
     name: string
   ): TagRef {

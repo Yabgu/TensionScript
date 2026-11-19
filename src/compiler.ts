@@ -289,6 +289,11 @@ export const ASYNC_CURRENT_SLOT = "~asyncCurrentSlot";
 export const ASYNC_MAIN_START = "~asyncMainStart";
 /** The next continuation slot `__installCont` hands out; slot 0 is main. */
 export const ASYNC_NEXT_SLOT = "~asyncNextSlot";
+/** The shared start table: a `funcIndex` both stores resolve identically. */
+export const STARTS_TABLE = "$starts";
+/** Its export name, which is the name the design and the host use. */
+export const STARTS_TABLE_EXPORT = "$starts";
+
 /** A canonical `() -> i32` function, so `$ct` exists before any body compiles. */
 const ASYNC_SIG = "~asyncSig";
 
@@ -1224,6 +1229,38 @@ export class Compiler extends DiagnosticEmitter {
     this.module.addPassiveElementSegment("~asyncStart", list);
   }
 
+  /**
+   * `(table $starts N N funcref)` + its active element segment + the export.
+   *
+   * **The one place a `funcIndex` means the same thing in every store.** All
+   * threads instantiate this module, so index `k` is the same function in each
+   * (`docs/task-design.md` §3). A request that crosses a thread boundary carries
+   * a slot index and a `funcIndex`, never a reference: references do not survive
+   * a store (F1/F2), indices do.
+   *
+   * **The order is program order, and it is deterministic.** The entries are the
+   * functions the compiler installs as continuations — `~asyncMainStart`, the
+   * executor loop, and each `f$start` in the order its entry was compiled — held
+   * by `asyncStartFunctions` in registration order. The same source compiled
+   * twice gives the same table; a hash-ordered set would not.
+   *
+   * The segment is **active**, not passive: `table.get $starts k` is what a
+   * served request reads, so the contents have to be in the table at runtime, not
+   * merely declared for `ref.func`'s sake.
+   */
+  private emitStartsTable(): void {
+    let names = Set_values(this.asyncStartFunctions);
+    let count = names.length;
+    let list = new Array<string>(count);
+    for (let i = 0; i < count; ++i) unchecked(list[i] = unchecked(names[i]));
+    let module = this.module;
+    module.addTable(STARTS_TABLE, count, count, TypeRef.funcref());
+    if (count > 0) {
+      module.addActiveElementSegment(STARTS_TABLE, "$starts$elem", list, module.i32(0));
+    }
+    module.addTableExport(STARTS_TABLE, STARTS_TABLE_EXPORT);
+  }
+
   /** Performs compilation of the underlying {@link Program} to a {@link Module}. */
   compile(): Module {
     let options = this.options;
@@ -1519,6 +1556,7 @@ export class Compiler extends DiagnosticEmitter {
       if (this.asyncShellSuspends) {
         if (this.asyncShellStartReady) {
           this.emitAsyncStartElements();
+          this.emitStartsTable();
           this.emitAsyncStackShellStart(startFunctionBody);
         }
       } else {
