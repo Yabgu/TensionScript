@@ -72,6 +72,7 @@ import {
   UnaryPrefixExpression,
   UnaryPostfixExpression,
   AwaitExpression,
+  OnExpression,
   AssertionKind,
   BinaryExpression,
   ThisExpression,
@@ -1735,6 +1736,16 @@ export class Resolver extends DiagnosticEmitter {
         );
         return type ? this.getElementOfType(type) : null;
       }
+      case NodeKind.On: {
+        // **The policy does not change the type.** `f(x) on p` is a call that
+        // creates a task; where it runs is a value, not a type. So the whole
+        // expression has its inner call's type, and the policy expression is
+        // resolved for its own sake below.
+        return this.lookupExpression(
+          (<OnExpression>node).expression,
+          ctxFlow, ctxType, reportMode
+        );
+      }
     }
     assert(false);
     return null;
@@ -1878,6 +1889,15 @@ export class Resolver extends DiagnosticEmitter {
           ctxFlow,
           reportMode
         );
+      }
+      case NodeKind.On: {
+        let on = <OnExpression>node;
+        // Both sides are resolved here so a bad policy (a non-`TaskPolicy`
+        // value, an unknown name) is reported at its own range, not later as a
+        // whole-expression mismatch.
+        let type = this.resolveExpression(on.expression, ctxFlow, ctxType, reportMode);
+        if (type) this.resolveExpression(on.policy, ctxFlow, Type.auto, reportMode);
+        return type;
       }
     }
     assert(false);

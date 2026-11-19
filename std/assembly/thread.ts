@@ -187,12 +187,29 @@ let executors: Array<Executor | null> | null = null;
 let mainExecutorInstance: Executor | null = null;
 
 /**
- * Initialises the executor table with main at `0`, and installs the wake seam.
+ * Whether the program installed its own step, and that step.
  *
- * Idempotent, and called by the executor loop before anything runs: `settle`
- * pushes a waiter's slot through `__wakeSink`, which only exists once there is
- * an executor table to push into.
+ * **Two globals and a bool, not one nullable function.** Both hazards are
+ * measured: a global *initializer* that names a function pulls the executor's
+ * whole chain (rings, atomics) into every program that parses this file — an
+ * await-free async program then fails with `AS103: Feature 'threads' is not
+ * enabled`; and `if (nullableFn)` under `--wasmGc` does not produce an i32
+ * condition (an assertion in `evaluateCondition`). Constant `null` here costs
+ * nothing, and the bool carries the decision.
  */
+let hasCustomStep: bool = false;
+let customStep: ((e: Executor) => bool) | null = null;
+
+/** Installs the program's own step as the default (`__mainStep__` otherwise). */
+/** Installs the program's own step as the default (`__mainStep__` otherwise). */
+/** Installs the program's own step as the default (`__mainStep__` otherwise). */
+export function __setDefaultMainStep(step: (e: Executor) => bool): void {
+  customStep = step;
+  hasCustomStep = true;
+  let main = mainExecutorInstance;
+  if (main) changetype<Executor>(main).step = step;
+}
+
 export function __executorInit(): void {
   let table = executors;
   if (!table) {
@@ -201,7 +218,12 @@ export function __executorInit(): void {
     executors = table;
   }
   if (!mainExecutorInstance) {
-    let main = new Executor(0, mainStep);
+    let step: (e: Executor) => bool = __mainStep__;
+    // `changetype`, not `!`: a nullable function value's non-null assertion
+    // does not lower to valid IR here (`if condition must be valid`, measured),
+    // while the two types are one wasm type and the cast is the identity.
+    if (hasCustomStep) step = changetype<(e: Executor) => bool>(customStep);
+    let main = new Executor(0, step);
     mainExecutorInstance = main;
     table[0] = main;
   }
@@ -258,12 +280,19 @@ export function driveReady(e: Executor): void {
  *
  * `docs/task-design.md` §1.3 verbatim, with `__drainInbox` doing the serving
  * (§2). Never stops: main runs until the loop has nothing left.
+ *
+ * **`__mainStep__`, not `mainStep`.** `docs/policy-and-threads.md` §6 gives a
+ * program the right to declare its own `mainStep`, and a program-level
+ * declaration cannot share a name with a std export: this one is the default,
+ * and the shell installs whichever of the two exists (`__setDefaultMainStep`).
  */
-export function mainStep(e: Executor): bool {
+export function __mainStep__(e: Executor): bool {
   __drainInbox(e);
   driveReady(e);
   return false;
 }
+
+
 
 // ── requests: the inbox protocol ────────────────────────────────────────────
 

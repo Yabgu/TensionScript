@@ -549,6 +549,19 @@ export class Program extends DiagnosticEmitter {
    */
   asyncSpawnStarts: DeclarationStatement[] = [];
 
+  /**
+   * The declarations the stackful transform turned into task entries — one per
+   * `async function` it lowered, after the mutating pass.
+   *
+   * `on` is legal only on a call of one of these (`docs/policy-and-threads.md`
+   * §2/§9.1): the postfix names where *a task* runs, so a call that creates no
+   * task has nothing for it to mean. The set is the identity that survives the
+   * transform — `isAsync` is cleared on the declaration, so it is the one fact
+   * that still distinguishes an entry from an ordinary function returning
+   * `Task<R>` by hand.
+   */
+  asyncEntries: Set<DeclarationStatement> = new Set();
+
   // Lookup maps
 
   /** Files by unique internal name. */

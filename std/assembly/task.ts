@@ -120,6 +120,48 @@ export function __inlineAwait(task: TaskBase): void {
 }
 
 /**
+ * The default policy, named: create does nothing, await is the inline path.
+ *
+ * `docs/policy-and-threads.md` §5's first row. It exists so a call site can say
+ * `f(x) on inline` and mean exactly what the absence means — useful when a
+ * caller wants the default *explicitly*, or when one call site in a pool-using
+ * file must not be pooled. The absent form stays cheaper (one null compare), so
+ * this is a convenience, not the implementation of the default.
+ */
+@final class InlinePolicy extends TaskPolicy {
+  create(task: TaskBase): void {}
+  await(task: TaskBase): void { __inlineAwait(task); }
+}
+
+/** The shared default-policy instance, created on first use. */
+let inlinePolicyInstance: TaskPolicy | null = null;
+
+/**
+ * The default policy as a value — `f(x) on inlinePolicy()` means exactly what
+ * `f(x)` means, said out loud (`docs/policy-and-threads.md` §5).
+ *
+ * **A function, not a `const`, and that is a measured constraint.** Every
+ * program parses this file, and a top-level *initializer* — `new` or even
+ * `@lazy new` — is emitted into the module's start function whether or not
+ * anything reads it. Measured: an await-free async program (A1's shell) grew an
+ * `env.abort` import from the allocator and `test:coreloop` failed with exit 1.
+ * A function is only compiled when called, so a program that never names the
+ * policy pays nothing, and the instance is still one object, shared.
+ *
+ * (The design's table spells this row `inline`; `inline` itself is the
+ * `@inline` decorator's name in the global element index, so a top-level
+ * binding of that name is a duplicate identifier — `TS2300`, measured.)
+ */
+export function inlinePolicy(): TaskPolicy {
+  let policy = inlinePolicyInstance;
+  if (!policy) {
+    policy = new InlinePolicy();
+    inlinePolicyInstance = policy;
+  }
+  return changetype<TaskPolicy>(policy);
+}
+
+/**
  * The common part of every task: one object per execution, with the fields the
  * scheduler owns and the single abstract operation that runs it.
  *

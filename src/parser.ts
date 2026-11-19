@@ -5029,6 +5029,23 @@ export class Parser extends DiagnosticEmitter {
           expr = this.maybeParseCallExpression(tn, expr);
           break;
         }
+        // OnExpression — `call on policy`, the call-site policy.
+        //
+        // The policy is parsed at `Precedence.UnaryPrefix`, so `a on b + c` is
+        // `(a on b) + c`: the postfix binds tighter than every binary operator,
+        // which is what a reader expects of something that sits outside an
+        // argument list. Calls (`hostExecutor(e)`) and `new` are inside that
+        // precedence, so every form the design names parses.
+        case Token.On: {
+          let policy = this.parseExpression(tn, Precedence.UnaryPrefix);
+          if (!policy) return null;
+          expr = Node.createOnExpression(
+            expr,
+            policy,
+            tn.range(startPos, tn.pos)
+          );
+          break;
+        }
         // InstanceOfExpression
         case Token.InstanceOf: {
           let isType = this.parseType(tn); // reports
@@ -5444,6 +5461,7 @@ function determinePrecedence(kind: Token): Precedence {
     case Token.Exclamation_Equals:
     case Token.Equals_Equals_Equals:
     case Token.Exclamation_Equals_Equals: return Precedence.Equality;
+    case Token.On: return Precedence.UnaryPostfix;
     case Token.As:
     case Token.In:
     case Token.InstanceOf:

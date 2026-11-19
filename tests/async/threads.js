@@ -334,7 +334,7 @@ console.log("\n# 3d a self-spawned request is served");
   // continuation in this store. The served body awaits, so the value can only
   // arrive if the whole chain works.
   const source = `
-import { __spawnOn, mainStep, mainExecutor } from "~lib/thread";
+import { __spawnOn, __mainStep__, mainExecutor } from "~lib/thread";
 
 export let served: i32 = -1;
 
@@ -349,7 +349,7 @@ export function trySpawn(index: i32): i32 {
   __spawnOn(0, index, 0, 0);
   let guard = 0;
   while (mainExecutor().ready.depth > 0 || mainExecutor().inbox.depth > 0) {
-    if (mainStep(mainExecutor())) break;
+    if (__mainStep__(mainExecutor())) break;
     if (++guard > 10000) break;
   }
   return served;

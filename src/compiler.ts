@@ -188,6 +188,7 @@ import {
   UnaryPostfixExpression,
   UnaryPrefixExpression,
   CompiledExpression,
+  OnExpression,
 
   TypeNode,
   NamedTypeNode,
@@ -676,6 +677,18 @@ export class Compiler extends DiagnosticEmitter {
   asyncShellStartReady: bool = false;
   /** The `f$start` functions `__installCont` has installed, for the elem segment. */
   asyncStartFunctions: Set<string> = new Set<string>();
+
+  /** The program's own `mainStep`, once found and validated (design §6). */
+  mainStepOverride: Function | null = null;
+  /**
+   * Its static `Function<T>` object's address, when the pointer ABI is in force.
+   *
+   * Reserved in `findMainStepOverride` because that runs before the data
+   * segments are finalized — a reservation made at `__start` time would name a
+   * segment the module never emits, and `call_indirect` would read a garbage
+   * index (measured: `uninitialized element`).
+   */
+  mainStepValueOffset: i64 = i64_zero;
   /** Disambiguates the handler block of each `__resumeSlot` in one function. */
   asyncResumeLabels: i32 = 0;
   /** Whether `main`'s compiled signature returns a value the status can carry. */
@@ -1153,6 +1166,11 @@ export class Compiler extends DiagnosticEmitter {
       return;
     }
 
+    // **Before the function table is materialized.** The program's own
+    // `mainStep`, if it has one, takes a table slot here (`findMainStepOverride`
+    // explains why that cannot wait for `__start`).
+    this.mainStepOverride = this.findMainStepOverride();
+
     this.asyncShellSuspends = true;
     this.asyncShellPrepared = true;
     this.asyncShellStartReady = true;
@@ -1214,6 +1232,15 @@ export class Compiler extends DiagnosticEmitter {
     let module = this.module;
     let coreloop = this.program.requireFunction(BuiltinNames.asyncCoreloopAwait);
 
+    // The program's own `mainStep`, if it declared one (`docs/policy-and-threads.md`
+    // §6). **Appended, not prepended**: a GC program's std globals are
+    // initialized in `__start` at runtime, so a call placed before them is
+    // overwritten by `defaultStep = __mainStep__` (measured: the custom step
+    // ran in the pointer ABI and never in the GC one). Appending puts it after
+    // every initializer and before the resume, which is exactly the window the
+    // retrofit in `__setDefaultMainStep` is for.
+    this.emitMainStepOverride(body);
+
     body.push(
       module.table_set(
         ASYNC_CONT_TABLE,
@@ -1251,6 +1278,94 @@ export class Compiler extends DiagnosticEmitter {
     ], this.asyncCtCoreRef);
 
     body.push(module.drop(idleBlock));
+  }
+
+  /**
+   * Installs a program's `mainStep` as the executors' default step.
+   *
+   * `docs/policy-and-threads.md` §6: the compiler ships `__mainStep__` and a
+   * program may replace it at the top level. The name is the program's, so the
+   * compiler looks it up rather than requiring an export — a `mainStep` nobody
+   * exports is still the program's loop, and `mainExecutor.step = …` overrides
+   * it at runtime (Gate 3c).
+   *
+   * The signature is checked here rather than left to the call: a `mainStep`
+   * with the wrong shape would otherwise fail as a function-value mismatch deep
+   * in the shell, which says nothing about what the program has to fix.
+   */
+  private emitMainStepOverride(body: ExpressionRef[]): void {
+    let instance = this.mainStepOverride;
+    if (instance == null) return;
+    let setter = this.program.requireFunction("~lib/thread/__setDefaultMainStep");
+    this.compileFunction(setter);
+    let valueType = instance.signature.type;
+    let stepValue: ExpressionRef;
+    if (this.gcActive && gcFunctionValueUsable(valueType)) {
+      stepValue = this.makeGcFunctionValue(instance);
+    } else {
+      let offset = this.mainStepValueOffset;
+      stepValue = this.options.isWasm64
+        ? this.module.i64(i64_low(offset), i64_high(offset))
+        : this.module.i32(i64_low(offset));
+    }
+    let module = this.module;
+    body.push(module.call(setter.internalName, [ stepValue ], TypeRef.None));
+  }
+
+  /**
+   * Finds, validates and **reserves a table slot for** the program's `mainStep`.
+   *
+   * Called from `prepareAsyncStackShell`, which runs before the function table is
+   * materialized — and that ordering is the whole reason this is a separate step
+   * from {@link emitMainStepOverride}. Measured: reserving the slot at `__start`
+   * time put the entry past the table's fixed size, and the indirect call trapped
+   * with `uninitialized element`.
+   *
+   * The lookup is `getMember` on the entry files, not `program.lookup`: the
+   * program index is keyed by *internal* name, whose prefix is a function of
+   * where the program sits on disk.
+   */
+  private findMainStepOverride(): Function | null {
+    let element: Element | null = null;
+    let files = this.program.filesByName;
+    for (let _files = Map_values(files), i = 0, k = _files.length; i < k && element == null; ++i) {
+      let file = unchecked(_files[i]);
+      if (file.source.sourceKind != SourceKind.UserEntry) continue;
+      let member = file.getMember("mainStep");
+      if (member != null) element = member;
+    }
+    if (element == null) return null;
+    let instance: Function | null = null;
+    if (element.kind == ElementKind.Function) {
+      instance = <Function>element;
+    } else if (element.kind == ElementKind.FunctionPrototype) {
+      instance = this.resolver.resolveFunction(<FunctionPrototype>element, null);
+    }
+    if (instance == null) return null;
+    let sig = instance.signature;
+    let paramType = sig.parameterTypes.length == 1 ? unchecked(sig.parameterTypes[0]) : null;
+    let paramClass = paramType != null ? paramType.classReference : null;
+    if (
+      paramClass == null ||
+      paramClass.internalName != "~lib/thread/Executor" ||
+      sig.returnType != Type.bool
+    ) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        instance.declaration.name.range,
+        "mainStep must be `(e: Executor) => bool` (the executor's one iteration)"
+      );
+      return null;
+    }
+    // Compile it and take its table index now: the table is sized and filled
+    // from `functionTable` after this point, so a reservation made later would
+    // be a slot the element segment never writes.
+    if (!this.compileFunction(instance)) return null;
+    this.ensureFunctionTableIndex(instance);
+    if (!(this.gcActive && gcFunctionValueUsable(instance.signature.type))) {
+      this.mainStepValueOffset = this.ensureRuntimeFunction(instance);
+    }
+    return instance;
   }
 
   /** Declares every function `cont.new` references, as `ref.func` requires. */
@@ -6338,6 +6453,10 @@ export class Compiler extends DiagnosticEmitter {
         expr = this.asyncShellSuspends
           ? this.compileShellAwaitExpression(<AwaitExpression>expression, contextualType, constraints)
           : this.compileLoweredAwaitExpression(<AwaitExpression>expression);
+        break;
+      }
+      case NodeKind.On: {
+        expr = this.compileOnExpression(<OnExpression>expression, contextualType);
         break;
       }
       case NodeKind.Lazy: {
@@ -12657,6 +12776,151 @@ export class Compiler extends DiagnosticEmitter {
     // the declared `T` (i32 or bool here).
     this.currentType = valueType.kind == TypeKind.Bool ? Type.bool : Type.i32;
     return module.block(null, stmts, valueType.toRef());
+  }
+
+  /**
+   * `CALL on POLICY` — create the task, attach the policy, let it act.
+   *
+   * `docs/policy-and-threads.md` §2/§3:
+   *
+   * ```
+   * let $t = CALL;            // the task object, as today
+   * let $p = POLICY;          // evaluated in the caller's frame
+   * $t.policy = $p;           // stored, so `await` and the caller can read it
+   * $p.create($t);            // the one moment a policy may submit work
+   * $t                        // the expression's value
+   * ```
+   *
+   * The order is the design's, and it matters: the task exists before the policy
+   * can be asked to run anything, and the policy is evaluated **once** no matter
+   * how many times the expression is used downstream. Absent `on`, none of this
+   * is emitted — `policy` stays `null` and no `create` call exists.
+   *
+   * Emitted as source-level statements so the field write, the null handling and
+   * the virtual call all resolve through the ordinary paths (pointer offset or
+   * GC `struct.set`, per the ABI), rather than being spelled as raw IR here.
+   */
+  private compileOnExpression(
+    expression: OnExpression,
+    contextualType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let resolver = this.resolver;
+    let inner = expression.expression;
+
+    // `on` names where a *task* runs, so the inner expression must be a call of
+    // a may-suspend `async function` — the transform's entry, whose type is
+    // `Task<R>`. On anything else the postfix has no meaning, and saying so by
+    // name beats a type error about `TaskPolicy`.
+    let calleeElement: Element | null = null;
+    if (inner.kind == NodeKind.Call) {
+      calleeElement = resolver.lookupExpression(
+        (<CallExpression>inner).expression,
+        flow, Type.auto, ReportMode.Swallow
+      );
+    }
+    let entry: Function | null = null;
+    if (calleeElement != null) {
+      if (calleeElement.kind == ElementKind.Function) {
+        entry = <Function>calleeElement;
+      } else if (calleeElement.kind == ElementKind.FunctionPrototype) {
+        entry = resolver.resolveFunction(<FunctionPrototype>calleeElement, null);
+      }
+    }
+    if (entry == null || !this.program.asyncEntries.has(entry.declaration)) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "`on` applies to a call of an async function (the call this postfix names creates no task)"
+      );
+      return module.unreachable();
+    }
+
+    // The call's own type is what the whole expression has, so the local that
+    // holds the task is typed by resolving the inner expression once.
+    let taskType = resolver.resolveExpression(inner, flow, Type.auto, ReportMode.Report);
+    if (!taskType) return module.unreachable();
+
+    let start = expression.range.start;
+    let taskName = "$onTask$" + start.toString();
+    let policyName = "$onPolicy$" + start.toString();
+
+    let taskDecl = Node.createVariableStatement(
+      null,
+      [
+        Node.createVariableDeclaration(
+          Node.createIdentifierExpression(taskName, expression.range),
+          null, CommonFlags.Let,
+          null, // inferred: the call's `Task<R>`
+          inner,
+          expression.range
+        )
+      ],
+      expression.range
+    );
+
+    let policyType = Node.createNamedType(
+      Node.createSimpleTypeName("TaskPolicy", expression.range),
+      null,
+      false,
+      expression.range
+    );
+    let policyDecl = Node.createVariableStatement(
+      null,
+      [
+        Node.createVariableDeclaration(
+          Node.createIdentifierExpression(policyName, expression.range),
+          null, CommonFlags.Let,
+          policyType,
+          expression.policy,
+          expression.range
+        )
+      ],
+      expression.range
+    );
+
+    // `$t.policy = $p` — the generated setter, so the write is the ABI's.
+    let assignStmt = Node.createExpressionStatement(
+      Node.createBinaryExpression(
+        Token.Equals,
+        Node.createPropertyAccessExpression(
+          Node.createIdentifierExpression(taskName, expression.range),
+          Node.createIdentifierExpression("policy", expression.range),
+          expression.range
+        ),
+        Node.createIdentifierExpression(policyName, expression.range),
+        expression.range
+      )
+    );
+
+    // `$p.create($t)`
+    let createStmt = Node.createExpressionStatement(
+      Node.createCallExpression(
+        Node.createPropertyAccessExpression(
+          Node.createIdentifierExpression(policyName, expression.range),
+          Node.createIdentifierExpression("create", expression.range),
+          expression.range
+        ),
+        null,
+        [ Node.createIdentifierExpression(taskName, expression.range) ],
+        expression.range
+      )
+    );
+
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(this.compileStatement(taskDecl));
+    stmts.push(this.compileStatement(policyDecl));
+    stmts.push(this.compileStatement(assignStmt));
+    stmts.push(this.compileStatement(createStmt));
+    // The value is the task local, read by name: the declaration above owns the
+    // local, so there is no index to carry and no second registration to drift.
+    stmts.push(this.compileExpression(
+      Node.createIdentifierExpression(taskName, expression.range),
+      taskType,
+      Constraints.None
+    ));
+    return module.block(null, stmts, taskType.toRef());
   }
 
   private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {

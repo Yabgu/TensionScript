@@ -687,6 +687,9 @@ export class StackfulAsyncTransform {
       // declaration owns.
       this.program.asyncSpawnStarts.push(spawnFunction);
     }
+    // The entry itself: what `on` may attach to (`docs/policy-and-threads.md`
+    // §2). Recorded by declaration because no instance exists yet.
+    this.program.asyncEntries.add(declaration);
     artifacts.push(declaration);
     return artifacts;
   }

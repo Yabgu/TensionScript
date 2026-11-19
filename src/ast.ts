@@ -82,6 +82,8 @@ export const enum NodeKind {
   UnaryPrefix,
   Await,
   Lazy,
+  /** `EXPR on POLICY` — the call site's policy (`docs/policy-and-threads.md` §2). */
+  On,
   Compiled,
 
   // statements
@@ -497,6 +499,14 @@ export abstract class Node {
     range: Range
   ): LazyExpression {
     return new LazyExpression(expression, range);
+  }
+
+  static createOnExpression(
+    expression: Expression,
+    policy: Expression,
+    range: Range
+  ): OnExpression {
+    return new OnExpression(expression, policy, range);
   }
 
   static createCompiledExpression(
@@ -1927,6 +1937,30 @@ export class LazyExpression extends Expression {
 }
 
 /** Represents a special pre-compiled expression. If the expression has side-effects, special care has to be taken. */
+/**
+ * `EXPR on POLICY` — the policy the call's task is created under.
+ *
+ * A postfix, not an argument (`docs/policy-and-threads.md` §2): the policy
+ * belongs to *this call*, so two call sites of one `async function` can differ,
+ * and it sits outside the argument list so it cannot be mistaken for a real
+ * argument. `on` is the word the semantics have — *where does this run*.
+ *
+ * The typed inner expression is a call of a may-suspend `async function`; that
+ * is checked once, where both facts are known, rather than at parse time.
+ */
+export class OnExpression extends Expression {
+  constructor(
+    /** The call that creates the task. */
+    public expression: Expression,
+    /** The policy value, evaluated in the caller's frame. */
+    public policy: Expression,
+    /** Source range. */
+    range: Range
+  ) {
+    super(NodeKind.On, range);
+  }
+}
+
 export class CompiledExpression extends Expression {
   constructor(
     /** Compiled expression. */
