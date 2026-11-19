@@ -229,6 +229,71 @@ export async function main(): i32 {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 3c. `Executor.step` — one iteration, programmable, observed.
+// ---------------------------------------------------------------------------
+
+console.log("\n# 3c the executor and its step");
+{
+  // The program installs a COUNTING step on main: it counts its own calls and
+  // then does main's work — one ready slot per iteration at first, two at
+  // second. If the step were baked in, the second number could not differ.
+  const source = `
+import { mainExecutor, driveReady, __drainInbox, Executor } from "~lib/thread";
+
+let mode: i32 = 0;
+let calls: i32 = 0;
+export let firstCount: i32 = 0;
+export let secondCount: i32 = 0;
+
+function counting(e: Executor): bool {
+  calls++;
+  __drainInbox(e);
+  driveReady(e);
+  if (mode == 1) driveReady(e);
+  return false;
+}
+
+async function inner(): i32 { return 0; }
+async function leaf(x: i32): i32 { await inner(); return x; }
+
+export async function main(): i32 {
+  mainExecutor().step = counting;
+  let a = leaf(1); let b = leaf(2); let c = leaf(3);
+  let s1 = (await a) + (await b) + (await c);
+  firstCount = calls;
+  calls = 0;
+  mode = 1;
+  let d = leaf(4); let e = leaf(5); let f = leaf(6);
+  let s2 = (await d) + (await e) + (await f);
+  secondCount = calls;
+  return s1 * 1000 + s2;
+}
+`;
+  const built = compile(source);
+  check("a program that replaces main's step compiles", built.error === undefined, true);
+  if (!built.error) {
+    try {
+      check("the loop calls the step field, not an inlined mainStep",
+        /Executor#get:step/.test(built.wat), true);
+      check("the loop guards on the stop flag",
+        /Executor#get:stop/.test(built.wat), true);
+      if (wasmtime != null) {
+        const ran = globalsAfterStart(built.wasmPath, built.bytes, [["__asyncStatus", 6015]]);
+        check("the replaced step still produces the awaited values (6015)", ran.ok, true);
+        // 1 + 2 + 3 and 4 + 5 + 6 under a step that runs one slot per
+        // iteration, then the same work at two slots per iteration: fewer calls.
+        const first = globalsAfterStart(built.wasmPath, built.bytes,
+          [["firstCount", 6], ["secondCount", 3]]);
+        check("the counting step ran 6 iterations, then 3 with two drives each",
+          first.ok, true);
+      }
+    } finally {
+      built.dispose();
+    }
+  }
+}
+
 if (failures) {
   console.error(`\nthreads: ${failures} of ${checks} checks failed`);
   process.exit(1);

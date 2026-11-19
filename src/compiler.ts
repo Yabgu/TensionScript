@@ -12072,6 +12072,14 @@ export class Compiler extends DiagnosticEmitter {
           let signatureReference = contextualType.getSignature();
           if (signatureReference) {
             this.currentType = signatureReference.type.asNullable();
+            // **A function value is a `Function<T>` struct under GC**, so its
+            // null is `ref.null` and not a zero word — the same rule the class
+            // arm above applies. Measured on a nullable function-typed global
+            // (`let sink: (exec: i32, slot: i32) => void | null`): the module
+            // failed validation at `global init must have correct type`.
+            if (gcFunctionValueUsable(signatureReference.type)) {
+              return module.ref_null(this.currentType.toRef());
+            }
             return options.isWasm64 ? module.i64(0) : module.i32(0);
           }
           return this.makeZero(contextualType);

@@ -49,40 +49,24 @@ export class Waiter {
   slot: i32 = 0;
 }
 
-/** The ready queue (executor 0's, until Gate 3 adds per-executor queues). */
-let ready: Array<i32> | null = null;
-
 /**
- * Push a continuation slot onto executor 0's ready queue.
+ * The wake seam: `settle` pushes a waiter's slot onto its executor's ready
+ * ring through this.
  *
- * **At most one entry per slot.** A task can be queued by several waiters and
- * by the task that parked on it; resuming a continuation twice would advance a
- * suspended body twice. The queue is small (the number of runnable tasks), so
- * the membership scan is cheaper than a set and needs no allocation.
+ * A function, not a direct call, because the executor table lives in
+ * `thread.ts` and this file must not import it: `thread.ts` names `TaskBase`,
+ * and a cycle between them would make the layout of one depend on the other's
+ * initialisation. `__executorInit` installs the sink before anything runs; a
+ * `settle` with no executor table (a task that never reaches the loop) wakes
+ * nobody, which is the correct no-op — nothing could resume it.
  */
-export function __readyPush(slot: i32): void {
-  let queue = ready;
-  if (!queue) {
-    queue = new Array<i32>();
-    ready = queue;
-  }
-  for (let i = 0, k = queue.length; i < k; ++i) {
-    if (unchecked(queue[i]) == slot) return;
-  }
-  queue.push(slot);
-}
+function noopWake(exec: i32, slot: i32): void {}
 
-/** Pop a ready slot, or `-1` when the queue is empty. */
-export function __readyPop(): i32 {
-  let queue = ready;
-  if (!queue || queue.length == 0) return -1;
-  return queue.pop();
-}
+export let __wakeSink: (exec: i32, slot: i32) => void = noopWake;
 
-/** Whether the ready queue has anything to run. */
-export function __readyEmpty(): bool {
-  let queue = ready;
-  return !queue || queue.length == 0;
+/** Installs the wake seam. Called once, by `__executorInit`. */
+export function setWakeSink(sink: (exec: i32, slot: i32) => void): void {
+  __wakeSink = sink;
 }
 
 /**
@@ -122,12 +106,13 @@ export abstract class TaskBase {
     this.status = status;
     this.settled = true;
     let list = this.waiters;
+    let sink = __wakeSink;
     if (list) {
       for (let i = 0, k = list.length; i < k; ++i) {
         let waiter = unchecked(list[i]);
-        // Gate 2 is single-executor by construction, so every waiter's `exec`
-        // is 0 and the global queue is its queue. Gate 3 routes by `exec`.
-        __readyPush(waiter.slot);
+        // **Routed by the waiter's own executor**, never by the one settling:
+        // a worker can make main runnable and can never make main run (§9.0).
+        unchecked(sink)(waiter.exec, waiter.slot);
       }
       list.length = 0;
     }

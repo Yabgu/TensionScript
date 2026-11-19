@@ -19,22 +19,12 @@
 // a user cannot import them from here, and the compiler refuses a call reached
 // from any source other than this file (`src/builtins.ts`).
 
-import { __readyPush, __readyPop, __readyEmpty, TaskBase } from "./task";
-import { __taskAt } from "./task-stack";
+import { mainExecutor } from "./thread";
+import { __lastStatus } from "./task-stack";
 
 // @ts-ignore: decorator
 @builtin
 declare function __resumeMain(): i32;
-
-// The stackful executor's one primitive, declared here because only the core
-// loop calls it.
-// @ts-ignore: decorator
-@builtin
-declare function __resumeTask(slot: i32): i32;
-
-// @ts-ignore: decorator
-@builtin
-declare function __lastStatus(): i32;
 
 // @ts-ignore: decorator
 @builtin
@@ -82,30 +72,30 @@ export function __asyncPump(): i32 {
 }
 
 /**
- * The stackful executor: drive ready continuation slots until none remain, then
- * report main's status.
+ * The stackful executor loop: drive main's executor until it has nothing left.
+ *
+ * **The loop is the entry; the policy is the `step` field** (`docs/task-design.md`
+ * §1.3, §5). One iteration is `e.step(e)`; `true` stops. Main's default step is
+ * `mainStep` (drain inbox, pop ready, drive), and assigning
+ * `mainExecutor().step` replaces it — which is what makes the fallback a
+ * program decision rather than a runtime one (§9.0).
  *
  * **The ready queue holds slots, and a task's slot is its identity.** `main` is
  * slot 0; every `async function`'s entry hands its task object a slot from
  * `__installCont`. A suspension parks the current task (its slot is the waiter)
  * and queues the awaited task; a completion (`TaskBase#settle`) queues every
- * waiter. Nothing is resumed from inside a completing task's own body, so the
- * executor is the only resumer.
+ * waiter on its own executor. Nothing is resumed from inside a completing task's
+ * own body, so the executor is the only resumer.
  *
- * A slot can be queued more than once — two tasks awaiting one task both park
- * and both wake it — so a settled task is skipped rather than resumed twice.
- * `__readyPush` also refuses a slot already queued, which keeps a task from
- * advancing twice before it ever runs.
+ * The loop stops when the queues are empty: a step that never stops on its own
+ * (main's) is bounded by the work there is.
  */
 export function __coreloopAwait(): void {
+  let e = mainExecutor();
   // main is slot 0 and has no task object.
-  __readyPush(0);
-  while (!__readyEmpty()) {
-    let slot = __readyPop();
-    let task = __taskAt(slot);
-    if (task && task.settled) continue;
-    let awaited = __resumeTask(slot);
-    if (awaited >= 0) __readyPush(awaited);
+  e.ready.push(0);
+  while (!e.stop && (e.ready.depth > 0 || e.inbox.depth > 0)) {
+    if (e.step(e)) break;
   }
   __suspendDone(__lastStatus());
 }

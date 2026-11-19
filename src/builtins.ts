@@ -35,7 +35,8 @@ import {
   ASYNC_MAIN_SLOT,
   ASYNC_LAST_STATUS,
   ASYNC_CURRENT_SLOT,
-  ASYNC_NEXT_SLOT
+  ASYNC_NEXT_SLOT,
+  STARTS_TABLE
 } from "./compiler";
 
 import {
@@ -760,10 +761,11 @@ export namespace BuiltinNames {
   export const asyncCoreloop = "~lib/async/__coreloop";
   export const asyncCoreloopAwait = "~lib/async/__coreloopAwait";
   export const asyncPump = "~lib/async/__asyncPump";
-  export const asyncResumeTask = "~lib/async/__resumeTask";
-  export const asyncLastStatus = "~lib/async/__lastStatus";
+  export const asyncResumeTask = "~lib/task-stack/__resumeTask";
+  export const asyncLastStatus = "~lib/task-stack/__lastStatus";
   export const asyncInstallCont = "~lib/async-stack/__installCont";
   export const asyncSuspendAwait = "~lib/async-stack/__suspendAwait";
+  export const asyncServeCont = "~lib/task-stack/__serveCont";
   export const asyncCurrentSlot = "~lib/task-stack/__currentSlot";
 
   // std/number.ts
@@ -12072,7 +12074,13 @@ function checkTypeOptional(ctx: BuiltinFunctionContext, setCurrentTypeOnError: b
  */
 function checkAsyncIntrinsic(ctx: BuiltinFunctionContext): i32 {
   let compiler = ctx.compiler;
-  if (ctx.reportNode.range.source.internalPath != "~lib/async") {
+  // **The shell's own std machinery, and nothing else.** `~lib/async` is the
+  // core loop; `~lib/thread` is the executor that drives it and reads the last
+  // status after serving a request; `~lib/task-stack` is where those two reach
+  // the slot table. The list is explicit so a user source — or a future std file
+  // — has to be added deliberately rather than inherit access by accident.
+  let path = ctx.reportNode.range.source.internalPath;
+  if (path != "~lib/async" && path != "~lib/thread" && path != "~lib/task-stack") {
     compiler.error(
       DiagnosticCode.Not_implemented_0,
       ctx.reportNode.range,
@@ -12290,6 +12298,71 @@ function builtin_async_suspendAwait(ctx: BuiltinFunctionContext): ExpressionRef 
   return module.suspend(ASYNC_AWAIT_TAG, [ slot ]);
 }
 builtinFunctions.set(BuiltinNames.asyncSuspendAwait, builtin_async_suspendAwait);
+
+// __serveCont(funcIndex: i32) -> i32
+//
+// Turn `$starts[funcIndex]` into a continuation and install it at a fresh slot,
+// answering the slot. The receiving half of `__spawnOn` (`docs/task-design.md`
+// §8.5): a request crossed the thread boundary as an index, and this is where
+// the index becomes a `cont.new` **in this store** — the one place a reference
+// is created, and never carried across.
+//
+// The cast is required because `table.get` on a `funcref` table answers
+// `(ref null func)`, while `cont.new` wants the canonical `() -> i32` function
+// type. It traps if the index names something else, never an `env.abort`.
+function builtin_async_serveCont(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.i32;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 1) |
+    checkStackIntrinsic(ctx, ctx.prototype.internalName)
+  ) return module.unreachable();
+
+  let funcIndex = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
+  let funcTypeRef = typeFromHeapType(compiler.asyncFtMainHeap, false);
+  let slotLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  let stmts = new Array<ExpressionRef>();
+  stmts.push(module.local_set(slotLocal.index, module.global_get(ASYNC_NEXT_SLOT, TypeRef.I32), false));
+  stmts.push(module.global_set(ASYNC_NEXT_SLOT, module.binary(
+    BinaryOp.AddI32,
+    module.local_get(slotLocal.index, TypeRef.I32),
+    module.i32(1)
+  )));
+
+  // Grow the continuation table when the slot is past the end.
+  let size = module.table_size(ASYNC_CONT_TABLE);
+  let need = module.binary(
+    BinaryOp.AddI32,
+    module.local_get(slotLocal.index, TypeRef.I32),
+    module.i32(1)
+  );
+  stmts.push(module.if(
+    module.binary(BinaryOp.GtI32, need, size),
+    module.drop(module.table_grow(
+      ASYNC_CONT_TABLE,
+      module.binary(BinaryOp.SubI32, need, size),
+      module.ref_null(compiler.asyncCtMainRef)
+    )),
+    module.nop()
+  ));
+
+  stmts.push(module.table_set(
+    ASYNC_CONT_TABLE,
+    module.local_get(slotLocal.index, TypeRef.I32),
+    module.cont_new(
+      compiler.asyncCtMainHeap,
+      module.ref_cast(
+        module.table_get(STARTS_TABLE, funcIndex, TypeRef.funcref()),
+        funcTypeRef
+      )
+    )
+  ));
+  stmts.push(module.local_get(slotLocal.index, TypeRef.I32));
+  return module.block(null, stmts, TypeRef.I32);
+}
+builtinFunctions.set(BuiltinNames.asyncServeCont, builtin_async_serveCont);
 
 // __currentSlot() -> i32
 //

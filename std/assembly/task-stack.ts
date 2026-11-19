@@ -13,7 +13,7 @@
  * is no second record and no raw `i32.store` into one.
  */
 
-import { TaskBase, Waiter, __readyPush } from "./task";
+import { TaskBase, Waiter } from "./task";
 
 // ── the stackful task object (one object per execution) ─────────────────────
 //
@@ -29,6 +29,34 @@ let tasks: Array<TaskBase | null> | null = null;
 // @ts-ignore: decorator
 @builtin
 declare function __currentSlot(): i32;
+
+/**
+ * The status the last normal `resume` returned. Declared here because the
+ * executor (`~lib/thread`) reads it when it serves a request, and `~lib/async`
+ * imports `~lib/thread` for the loop.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function __lastStatus(): i32;
+
+/**
+ * Turns `$starts[funcIndex]` into a continuation installed at a fresh slot
+ * (`docs/task-design.md` §8.5). The index crossed; the reference is made here.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function __serveCont(funcIndex: i32): i32;
+
+/**
+ * Resumes `table[slot]` with the shell's `$await` handler and answers the
+ * awaited slot, or `-1` when the task ran to its own completion.
+ *
+ * Declared here rather than in `~lib/async` because the executor (`~lib/thread`)
+ * is its only caller now, and `~lib/async` imports `~lib/thread` for the loop.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function __resumeTask(slot: i32): i32;
 
 /** Registers `task` under its continuation slot, for `__currentTask`. */
 export function __bindTask(slot: i32, task: TaskBase): void {
@@ -58,12 +86,13 @@ export function __currentTask(): TaskBase | null {
 }
 
 /**
- * Parks the **current** task on `task` and makes `task` runnable.
+ * Parks the **current** task on `task`.
  *
  * Called by the generated `f$Rec#drive` immediately before the `$await`
- * suspend. The waiter records its own slot and executor; `task` is queued so
- * the executor picks it up next. The awaited task's `settle` pushes the waiter
- * back onto its executor's ready queue.
+ * suspend. The waiter records its own slot and executor; the awaited task is
+ * queued by the executor when the resume reports it (`driveReady` pushes
+ * `__resumeTask`'s answer), so parking itself only registers the waiter. The
+ * awaited task's `settle` pushes that waiter back onto its own executor.
  */
 export function __parkOn(task: TaskBase): void {
   let waiter = new Waiter();
@@ -76,7 +105,6 @@ export function __parkOn(task: TaskBase): void {
     task.waiters = list;
   }
   list.push(waiter);
-  __readyPush(task.slot);
 }
 
 /** The base class of every lowered state machine (§4.7.3). */
