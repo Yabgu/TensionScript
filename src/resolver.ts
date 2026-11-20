@@ -783,6 +783,32 @@ export class Resolver extends DiagnosticEmitter {
       type.fixedMemoryModel == MemoryModelCode.Inline;
   }
 
+  /**
+   * The first **GC-reference** element of a value-form fixed array, or `null`.
+   *
+   * `resolveFixedArrayType` deliberately accepts an ordinary class element: the
+   * value form is N inline slots, and for a class the slot is the 4-byte
+   * reference, so a *local* `Foo[4]` is four pointers with an address of their
+   * own -- coherent. What makes it incoherent is the position: as a member of a
+   * C record those slots are bytes in a blob nothing scans, so a collected
+   * object can be reclaimed while the record still holds the word. The array
+   * type cannot know its position; `finishResolveClass` can, and calls this to
+   * refuse the member.
+   *
+   * Nested value-form arrays are followed to the leaf (`[[Foo * 2] * 3]` is
+   * still six reference slots). A nested *view* form (`@unmanaged [T * N]`) is
+   * a pointer, not a slot run, so it is not followed -- it holds an address,
+   * which is what `usize` is for.
+   */
+  private fixedArrayGcReference(type: Type): Type | null {
+    let element = type.fixedElementType;
+    if (element == null) return null;
+    if (this.isValueFormFixedArray(element)) {
+      return this.fixedArrayGcReference(element);
+    }
+    return element.isManaged && element.classReference != null ? element : null;
+  }
+
   private resolveFixedArrayType(
     node: FixedArrayTypeNode,
     flow: Flow | null,
@@ -4797,6 +4823,43 @@ export class Resolver extends DiagnosticEmitter {
                     instance.hasDecorator(DecoratorFlags.InlineStruct) &&
                     fieldType.isManaged &&
                     fieldType.classReference != null
+                  ) {
+                    this.error(
+                      DiagnosticCode.Not_implemented_0,
+                      assert(boundPrototype.fieldDeclaration).type!.range,
+                      "a struct cannot hold a GC reference (`string`, a class, `Array<T>`, `@managed struct`); a C record is not scanned, so the reference would dangle. Use `[u8*N]` for an inline char array, `[u8*]` for a char pointer, `usize` for an opaque word, or an `@unmanaged` record"
+                    );
+                    break;
+                  }
+                  // === A value-form array member is bytes too ===============
+                  //
+                  // VT6 refused a direct GC-reference field of a record. The
+                  // array spelling slipped past it: `struct S { a: Foo[4] }`
+                  // compiled, `sizeof<S>()` answered 16, and those four slots
+                  // are four pointers in a record nothing scans -- the same
+                  // dangling reference one step out. `resolveFixedArrayType`
+                  // allows the class element on purpose (a *local* array of
+                  // pointers is coherent), and that choice is untouched; what
+                  // is added here is the member position's verdict on it.
+                  //
+                  // The record test includes `@unmanaged class` / `@unmanaged
+                  // struct`, whose fields are pointer-layout slots in an
+                  // unscanned blob exactly like a plain `struct`'s. `@managed
+                  // struct` is excluded: its inline-array field is already
+                  // refused above (the collector could not trace elements).
+                  //
+                  // The element decides, not the array: only the value form is
+                  // a slot run (`@unmanaged [T * N]` is a pointer and is left
+                  // alone), and only a GC reference is refused (a scalar,
+                  // `usize`, or an `@unmanaged` record element is a C slot).
+                  // Nested value-form arrays are followed to the leaf by
+                  // `fixedArrayGcReference`.
+                  if (
+                    (instance.hasDecorator(DecoratorFlags.InlineStruct) ||
+                     instance.hasDecorator(DecoratorFlags.Unmanaged)) &&
+                    !instance.hasDecorator(DecoratorFlags.ManagedStruct) &&
+                    this.isValueFormFixedArray(fieldType) &&
+                    this.fixedArrayGcReference(fieldType) != null
                   ) {
                     this.error(
                       DiagnosticCode.Not_implemented_0,

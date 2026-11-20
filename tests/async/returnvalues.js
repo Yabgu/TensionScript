@@ -12,9 +12,16 @@
 // as by value: a body with no `await` is inlined, never becomes a task, and
 // would pass the value check while testing nothing.
 //
-// The ten kinds are i32, i64, f32, f64, bool, void, class, array, string and an
-// `@unmanaged` struct. Each runs under both class representations:
-// `--runtime stub` (pointers) and `--wasmGc` (GC structs).
+// The eleven kinds are i32, i64, f32, f64, bool, void, class, array, string, an
+// `@unmanaged` struct and an `inline struct`. The inline struct is covered in
+// the four shapes VT7 verified by hand: two scalars, a nested record, an
+// `[i32 * 4]` field and the C-interop `[u8 * 8]` char array. Each runs under
+// both class representations: `--runtime stub` (pointers) and `--wasmGc` (GC
+// structs).
+//
+// The value assertions use widely separated multipliers (1e6 / 1e4 / 1e2).
+// Colliding places (a*1000 + b*100 + c with b = 66) read as failures when the
+// value is right, so each component owns a place no other component can reach.
 //
 // `await t` is also checked against the *wrong* target type: for every kind but
 // `i32` (and `bool`, see below), `let b: i32 = await t` must be refused with
@@ -156,6 +163,11 @@ function functionBody(wat, name) {
 const PRELUDE = `
 class P { x: i32 = 0; }
 @unmanaged struct V { a: i32; b: i32; }
+struct Pair { x: i32; y: i32; }
+struct Cell { a: i32; b: i32; }
+struct Outer { i: Cell; c: i32; }
+struct Ints { xs: [i32 * 4]; n: i32; }
+struct Chars { name: [u8 * 8]; len: i32; }
 async function tick(): i32 { return 1; }
 async function inner(): i32 { return await tick(); }
 `;
@@ -212,6 +224,26 @@ const CASES = [
     body: `let v = new V(); v.a = 4; v.b = 5; return v;`,
     main: `let v: V = await t; return v.a * 10 + v.b;`,
   },
+  {
+    id: "inline-struct", type: "Pair", want: 3040000,
+    body: `let v = new Pair(); v.x = 3; v.y = 4; return v;`,
+    main: `let v: Pair = await t; return v.x * 1000000 + v.y * 10000;`,
+  },
+  {
+    id: "inline-struct-nested", type: "Outer", want: 1020300,
+    body: `let v = new Outer(); v.i.a = 1; v.i.b = 2; v.c = 3; return v;`,
+    main: `let v: Outer = await t; return v.i.a * 1000000 + v.i.b * 10000 + v.c * 100;`,
+  },
+  {
+    id: "inline-struct-i32-array", type: "Ints", want: 7090500,
+    body: `let v = new Ints(); v.xs[0] = 7; v.xs[1] = 9; v.n = 5; return v;`,
+    main: `let v: Ints = await t; return v.xs[0] * 1000000 + v.xs[1] * 10000 + v.n * 100;`,
+  },
+  {
+    id: "inline-struct-u8-array", type: "Chars", want: 65660200,
+    body: `let v = new Chars(); v.name[0] = 65; v.name[1] = 66; v.len = 2; return v;`,
+    main: `let v: Chars = await t; return v.name[0] * 1000000 + v.name[1] * 10000 + v.len * 100;`,
+  },
 ];
 
 function program(c) {
@@ -265,10 +297,10 @@ if (wasmtime != null) {
   }
 }
 
-// ── the ten kinds, both ABIs ────────────────────────────────────────────────
+// ── the eleven kinds, both ABIs ──────────────────────────────────────────────
 
 if (wasmtime != null) {
-  console.log("\n# ten kinds round-trip, both class representations");
+  console.log("\n# eleven kinds round-trip, both class representations");
   for (const c of CASES) {
     const pointer = run(program(c), false);
     check(`${c.id} (pointer ABI) = ${c.want}`,

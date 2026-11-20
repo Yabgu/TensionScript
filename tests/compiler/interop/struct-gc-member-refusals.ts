@@ -28,6 +28,17 @@
 // Every declaration has a `sizeof`/`offsetof` user: the record has to be resolved
 // for the layout check to run, and that these calls do **not** answer a number is
 // the point.
+//
+// Round VT7 adds the array spelling of the same hazard, which slipped past the
+// direct-member check: `struct S { a: Foo[4] }` and `struct S { a: string[4] }`
+// compiled with `sizeof` 16 — four untraced reference slots. `resolveFixedArrayType`
+// keeps accepting a class element on purpose (a *local* array of pointers has an
+// address of its own and is coherent), so the refusal belongs to the member
+// position. The five shapes below pin the record forms it covers: plain
+// `struct`, a nested value-form array, `@unmanaged class`, and
+// `@unmanaged struct` (whose fields are pointer-layout slots in an unscanned
+// blob exactly like a value record's). `@managed struct` is not here: its
+// inline-array field is already refused one arm earlier.
 
 class SomeClass {
   x: i32 = 1;
@@ -79,4 +90,38 @@ export function valueSizes(): i32 {
 
 export function nested(): i32 {
   return sizeof<Outer>();
+}
+
+// VT7: the array spelling of the same hazard. A value-form `[T * N]` is N
+// slots; in a local the slots are pointers with their own address, but as a
+// member of a record they are bytes nothing scans. `resolveFixedArrayType`
+// still accepts the class element on purpose (the local case is coherent);
+// the refusal belongs to the member position, and it must cover the pointer
+// records (`@unmanaged class` / `@unmanaged struct`) as well as the value ones.
+struct ClsArr {
+  a: SomeClass[4];
+}
+
+struct StrArr {
+  a: string[4];
+}
+
+struct NestedArr {
+  a: SomeClass[2][3];
+}
+
+@unmanaged class UnmanagedClsArr {
+  a: SomeClass[4];
+}
+
+@unmanaged struct UnmanagedStrArr {
+  a: string[4];
+}
+
+export function arraySizes(): i32 {
+  return sizeof<ClsArr>() + sizeof<StrArr>() + sizeof<NestedArr>();
+}
+
+export function unmanagedArraySizes(): i32 {
+  return sizeof<UnmanagedClsArr>() + sizeof<UnmanagedStrArr>();
 }
