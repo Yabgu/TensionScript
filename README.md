@@ -83,6 +83,14 @@ shares, and how it stays current: [`docs/fork-posture.md`](docs/fork-posture.md)
   `@lazy await spawn(f)` (launched at the declaration, joined at the read).
   `spawn` is the eager primitive. See
   [showcase §7](docs/showcase.md).
+- **Atomics for threads/async.** `@atomic` on a field makes every read and every
+  write of it an atomic instruction — placed inside the field's own `get:`/`set:`
+  accessors, so no access can bypass it. `Atomics.*` gains `fence()` and an
+  address-facing surface (`atomicLoad`, `atomicStore`, `atomicAdd`, …) that takes
+  a raw `usize` and returns the **old** value from the RMW family. Compound
+  assignment on an `@atomic` field is refused by name (a load plus a store is two
+  atomic steps), as are floats, locals, globals and SROA positions. See
+  [`docs/atomics.md`](docs/atomics.md).
 - **Bootstrap self-compile.** The compiler compiles its own source: 229 errors
   down to 0, with the `.wast` fixpoint byte-identical across the stages.
 

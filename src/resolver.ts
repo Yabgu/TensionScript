@@ -163,6 +163,46 @@ function abiAlignDecoratorOf(decorators: DecoratorNode[] | null): DecoratorNode 
   return null;
 }
 
+/**
+ * Why `type` cannot back an `@atomic` field, or `null` when it can.
+ *
+ * The allowed set is exactly what wasm's atomic instructions take: integer
+ * scalars of 1, 2, 4 or 8 bytes (and `bool`, which is one byte the same way
+ * `u8` is). `isize`/`usize` are allowed because they *are* one of those
+ * widths — the target's pointer width — which is what the builtins' size-based
+ * dispatch also concludes.
+ *
+ * **Floats are refused, not bitcast.** wasm has no float atomics; the only way to
+ * make `@atomic x: f32` work is to reinterpret the float's bits as an `i32` at
+ * every access. That would make the field mean something the source does not say —
+ * the type is `f32` and the instruction would be `i32.atomic.load` — and the
+ * project refuses invisible magic of that kind. The caller must ask for the
+ * integer field and bitcast at the access, where the reader can see it.
+ *
+ * Everything else (a reference, `v128`, an inline array, an inline record) is
+ * refused for the plainer reason: no atomic instruction exists for it.
+ */
+function atomicFieldTypeRefusal(type: Type): string | null {
+  switch (type.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.I16:
+    case TypeKind.I32:
+    case TypeKind.I64:
+    case TypeKind.Isize:
+    case TypeKind.U8:
+    case TypeKind.U16:
+    case TypeKind.U32:
+    case TypeKind.U64:
+    case TypeKind.Usize: return null;
+    case TypeKind.F32:
+    case TypeKind.F64: return "an @atomic field of type '" + type.toString() +
+      "' (wasm has no float atomics: an atomic float would have to be bitcast to an integer at every access, and doing that invisibly would make the field mean something its type does not say — declare the field as 'u32'/'u64' and bitcast explicitly, or use atomic.load/atomic.store on its address)";
+    default: return "an @atomic field of type '" + type.toString() +
+      "' (atomics exist for i8/i16/i32/i64, u8/u16/u32/u64, isize/usize and bool only — there is no atomic instruction for a reference, a v128, an inline array or an inline record)";
+  }
+}
+
 /** Whether a type can back an enum's storage: a 32-bit or narrower integer scalar, nothing else. */
 function isValidEnumUnderlyingType(type: Type): bool {
   switch (type.kind) {
@@ -4770,6 +4810,41 @@ export class Resolver extends DiagnosticEmitter {
                   }
                 }
                 if (needsLayout) {
+                  // === `@atomic` is an access modifier, and only some fields can
+                  // carry it =====================================================
+                  //
+                  // Decided **here**, at layout, because this is where the
+                  // field's resolved type first exists and the last moment
+                  // before an offset is banked: a refusal here leaves no wrong
+                  // `sizeof`/`offsetof` behind and no codegen that has to guess.
+                  // (`@atomic` itself takes no part in the arithmetic below —
+                  // see `DecoratorFlags.Atomic` — which is what keeps the layout
+                  // identical with and without it.)
+                  //
+                  // The threads feature is required for the same reason the
+                  // builtins check it: `i32.atomic.load` and friends are the
+                  // threads proposal, and Binaryen emits them only with the
+                  // feature on.
+                  if (boundPrototype.hasDecorator(DecoratorFlags.Atomic)) {
+                    let atomicFieldTypeNode = assert(boundPrototype.fieldDeclaration).type!;
+                    if (!this.program.options.hasFeature(Feature.Threads)) {
+                      this.error(
+                        DiagnosticCode.Not_implemented_0,
+                        atomicFieldTypeNode.range,
+                        "@atomic without the threads feature (the atomic instructions are part of the threads proposal; enable them with `--enable threads`)"
+                      );
+                      break;
+                    }
+                    let atomicRefusal = atomicFieldTypeRefusal(fieldType);
+                    if (atomicRefusal != null) {
+                      this.error(
+                        DiagnosticCode.Not_implemented_0,
+                        atomicFieldTypeNode.range,
+                        atomicRefusal
+                      );
+                      break;
+                    }
+                  }
                   // === A record's field slots are bytes, so a GC reference is
                   // refused here, at the declaration ==========================
                   //

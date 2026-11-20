@@ -1271,7 +1271,8 @@ export enum DecoratorKind {
   ExternalJs,
   Builtin,
   Lazy,
-  Unsafe
+  Unsafe,
+  Atomic
 }
 
 export namespace DecoratorKind {
@@ -1282,6 +1283,10 @@ export namespace DecoratorKind {
       let nameStr = (<IdentifierExpression>nameNode).text;
       assert(nameStr.length);
       switch (nameStr.charCodeAt(0)) {
+        case CharCode.a: {
+          if (nameStr == "atomic") return DecoratorKind.Atomic;
+          break;
+        }
         case CharCode.b: {
           if (nameStr == "builtin") return DecoratorKind.Builtin;
           break;

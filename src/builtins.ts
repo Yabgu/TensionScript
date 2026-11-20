@@ -77,6 +77,7 @@ import {
   BinaryOp,
   UnaryOp,
   AtomicRMWOp,
+  MemoryOrder,
   SIMDExtractOp,
   SIMDReplaceOp,
   SIMDShiftOp,
@@ -3553,6 +3554,12 @@ function builtin_atomic_notify(ctx: BuiltinFunctionContext): ExpressionRef {
 builtinFunctions.set(BuiltinNames.atomic_notify, builtin_atomic_notify);
 
 // atomic.fence() -> void
+//
+// `module.atomic_fence` used to be called with no order, which reached
+// `BinaryenAtomicFence` as the zero value — `Unordered` — and every module using
+// `atomic.fence()` failed validation (`Atomic fence cannot be unordered`). A
+// fence names no source-level order (wasm defaults to seq_cst), so SeqCst is the
+// order emitted.
 function builtin_atomic_fence(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
@@ -3562,7 +3569,7 @@ function builtin_atomic_fence(ctx: BuiltinFunctionContext): ExpressionRef {
     checkTypeAbsent(ctx) |
     checkArgsRequired(ctx, 0)
   ) return module.unreachable();
-  return module.atomic_fence();
+  return module.atomic_fence(MemoryOrder.SeqCst);
 }
 builtinFunctions.set(BuiltinNames.atomic_fence, builtin_atomic_fence);
 

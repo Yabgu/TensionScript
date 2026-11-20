@@ -2102,6 +2102,42 @@ export class Program extends DiagnosticEmitter {
     return null;
   }
 
+  /**
+   * Removes `@atomic` from a decorator list, reporting it with `refusal`.
+   *
+   * Called on the two positions that hold **globals** — a top-level/namespace
+   * variable and a class's `static` field — both of which this round refuses.
+   * The reason is structural rather than temporary: a global compiles to a WASM
+   * **global**, which is not in linear memory at all, so there is no address for
+   * `i32.atomic.load`/`store` to take. `atomic.add` on a class's field address
+   * works because the field is at an offset in a record that lives in memory; a
+   * WASM global has no such offset.
+   *
+   * Removing the decorator is deliberate: `checkDecorators` would otherwise also
+   * report it as unknown, and two messages for one mistake teaches the reader
+   * nothing. The element is still created, without the flag, so the rest of the
+   * program compiles and the single diagnostic is the whole story.
+   */
+  private withoutAtomic(
+    /** Decorators present on an element. */
+    decorators: DecoratorNode[] | null,
+    /** What to say when `@atomic` is present. */
+    refusal: string
+  ): DecoratorNode[] | null {
+    if (!decorators) return null;
+    let kept: DecoratorNode[] | null = null;
+    for (let i = 0, k = decorators.length; i < k; ++i) {
+      let decorator = decorators[i];
+      if (decorator.decoratorKind == DecoratorKind.Atomic) {
+        this.error(DiagnosticCode.Not_implemented_0, decorator.range, refusal);
+        continue;
+      }
+      if (!kept) kept = [];
+      kept.push(decorator);
+    }
+    return kept;
+  }
+
   /** Validates that only supported decorators are present. */
   private checkDecorators(
     /** Decorators present on an element. */
@@ -2431,6 +2467,11 @@ export class Program extends DiagnosticEmitter {
       if (declaration.is(CommonFlags.Readonly)) {
         acceptedFlags |= DecoratorFlags.Inline;
       }
+      // `@atomic` is refused here, not silently ignored and not accepted: a
+      // static field is a WASM global, which has no address. See `withoutAtomic`.
+      decorators = this.withoutAtomic(decorators,
+        "@atomic on a static field of a class (a static field compiles to a WASM global, which is not in linear memory and has no address to make atomic; declare it as an instance field and reach it through that instance's address)"
+      );
       element = new Global(
         name,
         parent,
@@ -2440,6 +2481,21 @@ export class Program extends DiagnosticEmitter {
       if (!parent.add(name, element)) return;
     } else { // actual instance field
       assert(!declaration.isAny(CommonFlags.Abstract | CommonFlags.Get | CommonFlags.Set));
+      // `@atomic` is an access modifier of a **field**: the field's own getter
+      // and setter are where the atomic load/store goes, which is what makes the
+      // guarantee unbypassable (every read and every write goes through them).
+      //
+      // An **ambient** (`declare`) class is the one class that has no such
+      // accessors — its layout and its accesses belong to the external host — so
+      // the guarantee cannot be made there and pretending otherwise would be a
+      // silent no-op.
+      if (parent.is(CommonFlags.Ambient)) {
+        decorators = this.withoutAtomic(decorators,
+          "@atomic on a field of an ambient (declare) class: the field's memory and its accessors belong to the external host, so this compiler emits neither the storage nor the accessors that would carry the atomic instruction"
+        );
+      } else {
+        acceptedFlags |= DecoratorFlags.Atomic;
+      }
       element = PropertyPrototype.forField(
         name,
         parent,
@@ -3146,10 +3202,16 @@ export class Program extends DiagnosticEmitter {
       if (declaration.range.source.isLibrary) {
         acceptedFlags |= DecoratorFlags.Builtin;
       }
+      // A global variable compiles to a WASM global (or a lazy `__set` slot), which
+      // is not in linear memory: there is no address for an atomic load/store. See
+      // `withoutAtomic` for why it is removed rather than left to `checkDecorators`.
+      let decorators = this.withoutAtomic(declaration.decorators,
+        "@atomic on a global variable (a global compiles to a WASM global, which is not in linear memory and has no address to make atomic; declare it as a field of a class or of an @unmanaged struct, and reach it through an address)"
+      );
       let element = new Global(
         name,
         parent,
-        this.checkDecorators(declaration.decorators, acceptedFlags),
+        this.checkDecorators(decorators, acceptedFlags),
         declaration
       );
       if (element.hasDecorator(DecoratorFlags.Builtin) && !builtinVariables_onAccess.has(element.internalName)) {
@@ -3261,7 +3323,15 @@ export enum DecoratorFlags {
    *  wired into any code path**. Implies `Final` when it lands. */
   InlineStruct = 1 << 12,
   /** Is considered unsafe code. */
-  Unsafe = 1 << 13
+  Unsafe = 1 << 13,
+  /** Is an `@atomic` field: every read and every write of it compiles to an
+   *  atomic instruction. An **access modifier only** — it takes no part in
+   *  layout, so `sizeof`, `offsetof` and field order are identical with and
+   *  without it. Valid on a memory-backed field (class, `@managed struct`,
+   *  `@unmanaged struct`, and a plain/`@inline` record field that lives in
+   *  memory), never on a local (a WASM local has no address) and not yet on a
+   *  global (it may compile to a WASM global, which has no address either). */
+  Atomic = 1 << 14
 }
 
 export namespace DecoratorFlags {
@@ -3283,6 +3353,7 @@ export namespace DecoratorFlags {
       case DecoratorKind.Builtin: return DecoratorFlags.Builtin;
       case DecoratorKind.Lazy: return DecoratorFlags.Lazy;
       case DecoratorKind.Unsafe: return DecoratorFlags.Unsafe;
+      case DecoratorKind.Atomic: return DecoratorFlags.Atomic;
       default: return DecoratorFlags.None;
     }
   }
@@ -4962,6 +5033,14 @@ export class PropertyPrototype extends DeclaredElement {
       <MethodDeclaration>firstDeclaration
     );
     bound.flags = this.flags;
+    // **Decorator flags travel with the clone.** They did not, and that was a hole:
+    // `Property` copies `prototype.decoratorFlags`, so every decorator on a field
+    // — `@atomic` today, and `@unsafe`/`@inline` on a field in principle — was
+    // dropped the moment the class was instantiated, which is before any of the
+    // layout or codegen sites that read it ever run. The getter/setter prototypes
+    // are cloned by `FunctionPrototype.toBound`, which already carried them; the
+    // property was the odd one out.
+    bound.decoratorFlags = this.decoratorFlags;
     bound.fieldDeclaration = this.fieldDeclaration;
     let getterPrototype = this.getterPrototype;
     if (getterPrototype) {

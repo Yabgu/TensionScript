@@ -424,6 +424,14 @@ function gcStructFieldsSupported(cls: Class, intrinsic: bool = false): bool {
   let fields = gcFieldsOf(cls);
   for (let i = 0, k = fields.length; i < k; ++i) {
     let field = unchecked(fields[i]);
+    // **An `@atomic` field pins its record to linear memory.** `struct.get` and
+    // `struct.set` — the only field accesses a GC struct has — take no memory
+    // order and have no atomic form in wasm GC, so an `@atomic` field emitted as
+    // a struct field would be a field whose whole guarantee is silently gone.
+    // The answer is the same one every other unsupported field gets: not
+    // refused, but not a GC struct — and because `gcUniform` decides once, the
+    // program keeps the pointer ABI, where `i32.atomic.load`/`store` exist.
+    if (field.hasDecorator(DecoratorFlags.Atomic)) { ok = false; break; }
     if (!gcStructFieldSupported(field.type, intrinsic, field)) { ok = false; break; }
   }
   gcStructCheckPath.pop();
@@ -1121,6 +1129,18 @@ function recordGcRefusal(coverage: GcCoverage, cls: Class): void {
   let fields = gcFieldsOf(cls);
   for (let i = 0, k = fields.length; i < k; ++i) {
     let field = unchecked(fields[i]);
+    // The `@atomic` arm of the same answer `gcStructFieldsSupported` gives. Without it
+    // the class was counted as "eligible, held back only by the latch", which names the
+    // latch as the obstacle when the obstacle is the field — and the latch only said no
+    // *because* of this field. Permanent: it is not a representation change this
+    // migration will make, it is a fact about wasm GC structs.
+    if (field.hasDecorator(DecoratorFlags.Atomic)) {
+      coverage.refuse(
+        "holding an @atomic field (atomic loads and stores are linear-memory instructions; a wasm GC struct field has no atomic form)",
+        true
+      );
+      return;
+    }
     let refusal = gcFieldRefusal(field.type, field);
     if (refusal == null) continue;
     let fieldClass = field.type.classReference;

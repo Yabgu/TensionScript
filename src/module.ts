@@ -2039,9 +2039,14 @@ export class Module {
     return binaryen._BinaryenAtomicNotify(this.ref, ptr, notifyCount, cStr);
   }
 
-  atomic_fence(name: string | null = null): ExpressionRef {
-    let cStr = this.allocStringCached(name);
-    return binaryen._BinaryenAtomicFence(this.ref, cStr);
+  // `BinaryenAtomicFence(module, order)` takes a `MemoryOrder` — and the
+  // zero/default is `Unordered`, which **validates as an error** (`Atomic fence
+  // cannot be unordered`). The order is not optional at this layer even though
+  // the source form `atomic.fence()` takes no arguments, so it defaults to
+  // SeqCst: the one order a fence can express, and what wasm's memory model
+  // gives a program that never names an order.
+  atomic_fence(order: MemoryOrder = MemoryOrder.SeqCst): ExpressionRef {
+    return binaryen._BinaryenAtomicFence(this.ref, order);
   }
 
   // statements

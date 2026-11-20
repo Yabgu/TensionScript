@@ -3562,6 +3562,36 @@ export class Compiler extends DiagnosticEmitter {
     let thisTypeRef = this.options.sizeTypeRef;
     getterInstance.set(CommonFlags.Compiled);
 
+    // **An `@atomic` field reads with an atomic load, inside `get:`.**
+    //
+    // The getter is the single hook every read goes through — `this.x`, `obj.x`,
+    // `arr[i].x`, a constructor's own accesses — so emitting the instruction here
+    // is what makes the guarantee unbypassable: there is no path that reads the
+    // field non-atomically, because there is no path that does not call this
+    // function. Emitting it at each *use site* instead would be a promise kept
+    // only where someone remembered.
+    //
+    // `gcClass` is null by construction: a class with an `@atomic` field is not
+    // eligible for the GC ABI (`types.ts` `gcStructFieldsSupported`), because
+    // `struct.get` has no atomic form. The assert states that rather than
+    // assuming it.
+    if (property.hasDecorator(DecoratorFlags.Atomic)) {
+      assert(this.gcClassOfFieldGetter(property) == null);
+      let atomicBody = module.atomic_load(
+        valueType.byteSize,
+        module.local_get(0, thisTypeRef),
+        valueTypeRef,
+        property.memoryOffset
+      );
+      return module.addFunction(
+        getterInstance.internalName,
+        thisTypeRef,
+        valueTypeRef,
+        getterInstance.getNonParameterLocalTypeRefs(),
+        atomicBody
+      );
+    }
+
     // **A wasm GC class reads its field by type, not by offset.** `struct.get`
     // needs the struct's heap type and the field's *index*, and a reference has
     // no `i32` to add an offset to — so this is the one branch where the offset
@@ -3650,6 +3680,30 @@ export class Compiler extends DiagnosticEmitter {
     // and the field's index. No write barrier either — the engine's tracer owns
     // the edges, which is the whole reason `__link` disappears on this path.
     let gcClass = this.gcClassOfFieldSetter(property);
+    // **An `@atomic` field writes with an atomic store, inside `set:`** — the
+    // companion of the getter's note, and the other half of the guarantee: every
+    // write goes through this function, so no write can be non-atomic. There is
+    // no write barrier to think about, either: a barrier would be a second store
+    // to another word, and an atomic field's value type is an integer (references
+    // are refused at the declaration, `resolver.ts`).
+    if (property.hasDecorator(DecoratorFlags.Atomic)) {
+      assert(gcClass == null);
+      setterInstance.set(CommonFlags.Compiled);
+      let atomicBody = module.atomic_store(
+        valueType.byteSize,
+        module.local_get(0, thisTypeRef),
+        module.local_get(1, valueTypeRef),
+        valueTypeRef,
+        property.memoryOffset
+      );
+      return module.addFunction(
+        setterInstance.internalName,
+        createType([ thisTypeRef, valueTypeRef ]),
+        TypeRef.None,
+        null,
+        atomicBody
+      );
+    }
     if (gcClass != null) {
       let classTypeRef = gcClass.type.toRef();
       let body = module.struct_set(
@@ -7873,6 +7927,13 @@ export class Compiler extends DiagnosticEmitter {
     }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
+    // A compound operator on an `@atomic` field is refused here, before the store:
+    // the read has already been compiled (through the getter, so atomically), but
+    // the composite would still be a load and a store with a gap between them.
+    // See `refuseAtomicReadModifyWrite` for why it is not desugared to an RMW.
+    if (this.refuseAtomicReadModifyWrite(target, operatorTokenToString(operator), expression)) {
+      return module.unreachable();
+    }
     let targetType = resolver.getTypeOfElement(target);
     if (!targetType) targetType = Type.void;
     if (!this.currentType.isStrictlyAssignableTo(targetType)) {
@@ -9137,6 +9198,84 @@ export class Compiler extends DiagnosticEmitter {
     );
   }
 
+  /** The `@atomic` field a target names, or `null` when the target is not one. */
+  private atomicFieldOf(target: Element): Property | null {
+    let property: Property;
+    switch (target.kind) {
+      case ElementKind.PropertyPrototype: {
+        let instance = this.resolver.resolveProperty(<PropertyPrototype>target);
+        if (!instance) return null;
+        property = instance;
+        break;
+      }
+      case ElementKind.Property: {
+        property = <Property>target;
+        break;
+      }
+      default: return null;
+    }
+    return property.isField && property.hasDecorator(DecoratorFlags.Atomic)
+      ? property
+      : null;
+  }
+
+  /**
+   * The atomic read-modify-write that expresses `operator`, for a refusal message.
+   *
+   * Spelled out per operator rather than left as a generic "use an RMW", because
+   * the point of the refusal is that the reader must write the **one** instruction
+   * that does the whole step — and the name of that instruction is the only useful
+   * thing a message can give them.
+   */
+  private static atomicRmwHint(operator: string): string {
+    switch (operator) {
+      case "+=": case "++": return "atomic.add<T>(addressOf(aField), delta)";
+      case "-=": case "--": return "atomic.sub<T>(addressOf(aField), delta)";
+      case "&=": return "atomic.and<T>(addressOf(aField), mask)";
+      case "|=": return "atomic.or<T>(addressOf(aField), mask)";
+      case "^=": return "atomic.xor<T>(addressOf(aField), mask)";
+      default: return "atomicCompareExchange<T>(addressOf(aField), expect, replace) in a loop, or atomic.add/atomic.sub";
+    }
+  }
+
+  /**
+   * Refuses a **read-modify-write** of an `@atomic` field — `f += 1`, `f -= 1`,
+   * `f++`, `--f` — and returns `true` when it did (an error was reported).
+   *
+   * The composite is the problem, not the individual accesses. `ring.head += 1`
+   * compiles to a get (one atomic load), an add, and a set (one atomic store):
+   * **three** steps, and another agent can observe or interleave between the load
+   * and the store, so the increment is lost under exactly the contention atomics
+   * are for. Every other compound operator has the same shape, and so do `++`
+   * and `--`.
+   *
+   * **It is refused rather than desugared to `fetch_add`.** Quietly turning `+=`
+   * into one RMW would make this one operator mean something different from every
+   * other compound operator in the language (`*=` on the same field would still be
+   * a read plus a write), and "atomic only when we can guess" is the kind of
+   * invisible change this project refuses. The user writes the RMW, and the source
+   * then says exactly what the machine does.
+   */
+  private refuseAtomicReadModifyWrite(
+    /** The assignment target. */
+    target: Element,
+    /** The operator as written, for the message. */
+    operator: string,
+    /** Node the diagnostic points at. */
+    reportNode: Node
+  ): bool {
+    if (this.atomicFieldOf(target) == null) return false;
+    this.error(
+      DiagnosticCode.Not_implemented_0,
+      reportNode.range,
+      "an @atomic field cannot be updated with `" + operator +
+        "` (a read then a write is two atomic steps, not one). Use `" +
+        Compiler.atomicRmwHint(operator) +
+        "` for a single read-modify-write — the field's address is `changetype<usize>(instance) + offsetof<Class>(\"field\")`."
+    );
+    return true;
+  }
+
   /** Makes an assignment expression or block, assigning a value to a target. */
   makeAssignment(
     /** Target element, e.g. a Local. */
@@ -9232,6 +9371,16 @@ export class Compiler extends DiagnosticEmitter {
         if (thisExpression != null) {
           let sroaReceiver = this.resolveSroaReceiver(thisExpression);
           if (sroaReceiver != null) {
+            // The write half of the SROA refusal the read path states: a local has
+            // no address, so `local.set` cannot be an atomic store.
+            if (propertyInstance.hasDecorator(DecoratorFlags.Atomic)) {
+              this.error(
+                DiagnosticCode.Not_implemented_0,
+                valueExpression.range,
+                "writing an @atomic field of an @inline struct in SROA position (a value-form record lives in WASM locals, which have no address, so the write cannot be atomic; reach the record through memory — a field of a class, or a `@unmanaged` view over bytes — where the accessor carries the atomic instruction)"
+              );
+              return module.unreachable();
+            }
             let fieldLocals = assert(sroaReceiver.fieldLocals);
             if (!fieldLocals.has(propertyInstance.name)) {
               this.error(
@@ -14486,14 +14635,28 @@ export class Compiler extends DiagnosticEmitter {
         case TypeKind.F32:
         case TypeKind.F64: {
           // Can store zeroes directly (no need to __link)
+          //
+          // An `@atomic` field takes an atomic store even here: this is a write of
+          // the field, and "every write is atomic" has no exemption for the
+          // zeroing one. It is also the honest shape — the object is published by
+          // its first store, and a plain store would be a write the guarantee
+          // never covered.
           exprs.push(
-            module.store(
-              propertyType.byteSize,
-              module.local_get(tempLocal.index, classTypeRef),
-              this.makeZero(propertyType),
-              propertyType.toRef(),
-              propertyInstance.memoryOffset
-            )
+            propertyInstance.hasDecorator(DecoratorFlags.Atomic)
+              ? module.atomic_store(
+                  propertyType.byteSize,
+                  module.local_get(tempLocal.index, classTypeRef),
+                  this.makeZero(propertyType),
+                  propertyType.toRef(),
+                  propertyInstance.memoryOffset
+                )
+              : module.store(
+                  propertyType.byteSize,
+                  module.local_get(tempLocal.index, classTypeRef),
+                  this.makeZero(propertyType),
+                  propertyType.toRef(),
+                  propertyInstance.memoryOffset
+                )
           );
           continue;
         }
@@ -15117,6 +15280,22 @@ export class Compiler extends DiagnosticEmitter {
           ? this.resolveSroaReceiver(thisExpression)
           : null;
         if (sroaReceiver != null) {
+          // **`@atomic` and SROA are mutually exclusive.** An `@inline struct` in
+          // SROA position is a set of WASM locals: there is no address, so there
+          // is no `i32.atomic.load` to emit — the field is a `local.get` and
+          // nothing else. Refused by name here rather than emitted as a plain
+          // local read, which would silently drop the guarantee the declaration
+          // made. The field still works through a memory position (a nested
+          // field of a record, a view over bytes), which is where the accessor
+          // with the atomic instruction exists.
+          if (propertyInstance.hasDecorator(DecoratorFlags.Atomic)) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              expression.range,
+              "reading an @atomic field of an @inline struct in SROA position (a value-form record lives in WASM locals, which have no address, so the read cannot be atomic; reach the record through memory — a field of a class, or a `@unmanaged` view over bytes — where the accessor carries the atomic instruction)"
+            );
+            return module.unreachable();
+          }
           let fieldLocals = assert(sroaReceiver.fieldLocals);
           if (!propertyInstance.isField || !fieldLocals.has(propertyInstance.name)) {
             this.error(
@@ -15685,6 +15864,13 @@ export class Compiler extends DiagnosticEmitter {
     if (!target) {
       return module.unreachable();
     }
+    // `f++` / `f--` on an `@atomic` field: the same read-then-write composite the
+    // compound operators are refused for, so the same refusal.
+    if (this.refuseAtomicReadModifyWrite(
+      target,
+      expression.operator == Token.Plus_Plus ? "++" : "--",
+      expression
+    )) return module.unreachable();
 
     // simplify if dropped anyway
     if (!tempLocal) {
@@ -16122,6 +16308,13 @@ export class Compiler extends DiagnosticEmitter {
     }
     let target = resolver.lookupExpression(expression.operand, this.currentFlow);
     if (!target) return module.unreachable();
+    // `++f` / `--f` on an `@atomic` field: refused for the same reason the postfix
+    // form is (see `refuseAtomicReadModifyWrite`).
+    if (this.refuseAtomicReadModifyWrite(
+      target,
+      expression.operator == Token.Plus_Plus ? "++" : "--",
+      expression
+    )) return module.unreachable();
     return this.makeAssignment(
       target,
       expr,
@@ -16492,6 +16685,19 @@ export class Compiler extends DiagnosticEmitter {
         BinaryOp.AddSize,
         basePtr,
         this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+      );
+    }
+    // An `@atomic` field read through a **view** is the same instruction the
+    // record's own getter emits: the view's address plus the field's offset.
+    // The two branches above are storage (an inline array, a nested value), which
+    // an `@atomic` field cannot be — `atomicFieldTypeRefusal` allows integer
+    // scalars only — so this arm is the whole of the view story.
+    if (field.hasDecorator(DecoratorFlags.Atomic)) {
+      return module.atomic_load(
+        fieldType.byteSize,
+        basePtr,
+        fieldType.toRef(),
+        offset
       );
     }
     return module.load(
@@ -17089,6 +17295,25 @@ export class Compiler extends DiagnosticEmitter {
 
   /** A load of one field of an `@inline struct` at a slot address. */
   private makeSretFieldLoad(destAddress: ExpressionRef, field: Property): ExpressionRef {
+    // An `@atomic` field takes its atomic load here too. `f().x` reads `x` out of a
+    // call's result slot: the slot is memory, the offset is the field's own and the
+    // alignment is the record's, so this is the same access the accessor would make
+    // against the record itself — the guarantee has no hole at this boundary, and
+    // nothing about the slot being a temp makes the field's bytes less shared.
+    //
+    // In practice this arm is unreachable for an `@atomic` field: a value-form record
+    // is produced by writing its fields in SROA position, and those writes are refused
+    // (`compilePropertyAccess`), so no such value can be returned. It is kept because
+    // "unreachable" is an argument about today's producers, and this is the one line
+    // that keeps the guarantee true if one appears.
+    if (field.hasDecorator(DecoratorFlags.Atomic)) {
+      return this.module.atomic_load(
+        field.type.byteSize,
+        destAddress,
+        field.type.toRef(),
+        field.memoryOffset
+      );
+    }
     return this.module.load(
       field.type.byteSize,
       false,
@@ -18586,6 +18811,19 @@ export class Compiler extends DiagnosticEmitter {
     if (elementType.getClass() == null) return 0;    // scalar element: the ordinary path
     if (this.constantIndexValue(elementAccess.elementExpression) >= 0) return 0;
     if (!property.isField) return 0;
+    // **An `@atomic` field has no atomic read here.** These elements are SROA
+    // locals — one WASM local per leaf — so the dispatch below selects a
+    // `local.get` and there is no address for an atomic load. Refused by name
+    // *before* the dispatch, so the read cannot happen non-atomically behind the
+    // refusal.
+    if (property.hasDecorator(DecoratorFlags.Atomic)) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        elementAccess.range,
+        "reading an @atomic field of a value-form record array by a runtime index (the elements are WASM locals, which have no address, so the read cannot be atomic; use a constant index into memory, or reach the record through an address)"
+      );
+      return this.module.unreachable();
+    }
     let fieldLocals = assert(arrayLocal.fieldLocals);
     let length = arrayType.fixedLength;
     if (length > Compiler.VALUE_ARRAY_MAX_RUNTIME_INDEX) {
@@ -18673,6 +18911,16 @@ export class Compiler extends DiagnosticEmitter {
     if (elementType.getClass() == null) return 0;    // scalar element: the ordinary path
     if (this.constantIndexValue(elementAccess.elementExpression) >= 0) return 0;
     if (!property.isField) return 0;
+    // The write half of the refusal in `compileSroaArrayLeafByRuntimeIndex`: the
+    // leaf is a WASM local, and `local.set` cannot be an atomic store.
+    if (property.hasDecorator(DecoratorFlags.Atomic)) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        elementAccess.range,
+        "writing an @atomic field of a value-form record array by a runtime index (the elements are WASM locals, which have no address, so the write cannot be atomic; use a constant index into memory, or reach the record through an address)"
+      );
+      return this.module.unreachable();
+    }
     let fieldLocals = assert(arrayLocal.fieldLocals);
     let length = arrayType.fixedLength;
     if (length > Compiler.VALUE_ARRAY_MAX_RUNTIME_INDEX) {

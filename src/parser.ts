@@ -4962,6 +4962,20 @@ export class Parser extends DiagnosticEmitter {
     }
     let name = tn.readIdentifier();
     if (name != "lazy") {
+      // `@atomic` reaching statement position is a local variable: `@atomic let
+      // x = 0` (or a bare `@atomic` before any expression). A local is a WASM
+      // local — SROA, one slot, no address — so there is no memory location to
+      // make atomic, and no accessor to put the instruction in. Refused by name
+      // rather than by "not valid here", because the reason is a fact about
+      // locals and not about the decorator.
+      if (name == "atomic") {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          tn.range(startPos, tn.pos),
+          "@atomic on a local variable (a local lives in a WASM local, which has no address, so there is nothing to make atomic; use an @atomic field of a class or of an @unmanaged struct)"
+        );
+        return null;
+      }
       this.error(
         DiagnosticCode.Decorator_0_is_not_valid_here,
         tn.range(startPos, tn.pos), name
