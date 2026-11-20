@@ -107,6 +107,39 @@ function runTranscript(bytes, globals = []) {
   return { lines, threw, status: instance.exports.__asyncStatus.value, globals: read };
 }
 
+// Wasmfx availability, asked of the **engine** rather than of the argv.
+//
+// This file is in `npm test`, and that chain runs on a Node started without the
+// flag as well (the Coverage job does), where the first `new WebAssembly.Module`
+// on a stack-switching module is a hard `CompileError`. The flag's spelling has
+// moved across Node versions and its absence has announced itself two ways —
+// `core stack switching not enabled` (gate4's message) and
+// `Compiling function #N failed: Invalid opcode 0xe0` (`cont.new`/`suspend` are
+// the 0xe0 prefix) — so both are recognised as "this engine cannot run it".
+//
+// **Every other error is a failure.** A skip that also swallowed a validation
+// error would hide exactly the bug this round could introduce.
+{
+  const probe = compile(`
+async function leaf(): i32 { await 1; return 0; }
+export async function main(): i32 { await leaf(); return 0; }
+`);
+  if (probe.error === undefined) {
+    try {
+      new WebAssembly.Module(probe.bytes);
+    } catch (error) {
+      const message = String(error && error.message || error);
+      probe.dispose();
+      if (/core stack switching not enabled|Invalid opcode 0xe0/.test(message)) {
+        console.log("SKIP: this Node cannot run stack switching (start it with --experimental-wasm-wasmfx)");
+        process.exit(0);
+      }
+      throw error;
+    }
+    probe.dispose();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 1. A submitted task, and a step that ranks the ready set.
 // ---------------------------------------------------------------------------
