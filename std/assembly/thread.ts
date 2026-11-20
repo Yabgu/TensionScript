@@ -22,7 +22,17 @@
  * index space is `$~asyncCont`'s.
  */
 
-import { Atomics } from "./atomics";
+// @ts-ignore: decorator
+@inline const SHARED: bool = isDefined(ASC_ARENA);
+
+import {
+  atomicLoad,
+  atomicStore,
+  atomicAdd,
+  atomicCompareExchange,
+  atomicWait,
+  atomicNotify,
+} from "./atomics";
 
 // ── the slot ring ───────────────────────────────────────────────────────────
 
@@ -30,57 +40,98 @@ import { Atomics } from "./atomics";
 const HEAD: i32 = 0;
 /** Word 1: the producer index (reserved by CAS). */
 const TAIL: i32 = 1;
-/** Word 2: the capacity, repeated in memory so a shared reader can find it. */
+/** Word 2: the capacity, repeated in memory so a raw reader can find it. */
 const CAPACITY_WORD: i32 = 2;
 /** Word 3 onward: the ring's cells. */
 const SLOTS: i32 = 3;
 /** A cell reserved by a producer that has not yet stored its value. */
 const UNWRITTEN: i32 = -2;
 
+const HEAD_OFF: usize = <usize>HEAD << 2;
+const TAIL_OFF: usize = <usize>TAIL << 2;
+const CAPACITY_OFF: usize = <usize>CAPACITY_WORD << 2;
+const SLOTS_OFF: usize = <usize>SLOTS << 2;
+
+
 /**
- * A bounded ring of `i32` slot indices, in linear memory, accessed atomically.
+ * A bounded ring of `i32` words, **addressed by an integer**.
  *
  * **One type for both queues** (`docs/task-design.md` §8.5): `Executor.ready`
  * — owned by its executor, single consumer — and `Executor.inbox` — written by
  * anyone, drained by its owner. They differ in who writes, not in shape.
  *
- * **Why not an `Array<i32>`.** An `Array` is a heap object; a thread that did
- * not allocate it cannot read it (F1). The ring's words are an `Int32Array`
- * payload — plain linear memory with a stable address — so its *contents* are
- * addressable, which is the property F5 requires of anything crossing a thread.
- * The view object itself belongs to this store; handing another store the
- * ring's address is the shared-arena allocation `docs/task-design.md` §13
- * leaves open, and is not assumed here.
+ * **Why an address and not an `Array`.** An `Array`, an `Int32Array`, any heap
+ * object belongs to the store that made it (F1), so a second thread cannot see
+ * it. The ring's *contents* are four-plus words of plain linear memory, and
+ * what another thread needs to operate them is one number: `base`. Every
+ * operation below is a raw-address atomic on `base + word*4`, which is why a
+ * ring can be shared without a shared allocator: nothing is allocated to share
+ * it, the address is.
  *
- * **A `class`, not an `@managed struct`.** The design's own sketch (§8.5) is
- * `export class SlotRing`, and a struct cannot carry the constructor and the
- * three methods the ABI wants — measured: `@managed` on a class is refused
- * (`AS212`), and a struct has no method syntax in this fork. What `@managed`
- * was standing for here is the *storage*: the ring's words are linear, so their
- * address is a value any store could use once §13's arena exists.
+ * **A `class`, not a struct.** The handle carries `capacity` and `signal` for
+ * the hot path and the class is what a program names in its own code (§8.5's
+ * sketch is `export class SlotRing`); the words it points at are a plain span
+ * of memory, which is the part that has to be shareable.
  *
- * **Ordering.** `push` reserves the tail with a CAS and then writes the cell, so
- * several producers may push concurrently; `pop` advances the head with a plain
- * atomic store, because exactly one executor drains a given ring. A consumer
- * that sees a reserved-but-unwritten cell answers "empty" and leaves the head
- * where it is, so a value is never read before it is published.
+ * **Ordering.** `push` reserves the tail with a CAS and only then publishes the
+ * cell, so several producers may push concurrently; `pop` advances the head
+ * with a plain atomic store, because exactly one executor drains a given ring
+ * (`STRIDE` gives each executor its own words — `docs/thread-abi.md` §5). A
+ * consumer that sees a reserved-but-unwritten cell answers "empty" and leaves
+ * the head where it is, so a value is never read before it is published.
+ *
+ * **A push with a signal wakes the owner.** After the cell is published, a ring
+ * with `signal != 0` bumps the signal word and notifies one waiter. That order
+ * — publish, bump, notify — is what makes the wake unloseable; a consumer reads
+ * the signal *before* it looks at the ring, so a producer that ran in between
+ * changes the value the consumer would wait on and the wait returns instead of
+ * sleeping (`docs/thread-abi.md` §4).
  */
 export class SlotRing {
-  /** `[head, tail, capacity, cells…]`. */
-  private data: Int32Array;
-  /** The ring's bound, kept outside the buffer for the hot path. */
-  readonly capacity: i32;
+  /** The ring's words: `[head, tail, capacity, cells…]`. */
+  base: usize = 0;
+  /** The ring's bound, mirrored for the hot path. */
+  capacity: i32 = 0;
+  /** Wake address (`i32` word), or 0 for a ring whose owner never sleeps. */
+  signal: usize = 0;
+  /**
+   * The allocation that owns the words when *this handle* made them, or an
+   * empty view when the words were carved by someone else.
+   *
+   * **Ownership, not access.** Nothing below reads or writes through it, and
+   * `at()` never has one: it exists because a `--sharedMemory` build's ring may
+   * still be created by `new SlotRing(cap)`, and under a tracing collector the
+   * payload has to stay referenced or the ring's own words would be swept. The
+   * hot path uses `base` alone, which is the property a second thread needs.
+   */
+  private anchor: Int32Array | null = null;
 
+  /** Allocates the ring's words in this store's heap. */
   constructor(capacity: i32) {
     this.capacity = capacity;
-    let data = new Int32Array(capacity > 0 ? capacity + SLOTS : SLOTS);
-    // A zero-filled buffer would make every empty cell look like slot 0, so the
-    // cells start unwritten and `pop` can tell "reserved" from "holds 0".
-    for (let i = 0; i < capacity; ++i) unchecked(data[SLOTS + i] = UNWRITTEN);
-    unchecked(data[HEAD] = 0);
-    unchecked(data[TAIL] = 0);
-    unchecked(data[CAPACITY_WORD] = capacity);
-    this.data = data;
+    if (capacity > 0) {
+      let words = new Int32Array(capacity + SLOTS);
+      for (let i = 0; i < capacity; ++i) unchecked(words[SLOTS + i] = UNWRITTEN);
+      unchecked(words[HEAD] = 0);
+      unchecked(words[TAIL] = 0);
+      unchecked(words[CAPACITY_WORD] = capacity);
+      this.anchor = words;
+      this.base = changetype<usize>(words.buffer);
+    }
+  }
+
+  /**
+   * A handle over words that already exist at `base`.
+   *
+   * **Allocates the handle and nothing else.** The caller has carved the words
+   * (`__threadInit` does, once, before any thread exists), and they must be
+   * initialised already: head 0, tail 0, capacity, every cell `UNWRITTEN`.
+   */
+  static at(base: usize, capacity: i32): SlotRing {
+    let ring = new SlotRing(0);
+    ring.base = base;
+    ring.capacity = capacity;
+    return ring;
   }
 
   /**
@@ -96,18 +147,18 @@ export class SlotRing {
   push(slot: i32): bool {
     let capacity = this.capacity;
     if (capacity <= 0) return false;
-    let data = this.data;
-    let tailNow = Atomics.load(data, TAIL);
-    let headNow = Atomics.load(data, HEAD);
+    let base = this.base;
+    let tailNow = atomicLoad<i32>(base + <usize>4);
+    let headNow = atomicLoad<i32>(base);
     for (let i = headNow; i < tailNow; ++i) {
-      if (Atomics.load(data, SLOTS + (i % capacity)) == slot) return false;
+      if (atomicLoad<i32>(base + SLOTS_OFF + <usize>(i % capacity << 2)) == slot) return false;
     }
     while (true) {
-      let tail = Atomics.load(data, TAIL);
-      let head = Atomics.load(data, HEAD);
+      let tail = atomicLoad<i32>(base + TAIL_OFF);
+      let head = atomicLoad<i32>(base + HEAD_OFF);
       if (tail - head >= capacity) return false;
-      if (Atomics.compareExchange(data, TAIL, tail, tail + 1) == tail) {
-        Atomics.store(data, SLOTS + (tail % capacity), slot);
+      if (atomicCompareExchange<i32>(base + TAIL_OFF, tail, tail + 1) == tail) {
+        atomicStore<i32>(base + SLOTS_OFF + <usize>(tail % capacity << 2), slot);
         return true;
       }
       // Another producer took this index; read the new tail and try again.
@@ -118,21 +169,40 @@ export class SlotRing {
   pop(): i32 {
     let capacity = this.capacity;
     if (capacity <= 0) return -1;
-    let data = this.data;
-    let head = Atomics.load(data, HEAD);
-    let tail = Atomics.load(data, TAIL);
+    let base = this.base;
+    let head = atomicLoad<i32>(base + HEAD_OFF);
+    let tail = atomicLoad<i32>(base + TAIL_OFF);
     if (head >= tail) return -1;
-    let value = Atomics.load(data, SLOTS + (head % capacity));
+    let value = atomicLoad<i32>(base + SLOTS_OFF + <usize>(head % capacity << 2));
     if (value == UNWRITTEN) return -1;
-    Atomics.store(data, HEAD, head + 1);
+    atomicStore<i32>(base + HEAD_OFF, head + 1);
     return value;
   }
 
   /** How many entries are published and not yet consumed. */
   get depth(): i32 {
-    let data = this.data;
-    let depth = Atomics.load(data, TAIL) - Atomics.load(data, HEAD);
+    let capacity = this.capacity;
+    if (capacity <= 0) return 0;
+    let base = this.base;
+    let depth = atomicLoad<i32>(base + TAIL_OFF) - atomicLoad<i32>(base + HEAD_OFF);
     return depth > 0 ? depth : 0;
+  }
+
+  /**
+   * Whether `pop` would answer `-1` right now.
+   *
+   * A reserved-but-unwritten head cell counts as empty: the producer that
+   * reserved it bumps the signal after publishing, which is what wakes the
+   * owner, so treating it as "nothing to do yet" cannot park past a wake.
+   */
+  get isEmpty(): bool {
+    let capacity = this.capacity;
+    if (capacity <= 0) return true;
+    let base = this.base;
+    let head = atomicLoad<i32>(base + HEAD_OFF);
+    let tail = atomicLoad<i32>(base + TAIL_OFF);
+    if (head >= tail) return true;
+    return atomicLoad<i32>(base + SLOTS_OFF + <usize>(head % capacity << 2)) == UNWRITTEN;
   }
 }
 

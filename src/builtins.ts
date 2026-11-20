@@ -12395,6 +12395,10 @@ function builtin_async_serveCont(ctx: BuiltinFunctionContext): ExpressionRef {
     module.nop()
   ));
 
+  // **`cont.new` reads the table through a cast, and that cast must not share a
+  // function with a `resume`.** V8 aborts compiling such a function (measured:
+  // `Check failed: !op.Effects().can_write()`); `~lib/thread` keeps the served
+  // continuation's creation in its own function for exactly that reason.
   stmts.push(module.table_set(
     ASYNC_CONT_TABLE,
     module.local_get(slotLocal.index, TypeRef.I32),

@@ -142,10 +142,23 @@ function compile({ flags = BASE_FLAGS, source = FIXTURE, text = false } = {}) {
   return { ok, output, bytes, wat };
 }
 
-/** Instantiates a module, against a host memory when it imports one. */
+/**
+ * Instantiates a module, against a host memory when it imports one.
+ *
+ * **A `--sharedMemory` module runs nothing at instantiation** (`docs/thread-abi.md`
+ * §4a). A start section would run on every instantiation, and this module is
+ * instantiated once per thread, so the boot body is the plain export
+ * `__start() -> i32` and the host chooses the entry. A forgotton `__start()`
+ * fails silently: `@lazy` globals never initialise, `__arenaHeapBase()` answers
+ * `0`, `__asyncStatus` stays `0`, and the host waits forever. So the helper
+ * calls it whenever the export exists; a non-shared build has no such export
+ * and keeps its start section.
+ */
 function instantiate(bytes, memory = null) {
   const imports = memory ? { env: { memory } } : {};
-  return new WebAssembly.Instance(new WebAssembly.Module(bytes), imports).exports;
+  const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes), imports).exports;
+  if (typeof exports.__start === "function") exports.__start();
+  return exports;
 }
 
 const PAGE = 0x10000;

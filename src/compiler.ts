@@ -281,6 +281,14 @@ export const ASYNC_AWAIT_TAG = "await";
 export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
 export const ASYNC_STATUS = "~asyncStatus";
+/**
+ * The exported boot entry of a shared-memory module (`docs/thread-abi.md` §4a).
+ *
+ * A name, not a section: the host calls it on the main instance and calls
+ * `__workerMain(rec)` on every other instance, so an instance has exactly one
+ * entry and nothing has to decide at runtime which one it is.
+ */
+export const StartEntryName = "__start";
 export const ASYNC_STATUS_EXPORT = "__asyncStatus";
 /** The status the last normal `resume` returned (A2's core loop reads it). */
 export const ASYNC_LAST_STATUS = "~asyncLastStatus";
@@ -545,6 +553,35 @@ export const runtimeFunctions = [ "__new", "__pin", "__unpin", "__collect" ];
  * runtime) simply exports nothing here instead of failing to compile.
  */
 export const arenaFunctions = [ "__arenaInit", "__arenaHeapBase", "__arenaEnd" ];
+/**
+ * The threading surface, exported under `--sharedMemory` and only there.
+ *
+ * `env.__startThread` / `env.__executorCount` are the host imports a shared
+ * build needs; `__threadInit`, `__workerMain`, `__spawnThread`, `__threadJoin`
+ * and `__executorExit` are the exports its host drives. A program compiled
+ * without `--sharedMemory` references none of them, so none of them — and
+ * neither import — is emitted, which is what keeps every existing program
+ * exactly as it was (`docs/thread-abi.md` §5).
+ *
+ * Looked up, not required: `~lib/thread` is pulled in by the async shell, so an
+ * await-free program has no threading surface to export and simply exports
+ * nothing here.
+ */
+export const threadFunctions = [
+  "__threadInit",
+  "__threadJoin",
+  "__workerMain",
+  "__spawnThread",
+  "__executorExit",
+];
+/** The carved layout, exported so a host and the tests can read it back. */
+export const threadGlobals = [
+  "__heapBase",
+  "__controlBase",
+  "__controlStride",
+  "__ringCapacity",
+  "__executorTotal",
+];
 /** Globals to export if `--exportRuntime` is set. */
 export const runtimeGlobals = [ "__rtti_base" ];
 
@@ -1552,16 +1589,35 @@ export class Compiler extends DiagnosticEmitter {
     // would bound nothing. Exporting an entry point that cannot bound the heap
     // would be worse than exporting none — a host would believe it had configured
     // a heap. Parametrizing that allocator is a separate front.
-    if (
-      (this.options.exportRuntime || (this.options.bindingsHint && this.desiresExportRuntime)) &&
-      this.options.sharedMemory && !this.gcActive
-    ) {
+    //
+    // **One gate, not two.** `--sharedMemory` is the switch that says this
+    // module is instantiated more than once over one memory, and a per-instance
+    // heap is what that requires; demanding `--exportRuntime` as well made the
+    // same feature reachable two ways and absent in one of them. A build that
+    // does not share memory gets none of this, byte for byte.
+    if (this.options.sharedMemory && !this.gcActive) {
       for (let i = 0, k = arenaFunctions.length; i < k; ++i) {
         let name = arenaFunctions[i];
         if (program.lookup(name) == null) continue; // runtime has no arenas
         let instance = program.requireFunction(name);
         if (this.compileFunction(instance) && !module.hasExport(name)) {
           module.addFunctionExport(instance.internalName, name);
+        }
+      }
+      for (let i = 0, k = threadFunctions.length; i < k; ++i) {
+        let name = threadFunctions[i];
+        if (program.lookup(name) == null) continue; // no async shell, no threads
+        let instance = program.requireFunction(name);
+        if (this.compileFunction(instance) && !module.hasExport(name)) {
+          module.addFunctionExport(instance.internalName, name);
+        }
+      }
+      for (let i = 0, k = threadGlobals.length; i < k; ++i) {
+        let name = threadGlobals[i];
+        if (program.lookup(name) == null) continue;
+        let instance = program.requireGlobal(name);
+        if (this.compileGlobal(instance) && !module.hasExport(name)) {
+          module.addGlobalExport(instance.internalName, name);
         }
       }
     }
@@ -1747,11 +1803,22 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
+    // **A shared-memory module has no start section.** The host instantiates
+    // this module again for every worker, and a start section runs on every
+    // instantiation: every worker would run `main` a second time, on its own
+    // copy of the globals, against the same shared memory. So the boot body is
+    // a plain exported function, `__start() -> i32`, and the host decides which
+    // entry each instance gets — `__start` for main, `__workerMain(rec)` for a
+    // worker (`docs/thread-abi.md` §4a). One entry per instance, chosen by the
+    // host: no boot words in memory and no "am I a worker" branch in the guest.
+    //
+    // A build without `--sharedMemory` keeps its start section and is unchanged.
     let startIsEmpty = !startFunctionBody.length;
     let exportStart = options.exportStart;
-    if (!startIsEmpty || exportStart != null) {
+    let shared = this.options.sharedMemory;
+    if (!startIsEmpty) {
       let signature = startFunctionInstance.signature;
-      if (!startIsEmpty && exportStart != null) {
+      if (exportStart != null) {
         module.addGlobal(BuiltinNames.started, TypeRef.I32, true, module.i32(0));
         startFunctionBody.unshift(
           module.global_set(BuiltinNames.started, module.i32(1))
@@ -1771,18 +1838,17 @@ export class Compiler extends DiagnosticEmitter {
         module.flatten(startFunctionBody)
       );
       startFunctionInstance.finalize(module, funcRef);
-      if (exportStart == null) module.setStart(funcRef);
-      else {
-        if (!isIdentifier(exportStart) || module.hasExport(exportStart)) {
-          this.error(
-            DiagnosticCode.Start_function_name_0_is_invalid_or_conflicts_with_another_export,
-            Source.native.range, exportStart
-          );
-        } else {
-          module.addFunctionExport(startFunctionInstance.internalName, exportStart);
-        }
+      if (shared) {
+        // No start section. `--exportStart` still means "export this instead",
+        // so a host that asked for a name keeps it.
+        if (exportStart != null) this.exportStartUnder(startFunctionInstance, exportStart);
+      } else if (exportStart == null) {
+        module.setStart(funcRef);
+      } else {
+        this.exportStartUnder(startFunctionInstance, exportStart);
       }
     }
+    if (shared) this.emitStartEntry(startFunctionInstance, startIsEmpty);
 
     // Run custom passes
     if (hasShadowStack) {
@@ -1793,6 +1859,58 @@ export class Compiler extends DiagnosticEmitter {
     }
 
     return module;
+  }
+
+  /** Validates and applies `--exportStart`, reporting a conflict by name. */
+  private exportStartUnder(startFunctionInstance: Function, exportStart: string): void {
+    let module = this.module;
+    if (!isIdentifier(exportStart) || module.hasExport(exportStart)) {
+      this.error(
+        DiagnosticCode.Start_function_name_0_is_invalid_or_conflicts_with_another_export,
+        Source.native.range, exportStart
+      );
+    } else {
+      module.addFunctionExport(startFunctionInstance.internalName, exportStart);
+    }
+  }
+
+  /**
+   * `__start() -> i32` — the one entry a shared-memory module's main instance
+   * gets: everything the start section would have done, and the status the
+   * shell reached, so a host reads the result of `main` from the call itself.
+   *
+   * `$~start` is unchanged and still exists as a function; it is simply not the
+   * start section any more. The shell's status global is read after the call
+   * rather than returned from it because the shell's own continuations return
+   * through `resume`, not to a wasm caller.
+   */
+  private emitStartEntry(startFunctionInstance: Function, startIsEmpty: bool): void {
+    let module = this.module;
+    let body = new Array<ExpressionRef>();
+    if (!startIsEmpty) {
+      body.push(module.call(startFunctionInstance.internalName, null, TypeRef.None));
+    }
+    body.push(this.asyncShellPrepared
+      ? module.global_get(ASYNC_STATUS, TypeRef.I32)
+      : module.i32(0)
+    );
+    let funcRef = module.addFunction(
+      StartEntryName,
+      TypeRef.None,
+      TypeRef.I32,
+      null,
+      module.block(null, body, TypeRef.I32)
+    );
+    if (module.hasExport(StartEntryName)) {
+      this.error(
+        DiagnosticCode.Start_function_name_0_is_invalid_or_conflicts_with_another_export,
+        Source.native.range, StartEntryName
+      );
+      return;
+    }
+    // `addFunction` gives the module the function; the export needs its name.
+    module.addFunctionExport(StartEntryName, StartEntryName);
+    void funcRef;
   }
 
   private initDummyMemory(): void {
