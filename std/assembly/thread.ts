@@ -325,6 +325,21 @@ import {
   __noteMaskRefusal,
 } from "./task-stack";
 
+// ── the step author's surface ───────────────────────────────────────────────
+//
+// A program that writes its own step needs every primitive the default step
+// uses, and it should not have to know which file owns each one. These are
+// **re-exports, not moves**: `~lib/task-stack` still defines them, and the
+// definitions stay there because `__parkOn` must reach the mask counters and
+// `~lib/thread` imports that file (the reverse would be a cycle). What this
+// does is make `import { … } from "~lib/thread"` the whole surface.
+//
+// `docs/task-model.md` §"Writing a step" states the invariant for each one:
+// what it reads, what it writes, and when a slot is legal to resume.
+export {
+  __taskAt, __currentTask, __resumeTask, __serveSlot, __lastStatus, __parkOn
+} from "./task-stack";
+
 // ── identity and masks: the program-facing surface ──────────────────────────
 //
 // The mask itself is `~lib/mask` (`MaskBase`, `Mask<T>`), re-exported here so a
@@ -939,7 +954,67 @@ export function __mainStep__(e: Executor): bool {
   return false;
 }
 
+// ── submitting: the legal "make this task runnable" ─────────────────────────
 
+/**
+ * `__submitTask(task) -> bool` — make `task` runnable on **this** executor,
+ * without running any of it.
+ *
+ * The seam a *submitting* policy needs. `task.drive()` runs the body inline and
+ * parks the **caller**, which is right for an eager policy and wrong for a
+ * pool, a priority queue or anything that wants to choose the order itself.
+ * Submitting is the other half: the task is placed in the ready ring, and the
+ * step decides when — and in what order relative to its siblings — it runs.
+ *
+ * The contract, in four lines:
+ *
+ * - **the task is runnable from creation.** The entry installs the start
+ *   continuation (`__installCont(f$start)`) before handing the task back, so a
+ *   slot the entry assigned names a resumable continuation. `slot < 0` means
+ *   the task never went through that entry, and this answers `false` rather
+ *   than pushing an index that would trap `resuming an invalid continuation`.
+ * - **it does not run the body.** Nothing here resumes anything; that is the
+ *   step's call (`__resumeTask`) and nobody else's.
+ * - **it is idempotent per slot.** The ring refuses a duplicate, which is now a
+ *   stated rule rather than an accident of the membership scan: submitting
+ *   twice answers `false` the second time and the task still runs once.
+ * - **`false` means "not submitted"**, never "submitted and failed": a full
+ *   ring (`SlotRing#push` answers `false`), a settled task, an uninstalled
+ *   slot, or a store with no executor for this thread.
+ *
+ * **This executor, and no parameter.** A slot is an index into *this store's*
+ * continuation table (`$~asyncCont`), so "submit to executor 7" is meaningless
+ * unless executor 7 shares that table — which only this store's executors do.
+ * Work that belongs in another store is a **request**, not a submission, and
+ * `__spawnOn`/`__spawnOnMasked` already carry it (the target store creates its
+ * own continuation). One name, one meaning; no `__submitTaskOn` whose argument
+ * can only ever be one store's own id.
+ *
+ * The task's `slot` is read once: a `Waiter` records a slot for the same
+ * reason, and a task's slot does not change after the entry assigned it.
+ */
+export function __submitTask(task: TaskBase): bool {
+  let slot = task.slot;
+  // No slot: the entry never installed a continuation (a hand-built `TaskBase`,
+  // or a record from another backend). Pushing it would answer `true` and then
+  // trap the first time a step resumed it — the refusal is the honest answer.
+  if (slot < 0) return false;
+  // A settled task's continuation has already returned; its table entry is a
+  // spent handle and resuming it is `resuming an invalid continuation`.
+  if (task.settled) return false;
+  let id = __selfExecutor();
+  let executorOrNull = __executorOf(id);
+  if (!executorOrNull) {
+    // Main is created on first use; a worker's executor is bound by
+    // `__workerMain`, so a store with no executor for this thread has nothing
+    // to submit to (and must not invent one on a worker's behalf).
+    if (id != 0) return false;
+    __executorInit();
+    executorOrNull = __executorOf(0);
+    if (!executorOrNull) return false;
+  }
+  return changetype<Executor>(executorOrNull).ready.push(slot);
+}
 
 // ── requests: the inbox protocol ────────────────────────────────────────────
 

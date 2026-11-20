@@ -78,3 +78,112 @@ side-effect of this document.
 
 Until then: read `TaskRecord` as "the Promise record", and read `TaskBase` /
 `Task<T>` as "the Task".
+
+## Writing a step
+
+A **step** is one iteration of "what runs next on this thread": `(e: Executor) =>
+bool`, where `true` stops the executor. The default is `__mainStep__` — drain the
+inbox, then resume **one** ready slot — and it is a field (`Executor.step`), so a
+program replaces it three ways, one name throughout: declare `mainStep` and the
+shell installs it at startup, assign `mainExecutor().step = myStep` at runtime, or
+build an executor with the step you want. The default does not change when you
+do; the point is that you can replace it.
+
+Everything a step needs is importable from **one** module:
+
+```ts
+import {
+  Executor, mainExecutor, __drainInbox, driveReady,
+  __taskAt, __resumeTask, __parkOn, __currentTask, __serveSlot, __lastStatus,
+  __submitTask,
+} from "~lib/thread";
+```
+
+`~lib/task-stack` still *defines* the primitives; `~lib/thread` re-exports them,
+so a step author does not have to know which file owns which. (A slot names an
+entry in this store's continuation table, and the table is the runtime's, not a
+policy's — that is why they live beside the executor rather than in the compiler.)
+
+### The primals, and what each one is allowed to touch
+
+- **`__drainInbox(e): i32`** — serves every request addressed to `e` and answers
+  the last serve's status (`-1` if there were none). *Reads* `e.inbox`, the
+  request table; *writes* the continuations it creates, the tasks they name, and
+  the ready ring. It runs no task body: a served entry parks on the task it
+  creates, and that slot is queued for a later iteration. That is what makes
+  "drain first" a policy choice rather than a necessity.
+- **`driveReady(e)`** — the one-slot step: pops the oldest ready slot and resumes
+  it, skipping a settled task, then queues whatever the resume reports it parked
+  on. *Reads* `e.ready`; *writes* the continuation table (a suspension is stored
+  back at its own slot) and `e.ready` again.
+- **`__taskAt(slot): TaskBase | null`** — the task registered at `slot`, or
+  `null` for main (slot 0) and for a served continuation, which has no task
+  object at all. *Reads* the slot table; writes nothing. This is how a step
+  inspects the work it is about to run: `__taskAt(slot).policy` is readable by
+  design, so a policy's rank (or deadline, or affinity) is the caller's
+  information and the step can sort by it.
+- **`__currentTask(): TaskBase | null`** — the task whose continuation is
+  running, or `null` on main. Restores correctly across a nested resume, so a
+  served body that drains its own inbox still sees *itself*.
+- **`__resumeTask(slot): i32`** — runs `table[slot]` with the shell's `$await`
+  handler. Answers `-1` when the task ran to completion, `>= 0` when it parked
+  on that local slot, and `-2` when it parked on something that is not a local
+  slot (work in another store). A step that ignores a non-negative answer loses
+  the wake-up; there is no second chance to learn it.
+- **`__parkOn(task)`** — never called by a step. It is what a body's `drive()`
+  calls before suspending; it records the waiter and the executor that must
+  resume it. Listed here because it is in the import, and because the rule it
+  encodes ("the waiter is woken in the store it parked in") is the one a step
+  must not try to second-guess.
+- **`__serveSlot(funcIndex): i32`** — turns `$starts[funcIndex]` into a fresh
+  continuation in **this** store. The receiving half of `__spawnOn`; a step
+  normally reaches it through `__drainInbox`.
+- **`__lastStatus(): i32`** — the status the last normal resume answered on this
+  thread. *Reads* a module global; writes nothing. It is a report, not a
+  decision: no primitive consults it.
+- **`__submitTask(task): bool`** — see below.
+
+### Submit versus run
+
+Two ways to make a task runnable, and they mean different things:
+
+- **`task.drive()`** runs (or resumes) the body **inline** and parks the
+  *caller* on it. An eager policy uses this in `create`: the prefix executes at
+  the call site.
+- **`__submitTask(task)`** puts the task in this executor's ready ring and runs
+  **none** of it. The step decides when, and in what order. A pool, a priority
+  queue or a rank-ordered scheduler is a policy whose `create` is one
+  `__submitTask` call.
+
+`__submitTask` answers `false` — never a silent success — for a task with no
+slot (one that never went through the transform's entry), a settled task, or a
+full ring. Submitting twice is a **stated** no-op: the ring holds a slot at most
+once, so the second call answers `false` and the body still runs once.
+
+There is no `__submitTaskOn(exec, task)`, and the reason is structural rather
+than stylistic: a slot is an index into *this store's* continuation table
+(`$~asyncCont`), so "submit to executor 7" means something only if executor 7
+shares that table. Work that belongs in another store is a **request**, not a
+submission, and `__spawnOn` already carries it — the target store makes its own
+continuation.
+
+### Two invariants
+
+1. **A slot is resumable only when the thing it waits for has settled.** The
+   entry installs a task's start continuation at creation, so `task.slot` is
+   valid immediately — the *first* resume runs the body from the top. After a
+   suspension the suspended continuation is written back at the same slot, and
+   the task becomes resumable again only when its waiter is woken. Resuming a
+   continuation that has already returned is `RuntimeError: resuming an invalid
+   continuation` — a trap, not a diagnostic. `driveReady` guards the one case
+   that can reach it by accident (a settled task still sitting in the ring); a
+   hand-written step owes the same guard.
+2. **A slot is in the ready ring at most once.** `SlotRing#push` scans the
+   published entries and refuses a duplicate, which is why two waiters waking one
+   task cannot advance its body twice. Treat the `false` as information: the work
+   is already queued.
+
+`tests/rt/order.js` is these two rules written as a program: three tasks
+submitted in creation order 1, 5, 9, a step that sorts the ready set by rank, and
+a transcript asserted line by line — `enter 9, enter 5, enter 1`, each body
+exactly once.
