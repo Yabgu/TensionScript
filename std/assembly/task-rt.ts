@@ -52,7 +52,6 @@ import { TaskRecord } from "./task";
  */
 export class TaskEnv {}
 
-/** The base class of every lowered state machine (§4.7.3). */
 export class TaskState {
   /**
    * The task's own record. Assigned by `__taskRegister`; the

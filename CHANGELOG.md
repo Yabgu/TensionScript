@@ -2,6 +2,65 @@
 
 ## Unreleased
 
+- **Fix: `atomic.fence()` emitted an invalid module.** `src/builtins.ts` called
+  `module.atomic_fence()` with no argument and the wrapper passed a cached string
+  where Binaryen's C API takes a `MemoryOrder`, so the order that arrived was the
+  enum's zero — `Unordered` — and a fence cannot be unordered. Every program
+  containing `atomic.fence()` failed validation (`Atomic fence cannot be
+  unordered`). A fence names no order at the source level, so `SeqCst` is what is
+  emitted, and a test now compiles the reported source, validates the bytes with
+  `wasm-tools` and runs it.
+
+- **Add: `@atomic` on a field, and the address-facing atomic surface.**
+  `@atomic` on a field means every read and every write of it compiles to an
+  atomic instruction — emitted **inside the field's `get:`/`set:` accessors**,
+  which is the single hook all access goes through, so there is no way to read the
+  field non-atomically. Allowed on a class field, a `@managed`/`@unmanaged` struct
+  field (the C `_Atomic` member) and a plain/`@inline` field in a memory position;
+  refused on a local, a global, a `static` field, an SROA-position value-type
+  field, an ambient class's field, an `f32`/`f64` (wasm has no float atomics, and
+  an invisible bitcast would make the field mean what its type does not say) and
+  without `--enable threads`. It is an access modifier only — `sizeof`,
+  `offsetof` and field order are identical with and without it. A **compound
+  assignment** (`head += 1`) is refused by name rather than desugared: it is one
+  atomic load, arithmetic and one atomic store, and the composite is not atomic;
+  the message names the single-instruction replacement. A class with an `@atomic`
+  field is not eligible for the wasm GC representation, because `struct.get` /
+  `struct.set` have no atomic form — the program keeps the pointer ABI, and the
+  coverage line names the field. `std/assembly/atomics.ts` also gains
+  `Atomics.fence()` (13 of 13) and an address-facing surface — `atomicLoad`,
+  `atomicStore`, `atomicAdd`/`Sub`/`And`/`Or`/`Xor`, `atomicExchange`,
+  `atomicCompareExchange`, `atomicFence`, `atomicWait`, `atomicNotify` — taking a
+  raw `usize` with no view, no bounds check and the builtins' exact semantics: the
+  RMW family returns the **old** value, which a test pins. Measured by
+  `npm run test:atomics` (71 checks), including two worker threads over one
+  `--sharedMemory --importMemory` module incrementing one `@atomic` counter —
+  40 000 increments, 40 000 counted, with the same harness losing thousands on a
+  load-then-store control. See [`docs/atomics.md`](docs/atomics.md).
+
+- **Add: arenas — one heap per thread, in one shared memory (`--sharedMemory`).**
+  The runtime is now parametrized by an arena: a `[base, end)` span that owns its
+  allocator state, its collector state and its stack region. `__arenaInit(base,
+  size)` (exported under `--sharedMemory --exportRuntime`) points an instance at
+  its arena, and `__arenaHeapBase()` / `__arenaEnd()` read the bounds back. Two
+  consequences, both measured at `3238905b` and closed here: `tlsf`'s free lists
+  were shared between threads and corrupted on the first concurrent allocation,
+  and `itcms.visitStack` covered only the collecting thread's stack, so a live
+  object reachable only from another thread was swept. Disjoint arenas make the
+  allocator's absent atomics *correct* (one arena, one owner — the atomic count is
+  still zero, and now that is a property rather than a defect) and make
+  `visitStack` correct as written. The collector's space heads move inside the
+  arena (`itcms.__arenaPlaceState`), because they live in memory and two instances
+  sharing one would otherwise share one set of chains; `__visit` / `__link` skip a
+  pointer the arena does not own. Default behaviour is unchanged — no arena
+  configured means the runtime spans the whole memory, and a build without
+  `--sharedMemory` emits byte-identical `.wat`. Measured by `npm run test:arena`
+  (68 checks: bounds, re-init, collection isolation with guard bytes, two arenas
+  in one shared memory over `--importMemory`, the stub runtime, and the atomic
+  count). `--wasmGc` has no arena: its linear allocator is the compiler's, so it
+  exports no entry point rather than one that bounds nothing. See
+  [`docs/arena.md`](docs/arena.md).
+
 - **Add: `changetype<@unmanaged T>(ptr)` with `T` inline-typed** is now legal;
   the result is a call-scoped view over the caller's bytes. Field access on the
   view routes through the record-load path (`i32.load`/`f32.load` at the field's

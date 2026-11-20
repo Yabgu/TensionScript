@@ -14,16 +14,19 @@
 //     existing guard, and depth is what is being shown: it fires for the inner
 //     field, not only for a flat one.
 //
+//     Since round VT6 a **class**-typed leaf is refused earlier, where the
+//     record is laid out (`Resolver#finishResolveClass`), so this arm is reached
+//     through a leaf the declaration check cannot see. A function type is
+//     exactly that: `Type#isManaged` answers true for it (via the signature) but
+//     it carries no class reference, so `findManagedLeaf` is the check that
+//     catches it — and depth is still what this fixture pins.
+//
 //   - `changetype<usize>(value)` — **a design decision, not a deferral.** The
 //     address it would return belongs to a temp whose lifetime nothing tracks,
 //     so it would be dangling by construction. `copyInto(dest, value)` is the
 //     explicit alternative and is what the engine uses (`inline-nesting-copyout.ts`).
 //
 // Every declaration below has a user so it actually resolves.
-
-class C {
-  v: i32 = 0;
-}
 
 struct Inner {
   x: f32 = 0;
@@ -36,7 +39,7 @@ struct Outer1 {
 }
 
 struct BadInner {
-  s: C = new C();
+  s!: () => void;
 }
 
 struct BadOuter {

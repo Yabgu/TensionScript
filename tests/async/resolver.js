@@ -79,6 +79,26 @@ console.log("type of await");
 }
 
 {
+  // A user class payload: the answer is the type argument, not a hardcoded
+  // `i32`. This is the case VT3 closed in codegen — the resolver already
+  // answered `P`; `resolveAwaitExpression` follows `resolveTaskValueType`.
+  const program = buildProgram([[
+    "probe.ts",
+    `class P { x: i32 = 0; }
+     async function f(h: Task<P>): P { return await h; }`
+  ]]);
+  program.initialize();
+  const f = resolveTopLevel(program, "f");
+  const expression = f.prototype.bodyNode.statements[0].value;
+  check(
+    "await h  (h: Task<P>)  is P",
+    typeOf(program, expression, f.flow),
+    "probe/P"
+  );
+  check("  ...and reports nothing extra", diagnosticCodes(program), []);
+}
+
+{
   // Awaiting something that is not a task is TypeScript's identity: `await 1`
   // is `1`, with no diagnostic -- the operand type is the result type.
   const program = buildProgram([["probe.ts", `async function f(): i32 { return await 1; }`]]);

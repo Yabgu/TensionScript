@@ -535,6 +535,33 @@ export class Program extends DiagnosticEmitter {
    */
   hasAwait: bool = false;
 
+  /**
+   * The synthesized `$spawnStart` declarations the stackful transform emitted —
+   * one per parameterless may-suspend function (`docs/task-design.md` §8.5's
+   * "compiler-synthesized start", narrowed to what Gate 3 needs). Declarations,
+   * not names: the compiler resolves them through `elementsByDeclaration`, which
+   * is the one map that cannot disagree with mangling.
+   *
+   * The compiler adds each to the `$starts` table so a request can name it by
+   * index, and compiles it: nothing else references it, so ordinary
+   * reachability would drop it. Registration order is transform order, which is
+   * program order, which is what makes the index deterministic (§3).
+   */
+  asyncSpawnStarts: DeclarationStatement[] = [];
+
+  /**
+   * The declarations the stackful transform turned into task entries — one per
+   * `async function` it lowered, after the mutating pass.
+   *
+   * `on` is legal only on a call of one of these (`docs/policy-and-threads.md`
+   * §2/§9.1): the postfix names where *a task* runs, so a call that creates no
+   * task has nothing for it to mean. The set is the identity that survives the
+   * transform — `isAsync` is cleared on the declaration, so it is the one fact
+   * that still distinguishes an entry from an ordinary function returning
+   * `Task<R>` by hand.
+   */
+  asyncEntries: Set<DeclarationStatement> = new Set();
+
   // Lookup maps
 
   /** Files by unique internal name. */
@@ -1180,6 +1207,14 @@ export class Program extends DiagnosticEmitter {
     // while the same code in a live arm is AS100.
     this.registerConstantInteger(CommonNames.ASC_WASM_GC, Type.i32,
       i64_new(options.wasmGc ? 1 : 0));
+    // **`ASC_ARENA`** — registered only under `--sharedMemory`, so that
+    // `isDefined(ASC_ARENA)` in `std/assembly/rt/common.ts` is the compile-time
+    // switch the runtime folds on. Not registered means not even a global is
+    // emitted (the `ASC_RTRACE` discipline), which is what lets a build that does
+    // not share memory emit exactly the module it emitted before arenas existed.
+    if (options.sharedMemory) {
+      this.registerConstantInteger(CommonNames.ASC_ARENA, Type.bool, i64_new(1, 0));
+    }
     this.registerConstantInteger(CommonNames.ASC_NO_ASSERT, Type.bool,
       i64_new(options.noAssert ? 1 : 0, 0));
     this.registerConstantInteger(CommonNames.ASC_MEMORY_BASE, Type.i32,
@@ -2067,6 +2102,42 @@ export class Program extends DiagnosticEmitter {
     return null;
   }
 
+  /**
+   * Removes `@atomic` from a decorator list, reporting it with `refusal`.
+   *
+   * Called on the two positions that hold **globals** — a top-level/namespace
+   * variable and a class's `static` field — both of which this round refuses.
+   * The reason is structural rather than temporary: a global compiles to a WASM
+   * **global**, which is not in linear memory at all, so there is no address for
+   * `i32.atomic.load`/`store` to take. `atomic.add` on a class's field address
+   * works because the field is at an offset in a record that lives in memory; a
+   * WASM global has no such offset.
+   *
+   * Removing the decorator is deliberate: `checkDecorators` would otherwise also
+   * report it as unknown, and two messages for one mistake teaches the reader
+   * nothing. The element is still created, without the flag, so the rest of the
+   * program compiles and the single diagnostic is the whole story.
+   */
+  private withoutAtomic(
+    /** Decorators present on an element. */
+    decorators: DecoratorNode[] | null,
+    /** What to say when `@atomic` is present. */
+    refusal: string
+  ): DecoratorNode[] | null {
+    if (!decorators) return null;
+    let kept: DecoratorNode[] | null = null;
+    for (let i = 0, k = decorators.length; i < k; ++i) {
+      let decorator = decorators[i];
+      if (decorator.decoratorKind == DecoratorKind.Atomic) {
+        this.error(DiagnosticCode.Not_implemented_0, decorator.range, refusal);
+        continue;
+      }
+      if (!kept) kept = [];
+      kept.push(decorator);
+    }
+    return kept;
+  }
+
   /** Validates that only supported decorators are present. */
   private checkDecorators(
     /** Decorators present on an element. */
@@ -2143,12 +2214,19 @@ export class Program extends DiagnosticEmitter {
         let typeArguments = classReference.typeArguments;
         if (typeArguments) {
           for (let i = 0, k = typeArguments.length; i < k; ++i) {
-            // A type-argument position is a pointer slot (`Array<T>`'s buffer
-            // holds references), so an `@inline struct` there would be stored
-            // by reference — the deferred inline-in-heap case.
-            if (!this.checkInlineStructValue(
-              typeArguments[i], reportNode, "a type argument (Array<T>)"
-            )) return false;
+            // A type argument is **not** inherently a pointer slot. That premise
+            // was `Array<T>`'s (its buffer held references), and it is false for
+            // `Task<P>`, whose `value!: P` is an inline field since VT4 — the
+            // instantiated field, not the type argument, is where the storage
+            // decision is made. The blanket check here therefore refused a
+            // legal shape (`Task<Res>`) for a reason that did not apply to it.
+            //
+            // Removing it loses no safety: every unsupported use is refused
+            // where the storage decision actually is (an inline-array element,
+            // a dynamic-array element, a whole-value read/assignment, a local
+            // initialiser), and `Array<Res>` was measured to hit those refusals
+            // rather than miscompile. `checkInlineStructValue` itself stays for
+            // the `a global` call site, where two globals would alias.
             if (!this.checkTypeSupported(typeArguments[i], reportNode)) {
               return false;
             }
@@ -2389,6 +2467,11 @@ export class Program extends DiagnosticEmitter {
       if (declaration.is(CommonFlags.Readonly)) {
         acceptedFlags |= DecoratorFlags.Inline;
       }
+      // `@atomic` is refused here, not silently ignored and not accepted: a
+      // static field is a WASM global, which has no address. See `withoutAtomic`.
+      decorators = this.withoutAtomic(decorators,
+        "@atomic on a static field of a class (a static field compiles to a WASM global, which is not in linear memory and has no address to make atomic; declare it as an instance field and reach it through that instance's address)"
+      );
       element = new Global(
         name,
         parent,
@@ -2398,6 +2481,21 @@ export class Program extends DiagnosticEmitter {
       if (!parent.add(name, element)) return;
     } else { // actual instance field
       assert(!declaration.isAny(CommonFlags.Abstract | CommonFlags.Get | CommonFlags.Set));
+      // `@atomic` is an access modifier of a **field**: the field's own getter
+      // and setter are where the atomic load/store goes, which is what makes the
+      // guarantee unbypassable (every read and every write goes through them).
+      //
+      // An **ambient** (`declare`) class is the one class that has no such
+      // accessors — its layout and its accesses belong to the external host — so
+      // the guarantee cannot be made there and pretending otherwise would be a
+      // silent no-op.
+      if (parent.is(CommonFlags.Ambient)) {
+        decorators = this.withoutAtomic(decorators,
+          "@atomic on a field of an ambient (declare) class: the field's memory and its accessors belong to the external host, so this compiler emits neither the storage nor the accessors that would carry the atomic instruction"
+        );
+      } else {
+        acceptedFlags |= DecoratorFlags.Atomic;
+      }
       element = PropertyPrototype.forField(
         name,
         parent,
@@ -3104,10 +3202,16 @@ export class Program extends DiagnosticEmitter {
       if (declaration.range.source.isLibrary) {
         acceptedFlags |= DecoratorFlags.Builtin;
       }
+      // A global variable compiles to a WASM global (or a lazy `__set` slot), which
+      // is not in linear memory: there is no address for an atomic load/store. See
+      // `withoutAtomic` for why it is removed rather than left to `checkDecorators`.
+      let decorators = this.withoutAtomic(declaration.decorators,
+        "@atomic on a global variable (a global compiles to a WASM global, which is not in linear memory and has no address to make atomic; declare it as a field of a class or of an @unmanaged struct, and reach it through an address)"
+      );
       let element = new Global(
         name,
         parent,
-        this.checkDecorators(declaration.decorators, acceptedFlags),
+        this.checkDecorators(decorators, acceptedFlags),
         declaration
       );
       if (element.hasDecorator(DecoratorFlags.Builtin) && !builtinVariables_onAccess.has(element.internalName)) {
@@ -3219,7 +3323,15 @@ export enum DecoratorFlags {
    *  wired into any code path**. Implies `Final` when it lands. */
   InlineStruct = 1 << 12,
   /** Is considered unsafe code. */
-  Unsafe = 1 << 13
+  Unsafe = 1 << 13,
+  /** Is an `@atomic` field: every read and every write of it compiles to an
+   *  atomic instruction. An **access modifier only** — it takes no part in
+   *  layout, so `sizeof`, `offsetof` and field order are identical with and
+   *  without it. Valid on a memory-backed field (class, `@managed struct`,
+   *  `@unmanaged struct`, and a plain/`@inline` record field that lives in
+   *  memory), never on a local (a WASM local has no address) and not yet on a
+   *  global (it may compile to a WASM global, which has no address either). */
+  Atomic = 1 << 14
 }
 
 export namespace DecoratorFlags {
@@ -3241,6 +3353,7 @@ export namespace DecoratorFlags {
       case DecoratorKind.Builtin: return DecoratorFlags.Builtin;
       case DecoratorKind.Lazy: return DecoratorFlags.Lazy;
       case DecoratorKind.Unsafe: return DecoratorFlags.Unsafe;
+      case DecoratorKind.Atomic: return DecoratorFlags.Atomic;
       default: return DecoratorFlags.None;
     }
   }
@@ -4250,6 +4363,23 @@ export class Function extends TypedElement {
         into.set(property.name, placeholder);
         continue;
       }
+      // A value-form `[T * N]` field is N element leaves, bound element-major —
+      // the order `Signature.leafTypesOf` declares and the caller pushes.
+      if (
+        fieldType.kind == TypeKind.FixedArray &&
+        (fieldType.fixedMemoryModel == MemoryModelCode.None ||
+         fieldType.fixedMemoryModel == MemoryModelCode.Inline)
+      ) {
+        let nested = new Map<string, Local>();
+        let inner = this.bindSroaArrayParameterLeaves(
+          fieldType, fieldPath, nested, localIndex + consumed, flow
+        );
+        consumed += inner.leafCount;
+        let placeholder = new Local(fieldPath, -1, fieldType, flow.sourceFunction);
+        placeholder.fieldLocals = nested;
+        into.set(property.name, placeholder);
+        continue;
+      }
       // Named after the parameter and field, matching `compileSroaLocal`, so a
       // debug read of the WAT says which is which.
       let local = new Local(fieldPath, localIndex + consumed, fieldType, flow.sourceFunction);
@@ -4903,6 +5033,14 @@ export class PropertyPrototype extends DeclaredElement {
       <MethodDeclaration>firstDeclaration
     );
     bound.flags = this.flags;
+    // **Decorator flags travel with the clone.** They did not, and that was a hole:
+    // `Property` copies `prototype.decoratorFlags`, so every decorator on a field
+    // — `@atomic` today, and `@unsafe`/`@inline` on a field in principle — was
+    // dropped the moment the class was instantiated, which is before any of the
+    // layout or codegen sites that read it ever run. The getter/setter prototypes
+    // are cloned by `FunctionPrototype.toBound`, which already carried them; the
+    // property was the odd one out.
+    bound.decoratorFlags = this.decoratorFlags;
     bound.fieldDeclaration = this.fieldDeclaration;
     let getterPrototype = this.getterPrototype;
     if (getterPrototype) {

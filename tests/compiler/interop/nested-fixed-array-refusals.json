@@ -1,0 +1,10 @@
+{
+  "asc_flags": [],
+  "stderr": [
+    "AS100: Not implemented: a nested `[T * N]` value as a global",
+    "AS100: Not implemented: passing this expression as a `[T * N]` argument",
+    "AS100: Not implemented: a nested `[T * N]` value as a parameter",
+    "AS100: Not implemented: a nested `[T * N]` value as a return type",
+    "AS100: Not implemented: a `[T * N]` value with an element that cannot live in one WASM local"
+  ]
+}

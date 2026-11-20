@@ -1514,6 +1514,12 @@
   i32.const 0
   call $interop/fixed-array-value-new/H#set:head
   local.get $this
+  i32.const 4
+  i32.add
+  i32.const 0
+  i32.const 16
+  memory.fill
+  local.get $this
  )
  (func $interop/fixed-array-value-new/H#get:head (param $this i32) (result i32)
   local.get $this

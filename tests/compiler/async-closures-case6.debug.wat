@@ -28,6 +28,8 @@
  (global $~lib/rt/itcms/fromSpace (mut i32) (i32.const 0))
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
  (global $~lib/native/ASC_LOW_MEMORY_LIMIT i32 (i32.const 0))
+ (global $~lib/task/__wakeSink (mut i32) (i32.const 432))
+ (global $~lib/task/inlinePolicyInstance (mut i32) (i32.const 0))
  (global $~lib/task-rt/recordFactory (mut i32) (i32.const 0))
  (global $~lib/task-rt/families (mut i32) (i32.const 0))
  (global $~lib/task-rt/waiters (mut i32) (i32.const 0))
@@ -39,10 +41,10 @@
  (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/native/ASC_RUNTIME i32 (i32.const 2))
- (global $~lib/rt/__rtti_base i32 (i32.const 1216))
- (global $~lib/memory/__data_end i32 (i32.const 1296))
- (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34064))
- (global $~lib/memory/__heap_base i32 (i32.const 34064))
+ (global $~lib/rt/__rtti_base i32 (i32.const 1248))
+ (global $~lib/memory/__data_end i32 (i32.const 1348))
+ (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34116))
+ (global $~lib/memory/__heap_base i32 (i32.const 34116))
  (memory $0 1)
  (data $0 (i32.const 12) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00(\00\00\00A\00l\00l\00o\00c\00a\00t\00i\00o\00n\00 \00t\00o\00o\00 \00l\00a\00r\00g\00e\00\00\00\00\00")
  (data $1 (i32.const 76) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00 \00\00\00~\00l\00i\00b\00/\00r\00t\00/\00i\00t\00c\00m\00s\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00")
@@ -52,21 +54,22 @@
  (data $5 (i32.const 268) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\14\00\00\00~\00l\00i\00b\00/\00r\00t\00.\00t\00s\00\00\00\00\00\00\00\00\00")
  (data $6 (i32.const 320) "\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (data $7 (i32.const 348) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1e\00\00\00~\00l\00i\00b\00/\00r\00t\00/\00t\00l\00s\00f\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
- (data $8 (i32.const 412) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1c\00\00\00A\00r\00r\00a\00y\00 \00i\00s\00 \00e\00m\00p\00t\00y\00")
- (data $9 (i32.const 460) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1a\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00.\00t\00s\00\00\00")
- (data $10 (i32.const 508) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00E\00l\00e\00m\00e\00n\00t\00 \00t\00y\00p\00e\00 \00m\00u\00s\00t\00 \00b\00e\00 \00n\00u\00l\00l\00a\00b\00l\00e\00 \00i\00f\00 \00a\00r\00r\00a\00y\00 \00i\00s\00 \00h\00o\00l\00e\00y\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
- (data $11 (i32.const 636) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00U\00n\00e\00x\00p\00e\00c\00t\00e\00d\00 \00\'\00n\00u\00l\00l\00\'\00 \00(\00n\00o\00t\00 \00a\00s\00s\00i\00g\00n\00e\00d\00 \00o\00r\00 \00f\00a\00i\00l\00e\00d\00 \00c\00a\00s\00t\00)\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
- (data $12 (i32.const 764) "L\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00.\00\00\00a\00s\00y\00n\00c\00-\00c\00l\00o\00s\00u\00r\00e\00s\00-\00c\00a\00s\00e\006\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
- (data $13 (i32.const 844) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\18\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00.\00t\00s\00\00\00\00\00")
- (data $14 (i32.const 892) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1c\00\00\00I\00n\00v\00a\00l\00i\00d\00 \00l\00e\00n\00g\00t\00h\00")
- (data $15 (i32.const 940) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
- (data $16 (i32.const 1004) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00$\00\00\00K\00e\00y\00 \00d\00o\00e\00s\00 \00n\00o\00t\00 \00e\00x\00i\00s\00t\00\00\00\00\00\00\00\00\00")
- (data $17 (i32.const 1068) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\16\00\00\00~\00l\00i\00b\00/\00m\00a\00p\00.\00t\00s\00\00\00\00\00\00\00")
- (data $18 (i32.const 1116) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1e\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00-\00r\00t\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
- (data $19 (i32.const 1180) "\1c\00\00\00\00\00\00\00\00\00\00\00\12\00\00\00\08\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00")
- (data $20 (i32.const 1216) "\13\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00 \00\00\00\10\t\12\00\02A\00\00\10A\82\00\00\00\00\00\02A\00\00\02\t\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
- (table $0 3 3 funcref)
- (elem $0 (i32.const 1) $async-closures-case6/outer$resume~inner $async-closures-case6/outer$resume)
+ (data $8 (i32.const 412) "\1c\00\00\00\00\00\00\00\00\00\00\00\0e\00\00\00\08\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00")
+ (data $9 (i32.const 444) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1c\00\00\00A\00r\00r\00a\00y\00 \00i\00s\00 \00e\00m\00p\00t\00y\00")
+ (data $10 (i32.const 492) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1a\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00.\00t\00s\00\00\00")
+ (data $11 (i32.const 540) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00E\00l\00e\00m\00e\00n\00t\00 \00t\00y\00p\00e\00 \00m\00u\00s\00t\00 \00b\00e\00 \00n\00u\00l\00l\00a\00b\00l\00e\00 \00i\00f\00 \00a\00r\00r\00a\00y\00 \00i\00s\00 \00h\00o\00l\00e\00y\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (data $12 (i32.const 668) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00U\00n\00e\00x\00p\00e\00c\00t\00e\00d\00 \00\'\00n\00u\00l\00l\00\'\00 \00(\00n\00o\00t\00 \00a\00s\00s\00i\00g\00n\00e\00d\00 \00o\00r\00 \00f\00a\00i\00l\00e\00d\00 \00c\00a\00s\00t\00)\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (data $13 (i32.const 796) "L\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00.\00\00\00a\00s\00y\00n\00c\00-\00c\00l\00o\00s\00u\00r\00e\00s\00-\00c\00a\00s\00e\006\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (data $14 (i32.const 876) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\18\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00.\00t\00s\00\00\00\00\00")
+ (data $15 (i32.const 924) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1c\00\00\00I\00n\00v\00a\00l\00i\00d\00 \00l\00e\00n\00g\00t\00h\00")
+ (data $16 (i32.const 972) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $17 (i32.const 1036) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00$\00\00\00K\00e\00y\00 \00d\00o\00e\00s\00 \00n\00o\00t\00 \00e\00x\00i\00s\00t\00\00\00\00\00\00\00\00\00")
+ (data $18 (i32.const 1100) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\16\00\00\00~\00l\00i\00b\00/\00m\00a\00p\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $19 (i32.const 1148) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1e\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00-\00r\00t\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (data $20 (i32.const 1212) "\1c\00\00\00\00\00\00\00\00\00\00\00\17\00\00\00\08\00\00\00\03\00\00\00\00\00\00\00\00\00\00\00")
+ (data $21 (i32.const 1248) "\18\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00\00\00\00\00 \00\00\00\02A\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00 \00\00\00\00\00\00\00\10\t\12\00\02A\00\00\10A\82\00\00\00\00\00\02A\00\00\02\t\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (table $0 4 4 funcref)
+ (elem $0 (i32.const 1) $~lib/task/noopWake $async-closures-case6/outer$resume~inner $async-closures-case6/outer$resume)
  (export "main" (func $async-closures-case6/main))
  (export "memory" (memory $0))
  (start $~start)
@@ -2422,14 +2425,64 @@
   i32.const 0
   call $~lib/rt/itcms/__link
  )
+ (func $~lib/task/TaskBase#set:slot (param $this i32) (param $slot i32)
+  local.get $this
+  local.get $slot
+  i32.store
+ )
+ (func $~lib/task/TaskBase#set:home (param $this i32) (param $home i32)
+  local.get $this
+  local.get $home
+  i32.store offset=4
+ )
+ (func $~lib/task/TaskBase#set:settled (param $this i32) (param $settled i32)
+  local.get $this
+  local.get $settled
+  i32.store8 offset=8
+ )
+ (func $~lib/task/TaskBase#set:status (param $this i32) (param $status i32)
+  local.get $this
+  local.get $status
+  i32.store offset=12
+ )
+ (func $~lib/task/TaskBase#set:waiters (param $this i32) (param $waiters i32)
+  local.get $this
+  local.get $waiters
+  i32.store offset=16
+  local.get $this
+  local.get $waiters
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/task/TaskBase#set:policy (param $this i32) (param $policy i32)
+  local.get $this
+  local.get $policy
+  i32.store offset=20
+  local.get $this
+  local.get $policy
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/task/TaskBase#set:entry (param $this i32) (param $entry i32)
+  local.get $this
+  local.get $entry
+  i32.store offset=24
+ )
  (func $~lib/task/Task<i32>#set:_record (param $this i32) (param $_record i32)
   local.get $this
   local.get $_record
-  i32.store
+  i32.store offset=28
   local.get $this
   local.get $_record
   i32.const 0
   call $~lib/rt/itcms/__link
+ )
+ (func $~lib/task/Task<i32>#set:value (param $this i32) (param $value i32)
+  local.get $this
+  local.get $value
+  i32.store offset=32
+ )
+ (func $~lib/task/noopWake (param $exec i32) (param $slot i32)
  )
  (func $~lib/task/TaskRecord#set:class_ (param $this i32) (param $class_ i32)
   local.get $this
@@ -2836,6 +2889,13 @@
    local.get $0
    call $~lib/rt/itcms/__visit
   end
+  global.get $~lib/task/inlinePolicyInstance
+  local.tee $1
+  if
+   local.get $1
+   local.get $0
+   call $~lib/rt/itcms/__visit
+  end
   global.get $async-closures-case6/sink
   local.tee $1
   if
@@ -2846,16 +2906,16 @@
   i32.const 224
   local.get $0
   call $~lib/rt/itcms/__visit
-  i32.const 912
+  i32.const 944
   local.get $0
   call $~lib/rt/itcms/__visit
-  i32.const 432
+  i32.const 464
   local.get $0
   call $~lib/rt/itcms/__visit
-  i32.const 528
+  i32.const 560
   local.get $0
   call $~lib/rt/itcms/__visit
-  i32.const 1024
+  i32.const 1056
   local.get $0
   call $~lib/rt/itcms/__visit
   i32.const 32
@@ -2878,11 +2938,45 @@
   (local $2 i32)
   local.get $0
   local.get $1
-  call $~lib/object/Object~visit
+  call $~lib/task/TaskBase~visit
   local.get $0
-  i32.load
+  i32.load offset=28
   local.get $1
   call $~lib/rt/itcms/__visit
+ )
+ (func $~lib/task/TaskBase~visit (param $0 i32) (param $1 i32)
+  (local $2 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  i32.load offset=16
+  local.get $1
+  call $~lib/rt/itcms/__visit
+  local.get $0
+  i32.load offset=20
+  local.get $1
+  call $~lib/rt/itcms/__visit
+ )
+ (func $~lib/array/Array<~lib/task/Waiter>#get:dataStart (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/array/Array<~lib/task/Waiter>#get:length_ (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=12
+ )
+ (func $~lib/array/Array<~lib/task/Waiter>#get:buffer (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $~lib/array/Array<~lib/task/Waiter>~visit (param $0 i32) (param $1 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  local.get $1
+  call $~lib/array/Array<~lib/task/Waiter>#__visit
  )
  (func $async-closures-case6/outer$State~visit (param $0 i32) (param $1 i32)
   (local $2 i32)
@@ -2923,6 +3017,18 @@
   i32.load offset=4
   local.get $1
   call $~lib/rt/itcms/__visit
+ )
+ (func $~lib/function/Function<%28i32%2Ci32%29=>void>#get:_env (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/function/Function<%28i32%2Ci32%29=>void>~visit (param $0 i32) (param $1 i32)
+  local.get $0
+  local.get $1
+  call $~lib/object/Object~visit
+  local.get $0
+  local.get $1
+  call $~lib/function/Function<%28i32%2Ci32%29=>void>#__visit
  )
  (func $"~lib/map/Map<i32,i32>#get:buckets" (param $this i32) (result i32)
   local.get $this
@@ -3045,52 +3151,76 @@
          block $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>"
           block $~lib/array/Array<~lib/task-rt/TaskState>
            block $"~lib/map/Map<i32,i32>"
-            block $async-closures-case6/outer$Env
-             block $~lib/task-rt/TaskEnv
-              block $~lib/task-rt/TaskState
-               block $async-closures-case6/outer$State
-                block $~lib/task/TaskRecord
-                 block $~lib/task/Task<i32>
-                  block $~lib/arraybuffer/ArrayBufferView
-                   block $~lib/string/String
-                    block $~lib/arraybuffer/ArrayBuffer
-                     block $~lib/object/Object
+            block $~lib/function/Function<%28i32%2Ci32%29=>void>
+             block $async-closures-case6/outer$Env
+              block $~lib/task-rt/TaskEnv
+               block $~lib/task-rt/TaskState
+                block $async-closures-case6/outer$State
+                 block $~lib/task/TaskRecord
+                  block $~lib/task/TaskPolicy
+                   block $~lib/array/Array<~lib/task/Waiter>
+                    block $~lib/task/Waiter
+                     block $~lib/task/TaskBase
+                      block $~lib/task/Task<i32>
+                       block $~lib/arraybuffer/ArrayBufferView
+                        block $~lib/string/String
+                         block $~lib/arraybuffer/ArrayBuffer
+                          block $~lib/object/Object
+                           local.get $0
+                           i32.const 8
+                           i32.sub
+                           i32.load
+                           br_table $~lib/object/Object $~lib/arraybuffer/ArrayBuffer $~lib/string/String $~lib/arraybuffer/ArrayBufferView $~lib/task/Task<i32> $~lib/task/TaskBase $~lib/task/Waiter $~lib/array/Array<~lib/task/Waiter> $~lib/task/TaskPolicy $~lib/task/TaskRecord $async-closures-case6/outer$State $~lib/task-rt/TaskState $~lib/task-rt/TaskEnv $async-closures-case6/outer$Env $~lib/function/Function<%28i32%2Ci32%29=>void> $"~lib/map/Map<i32,i32>" $~lib/array/Array<~lib/task-rt/TaskState> $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>" $~lib/task-rt/TaskSlot $~lib/array/Array<~lib/task-rt/TaskSlot> $~lib/array/Array<i32> $~lib/function/Function<%28%29=>~lib/task/TaskRecord> $~lib/function/Function<%28%29=>i32> $~lib/function/Function<%28async-closures-case6/outer$State%29=>void> $invalid
+                          end
+                          return
+                         end
+                         return
+                        end
+                        return
+                       end
+                       local.get $0
+                       local.get $1
+                       call $~lib/arraybuffer/ArrayBufferView~visit
+                       return
+                      end
                       local.get $0
-                      i32.const 8
-                      i32.sub
-                      i32.load
-                      br_table $~lib/object/Object $~lib/arraybuffer/ArrayBuffer $~lib/string/String $~lib/arraybuffer/ArrayBufferView $~lib/task/Task<i32> $~lib/task/TaskRecord $async-closures-case6/outer$State $~lib/task-rt/TaskState $~lib/task-rt/TaskEnv $async-closures-case6/outer$Env $"~lib/map/Map<i32,i32>" $~lib/array/Array<~lib/task-rt/TaskState> $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>" $~lib/task-rt/TaskSlot $~lib/array/Array<~lib/task-rt/TaskSlot> $~lib/array/Array<i32> $~lib/function/Function<%28%29=>~lib/task/TaskRecord> $~lib/function/Function<%28%29=>i32> $~lib/function/Function<%28async-closures-case6/outer$State%29=>void> $invalid
+                      local.get $1
+                      call $~lib/task/Task<i32>~visit
+                      return
                      end
+                     local.get $0
+                     local.get $1
+                     call $~lib/task/TaskBase~visit
                      return
                     end
                     return
                    end
+                   local.get $0
+                   local.get $1
+                   call $~lib/array/Array<~lib/task/Waiter>~visit
                    return
                   end
-                  local.get $0
-                  local.get $1
-                  call $~lib/arraybuffer/ArrayBufferView~visit
                   return
                  end
-                 local.get $0
-                 local.get $1
-                 call $~lib/task/Task<i32>~visit
                  return
                 end
+                local.get $0
+                local.get $1
+                call $async-closures-case6/outer$State~visit
                 return
                end
                local.get $0
                local.get $1
-               call $async-closures-case6/outer$State~visit
+               call $~lib/task-rt/TaskState~visit
                return
               end
-              local.get $0
-              local.get $1
-              call $~lib/task-rt/TaskState~visit
               return
              end
              return
             end
+            local.get $0
+            local.get $1
+            call $~lib/function/Function<%28i32%2Ci32%29=>void>~visit
             return
            end
            local.get $0
@@ -3164,8 +3294,8 @@
   global.get $~lib/memory/__data_end
   i32.lt_s
   if
-   i32.const 34096
    i32.const 34144
+   i32.const 34192
    i32.const 1
    i32.const 1
    call $~lib/builtins/abort
@@ -3187,7 +3317,7 @@
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 12
-   i32.const 7
+   i32.const 11
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -3252,7 +3382,7 @@
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 36
-   i32.const 6
+   i32.const 10
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -3357,7 +3487,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $2
  )
- (func $~lib/task/Task<i32>#constructor (param $this i32) (result i32)
+ (func $~lib/task/TaskBase#constructor (param $this i32) (result i32)
   (local $1 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 8
@@ -3371,8 +3501,8 @@
   i32.eqz
   if
    global.get $~lib/memory/__stack_pointer
-   i32.const 4
-   i32.const 4
+   i32.const 28
+   i32.const 5
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -3393,8 +3523,110 @@
   local.get $1
   i32.store offset=4
   local.get $1
+  i32.const -1
+  call $~lib/task/TaskBase#set:slot
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskBase#set:home
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskBase#set:settled
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskBase#set:status
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskBase#set:waiters
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskBase#set:policy
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const -1
+  call $~lib/task/TaskBase#set:entry
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $1
+ )
+ (func $~lib/task/Task<i32>#constructor (param $this i32) (result i32)
+  (local $1 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  local.get $this
+  i32.eqz
+  if
+   global.get $~lib/memory/__stack_pointer
+   i32.const 36
+   i32.const 4
+   call $~lib/rt/itcms/__new
+   local.tee $this
+   i32.store
+  end
+  global.get $~lib/memory/__stack_pointer
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  call $~lib/task/TaskBase#constructor
+  local.tee $this
+  i32.store
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
   i32.const 0
   call $~lib/task/Task<i32>#set:_record
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/Task<i32>#set:value
   local.get $this
   local.set $1
   global.get $~lib/memory/__stack_pointer
@@ -3418,7 +3650,7 @@
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 32
-   i32.const 5
+   i32.const 9
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -3554,8 +3786,8 @@
   i32.const 1
   i32.lt_s
   if
-   i32.const 432
-   i32.const 480
+   i32.const 464
+   i32.const 512
    i32.const 271
    i32.const 18
    call $~lib/builtins/abort
@@ -3616,7 +3848,7 @@
   i32.ge_u
   if
    i32.const 224
-   i32.const 480
+   i32.const 512
    i32.const 114
    i32.const 42
    call $~lib/builtins/abort
@@ -3645,8 +3877,8 @@
   local.get $value
   i32.eqz
   if
-   i32.const 528
-   i32.const 480
+   i32.const 560
+   i32.const 512
    i32.const 118
    i32.const 40
    call $~lib/builtins/abort
@@ -3908,7 +4140,7 @@
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 0
-   i32.const 8
+   i32.const 12
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -3946,7 +4178,7 @@
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 4
-   i32.const 9
+   i32.const 13
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -4052,7 +4284,7 @@
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 24
-   i32.const 12
+   i32.const 17
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -4296,8 +4528,8 @@
   local.get $entry
   i32.eqz
   if
-   i32.const 1024
-   i32.const 1088
+   i32.const 1056
+   i32.const 1120
    i32.const 105
    i32.const 17
    call $~lib/builtins/abort
@@ -4335,7 +4567,7 @@
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 16
-   i32.const 11
+   i32.const 16
    call $~lib/rt/itcms/__new
    local.tee $this
    i32.store
@@ -4378,8 +4610,8 @@
   i32.shr_u
   i32.gt_u
   if
-   i32.const 912
-   i32.const 480
+   i32.const 944
+   i32.const 512
    i32.const 70
    i32.const 60
    call $~lib/builtins/abort
@@ -4946,8 +5178,8 @@
    i32.shr_u
    i32.gt_u
    if
-    i32.const 912
-    i32.const 480
+    i32.const 944
+    i32.const 512
     i32.const 19
     i32.const 48
     call $~lib/builtins/abort
@@ -5622,7 +5854,7 @@
   i32.ge_u
   if
    i32.const 224
-   i32.const 480
+   i32.const 512
    i32.const 114
    i32.const 42
    call $~lib/builtins/abort
@@ -5651,8 +5883,8 @@
   local.get $value
   i32.eqz
   if
-   i32.const 528
-   i32.const 480
+   i32.const 560
+   i32.const 512
    i32.const 118
    i32.const 40
    call $~lib/builtins/abort
@@ -6017,12 +6249,12 @@
   global.get $~lib/memory/__stack_pointer
   global.get $~lib/memory/__stack_pointer
   i32.const 8
-  i32.const 17
+  i32.const 22
   call $~lib/rt/itcms/__new
   local.tee $3
   i32.store offset=12
   local.get $3
-  i32.const 1
+  i32.const 2
   i32.store
   local.get $3
   local.get $$closureEnv
@@ -6307,7 +6539,7 @@
   local.get $2
   i32.store
   local.get $2
-  i32.const 1200
+  i32.const 1232
   local.set $2
   global.get $~lib/memory/__stack_pointer
   local.get $2
@@ -6335,6 +6567,100 @@
   global.set $~lib/memory/__stack_pointer
   local.get $2
   return
+ )
+ (func $~lib/array/Array<~lib/task/Waiter>#__visit (param $this i32) (param $cookie i32)
+  (local $cur i32)
+  (local $end i32)
+  (local $val i32)
+  (local $5 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  i32.const 1
+  drop
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $~lib/array/Array<~lib/task/Waiter>#get:dataStart
+  local.set $cur
+  local.get $cur
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $~lib/array/Array<~lib/task/Waiter>#get:length_
+  i32.const 2
+  i32.shl
+  i32.add
+  local.set $end
+  loop $while-continue|0
+   local.get $cur
+   local.get $end
+   i32.lt_u
+   if
+    local.get $cur
+    i32.load
+    local.set $val
+    local.get $val
+    if
+     local.get $val
+     local.get $cookie
+     call $~lib/rt/itcms/__visit
+    end
+    local.get $cur
+    i32.const 4
+    i32.add
+    local.set $cur
+    br $while-continue|0
+   end
+  end
+  local.get $this
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store
+  local.get $5
+  call $~lib/array/Array<~lib/task/Waiter>#get:buffer
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $~lib/function/Function<%28i32%2Ci32%29=>void>#__visit (param $this i32) (param $cookie i32)
+  (local $2 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store
+  local.get $2
+  call $~lib/function/Function<%28i32%2Ci32%29=>void>#get:_env
+  local.get $cookie
+  call $~lib/rt/itcms/__visit
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
  )
  (func $"~lib/map/Map<i32,i32>#__visit" (param $this i32) (param $cookie i32)
   (local $entries i32)
@@ -6764,8 +7090,8 @@
   if (result i32)
    local.get $1
   else
-   i32.const 656
-   i32.const 784
+   i32.const 688
+   i32.const 816
    i32.const 17
    i32.const 1
    call $~lib/builtins/abort
@@ -6791,16 +7117,16 @@
   i32.store
   global.get $~lib/memory/__stack_pointer
   local.get $this
-  i32.load
+  i32.load offset=28
   local.tee $1
   i32.store
   local.get $1
   if (result i32)
    local.get $1
   else
-   i32.const 656
-   i32.const 864
-   i32.const 89
+   i32.const 688
+   i32.const 896
+   i32.const 265
    i32.const 3
    call $~lib/builtins/abort
    unreachable
@@ -6832,8 +7158,8 @@
   if (result i32)
    local.get $1
   else
-   i32.const 656
-   i32.const 784
+   i32.const 688
+   i32.const 816
    i32.const 17
    i32.const 1
    call $~lib/builtins/abort
@@ -6861,8 +7187,8 @@
   i32.const 1073741820
   i32.gt_u
   if
-   i32.const 912
-   i32.const 960
+   i32.const 944
+   i32.const 992
    i32.const 52
    i32.const 43
    call $~lib/builtins/abort
@@ -6907,9 +7233,9 @@
   if (result i32)
    local.get $1
   else
-   i32.const 656
-   i32.const 1136
-   i32.const 62
+   i32.const 688
+   i32.const 1168
+   i32.const 61
    i32.const 3
    call $~lib/builtins/abort
    unreachable

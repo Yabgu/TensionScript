@@ -34,10 +34,9 @@ import {
   ASYNC_CONT_TABLE,
   ASYNC_MAIN_SLOT,
   ASYNC_LAST_STATUS,
-  ASYNC_CURRENT_RECORD,
-  ASYNC_ARENA_BASE,
-  ASYNC_ARENA_NEXT,
-  ASYNC_NEXT_SLOT
+  ASYNC_CURRENT_SLOT,
+  ASYNC_NEXT_SLOT,
+  STARTS_TABLE
 } from "./compiler";
 
 import {
@@ -78,6 +77,7 @@ import {
   BinaryOp,
   UnaryOp,
   AtomicRMWOp,
+  MemoryOrder,
   SIMDExtractOp,
   SIMDReplaceOp,
   SIMDShiftOp,
@@ -762,12 +762,14 @@ export namespace BuiltinNames {
   export const asyncCoreloop = "~lib/async/__coreloop";
   export const asyncCoreloopAwait = "~lib/async/__coreloopAwait";
   export const asyncPump = "~lib/async/__asyncPump";
-  export const asyncResumeSlot = "~lib/async/__resumeSlot";
-  export const asyncLastStatus = "~lib/async/__lastStatus";
+  export const asyncResumeTask = "~lib/task-stack/__resumeTask";
+  export const asyncLastStatus = "~lib/task-stack/__lastStatus";
   export const asyncInstallCont = "~lib/async-stack/__installCont";
-export const asyncAllocCell = "~lib/async-stack/__allocCell";
-export const asyncSetTaskRecord = "~lib/async-stack/__setTaskRecord";
-  export const asyncCurrentRecord = "~lib/async-stack/__currentRecordRaw";
+  export const asyncSuspendAwait = "~lib/async-stack/__suspendAwait";
+  export const asyncSuspendParked = "~lib/task-stack/__suspendParked";
+  export const asyncSpawnIndexOf = "~lib/task-stack/__spawnIndexOf";
+  export const asyncServeCont = "~lib/task-stack/__serveCont";
+  export const asyncCurrentSlot = "~lib/task-stack/__currentSlot";
 
   // std/number.ts
   export const NaN = "~lib/number/NaN";
@@ -1105,7 +1107,15 @@ function builtin_isReference(ctx: BuiltinFunctionContext): ExpressionRef {
   let type = checkConstantType(ctx);
   compiler.currentType = Type.bool;
   if (!type) return module.unreachable();
-  return reifyConstantType(ctx, module.i32(type.isReference ? 1 : 0));
+  // An `@inline struct` has a reference-shaped `Type` (a class reference) but
+  // **is a value**: it is stored by value wherever it appears, has no address of
+  // its own and can never be null. Answering `true` here made `Array<Res>#__get`
+  // compile its null-hole check — `changetype<usize>(value)` on a whole value,
+  // which is exactly the read the representation forbids.
+  let classReference = type.classReference;
+  let isValue = classReference != null &&
+    classReference.hasDecorator(DecoratorFlags.InlineStruct);
+  return reifyConstantType(ctx, module.i32(type.isReference && !isValue ? 1 : 0));
 }
 builtinFunctions.set(BuiltinNames.isReference, builtin_isReference);
 
@@ -2763,6 +2773,38 @@ function builtin_store(ctx: BuiltinFunctionContext): ExpressionRef {
   let typeArguments = ctx.typeArguments;
   let contextualType = ctx.contextualType;
   let type = typeArguments![0];
+  // **`store<T>(ptr, value)` where `T` is an `@inline struct`.** The value is a
+  // value: it has no address and no WASM operand, so the store is one store per
+  // leaf at the record's layout offsets — the mirror of `copyInto`, and the
+  // reason `Array<Res>#__set` (written in std as `store<T>(…, value)`) works.
+  // The source must be SROA-tracked; anything else is refused by name, because
+  // there is no representation to load the leaves from.
+  let typeClass = type.classReference;
+  if (typeClass != null && typeClass.hasDecorator(DecoratorFlags.InlineStruct)) {
+    let dest = compiler.compileExpression(operands[0], compiler.options.usizeType, Constraints.ConvImplicit);
+    let sourceTree = compiler.sroaTreeOf(operands[1]);
+    if (sourceTree == null) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        operands[1].range,
+        "storing this expression as an @inline struct value (only a value held in a local can be stored: a value has no address, so there are no leaves to copy)"
+      );
+      compiler.currentType = Type.void;
+      return module.unreachable();
+    }
+    let inlineOffset = 0;
+    if (numOperands >= 3) {
+      inlineOffset = evaluateImmediateOffset(operands[2], compiler); // reports
+      if (inlineOffset < 0) {
+        compiler.currentType = Type.void;
+        return module.unreachable();
+      }
+    }
+    let inlineStmts = new Array<ExpressionRef>();
+    compiler.emitSroaStores(type, sourceTree, dest, inlineOffset, inlineStmts);
+    compiler.currentType = Type.void;
+    return module.flatten(inlineStmts, TypeRef.None);
+  }
   let arg0 = compiler.compileExpression(operands[0], compiler.options.usizeType, Constraints.ConvImplicit);
   let arg1 = ctx.contextIsExact
     ? compiler.compileExpression(operands[1],
@@ -3514,6 +3556,12 @@ function builtin_atomic_notify(ctx: BuiltinFunctionContext): ExpressionRef {
 builtinFunctions.set(BuiltinNames.atomic_notify, builtin_atomic_notify);
 
 // atomic.fence() -> void
+//
+// `module.atomic_fence` used to be called with no order, which reached
+// `BinaryenAtomicFence` as the zero value — `Unordered` — and every module using
+// `atomic.fence()` failed validation (`Atomic fence cannot be unordered`). A
+// fence names no source-level order (wasm defaults to seq_cst), so SeqCst is the
+// order emitted.
 function builtin_atomic_fence(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
@@ -3523,7 +3571,7 @@ function builtin_atomic_fence(ctx: BuiltinFunctionContext): ExpressionRef {
     checkTypeAbsent(ctx) |
     checkArgsRequired(ctx, 0)
   ) return module.unreachable();
-  return module.atomic_fence();
+  return module.atomic_fence(MemoryOrder.SeqCst);
 }
 builtinFunctions.set(BuiltinNames.atomic_fence, builtin_atomic_fence);
 
@@ -3849,6 +3897,26 @@ function builtin_changetype(ctx: BuiltinFunctionContext): ExpressionRef {
   // 27 — which `main` never creates, shifting every `idof` after it by one and
   // failing five `test:compiler` fixtures that never mention GC. The id is only
   // recoverable before it is burned, so the guard has to be here.
+  // **A reference-to-reference `changetype` is a wasm `ref.cast`.** The
+  // builtin's generic path answers the operand unchanged, which is right when
+  // both sides are one `i32` pointer and wrong under GC: `f$start` must narrow
+  // the task it read from the slot table (`TaskBase`) to its own subclass
+  // (`f$Rec`), and the validator requires the local's type to be the narrowed
+  // one before a field read. There is no unchecked ref cast in wasm, so this is
+  // `ref.cast` — a trap if the object is not that class, never an `env.abort`
+  // import, and exactly the conversion `changetype` names.
+  if (gcClassesEnabled && operands.length && toType.classReference != null) {
+    let sourceType = compiler.resolver.resolveExpression(
+      operands[0], compiler.currentFlow
+    );
+    let sourceClass = sourceType != null ? sourceType.classReference : null;
+    if (sourceClass != null && isGcClass(sourceClass) && isGcClass(assert(toType.classReference))) {
+      let value = compiler.compileExpression(operands[0], Type.auto, Constraints.None);
+      compiler.currentType = toType;
+      return module.ref_cast(value, toType.toRef());
+    }
+  }
+
   if (gcClassesEnabled && operands.length && isIntegerTarget(toType)) {
     let sourceType = compiler.resolver.resolveExpression(
       operands[0], compiler.currentFlow
@@ -12055,7 +12123,13 @@ function checkTypeOptional(ctx: BuiltinFunctionContext, setCurrentTypeOnError: b
  */
 function checkAsyncIntrinsic(ctx: BuiltinFunctionContext): i32 {
   let compiler = ctx.compiler;
-  if (ctx.reportNode.range.source.internalPath != "~lib/async") {
+  // **The shell's own std machinery, and nothing else.** `~lib/async` is the
+  // core loop; `~lib/thread` is the executor that drives it and reads the last
+  // status after serving a request; `~lib/task-stack` is where those two reach
+  // the slot table. The list is explicit so a user source — or a future std file
+  // — has to be added deliberately rather than inherit access by accident.
+  let path = ctx.reportNode.range.source.internalPath;
+  if (path != "~lib/async" && path != "~lib/thread" && path != "~lib/task-stack") {
     compiler.error(
       DiagnosticCode.Not_implemented_0,
       ctx.reportNode.range,
@@ -12249,126 +12323,204 @@ function builtin_async_installCont(ctx: BuiltinFunctionContext): ExpressionRef {
 }
 builtinFunctions.set(BuiltinNames.asyncInstallCont, builtin_async_installCont);
 
-// __setTaskRecord(task: i32, record: i32) -> void
+// __suspendAwait(awaitedSlot: i32) -> void
 //
-// `Task<T>` is a std class with one field at offset 0. The entry writes it with
-// a store rather than the generated setter: the setter calls the runtime's
-// `__link`, and a static-arena cell has nothing to link. This is the write
-// counterpart of the await path's direct `_record` load.
-function builtin_async_setTaskRecord(ctx: BuiltinFunctionContext): ExpressionRef {
+// The park half of the stackful backend: suspend the **current** task, naming
+// the continuation slot it waits for. The executor's `$await` handler captures
+// the suspended continuation and stores it back at the current task's slot, so
+// the only value the tag carries is an i32 slot — the same shape in both class
+// representations, and a value a scheduler can move between threads.
+function builtin_async_suspendAwait(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
   compiler.currentType = Type.void;
-  if (
-    checkTypeAbsent(ctx) |
-    checkArgsRequired(ctx, 2) |
-    checkStackIntrinsic(ctx, ctx.prototype.internalName)
-  ) return module.unreachable();
-  let task = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
-  let record = compiler.compileExpression(ctx.operands[1], Type.i32, Constraints.ConvImplicit);
-  // `Task<T>` is a std class with `_record` as its only field, at offset 0.
-  // `BinaryenStore` takes a constant offset, so this is the layout fact the
-  // transform's `sizeof<Task<R>>()` also depends on; the await read resolves
-  // the property and would disagree loudly if the field moved.
-  compiler.currentType = Type.void;
-  return module.store(4, task, record, TypeRef.I32, 0, 4);
-}
-builtinFunctions.set(BuiltinNames.asyncSetTaskRecord, builtin_async_setTaskRecord);
-
-/**
- * 256 KiB of zeroed cell storage: enough for ~6k tasks at A2's record size.
- *
- * It lives here, next to the bounds check that enforces it, and is imported by
- * the compiler for the segment it reserves. The other direction — exporting it
- * from `compiler.ts` and importing it here — is a cycle `builtins` reaches
- * before `compiler` has initialized it (`TS2448`, measured in the self-build).
- */
-export const ASYNC_ARENA_SIZE = 256 * 1024;
-
-// __allocCell(size: i32) -> usize
-//
-// The task-cell bump allocator. A cell is a record whose fields are written by
-// the entry; the segment is zero-filled, so the fields the entry does not
-// write (`done`, `key`, the links) start at zero. No runtime, no `env.abort`.
-function builtin_async_allocCell(ctx: BuiltinFunctionContext): ExpressionRef {
-  let compiler = ctx.compiler;
-  let module = compiler.module;
-  let usizeType = compiler.options.usizeType;
-  compiler.currentType = usizeType;
   if (
     checkTypeAbsent(ctx) |
     checkArgsRequired(ctx, 1) |
     checkStackIntrinsic(ctx, ctx.prototype.internalName)
   ) return module.unreachable();
-  let size = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
-  let sizeLocal = compiler.currentFlow.getTempLocal(Type.i32);
-  let cellLocal = compiler.currentFlow.getTempLocal(Type.i32);
-  let nextLocal = compiler.currentFlow.getTempLocal(Type.i32);
-  return module.block(null, [
-    module.local_set(sizeLocal.index, size, false),
-    // 8-byte alignment: every class cell starts on a word boundary.
-    module.local_set(cellLocal.index, module.binary(
-      BinaryOp.AndI32,
-      module.binary(
-        BinaryOp.AddI32,
-        module.global_get(ASYNC_ARENA_NEXT, TypeRef.I32),
-        module.i32(7)
-      ),
-      module.i32(-8)
-    ), false),
-    module.local_set(nextLocal.index, module.binary(
-      BinaryOp.AddI32,
-      module.local_get(cellLocal.index, TypeRef.I32),
-      module.local_get(sizeLocal.index, TypeRef.I32)
-    ), false),
-    // The arena is finite. A silent overrun would corrupt the heap that starts
-    // after it, so exhaustion is a trap — a program that outgrows A2's cell
-    // budget is a program the round does not support, and saying so is the
-    // honest failure.
-    module.if(
-      module.binary(
-        BinaryOp.GtU32,
-        module.local_get(nextLocal.index, TypeRef.I32),
-        module.binary(
-          BinaryOp.AddI32,
-          module.global_get(ASYNC_ARENA_BASE, TypeRef.I32),
-          module.i32(ASYNC_ARENA_SIZE)
-        )
-      ),
-      module.unreachable(),
-      module.nop()
-    ),
-    module.global_set(ASYNC_ARENA_NEXT, module.local_get(nextLocal.index, TypeRef.I32)),
-    module.local_get(cellLocal.index, TypeRef.I32)
-  ], TypeRef.I32);
+  let slot = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
+  // Compiling the operand leaves `currentType` at i32; the call's own result is
+  // void, and without this the expression statement wraps `suspend` in a
+  // `drop` the validator rejects.
+  compiler.currentType = Type.void;
+  return module.suspend(ASYNC_AWAIT_TAG, [ slot ]);
 }
-builtinFunctions.set(BuiltinNames.asyncAllocCell, builtin_async_allocCell);
+builtinFunctions.set(BuiltinNames.asyncSuspendAwait, builtin_async_suspendAwait);
 
-// __currentRecord() -> TaskRecord
-function builtin_async_currentRecord(ctx: BuiltinFunctionContext): ExpressionRef {
+// __suspendParked() -> void
+//
+// The park half for a task that waits on **something that is not a local
+// slot** — a request in another store (`~lib/thread`'s `RemotePolicy`). The
+// payload is `-2`, the third of `__resumeTask`'s three answers: the suspended
+// continuation is this task's and is written back at its slot, and nothing is
+// queued, because no slot in this table will ever make it runnable; the wake
+// arrives from the store that settles the task.
+//
+// A builtin and not a literal: `-1` used to be the only other negative value,
+// and a program that spelled `__suspendAwait(-2)` itself would be inventing a
+// payload the runtime does not define. Programs say `__suspendAwait(t.slot)` or
+// `__suspendParked()`.
+function builtin_async_suspendParked(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
+  compiler.currentType = Type.void;
   if (
     checkTypeAbsent(ctx) |
     checkArgsRequired(ctx, 0) |
     checkStackIntrinsic(ctx, ctx.prototype.internalName)
-  ) {
-    compiler.currentType = Type.void;
-    return module.unreachable();
-  }
-  if (!compiler.program.taskRecordPrototype) {
+  ) return module.unreachable();
+  return module.suspend(ASYNC_AWAIT_TAG, [ module.i32(-2) ]);
+}
+builtinFunctions.set(BuiltinNames.asyncSuspendParked, builtin_async_suspendParked);
+
+// __spawnIndexOf(start: () => i32) -> i32
+//
+// The `$starts` index of a synthesized `f$spawnStart`, so a task can carry the
+// index it is posted by (`TaskBase.entry`).
+//
+// **The index is not known when a body is compiled.** `$starts` is assembled
+// after every function has been compiled, and its order is the registration
+// order of the continuation set (`docs/task-design.md` §3). So this builtin
+// emits a call to a per-function helper, and `Compiler#emitStartsTable` adds
+// that helper's body — `i32.const <index>` — once the table is final. The
+// constant makes the field the same in every store: the table belongs to the
+// module, not to an instance.
+function builtin_async_spawnIndexOf(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.i32;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 1) |
+    checkStackIntrinsic(ctx, ctx.prototype.internalName)
+  ) return module.unreachable();
+
+  let start = ctx.operands[0];
+  if (start.kind != NodeKind.Identifier) {
     compiler.error(
       DiagnosticCode.Not_implemented_0,
-      ctx.reportNode.range,
-      "the async record type (std/assembly/task.ts) is not in this program"
+      start.range,
+      "a spawn entry that is not a function name (the stackful backend)"
     );
-    compiler.currentType = Type.void;
     return module.unreachable();
   }
-  compiler.currentType = Type.i32;
-  return module.global_get(ASYNC_CURRENT_RECORD, TypeRef.I32);
+  let element = compiler.resolver.lookupIdentifierExpression(
+    <IdentifierExpression>start,
+    compiler.currentFlow,
+    compiler.currentFlow.sourceFunction,
+    ReportMode.Report
+  );
+  let target: Function | null = null;
+  if (element) {
+    if (element.kind == ElementKind.Function) {
+      target = <Function>element;
+    } else if (element.kind == ElementKind.FunctionPrototype) {
+      target = compiler.resolver.resolveFunction(<FunctionPrototype>element, null);
+    }
+  }
+  if (!target) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      start.range,
+      "a spawn entry that does not name a function (the stackful backend)"
+    );
+    return module.unreachable();
+  }
+  compiler.compileFunction(target);
+  let helper = "~spawnIndex/" + target.internalName;
+  compiler.spawnIndexTargets.set(helper, target.internalName);
+  return module.call(helper, [], TypeRef.I32);
 }
-builtinFunctions.set(BuiltinNames.asyncCurrentRecord, builtin_async_currentRecord);
+builtinFunctions.set(BuiltinNames.asyncSpawnIndexOf, builtin_async_spawnIndexOf);
+
+// __serveCont(funcIndex: i32) -> i32
+//
+// Turn `$starts[funcIndex]` into a continuation and install it at a fresh slot,
+// answering the slot. The receiving half of `__spawnOn` (`docs/task-design.md`
+// §8.5): a request crossed the thread boundary as an index, and this is where
+// the index becomes a `cont.new` **in this store** — the one place a reference
+// is created, and never carried across.
+//
+// The cast is required because `table.get` on a `funcref` table answers
+// `(ref null func)`, while `cont.new` wants the canonical `() -> i32` function
+// type. It traps if the index names something else, never an `env.abort`.
+function builtin_async_serveCont(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.i32;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 1) |
+    checkStackIntrinsic(ctx, ctx.prototype.internalName)
+  ) return module.unreachable();
+
+  let funcIndex = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
+  let funcTypeRef = typeFromHeapType(compiler.asyncFtMainHeap, false);
+  let slotLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  let stmts = new Array<ExpressionRef>();
+  stmts.push(module.local_set(slotLocal.index, module.global_get(ASYNC_NEXT_SLOT, TypeRef.I32), false));
+  stmts.push(module.global_set(ASYNC_NEXT_SLOT, module.binary(
+    BinaryOp.AddI32,
+    module.local_get(slotLocal.index, TypeRef.I32),
+    module.i32(1)
+  )));
+
+  // Grow the continuation table when the slot is past the end.
+  let size = module.table_size(ASYNC_CONT_TABLE);
+  let need = module.binary(
+    BinaryOp.AddI32,
+    module.local_get(slotLocal.index, TypeRef.I32),
+    module.i32(1)
+  );
+  stmts.push(module.if(
+    module.binary(BinaryOp.GtI32, need, size),
+    module.drop(module.table_grow(
+      ASYNC_CONT_TABLE,
+      module.binary(BinaryOp.SubI32, need, size),
+      module.ref_null(compiler.asyncCtMainRef)
+    )),
+    module.nop()
+  ));
+
+  // **`cont.new` reads the table through a cast, and that cast must not share a
+  // function with a `resume`.** V8 aborts compiling such a function (measured:
+  // `Check failed: !op.Effects().can_write()`); `~lib/thread` keeps the served
+  // continuation's creation in its own function for exactly that reason.
+  stmts.push(module.table_set(
+    ASYNC_CONT_TABLE,
+    module.local_get(slotLocal.index, TypeRef.I32),
+    module.cont_new(
+      compiler.asyncCtMainHeap,
+      module.ref_cast(
+        module.table_get(STARTS_TABLE, funcIndex, TypeRef.funcref()),
+        funcTypeRef
+      )
+    )
+  ));
+  stmts.push(module.local_get(slotLocal.index, TypeRef.I32));
+  return module.block(null, stmts, TypeRef.I32);
+}
+builtinFunctions.set(BuiltinNames.asyncServeCont, builtin_async_serveCont);
+
+// __currentSlot() -> i32
+//
+// The slot of the task being resumed, written by `__resumeTask` immediately
+// before the resume. `0` is main. The continuation's `f$start` reads its own
+// task object from the runtime's slot table through this index, because resume
+// sends no operands.
+function builtin_async_currentSlot(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.i32;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 0) |
+    checkStackIntrinsic(ctx, ctx.prototype.internalName)
+  ) return module.unreachable();
+  return module.global_get(ASYNC_CURRENT_SLOT, TypeRef.I32);
+}
+builtinFunctions.set(BuiltinNames.asyncCurrentSlot, builtin_async_currentSlot);
 
 // __lastStatus() -> i32
 function builtin_async_lastStatus(ctx: BuiltinFunctionContext): ExpressionRef {
@@ -12384,33 +12536,47 @@ function builtin_async_lastStatus(ctx: BuiltinFunctionContext): ExpressionRef {
 }
 builtinFunctions.set(BuiltinNames.asyncLastStatus, builtin_async_lastStatus);
 
-// __resumeSlot(slot: i32, record: TaskRecord | null) -> i32
+// __resumeTask(slot: i32) -> i32
 //
-// The whole park protocol:
+// The executor's one primitive for the stackful backend:
 //
-//   set the current record (the continuation's `f$start` reads it),
+//   record the slot the continuation will read,
 //   resume table[slot] with an `on $await` handler,
-//   normal completion: store the status, yield (-1, null),
-//   suspension: yield (awaitedSlot, suspendedCont).
+//   normal completion: store the status, answer -1,
+//   suspension: write the suspended continuation back at the same slot and
+//   answer the payload the suspension carried.
 //
-// The suspended continuation is written back at the same slot — the slot is
-// the task's identity, so a task that parks twice uses one table entry. The
-// result is the awaited slot, or -1 for "completed normally"; the library
-// reads `__lastStatus()` for the status, because `resume`'s result and the
-// park discriminator would otherwise share one i32.
-function builtin_async_resumeSlot(ctx: BuiltinFunctionContext): ExpressionRef {
+// **`-1` is the "no suspension" sentinel and `0` is a real slot** (main's).
+// A1/A2 used `0` for both, which made an awaited task whose slot was 0
+// indistinguishable from a normal completion; the slot table now starts task
+// slots at 1, and the sentinel is negative.
+//
+// **Three payloads, three meanings** (`__suspendAwait` / `__suspendParked`):
+//   `>= 0` — parked on the local task slot it names: store the suspended
+//            continuation back at its own slot and answer that slot, so the
+//            caller (`driveReady`, `__serveOne`) may queue it;
+//   `-1`   — ran to completion: there is no suspended continuation to store
+//            and no slot to queue;
+//   `-2`   — parked on something that is **not** a local slot (a request in
+//            another store): the continuation is still this task's, so store it
+//            back, but queue nothing — the settle that wakes it arrives from the
+//            store that owns the work.
+//
+// The suspended continuation is written back at the *current task's* slot —
+// the slot is the task's identity, so a task that parks twice uses one table
+// entry and the executor always knows which continuation to resume.
+function builtin_async_resumeTask(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
   compiler.currentType = Type.i32;
   if (
     checkTypeAbsent(ctx) |
-    checkArgsRequired(ctx, 2) |
-    checkAsyncIntrinsic(ctx)
+    checkArgsRequired(ctx, 1) |
+    checkStackIntrinsic(ctx, ctx.prototype.internalName)
   ) return module.unreachable();
 
   let slot = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
   let slotLocal = compiler.currentFlow.getTempLocal(Type.i32);
-  let record = compiler.compileExpression(ctx.operands[1], Type.auto, Constraints.ConvImplicit);
   let statusLocal = compiler.currentFlow.getTempLocal(Type.i32);
 
   let label = "on_await" + (++compiler.asyncResumeLabels).toString();
@@ -12420,11 +12586,11 @@ function builtin_async_resumeSlot(ctx: BuiltinFunctionContext): ExpressionRef {
 
   let stmts = new Array<ExpressionRef>();
   stmts.push(module.local_set(slotLocal.index, slot, false));
-  stmts.push(module.global_set(ASYNC_CURRENT_RECORD, record));
+  stmts.push(module.global_set(ASYNC_CURRENT_SLOT, module.local_get(slotLocal.index, TypeRef.I32)));
 
   // The handler block's result is the tag payload (the awaited slot) followed
-  // by the continuation that suspended — A1's `$done` shape, with an i32
-  // payload instead of an i32 status.
+  // by the continuation that suspended. A normal completion stores the status
+  // and yields `(-1, null)`.
   let onAwait = module.block(label, [
     module.local_set(statusLocal.index, module.resume_with_handlers(
       module.table_get(ASYNC_CONT_TABLE, module.local_get(slotLocal.index, TypeRef.I32), compiler.asyncCtMainRef),
@@ -12434,17 +12600,30 @@ function builtin_async_resumeSlot(ctx: BuiltinFunctionContext): ExpressionRef {
     ), false),
     module.global_set(ASYNC_LAST_STATUS, module.local_get(statusLocal.index, TypeRef.I32)),
     module.tuple_make([
-      module.i32(0),
+      module.i32(-1),
       module.ref_null(compiler.asyncCtMainRef)
     ])
   ], tupleType);
 
   stmts.push(module.local_set(pairLocal.index, onAwait, false));
-  let pair = module.local_get(pairLocal.index, tupleType);
-  let awaited = module.tuple_extract(pair, 0);
+  // One extract to a local: the payload is read by the store condition, the
+  // result, and both compares, and a shared IR node used in several parents is
+  // the shape LocalCSE asserts on.
+  let awaitedLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  stmts.push(module.local_set(
+    awaitedLocal.index,
+    module.tuple_extract(module.local_get(pairLocal.index, tupleType), 0),
+    false
+  ));
   let suspended = module.tuple_extract(module.local_get(pairLocal.index, tupleType), 1);
+  let parkedOnSlot = module.binary(
+    BinaryOp.GeI32, module.local_get(awaitedLocal.index, TypeRef.I32), module.i32(0)
+  );
+  let parkedElsewhere = module.binary(
+    BinaryOp.EqI32, module.local_get(awaitedLocal.index, TypeRef.I32), module.i32(-2)
+  );
   stmts.push(module.if(
-    module.binary(BinaryOp.NeI32, awaited, module.i32(0)),
+    module.binary(BinaryOp.OrI32, parkedOnSlot, parkedElsewhere),
     module.table_set(
       ASYNC_CONT_TABLE,
       module.local_get(slotLocal.index, TypeRef.I32),
@@ -12452,10 +12631,10 @@ function builtin_async_resumeSlot(ctx: BuiltinFunctionContext): ExpressionRef {
     ),
     module.nop()
   ));
-  stmts.push(module.tuple_extract(module.local_get(pairLocal.index, tupleType), 0));
+  stmts.push(module.local_get(awaitedLocal.index, TypeRef.I32));
   return module.block(null, stmts, TypeRef.I32);
 }
-builtinFunctions.set(BuiltinNames.asyncResumeSlot, builtin_async_resumeSlot);
+builtinFunctions.set(BuiltinNames.asyncResumeTask, builtin_async_resumeTask);
 
 /** Checks a call that is not generic. Returns `1` on error. */
 function checkTypeAbsent(ctx: BuiltinFunctionContext): i32 {

@@ -82,6 +82,7 @@ export const enum Token {
   Namespace,    // AS possible identifier
   New,          // ES2017
   Null,         // ES
+  On,           // TensionScript: the call-site policy postfix
   Of,
   Override,
   Package,      // ES2017 non-lexical
@@ -296,6 +297,7 @@ export function tokenFromKeyword(text: string): Token {
     }
     case CharCode.o: {
       if (text == "of") return Token.Of;
+      if (text == "on") return Token.On;
       if (text == "override") return Token.Override;
       break;
     }
@@ -371,6 +373,7 @@ export function tokenIsAlsoIdentifier(token: Token): bool {
     case Token.Module:
     case Token.Namespace:
     case Token.Null:
+    case Token.On:
     case Token.Readonly:
     case Token.Set:
     case Token.Type:

@@ -1,4 +1,4 @@
-import { AL_MASK, OBJECT, OBJECT_OVERHEAD, BLOCK_MAXSIZE, BLOCK_OVERHEAD, BLOCK, OBJECT_MAXSIZE } from "./common";
+import { AL_MASK, OBJECT, OBJECT_OVERHEAD, BLOCK_MAXSIZE, BLOCK_OVERHEAD, BLOCK, OBJECT_MAXSIZE, ARENA, ARENA_END, enterArena } from "./common";
 import { E_ALLOCATION_TOO_LARGE } from "../util/error";
 
 // === A minimal runtime stub ===
@@ -34,7 +34,7 @@ export function __alloc(size: usize): usize {
   let block = changetype<BLOCK>(offset);
   let ptr = offset + BLOCK_OVERHEAD;
   let payloadSize = computeSize(size);
-  maybeGrowMemory(ptr + payloadSize);
+  maybeGrowMemory(ARENA ? arenaLimit(ptr + payloadSize) : ptr + payloadSize);
   block.mmInfo = payloadSize;
   return ptr;
 }
@@ -50,7 +50,7 @@ export function __realloc(ptr: usize, size: usize): usize {
   if (size > actualSize) {
     if (isLast) { // last block: grow
       if (size > BLOCK_MAXSIZE) throw new Error(E_ALLOCATION_TOO_LARGE);
-      maybeGrowMemory(ptr + payloadSize);
+      maybeGrowMemory(ARENA ? arenaLimit(ptr + payloadSize) : ptr + payloadSize);
       block.mmInfo = payloadSize;
     } else { // copy to new block at least double the size
       let newPtr = __alloc(max<usize>(payloadSize, actualSize << 1));
@@ -130,4 +130,34 @@ function __visit(ptr: usize, cookie: u32): void { // eslint-disable-line @typesc
 @global @unsafe
 export function __collect(): void {
   // nop
+}
+
+// === Arenas ==============================================================================
+
+/**
+ * Bounds an allocation to this instance's arena and answers the offset to grow
+ * to. The stub runtime never frees, so an arena is all it needs to become a
+ * per-thread heap: a bump region with a hard end. Outside an arena (`ARENA_END`
+ * is 0) it is the identity, and the `ARENA` fold leaves no trace of it in a build
+ * that does not share memory.
+ */
+// @ts-ignore: decorator
+@inline function arenaLimit(need: usize): usize {
+  let end = ARENA_END;
+  return end && need > end ? unreachable() : need;
+}
+
+/**
+ * Points this instance's bump allocator at `[base, base + size)`; see
+ * `docs/arena.md`. The layout mirrors the default one — stack region at the
+ * bottom, heap above it — and the assignment to `__stack_pointer` is last, so
+ * this moves this instance's stack inside its own arena and nothing else.
+ */
+// @ts-ignore: decorator
+@global @unsafe
+export function __arenaInit(base: usize, size: usize): void {
+  let heap = enterArena(base, size);
+  startOffset = ((heap + BLOCK_OVERHEAD + AL_MASK) & ~AL_MASK) - BLOCK_OVERHEAD;
+  offset = startOffset;
+  __stack_pointer = heap;
 }

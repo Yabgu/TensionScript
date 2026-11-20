@@ -22,9 +22,16 @@
 //   - ~~a field of an `@inline` value~~ **now accepted** (deep SROA Phase A:
 //     the nesting is flattened one local per leaf — see
 //     `inline-nesting-nested.ts`)
-//   - a field of a plain class (inline-in-heap; deferred)
-//   - `T[N]` of an `@inline struct`
-//   - `Array<T>` (a type argument is a pointer slot)
+//   - ~~a field of a plain class~~ **now accepted** (the field slot is a byte
+//     offset, exactly as in a record — see `inline-struct-as-class-field.ts`)
+//   - ~~`T[N]` of an `@inline struct`~~ **now accepted** (the element stride is
+//     its inline extent — see `fixed-array-inline-struct.ts`)
+//   - an initializer on an `@inline struct` field (the field is bytes; a whole
+//     value has no store)
+//   - ~~`Array<T>`~~ **the index operator is accepted** now: an `@inline struct`
+//     element is inline bytes at `dataStart + i * sizeof(T)`, and `[]`/`[]=` are
+//     emitted by the compiler. Other `Array<T>` methods are still refused by
+//     name, because std bodies index by alignment (`i << alignof<T>()`).
 //   - `changetype` to one (a value has no address to reinterpret)
 //   - inheritance from one
 //
@@ -57,19 +64,24 @@ function makes(): P { return new P(); }
   p: P = {};
 }
 
-// A field of a plain class: the class field is a pointer slot, so an inline
-// field would be inline *in the heap* — its allocation size, `__visit` and
-// constructors would all have to learn about it. Deferred; refused by name.
+// A field of a plain class is **accepted** now: the slot is a byte offset, the
+// constructor zero-fills the extent (`inline-struct-as-class-field.ts`). What is
+// still refused is a whole-value initializer — the field is bytes and has no
+// single store — which is the one case this fixture pins here.
 class Holder {
   p: P = new P();
 }
 
-// `T[N]` of an `@inline struct`: elements by value
+// `T[N]` of an `@inline struct` is **accepted** too (the element stride is the
+// inline extent, `fixed-array-inline-struct.ts`). A record holding one is laid
+// out and constructed; `new Arrays()` below forces that path.
 @unmanaged struct Arrays {
-  arr: P[2] = [{}, {}];
+  arr: P[2];
 }
 
-// `Array<T>`: a type argument is a pointer slot
+// `Array<T>`: the index operator is the supported path (an `@inline struct`
+// element is inline bytes); constructing one is legal, and so is `a[i]` when the
+// value is held in a local.
 function arrayOf(): void {
   let a = new Array<P>();
 }
@@ -96,4 +108,5 @@ export function run(): void {
   let n: u32 = sizeof<NestedOuter>() + sizeof<Arrays>();
   if (n == 1) globalValue = new P();
   if (n == 2) new Holder();
+  if (n == 3) new Arrays();
 }

@@ -72,6 +72,7 @@ import {
   UnaryPrefixExpression,
   UnaryPostfixExpression,
   AwaitExpression,
+  OnExpression,
   AssertionKind,
   BinaryExpression,
   ThisExpression,
@@ -160,6 +161,46 @@ function abiAlignDecoratorOf(decorators: DecoratorNode[] | null): DecoratorNode 
     if (isAbiAlignDecorator(decorator)) return decorator;
   }
   return null;
+}
+
+/**
+ * Why `type` cannot back an `@atomic` field, or `null` when it can.
+ *
+ * The allowed set is exactly what wasm's atomic instructions take: integer
+ * scalars of 1, 2, 4 or 8 bytes (and `bool`, which is one byte the same way
+ * `u8` is). `isize`/`usize` are allowed because they *are* one of those
+ * widths — the target's pointer width — which is what the builtins' size-based
+ * dispatch also concludes.
+ *
+ * **Floats are refused, not bitcast.** wasm has no float atomics; the only way to
+ * make `@atomic x: f32` work is to reinterpret the float's bits as an `i32` at
+ * every access. That would make the field mean something the source does not say —
+ * the type is `f32` and the instruction would be `i32.atomic.load` — and the
+ * project refuses invisible magic of that kind. The caller must ask for the
+ * integer field and bitcast at the access, where the reader can see it.
+ *
+ * Everything else (a reference, `v128`, an inline array, an inline record) is
+ * refused for the plainer reason: no atomic instruction exists for it.
+ */
+function atomicFieldTypeRefusal(type: Type): string | null {
+  switch (type.kind) {
+    case TypeKind.Bool:
+    case TypeKind.I8:
+    case TypeKind.I16:
+    case TypeKind.I32:
+    case TypeKind.I64:
+    case TypeKind.Isize:
+    case TypeKind.U8:
+    case TypeKind.U16:
+    case TypeKind.U32:
+    case TypeKind.U64:
+    case TypeKind.Usize: return null;
+    case TypeKind.F32:
+    case TypeKind.F64: return "an @atomic field of type '" + type.toString() +
+      "' (wasm has no float atomics: an atomic float would have to be bitcast to an integer at every access, and doing that invisibly would make the field mean something its type does not say — declare the field as 'u32'/'u64' and bitcast explicitly, or use atomic.load/atomic.store on its address)";
+    default: return "an @atomic field of type '" + type.toString() +
+      "' (atomics exist for i8/i16/i32/i64, u8/u16/u32/u64, isize/usize and bool only — there is no atomic instruction for a reference, a v128, an inline array or an inline record)";
+  }
 }
 
 /** Whether a type can back an enum's storage: a 32-bit or narrower integer scalar, nothing else. */
@@ -782,6 +823,32 @@ export class Resolver extends DiagnosticEmitter {
       type.fixedMemoryModel == MemoryModelCode.Inline;
   }
 
+  /**
+   * The first **GC-reference** element of a value-form fixed array, or `null`.
+   *
+   * `resolveFixedArrayType` deliberately accepts an ordinary class element: the
+   * value form is N inline slots, and for a class the slot is the 4-byte
+   * reference, so a *local* `Foo[4]` is four pointers with an address of their
+   * own -- coherent. What makes it incoherent is the position: as a member of a
+   * C record those slots are bytes in a blob nothing scans, so a collected
+   * object can be reclaimed while the record still holds the word. The array
+   * type cannot know its position; `finishResolveClass` can, and calls this to
+   * refuse the member.
+   *
+   * Nested value-form arrays are followed to the leaf (`[[Foo * 2] * 3]` is
+   * still six reference slots). A nested *view* form (`@unmanaged [T * N]`) is
+   * a pointer, not a slot run, so it is not followed -- it holds an address,
+   * which is what `usize` is for.
+   */
+  private fixedArrayGcReference(type: Type): Type | null {
+    let element = type.fixedElementType;
+    if (element == null) return null;
+    if (this.isValueFormFixedArray(element)) {
+      return this.fixedArrayGcReference(element);
+    }
+    return element.isManaged && element.classReference != null ? element : null;
+  }
+
   private resolveFixedArrayType(
     node: FixedArrayTypeNode,
     flow: Flow | null,
@@ -812,19 +879,16 @@ export class Resolver extends DiagnosticEmitter {
     );
     if (!elementType) return null;
     if (isValueForm) {
-      if (
-        elementType.classReference != null &&
-        assert(elementType.classReference).hasDecorator(DecoratorFlags.InlineStruct)
-      ) {
-        if (reportMode == ReportMode.Report) {
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            node.elementType.range,
-            "an inline array (T[N]) of an @inline struct (elements by value are a later phase)"
-          );
-        }
-        return null;
-      }
+      // An `@inline struct` element is **accepted**: the array's size is built
+      // from the element's `inlineExtentBytes`, so `[S * 2]` over an 8-byte `S`
+      // is 16 bytes of inline storage -- the same layout `[U * 2]` over an
+      // `@unmanaged struct U` always had. Element access is the address
+      // `base + i * sizeof(S)` (`Compiler#compileFixedArrayElementAccess`), and
+      // the stride is the extent, not the 4-byte reference, or the elements
+      // would alias. The GC-reference hazard is the one a *record* element
+      // carries, and it is refused below: an inline element's GC pointer has
+      // nowhere for the collector to find it.
+      //
       // A record element is the same claim one step further out, and it used to
       // reach `Type.fixedArray` because nothing between here and there asked
       // what the element *is*: a class type's kind is `TypeKind.Usize`
@@ -872,6 +936,28 @@ export class Resolver extends DiagnosticEmitter {
           );
         }
         return null;
+      }
+      // An **inline value** element carries the same GC-reference hazard one
+      // step further out: N copies of a value whose leaf is a collected pointer
+      // would be N references with nowhere for the collector to find them --
+      // an inline array is bytes. Refused by name, as the field form is.
+      if (
+        elementClass != null &&
+        elementClass.hasDecorator(DecoratorFlags.InlineStruct)
+      ) {
+        let managedLeaf = this.findManagedLeaf(elementType, new Set<Class>());
+        if (managedLeaf != null) {
+          if (reportMode == ReportMode.Report) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              node.elementType.range,
+              "an inline array (T[N]) whose element '" + elementClass.name +
+                "' has a GC-reference field '" + managedLeaf.name +
+                "' (the elements are inline bytes, and an inline field's GC pointer is invisible to the collector)"
+            );
+          }
+          return null;
+        }
       }
       // **A record that is still being laid out has no extent yet.**
       //
@@ -1735,6 +1821,16 @@ export class Resolver extends DiagnosticEmitter {
         );
         return type ? this.getElementOfType(type) : null;
       }
+      case NodeKind.On: {
+        // **The policy does not change the type.** `f(x) on p` is a call that
+        // creates a task; where it runs is a value, not a type. So the whole
+        // expression has its inner call's type, and the policy expression is
+        // resolved for its own sake below.
+        return this.lookupExpression(
+          (<OnExpression>node).expression,
+          ctxFlow, ctxType, reportMode
+        );
+      }
     }
     assert(false);
     return null;
@@ -1878,6 +1974,15 @@ export class Resolver extends DiagnosticEmitter {
           ctxFlow,
           reportMode
         );
+      }
+      case NodeKind.On: {
+        let on = <OnExpression>node;
+        // Both sides are resolved here so a bad policy (a non-`TaskPolicy`
+        // value, an unknown name) is reported at its own range, not later as a
+        // whole-expression mismatch.
+        let type = this.resolveExpression(on.expression, ctxFlow, ctxType, reportMode);
+        if (type) this.resolveExpression(on.policy, ctxFlow, Type.auto, reportMode);
+        return type;
       }
     }
     assert(false);
@@ -4632,6 +4737,26 @@ export class Resolver extends DiagnosticEmitter {
           case ElementKind.PropertyPrototype: {
             let boundPrototype = (<PropertyPrototype>member).toBound(instance);
             if (boundPrototype.isField) { // resolve and lay out
+              // A field whose **type parameter** was substituted with `void`
+              // has no storage, and no accessors either: `Task<T>` declares
+              // `value!: T`, so `Task<void>` must instantiate without a
+              // `value` member rather than rejecting the declaration (the
+              // implicit setter's `void` parameter used to report TS1110).
+              // Only a direct type-parameter use is omitted; a field written
+              // `x: void` is still the error it always was.
+              let declaredTypeNode = boundPrototype.typeNode;
+              if (declaredTypeNode != null && declaredTypeNode.kind == NodeKind.NamedType) {
+                let named = <NamedTypeNode>declaredTypeNode;
+                let ctxTypes = instance.contextualTypeArguments;
+                if (
+                  named.name.next == null &&
+                  ctxTypes != null &&
+                  ctxTypes.has(named.name.identifier.text) &&
+                  ctxTypes.get(named.name.identifier.text) == Type.void
+                ) {
+                  break; // zero-size: no member, no get/set
+                }
+              }
               let boundInstance = this.resolveProperty(boundPrototype, reportMode);
               if (boundInstance) {
                 let fieldType = boundInstance.type;
@@ -4685,6 +4810,139 @@ export class Resolver extends DiagnosticEmitter {
                   }
                 }
                 if (needsLayout) {
+                  // === `@atomic` is an access modifier, and only some fields can
+                  // carry it =====================================================
+                  //
+                  // Decided **here**, at layout, because this is where the
+                  // field's resolved type first exists and the last moment
+                  // before an offset is banked: a refusal here leaves no wrong
+                  // `sizeof`/`offsetof` behind and no codegen that has to guess.
+                  // (`@atomic` itself takes no part in the arithmetic below —
+                  // see `DecoratorFlags.Atomic` — which is what keeps the layout
+                  // identical with and without it.)
+                  //
+                  // The threads feature is required for the same reason the
+                  // builtins check it: `i32.atomic.load` and friends are the
+                  // threads proposal, and Binaryen emits them only with the
+                  // feature on.
+                  if (boundPrototype.hasDecorator(DecoratorFlags.Atomic)) {
+                    let atomicFieldTypeNode = assert(boundPrototype.fieldDeclaration).type!;
+                    if (!this.program.options.hasFeature(Feature.Threads)) {
+                      this.error(
+                        DiagnosticCode.Not_implemented_0,
+                        atomicFieldTypeNode.range,
+                        "@atomic without the threads feature (the atomic instructions are part of the threads proposal; enable them with `--enable threads`)"
+                      );
+                      break;
+                    }
+                    let atomicRefusal = atomicFieldTypeRefusal(fieldType);
+                    if (atomicRefusal != null) {
+                      this.error(
+                        DiagnosticCode.Not_implemented_0,
+                        atomicFieldTypeNode.range,
+                        atomicRefusal
+                      );
+                      break;
+                    }
+                  }
+                  // === A record's field slots are bytes, so a GC reference is
+                  // refused here, at the declaration ==========================
+                  //
+                  // A `struct` is a C interop type: a binary blob with known
+                  // offsets, and nothing inside it is traced. A GC reference in
+                  // one of its slots is a word the collector never sees — it is
+                  // free to reclaim the object while the record still holds the
+                  // pointer, and the next read dereferences freed memory. That is
+                  // the same hazard `resolveFixedArrayType` /
+                  // `resolveUnmanagedArrayType` refuse for `[T *]` and
+                  // `[T * N]`, and the fix is the same shape: refuse it by name
+                  // where the storage is decided.
+                  //
+                  // **Why here and not at the use.** Before this check the type
+                  // resolved for *introspection* and was refused for every use:
+                  // `struct S { s: string }` compiled, `sizeof<S>()` answered 4
+                  // and `offsetof<S>("s")` answered 0, while `let s: S` and
+                  // `s.s = "x"` were refused later (`compiler.ts`,
+                  // `fillSroaFieldLocals`; `resolver.ts`, the inline-field
+                  // nesting check). Two answers for one declaration, and the
+                  // number `sizeof` gave invited the wrong conclusion — that a
+                  // 4-byte blob with an untraced GC pointer is fine to size a
+                  // buffer with. The layout is where the extent is decided, so it
+                  // is where the claim is false, and refusing before the offset
+                  // is banked means `sizeof` and `offsetof` have nothing wrong to
+                  // report: the record never gets an extent at all.
+                  //
+                  // **Which records.** `InlineStruct` is exactly the plain
+                  // `struct` and `@inline struct` (the parser makes them one
+                  // declaration: `@inline @unmanaged class`), which are the
+                  // forms whose bytes are the record. `@managed struct` is a
+                  // GC-record whose fields `__visit` walks, so a reference there
+                  // is traced and stays accepted; a plain class is not a record
+                  // at all. `@unmanaged class` and `@unmanaged struct` are
+                  // pointer-layout records and are deliberately left out of this
+                  // check — see the round report, where that question is stated
+                  // rather than decided.
+                  //
+                  // **A class reference, not every `isManaged` type.** A field
+                  // of function type is `isManaged` too (`Type#isManaged`, via
+                  // the signature), and its slot holds a table index under the
+                  // pointer ABI — not a collectable pointer. The class form is
+                  // the one that names all five shapes the message lists:
+                  // `string`, a user class, `Array<T>`, and a `@managed struct`
+                  // are all internal class references.
+                  //
+                  // A `@managed [T * N]` field is refused a few lines above
+                  // (`Landing 5c`), before any offset is taken, so it never
+                  // reaches this check.
+                  if (
+                    instance.hasDecorator(DecoratorFlags.InlineStruct) &&
+                    fieldType.isManaged &&
+                    fieldType.classReference != null
+                  ) {
+                    this.error(
+                      DiagnosticCode.Not_implemented_0,
+                      assert(boundPrototype.fieldDeclaration).type!.range,
+                      "a struct cannot hold a GC reference (`string`, a class, `Array<T>`, `@managed struct`); a C record is not scanned, so the reference would dangle. Use `[u8*N]` for an inline char array, `[u8*]` for a char pointer, `usize` for an opaque word, or an `@unmanaged` record"
+                    );
+                    break;
+                  }
+                  // === A value-form array member is bytes too ===============
+                  //
+                  // VT6 refused a direct GC-reference field of a record. The
+                  // array spelling slipped past it: `struct S { a: Foo[4] }`
+                  // compiled, `sizeof<S>()` answered 16, and those four slots
+                  // are four pointers in a record nothing scans -- the same
+                  // dangling reference one step out. `resolveFixedArrayType`
+                  // allows the class element on purpose (a *local* array of
+                  // pointers is coherent), and that choice is untouched; what
+                  // is added here is the member position's verdict on it.
+                  //
+                  // The record test includes `@unmanaged class` / `@unmanaged
+                  // struct`, whose fields are pointer-layout slots in an
+                  // unscanned blob exactly like a plain `struct`'s. `@managed
+                  // struct` is excluded: its inline-array field is already
+                  // refused above (the collector could not trace elements).
+                  //
+                  // The element decides, not the array: only the value form is
+                  // a slot run (`@unmanaged [T * N]` is a pointer and is left
+                  // alone), and only a GC reference is refused (a scalar,
+                  // `usize`, or an `@unmanaged` record element is a C slot).
+                  // Nested value-form arrays are followed to the leaf by
+                  // `fixedArrayGcReference`.
+                  if (
+                    (instance.hasDecorator(DecoratorFlags.InlineStruct) ||
+                     instance.hasDecorator(DecoratorFlags.Unmanaged)) &&
+                    !instance.hasDecorator(DecoratorFlags.ManagedStruct) &&
+                    this.isValueFormFixedArray(fieldType) &&
+                    this.fixedArrayGcReference(fieldType) != null
+                  ) {
+                    this.error(
+                      DiagnosticCode.Not_implemented_0,
+                      assert(boundPrototype.fieldDeclaration).type!.range,
+                      "a struct cannot hold a GC reference (`string`, a class, `Array<T>`, `@managed struct`); a C record is not scanned, so the reference would dangle. Use `[u8*N]` for an inline char array, `[u8*]` for a char pointer, `usize` for an opaque word, or an `@unmanaged` record"
+                    );
+                    break;
+                  }
                   // === Inline nesting, sub-phase A ==========================
                   // A field whose **type** is an `@inline struct` stores the
                   // value's bytes inline instead of a 4-byte pointer. The
@@ -4904,50 +5162,33 @@ export class Resolver extends DiagnosticEmitter {
                 // (other checks are performed once an element is compiled)
                 let typeNode = assert(boundPrototype.fieldDeclaration).type;
                 if (typeNode) {
-                  // An `@inline struct` field is **accepted** when the outer is
-                  // a pointer-layout record (`@unmanaged` / `@managed`): the
-                  // layout branch above gives it the value's own extent and
-                  // alignment, which is the C inline-nesting shape
+                  // An `@inline struct` field is **accepted** wherever a field
+                  // slot is a byte offset: a pointer-layout record
+                  // (`@unmanaged` / `@managed`), and a plain class. The layout
+                  // branch above gives it the value's own extent and alignment,
+                  // which is the C inline-nesting shape
                   // (`struct Outer { struct Inner inner; }`).
                   //
-                  // Inside an **`@inline`** outer it is refused by name: that
+                  // Inside an **`@inline`** outer it is accepted as well: that
                   // outer is itself a value, stored as one WASM local per
-                  // field, so the inner would have to be flattened into the
-                  // outer's own leaves -- SROA flattening, sub-phase B. The
-                  // cycle and GC-reference hazards were already checked above,
-                  // before this field took an extent.
-                  if (
-                    declaredMemoryModelOf(fieldType) == MemoryModel.Inline
-                  ) {
-                    if (instance.hasDecorator(DecoratorFlags.InlineStruct)) {
-                      // Accepted: an inline value nested in an inline value is
-                      // flattened, one WASM local per **leaf**. The outer's SROA
-                      // local creation recurses through the nesting
-                      // (`Compiler#compileSroaLocal`), and a field read walks the
-                      // access chain to the leaf (`#resolveSroaReceiver`).
-                      //
-                      // The two hazards the flat case guards still apply and are
-                      // checked above this branch: a cycle would have no finite
-                      // extent, and a GC-reference leaf has no write barrier under
-                      // a bare `local.set`. Both are refused there, for the inner
-                      // as for the outer.
-                    } else if (
-                      !instance.hasDecorator(DecoratorFlags.Unmanaged) &&
-                      !instance.hasDecorator(DecoratorFlags.ManagedStruct)
-                    ) {
-                      // A plain class: its fields are heap slots reached through a
-                      // reference, so an inline field would be inline *in the heap* --
-                      // the class's allocation size, its `__visit` and its
-                      // constructors would all have to learn about it. That is the
-                      // deferred inline-in-heap case, refused by name so it cannot
-                      // ship as a silently pointer-sized slot.
-                      this.error(
-                        DiagnosticCode.Not_implemented_0,
-                        typeNode.range,
-                        "an @inline struct as a class field (a class field is a pointer slot; inline-in-heap is a separate, deferred case -- use an @unmanaged or @managed record field)"
-                      );
-                    }
-                  }
+                  // field, so the inner is flattened into the outer's own
+                  // leaves. The cycle and GC-reference hazards were already
+                  // checked above, before this field took an extent.
+                  //
+                  // **A plain class is no different.** Its field slot is a byte
+                  // offset into its allocation, so an inline field is inline in
+                  // the heap -- the class's extent (already computed above), its
+                  // constructor's zero fill
+                  // (`Compiler#makeFieldInitializationInConstructor`) and its
+                  // accessors all take the offset like any other field. There is
+                  // no `__visit` hazard to guard: a managed leaf inside an inline
+                  // struct is refused separately and precisely above
+                  // (`findManagedLeaf`), which is the guarantee that makes this
+                  // arm safe.
+                  // To reach here an inline type had to take an extent above,
+                  // which is true for every outer. Nothing else is left to
+                  // check: the cycle and the GC-reference leaf are refused
+                  // there, before the extent is banked.
                   this.program.checkTypeSupported(fieldType, typeNode);
                 }
               }

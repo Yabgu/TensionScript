@@ -17,8 +17,7 @@ import {
   builtinVariables_onCompile,
   compileVisitGlobals,
   compileVisitMembers,
-  compileRTTI,
-  ASYNC_ARENA_SIZE
+  compileRTTI
 } from "./builtins";
 
 import {
@@ -189,6 +188,7 @@ import {
   UnaryPostfixExpression,
   UnaryPrefixExpression,
   CompiledExpression,
+  OnExpression,
 
   TypeNode,
   NamedTypeNode,
@@ -276,23 +276,33 @@ export const defaultFeatures = Feature.MutableGlobals
 // so the two cannot drift apart silently.
 export const ASYNC_IDLE_TAG = "idle";
 export const ASYNC_DONE_TAG = "done";
-/** The A2 suspension tag: its payload is the awaited task's record address. */
+/** The A2 suspension tag: its payload is the awaited task's continuation slot. */
 export const ASYNC_AWAIT_TAG = "await";
 export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
 export const ASYNC_STATUS = "~asyncStatus";
+/**
+ * The exported boot entry of a shared-memory module (`docs/thread-abi.md` §2).
+ *
+ * A name, not a section: the host calls it on the main instance and calls
+ * `__workerMain(rec)` on every other instance, so an instance has exactly one
+ * entry and nothing has to decide at runtime which one it is.
+ */
+export const StartEntryName = "__start";
 export const ASYNC_STATUS_EXPORT = "__asyncStatus";
 /** The status the last normal `resume` returned (A2's core loop reads it). */
 export const ASYNC_LAST_STATUS = "~asyncLastStatus";
-/** The record of the task the core loop is currently resuming. */
-export const ASYNC_CURRENT_RECORD = "~asyncCurrentRecord";
+/** The slot of the task the executor is currently resuming (0 = main). */
+export const ASYNC_CURRENT_SLOT = "~asyncCurrentSlot";
 /** The zero-argument wrapper around `main`, so every continuation is `() -> i32`. */
 export const ASYNC_MAIN_START = "~asyncMainStart";
-/** The task-cell arena: its base and its bump pointer (A2 allocates no heap). */
-export const ASYNC_ARENA_BASE = "~asyncArenaBase";
-export const ASYNC_ARENA_NEXT = "~asyncArenaNext";
 /** The next continuation slot `__installCont` hands out; slot 0 is main. */
 export const ASYNC_NEXT_SLOT = "~asyncNextSlot";
+/** The shared start table: a `funcIndex` both stores resolve identically. */
+export const STARTS_TABLE = "$starts";
+/** Its export name, which is the name the design and the host use. */
+export const STARTS_TABLE_EXPORT = "$starts";
+
 /** A canonical `() -> i32` function, so `$ct` exists before any body compiles. */
 const ASYNC_SIG = "~asyncSig";
 
@@ -534,6 +544,48 @@ export namespace ExportNames {
 
 /** Functions to export if `--exportRuntime` is set. */
 export const runtimeFunctions = [ "__new", "__pin", "__unpin", "__collect" ];
+/**
+ * Arena entry points, exported when `--sharedMemory` is set and the selected
+ * runtime implements them (`std/assembly/rt/**`). A host configures one arena
+ * per instance it creates, which is how a spawned thread learns where its heap
+ * is: `__arenaInit(base, size)`, plus two read-backs for the host and the tests.
+ * The list is looked up, not required, so a runtime without arenas (or a custom
+ * runtime) simply exports nothing here instead of failing to compile.
+ */
+export const arenaFunctions = [ "__arenaInit", "__arenaHeapBase", "__arenaEnd" ];
+/**
+ * The threading surface, exported under `--sharedMemory` and only there.
+ *
+ * `env.__startThread` / `env.__executorCount` are the host imports a shared
+ * build needs; `__threadInit`, `__workerMain`, `__spawnThread`, `__threadJoin`
+ * and `__executorExit` are the exports its host drives. A program compiled
+ * without `--sharedMemory` references none of them, so none of them — and
+ * neither import — is emitted, which is what keeps every existing program
+ * exactly as it was (`docs/thread-abi.md` §5).
+ *
+ * Looked up, not required: `~lib/thread` is pulled in by the async shell, so an
+ * await-free program has no threading surface to export and simply exports
+ * nothing here.
+ */
+export const threadFunctions = [
+  "__threadInit",
+  "__threadJoin",
+  "__workerMain",
+  "__spawnThread",
+  "__executorExit",
+  "__mainArenaBase",
+  "__mainArenaSize",
+  "__workerArenaBase",
+  "__workerArenaSize",
+];
+/** The carved layout, exported so a host and the tests can read it back. */
+export const threadGlobals = [
+  "__heapBase",
+  "__controlBase",
+  "__controlStride",
+  "__ringCapacity",
+  "__executorTotal",
+];
 /** Globals to export if `--exportRuntime` is set. */
 export const runtimeGlobals = [ "__rtti_base" ];
 
@@ -675,6 +727,24 @@ export class Compiler extends DiagnosticEmitter {
   asyncShellStartReady: bool = false;
   /** The `f$start` functions `__installCont` has installed, for the elem segment. */
   asyncStartFunctions: Set<string> = new Set<string>();
+  /**
+   * Helpers answering a `$spawnStart` function's `$starts` index: helper name →
+   * the function's internal name (`__spawnIndexOf` emits the call; the body is
+   * added by `emitStartsTable`, when the index is final).
+   */
+  spawnIndexTargets: Map<string, string> = new Map<string, string>();
+
+  /** The program's own `mainStep`, once found and validated (design §6). */
+  mainStepOverride: Function | null = null;
+  /**
+   * Its static `Function<T>` object's address, when the pointer ABI is in force.
+   *
+   * Reserved in `findMainStepOverride` because that runs before the data
+   * segments are finalized — a reservation made at `__start` time would name a
+   * segment the module never emits, and `call_indirect` would read a garbage
+   * index (measured: `uninitialized element`).
+   */
+  mainStepValueOffset: i64 = i64_zero;
   /** Disambiguates the handler block of each `__resumeSlot` in one function. */
   asyncResumeLabels: i32 = 0;
   /** Whether `main`'s compiled signature returns a value the status can carry. */
@@ -1048,13 +1118,21 @@ export class Compiler extends DiagnosticEmitter {
    */
   private prepareAsyncStackPrologue(): void {
     let module = this.module;
+    // **The executor's queues are atomic by design** (`docs/task-design.md`
+    // §8.5: `SlotRing` is CAS on the tail, atomic store on the head), so a
+    // program that can suspend needs the atomics feature. It is *implied* by
+    // the shell rather than asked for: a user who writes `await` should not have
+    // to know the ring's implementation. The memory stays unshared — atomics on
+    // an unshared memory are valid, and sharing it is the host's decision (T0).
+    this.options.setFeature(Feature.Threads);
     let features = module.getFeatures()
       | FeatureFlags.StackSwitching
       | FeatureFlags.GC
       | FeatureFlags.ReferenceTypes
       | FeatureFlags.ExceptionHandling
       | FeatureFlags.MultiValue
-      | FeatureFlags.MutableGlobals;
+      | FeatureFlags.MutableGlobals
+      | FeatureFlags.Atomics;
     module.setFeatures(features);
     assert((module.getFeatures() & FeatureFlags.StackSwitching) != 0);
 
@@ -1084,28 +1162,17 @@ export class Compiler extends DiagnosticEmitter {
     module.addTable(ASYNC_CONT_TABLE, 16, 65536, this.asyncCtMainRef);
 
     module.addGlobal(ASYNC_LAST_STATUS, TypeRef.I32, true, module.i32(0));
-    module.addGlobal(ASYNC_CURRENT_RECORD, TypeRef.I32, true, module.i32(0));
+    // The slot the executor is resuming. `f$start` reads the task object from
+    // the slot table through this index (resume sends no operands).
+    module.addGlobal(ASYNC_CURRENT_SLOT, TypeRef.I32, true, module.i32(0));
     module.addGlobal(ASYNC_NEXT_SLOT, TypeRef.I32, true, module.i32(1));
     module.addGlobal(ASYNC_STATUS, TypeRef.I32, true, module.i32(0));
     module.addGlobalExport(ASYNC_STATUS, ASYNC_STATUS_EXPORT);
 
-    // Task cells come from a static, zeroed arena. `new` would pull the
-    // runtime and its `env.abort` import into every module that starts a task;
-    // a module that cannot instantiate without a host stub is not the shape
-    // A1 established, and the round's tests run it on plain wasmtime. The
-    // arena is reserved as a data segment, so `__data_end` and the heap start
-    // after it and no allocator is involved.
-    // A cell address of 0 is the core loop's "main" sentinel, so the arena
-    // must not start at 0. It does only when the program explicitly asks for
-    // `--memoryBase 0`; a padding segment moves it to 8.
-    if (i64_low(this.memoryOffset) == 0 && i64_high(this.memoryOffset) == 0) {
-      this.addAlignedMemorySegment(new Uint8Array(8), 8);
-    }
-    let arena = new Uint8Array(ASYNC_ARENA_SIZE);
-    let arenaSegment = this.addAlignedMemorySegment(arena, 8);
-    let arenaBase = i64_low(arenaSegment.offset);
-    module.addGlobal(ASYNC_ARENA_BASE, TypeRef.I32, false, module.i32(arenaBase));
-    module.addGlobal(ASYNC_ARENA_NEXT, TypeRef.I32, true, module.i32(arenaBase));
+    // **No cell arena.** A task is one object allocated by its entry with
+    // `new` — `struct.new` on the GC ABI, the guest allocator otherwise — and
+    // its fields are the captured parameters. The 256 KiB static arena and its
+    // exhaustion trap are gone with the record it existed for.
 
     this.asyncShellPrepared = true;
   }
@@ -1155,6 +1222,11 @@ export class Compiler extends DiagnosticEmitter {
       return;
     }
 
+    // **Before the function table is materialized.** The program's own
+    // `mainStep`, if it has one, takes a table slot here (`findMainStepOverride`
+    // explains why that cannot wait for `__start`).
+    this.mainStepOverride = this.findMainStepOverride();
+
     this.asyncShellSuspends = true;
     this.asyncShellPrepared = true;
     this.asyncShellStartReady = true;
@@ -1177,6 +1249,31 @@ export class Compiler extends DiagnosticEmitter {
 
     this.asyncStartFunctions.add(ASYNC_MAIN_START);
     this.asyncStartFunctions.add(coreloop.internalName);
+
+    // **The spawn starts, compiled here and not by reachability.** Nothing in
+    // the program references `f$spawnStart`: a request names it by *index* in
+    // `$starts`, which no call site can express. So they are compiled
+    // explicitly, before the lazy queue is drained, exactly as `__installCont`
+    // compiles the `f$start` it installs.
+    let spawnStarts = program.asyncSpawnStarts;
+    let spawnElements = program.elementsByDeclaration;
+    for (let i = 0, k = spawnStarts.length; i < k; ++i) {
+      let element = spawnElements.get(unchecked(spawnStarts[i]));
+      if (!element) continue;
+      // The map holds the **prototype** at this point (`FunctionPrototype`),
+      // not the instance: `initialize` registers declarations, and an instance
+      // exists only once something resolves it. Resolving here is the same act
+      // `__installCont` performs for the `f$start` it installs.
+      let instance: Function | null = null;
+      if (element.kind == ElementKind.Function) {
+        instance = <Function>element;
+      } else if (element.kind == ElementKind.FunctionPrototype) {
+        instance = this.resolver.resolveFunction(<FunctionPrototype>element, null);
+      }
+      if (!instance) continue;
+      this.compileFunction(instance);
+      this.asyncStartFunctions.add(instance.internalName);
+    }
   }
 
   /**
@@ -1190,6 +1287,15 @@ export class Compiler extends DiagnosticEmitter {
   private emitAsyncStackShellStart(body: ExpressionRef[]): void {
     let module = this.module;
     let coreloop = this.program.requireFunction(BuiltinNames.asyncCoreloopAwait);
+
+    // The program's own `mainStep`, if it declared one (`docs/policy-and-threads.md`
+    // §6). **Appended, not prepended**: a GC program's std globals are
+    // initialized in `__start` at runtime, so a call placed before them is
+    // overwritten by `defaultStep = __mainStep__` (measured: the custom step
+    // ran in the pointer ABI and never in the GC one). Appending puts it after
+    // every initializer and before the resume, which is exactly the window the
+    // retrofit in `__setDefaultMainStep` is for.
+    this.emitMainStepOverride(body);
 
     body.push(
       module.table_set(
@@ -1230,6 +1336,94 @@ export class Compiler extends DiagnosticEmitter {
     body.push(module.drop(idleBlock));
   }
 
+  /**
+   * Installs a program's `mainStep` as the executors' default step.
+   *
+   * `docs/policy-and-threads.md` §6: the compiler ships `__mainStep__` and a
+   * program may replace it at the top level. The name is the program's, so the
+   * compiler looks it up rather than requiring an export — a `mainStep` nobody
+   * exports is still the program's loop, and `mainExecutor.step = …` overrides
+   * it at runtime (Gate 3c).
+   *
+   * The signature is checked here rather than left to the call: a `mainStep`
+   * with the wrong shape would otherwise fail as a function-value mismatch deep
+   * in the shell, which says nothing about what the program has to fix.
+   */
+  private emitMainStepOverride(body: ExpressionRef[]): void {
+    let instance = this.mainStepOverride;
+    if (instance == null) return;
+    let setter = this.program.requireFunction("~lib/thread/__setDefaultMainStep");
+    this.compileFunction(setter);
+    let valueType = instance.signature.type;
+    let stepValue: ExpressionRef;
+    if (this.gcActive && gcFunctionValueUsable(valueType)) {
+      stepValue = this.makeGcFunctionValue(instance);
+    } else {
+      let offset = this.mainStepValueOffset;
+      stepValue = this.options.isWasm64
+        ? this.module.i64(i64_low(offset), i64_high(offset))
+        : this.module.i32(i64_low(offset));
+    }
+    let module = this.module;
+    body.push(module.call(setter.internalName, [ stepValue ], TypeRef.None));
+  }
+
+  /**
+   * Finds, validates and **reserves a table slot for** the program's `mainStep`.
+   *
+   * Called from `prepareAsyncStackShell`, which runs before the function table is
+   * materialized — and that ordering is the whole reason this is a separate step
+   * from {@link emitMainStepOverride}. Measured: reserving the slot at `__start`
+   * time put the entry past the table's fixed size, and the indirect call trapped
+   * with `uninitialized element`.
+   *
+   * The lookup is `getMember` on the entry files, not `program.lookup`: the
+   * program index is keyed by *internal* name, whose prefix is a function of
+   * where the program sits on disk.
+   */
+  private findMainStepOverride(): Function | null {
+    let element: Element | null = null;
+    let files = this.program.filesByName;
+    for (let _files = Map_values(files), i = 0, k = _files.length; i < k && element == null; ++i) {
+      let file = unchecked(_files[i]);
+      if (file.source.sourceKind != SourceKind.UserEntry) continue;
+      let member = file.getMember("mainStep");
+      if (member != null) element = member;
+    }
+    if (element == null) return null;
+    let instance: Function | null = null;
+    if (element.kind == ElementKind.Function) {
+      instance = <Function>element;
+    } else if (element.kind == ElementKind.FunctionPrototype) {
+      instance = this.resolver.resolveFunction(<FunctionPrototype>element, null);
+    }
+    if (instance == null) return null;
+    let sig = instance.signature;
+    let paramType = sig.parameterTypes.length == 1 ? unchecked(sig.parameterTypes[0]) : null;
+    let paramClass = paramType != null ? paramType.classReference : null;
+    if (
+      paramClass == null ||
+      paramClass.internalName != "~lib/thread/Executor" ||
+      sig.returnType != Type.bool
+    ) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        instance.declaration.name.range,
+        "mainStep must be `(e: Executor) => bool` (the executor's one iteration)"
+      );
+      return null;
+    }
+    // Compile it and take its table index now: the table is sized and filled
+    // from `functionTable` after this point, so a reservation made later would
+    // be a slot the element segment never writes.
+    if (!this.compileFunction(instance)) return null;
+    this.ensureFunctionTableIndex(instance);
+    if (!(this.gcActive && gcFunctionValueUsable(instance.signature.type))) {
+      this.mainStepValueOffset = this.ensureRuntimeFunction(instance);
+    }
+    return instance;
+  }
+
   /** Declares every function `cont.new` references, as `ref.func` requires. */
   private emitAsyncStartElements(): void {
     let names = Set_values(this.asyncStartFunctions);
@@ -1237,6 +1431,53 @@ export class Compiler extends DiagnosticEmitter {
     let list = new Array<string>(names.length);
     for (let i = 0, k = names.length; i < k; ++i) unchecked(list[i] = unchecked(names[i]));
     this.module.addPassiveElementSegment("~asyncStart", list);
+  }
+
+  /**
+   * `(table $starts N N funcref)` + its active element segment + the export.
+   *
+   * **The one place a `funcIndex` means the same thing in every store.** All
+   * threads instantiate this module, so index `k` is the same function in each
+   * (`docs/task-design.md` §3). A request that crosses a thread boundary carries
+   * a slot index and a `funcIndex`, never a reference: references do not survive
+   * a store (F1/F2), indices do.
+   *
+   * **The order is program order, and it is deterministic.** The entries are the
+   * functions the compiler installs as continuations — `~asyncMainStart`, the
+   * executor loop, and each `f$start` in the order its entry was compiled — held
+   * by `asyncStartFunctions` in registration order. The same source compiled
+   * twice gives the same table; a hash-ordered set would not.
+   *
+   * The segment is **active**, not passive: `table.get $starts k` is what a
+   * served request reads, so the contents have to be in the table at runtime, not
+   * merely declared for `ref.func`'s sake.
+   */
+  private emitStartsTable(): void {
+    let names = Set_values(this.asyncStartFunctions);
+    let count = names.length;
+    let list = new Array<string>(count);
+    for (let i = 0; i < count; ++i) unchecked(list[i] = unchecked(names[i]));
+    let module = this.module;
+    module.addTable(STARTS_TABLE, count, count, TypeRef.funcref());
+    if (count > 0) {
+      module.addActiveElementSegment(STARTS_TABLE, "$starts$elem", list, module.i32(0));
+    }
+    module.addTableExport(STARTS_TABLE, STARTS_TABLE_EXPORT);
+
+    // `__spawnIndexOf` emitted a call per spawn entry; their bodies are the
+    // index the entry holds **now that the table is final**. A plain function
+    // per entry, not a global: a worker's copy of a module global is zero (its
+    // `$start` never ran), while a constant in code is the same in every store.
+    let helpers = this.spawnIndexTargets;
+    for (let _names = Map_keys(helpers), i = 0, k = _names.length; i < k; ++i) {
+      let helper = _names[i];
+      let target = unchecked(helpers.get(helper));
+      let index = -1;
+      for (let j = 0; j < count; ++j) {
+        if (unchecked(list[j]) == target) { index = j; break; }
+      }
+      module.addFunction(helper, TypeRef.None, TypeRef.I32, null, module.i32(index));
+    }
   }
 
   /** Performs compilation of the underlying {@link Program} to a {@link Module}. */
@@ -1357,6 +1598,58 @@ export class Compiler extends DiagnosticEmitter {
         let instance = program.requireGlobal(name);
         if (this.compileGlobal(instance) && !module.hasExport(name)) {
           module.addGlobalExport(instance.internalName, name);
+        }
+      }
+    }
+
+    // Export the arena entry points of a shared-memory module — the one guest
+    // function a host calls on every instance it creates to say where that
+    // instance's heap lives. They belong to the same family as `__new` /
+    // `__collect` and are exported on the same condition: `--exportRuntime`, the
+    // switch that says a host drives this module's runtime. `program.lookup`
+    // decides the rest — a runtime that does not implement arenas exports none.
+    //
+    // Not under `--wasmGc`: there the linear allocator is emitted by this
+    // compiler (`~gc/linNew`), not by `std/assembly/rt`, so a runtime-side arena
+    // would bound nothing. Exporting an entry point that cannot bound the heap
+    // would be worse than exporting none — a host would believe it had configured
+    // a heap. Parametrizing that allocator is a separate front.
+    //
+    // **One gate, not two.** `--sharedMemory` is the switch that says this
+    // module is instantiated more than once over one memory, and a per-instance
+    // heap is what that requires; demanding `--exportRuntime` as well made the
+    // same feature reachable two ways and absent in one of them. A build that
+    // does not share memory gets none of this, byte for byte.
+    if (this.options.sharedMemory && !this.gcActive) {
+      for (let i = 0, k = arenaFunctions.length; i < k; ++i) {
+        let name = arenaFunctions[i];
+        if (program.lookup(name) == null) continue; // runtime has no arenas
+        let instance = program.requireFunction(name);
+        if (this.compileFunction(instance) && !module.hasExport(name)) {
+          module.addFunctionExport(instance.internalName, name);
+        }
+      }
+      // **Only with the async shell.** The entries operate on `$starts` and
+      // `$~asyncCont`, and a shared program that merely imports `SlotRing` has
+      // neither: exporting them would pull the shell into a program that has no
+      // continuation table to serve from. `--sharedMemory` alone still decides
+      // whether a program *with* a shell gets them.
+      if (this.asyncShellPrepared) {
+        for (let i = 0, k = threadFunctions.length; i < k; ++i) {
+          let name = threadFunctions[i];
+          if (program.lookup(name) == null) continue; // no async shell, no threads
+          let instance = program.requireFunction(name);
+          if (this.compileFunction(instance) && !module.hasExport(name)) {
+            module.addFunctionExport(instance.internalName, name);
+          }
+        }
+        for (let i = 0, k = threadGlobals.length; i < k; ++i) {
+          let name = threadGlobals[i];
+          if (program.lookup(name) == null) continue;
+          let instance = program.requireGlobal(name);
+          if (this.compileGlobal(instance) && !module.hasExport(name)) {
+            module.addGlobalExport(instance.internalName, name);
+          }
         }
       }
     }
@@ -1534,6 +1827,7 @@ export class Compiler extends DiagnosticEmitter {
       if (this.asyncShellSuspends) {
         if (this.asyncShellStartReady) {
           this.emitAsyncStartElements();
+          this.emitStartsTable();
           this.emitAsyncStackShellStart(startFunctionBody);
         }
       } else {
@@ -1541,11 +1835,22 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
+    // **A shared-memory module has no start section.** The host instantiates
+    // this module again for every worker, and a start section runs on every
+    // instantiation: every worker would run `main` a second time, on its own
+    // copy of the globals, against the same shared memory. So the boot body is
+    // a plain exported function, `__start() -> i32`, and the host decides which
+    // entry each instance gets — `__start` for main, `__workerMain(rec)` for a
+    // worker (`docs/thread-abi.md` §2). One entry per instance, chosen by the
+    // host: no boot words in memory and no "am I a worker" branch in the guest.
+    //
+    // A build without `--sharedMemory` keeps its start section and is unchanged.
     let startIsEmpty = !startFunctionBody.length;
     let exportStart = options.exportStart;
-    if (!startIsEmpty || exportStart != null) {
+    let shared = this.options.sharedMemory;
+    if (!startIsEmpty) {
       let signature = startFunctionInstance.signature;
-      if (!startIsEmpty && exportStart != null) {
+      if (exportStart != null) {
         module.addGlobal(BuiltinNames.started, TypeRef.I32, true, module.i32(0));
         startFunctionBody.unshift(
           module.global_set(BuiltinNames.started, module.i32(1))
@@ -1565,18 +1870,17 @@ export class Compiler extends DiagnosticEmitter {
         module.flatten(startFunctionBody)
       );
       startFunctionInstance.finalize(module, funcRef);
-      if (exportStart == null) module.setStart(funcRef);
-      else {
-        if (!isIdentifier(exportStart) || module.hasExport(exportStart)) {
-          this.error(
-            DiagnosticCode.Start_function_name_0_is_invalid_or_conflicts_with_another_export,
-            Source.native.range, exportStart
-          );
-        } else {
-          module.addFunctionExport(startFunctionInstance.internalName, exportStart);
-        }
+      if (shared) {
+        // No start section. `--exportStart` still means "export this instead",
+        // so a host that asked for a name keeps it.
+        if (exportStart != null) this.exportStartUnder(startFunctionInstance, exportStart);
+      } else if (exportStart == null) {
+        module.setStart(funcRef);
+      } else {
+        this.exportStartUnder(startFunctionInstance, exportStart);
       }
     }
+    if (shared) this.emitStartEntry(startFunctionInstance, startIsEmpty);
 
     // Run custom passes
     if (hasShadowStack) {
@@ -1587,6 +1891,58 @@ export class Compiler extends DiagnosticEmitter {
     }
 
     return module;
+  }
+
+  /** Validates and applies `--exportStart`, reporting a conflict by name. */
+  private exportStartUnder(startFunctionInstance: Function, exportStart: string): void {
+    let module = this.module;
+    if (!isIdentifier(exportStart) || module.hasExport(exportStart)) {
+      this.error(
+        DiagnosticCode.Start_function_name_0_is_invalid_or_conflicts_with_another_export,
+        Source.native.range, exportStart
+      );
+    } else {
+      module.addFunctionExport(startFunctionInstance.internalName, exportStart);
+    }
+  }
+
+  /**
+   * `__start() -> i32` — the one entry a shared-memory module's main instance
+   * gets: everything the start section would have done, and the status the
+   * shell reached, so a host reads the result of `main` from the call itself.
+   *
+   * `$~start` is unchanged and still exists as a function; it is simply not the
+   * start section any more. The shell's status global is read after the call
+   * rather than returned from it because the shell's own continuations return
+   * through `resume`, not to a wasm caller.
+   */
+  private emitStartEntry(startFunctionInstance: Function, startIsEmpty: bool): void {
+    let module = this.module;
+    let body = new Array<ExpressionRef>();
+    if (!startIsEmpty) {
+      body.push(module.call(startFunctionInstance.internalName, null, TypeRef.None));
+    }
+    body.push(this.asyncShellPrepared
+      ? module.global_get(ASYNC_STATUS, TypeRef.I32)
+      : module.i32(0)
+    );
+    let funcRef = module.addFunction(
+      StartEntryName,
+      TypeRef.None,
+      TypeRef.I32,
+      null,
+      module.block(null, body, TypeRef.I32)
+    );
+    if (module.hasExport(StartEntryName)) {
+      this.error(
+        DiagnosticCode.Start_function_name_0_is_invalid_or_conflicts_with_another_export,
+        Source.native.range, StartEntryName
+      );
+      return;
+    }
+    // `addFunction` gives the module the function; the export needs its name.
+    module.addFunctionExport(StartEntryName, StartEntryName);
+    void funcRef;
   }
 
   private initDummyMemory(): void {
@@ -3356,6 +3712,36 @@ export class Compiler extends DiagnosticEmitter {
     let thisTypeRef = this.options.sizeTypeRef;
     getterInstance.set(CommonFlags.Compiled);
 
+    // **An `@atomic` field reads with an atomic load, inside `get:`.**
+    //
+    // The getter is the single hook every read goes through — `this.x`, `obj.x`,
+    // `arr[i].x`, a constructor's own accesses — so emitting the instruction here
+    // is what makes the guarantee unbypassable: there is no path that reads the
+    // field non-atomically, because there is no path that does not call this
+    // function. Emitting it at each *use site* instead would be a promise kept
+    // only where someone remembered.
+    //
+    // `gcClass` is null by construction: a class with an `@atomic` field is not
+    // eligible for the GC ABI (`types.ts` `gcStructFieldsSupported`), because
+    // `struct.get` has no atomic form. The assert states that rather than
+    // assuming it.
+    if (property.hasDecorator(DecoratorFlags.Atomic)) {
+      assert(this.gcClassOfFieldGetter(property) == null);
+      let atomicBody = module.atomic_load(
+        valueType.byteSize,
+        module.local_get(0, thisTypeRef),
+        valueTypeRef,
+        property.memoryOffset
+      );
+      return module.addFunction(
+        getterInstance.internalName,
+        thisTypeRef,
+        valueTypeRef,
+        getterInstance.getNonParameterLocalTypeRefs(),
+        atomicBody
+      );
+    }
+
     // **A wasm GC class reads its field by type, not by offset.** `struct.get`
     // needs the struct's heap type and the field's *index*, and a reference has
     // no `i32` to add an offset to — so this is the one branch where the offset
@@ -3444,6 +3830,30 @@ export class Compiler extends DiagnosticEmitter {
     // and the field's index. No write barrier either — the engine's tracer owns
     // the edges, which is the whole reason `__link` disappears on this path.
     let gcClass = this.gcClassOfFieldSetter(property);
+    // **An `@atomic` field writes with an atomic store, inside `set:`** — the
+    // companion of the getter's note, and the other half of the guarantee: every
+    // write goes through this function, so no write can be non-atomic. There is
+    // no write barrier to think about, either: a barrier would be a second store
+    // to another word, and an atomic field's value type is an integer (references
+    // are refused at the declaration, `resolver.ts`).
+    if (property.hasDecorator(DecoratorFlags.Atomic)) {
+      assert(gcClass == null);
+      setterInstance.set(CommonFlags.Compiled);
+      let atomicBody = module.atomic_store(
+        valueType.byteSize,
+        module.local_get(0, thisTypeRef),
+        module.local_get(1, valueTypeRef),
+        valueTypeRef,
+        property.memoryOffset
+      );
+      return module.addFunction(
+        setterInstance.internalName,
+        createType([ thisTypeRef, valueTypeRef ]),
+        TypeRef.None,
+        null,
+        atomicBody
+      );
+    }
     if (gcClass != null) {
       let classTypeRef = gcClass.type.toRef();
       let body = module.struct_set(
@@ -6284,6 +6694,10 @@ export class Compiler extends DiagnosticEmitter {
           : this.compileLoweredAwaitExpression(<AwaitExpression>expression);
         break;
       }
+      case NodeKind.On: {
+        expr = this.compileOnExpression(<OnExpression>expression, contextualType);
+        break;
+      }
       case NodeKind.Lazy: {
         // Reached only for a `@lazy` the declaration path did *not* take -- in
         // practice, a binding the closure transform captured, whose storage and
@@ -7663,6 +8077,13 @@ export class Compiler extends DiagnosticEmitter {
     }
     let target = resolver.lookupExpression(left, this.currentFlow);
     if (!target) return module.unreachable();
+    // A compound operator on an `@atomic` field is refused here, before the store:
+    // the read has already been compiled (through the getter, so atomically), but
+    // the composite would still be a load and a store with a gap between them.
+    // See `refuseAtomicReadModifyWrite` for why it is not desugared to an RMW.
+    if (this.refuseAtomicReadModifyWrite(target, operatorTokenToString(operator), expression)) {
+      return module.unreachable();
+    }
     let targetType = resolver.getTypeOfElement(target);
     if (!targetType) targetType = Type.void;
     if (!this.currentType.isStrictlyAssignableTo(targetType)) {
@@ -8552,6 +8973,7 @@ export class Compiler extends DiagnosticEmitter {
     contextualType: Type
   ): ExpressionRef {
     let program = this.program;
+    let module = this.module;
     let resolver = program.resolver;
     let flow = this.currentFlow;
 
@@ -8594,6 +9016,34 @@ export class Compiler extends DiagnosticEmitter {
           elementAccess, arrayType, true,
           contextualType, Constraints.None, valueExpression
         );
+      }
+      // `arr[i] = value` on `Array<Res>` where the element is an `@inline
+      // struct`: the SROA -> memory copy at `dataStart + i * sizeof(Res)`.
+      // Before the GC and index-signature arms, both of which take the element
+      // as a value with no representation.
+      if (arrayType != null && contextualType == Type.void) {
+        let inlineElement = this.inlineStructArrayElementOf(arrayType);
+        if (inlineElement != null) {
+          let sourceTree = this.sroaTreeOf(valueExpression);
+          if (sourceTree == null) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              valueExpression.range,
+              "assigning this expression to an Array element of an @inline struct type (only a value held in a local can be stored: a value has no address, so there are no leaves to copy)"
+            );
+            this.currentType = Type.void;
+            return module.unreachable();
+          }
+          let address = this.compileInlineStructArrayElementAddress(
+            elementAccess, arrayType, inlineElement
+          );
+          let addrLocal = flow.getTempLocal(this.options.usizeType);
+          let writeStmts = new Array<ExpressionRef>();
+          writeStmts.push(module.local_set(addrLocal.index, address, false));
+          this.copySroaToMemory(inlineElement, sourceTree, addrLocal.index, 0, writeStmts);
+          this.currentType = Type.void;
+          return module.flatten(writeStmts, TypeRef.None);
+        }
       }
       // **`a[i] = v` on a wasm GC `StaticArray<T>`: `array.set`.** Intercepted
       // here, before the index-signature lookup — that lookup resolves `__set`,
@@ -8719,6 +9169,55 @@ export class Compiler extends DiagnosticEmitter {
       }
       case ElementKind.Property: {
         let propertyInstance = <Property>target;
+        // `obj.field = value` where `field` holds inline bytes in a
+        // **pointer-layout** object and `value` is an SROA local: the memory <-
+        // SROA direction of the whole-value copy. `$rec.value = $r` in the
+        // stackful async lowering is exactly this shape — the task object's
+        // inline result field — and compiling `value` first would read it as a
+        // whole, which is the refusal this replaces.
+        //
+        // Only statement position is taken: an assignment used as a value would
+        // need this copy to produce one, and an inline struct has no value
+        // representation to produce. That shape keeps its named refusal.
+        if (
+          contextualType == Type.void &&
+          propertyInstance.isField &&
+          this.isInlineStructType(propertyInstance.type) &&
+          thisExpression != null
+        ) {
+          let sourceTree = this.sroaTreeOf(valueExpression);
+          if (sourceTree != null) {
+            let sourceType = resolver.resolveExpression(valueExpression, this.currentFlow);
+            if (sourceType == null || !sourceType.equals(propertyInstance.type)) {
+              this.error(
+                DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+                valueExpression.range,
+                sourceType != null ? sourceType.toString() : "unknown",
+                propertyInstance.type.toString()
+              );
+              return module.unreachable();
+            }
+            let receiverType = resolver.resolveExpression(thisExpression, this.currentFlow);
+            if (receiverType == null) return module.unreachable();
+            let receiver = this.compileExpression(
+              thisExpression, receiverType, Constraints.ConvImplicit
+            );
+            let offset = propertyInstance.memoryOffset;
+            let address = offset
+              ? module.binary(
+                  BinaryOp.AddSize,
+                  receiver,
+                  this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+                )
+              : receiver;
+            let addrLocal = flow.getTempLocal(this.options.usizeType);
+            let stmts = new Array<ExpressionRef>();
+            stmts.push(module.local_set(addrLocal.index, address, false));
+            this.copySroaToMemory(propertyInstance.type, sourceTree, addrLocal.index, 0, stmts);
+            this.currentType = Type.void;
+            return module.flatten(stmts, TypeRef.None);
+          }
+        }
         if (propertyInstance.isField) {
           if (this.pendingElements.has(target)) {
             this.error(
@@ -8769,6 +9268,52 @@ export class Compiler extends DiagnosticEmitter {
         assert(parameterTypes.length == 2); // parser must guarantee this
         targetType = parameterTypes[1];     // 2nd parameter is the element
 
+        // `arr[i] = value` where the element is an `@inline struct` and the
+        // value is an SROA local. The setter takes the value **by value**, so
+        // the direct call expands the leaves — the same `expandSroaArgument`
+        // path every other by-value call uses. Compiling `value` first would
+        // read it as a whole, which is the refusal this replaces; `Array<Res>`
+        // is this shape (`Array#__set`).
+        if (
+          contextualType == Type.void &&
+          this.isInlineStructType(targetType)
+        ) {
+          let sourceTree = this.sroaTreeOf(valueExpression);
+          if (sourceTree == null) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              valueExpression.range,
+              "assigning this expression to an Array element of an @inline struct type (only a value held in a local can be stored: a value has no address, so there are no leaves to copy)"
+            );
+            this.currentType = Type.void;
+            return module.unreachable();
+          }
+          if (sourceTree != null) {
+            let sourceType = resolver.resolveExpression(valueExpression, this.currentFlow);
+            if (sourceType == null || !sourceType.equals(targetType)) {
+              this.error(
+                DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+                valueExpression.range,
+                sourceType != null ? sourceType.toString() : "unknown",
+                targetType.toString()
+              );
+              return module.unreachable();
+            }
+            let setterThisType = assert(indexedSet.signature.thisType);
+            let setterThis = this.compileExpression(
+              assert(thisExpression), setterThisType,
+              Constraints.ConvImplicit | Constraints.IsThis
+            );
+            this.currentType = Type.void;
+            return this.compileCallDirect(
+              indexedSet,
+              [ assert(elementExpression), valueExpression ],
+              expression,
+              setterThis
+            );
+          }
+        }
+
         if (indexedSet.hasDecorator(DecoratorFlags.Unsafe)) this.checkUnsafe(expression);
         if (!isUnchecked && this.options.pedantic) {
           this.pedantic(
@@ -8801,6 +9346,84 @@ export class Compiler extends DiagnosticEmitter {
       elementExpression,
       contextualType != Type.void
     );
+  }
+
+  /** The `@atomic` field a target names, or `null` when the target is not one. */
+  private atomicFieldOf(target: Element): Property | null {
+    let property: Property;
+    switch (target.kind) {
+      case ElementKind.PropertyPrototype: {
+        let instance = this.resolver.resolveProperty(<PropertyPrototype>target);
+        if (!instance) return null;
+        property = instance;
+        break;
+      }
+      case ElementKind.Property: {
+        property = <Property>target;
+        break;
+      }
+      default: return null;
+    }
+    return property.isField && property.hasDecorator(DecoratorFlags.Atomic)
+      ? property
+      : null;
+  }
+
+  /**
+   * The atomic read-modify-write that expresses `operator`, for a refusal message.
+   *
+   * Spelled out per operator rather than left as a generic "use an RMW", because
+   * the point of the refusal is that the reader must write the **one** instruction
+   * that does the whole step — and the name of that instruction is the only useful
+   * thing a message can give them.
+   */
+  private static atomicRmwHint(operator: string): string {
+    switch (operator) {
+      case "+=": case "++": return "atomic.add<T>(addressOf(aField), delta)";
+      case "-=": case "--": return "atomic.sub<T>(addressOf(aField), delta)";
+      case "&=": return "atomic.and<T>(addressOf(aField), mask)";
+      case "|=": return "atomic.or<T>(addressOf(aField), mask)";
+      case "^=": return "atomic.xor<T>(addressOf(aField), mask)";
+      default: return "atomicCompareExchange<T>(addressOf(aField), expect, replace) in a loop, or atomic.add/atomic.sub";
+    }
+  }
+
+  /**
+   * Refuses a **read-modify-write** of an `@atomic` field — `f += 1`, `f -= 1`,
+   * `f++`, `--f` — and returns `true` when it did (an error was reported).
+   *
+   * The composite is the problem, not the individual accesses. `ring.head += 1`
+   * compiles to a get (one atomic load), an add, and a set (one atomic store):
+   * **three** steps, and another agent can observe or interleave between the load
+   * and the store, so the increment is lost under exactly the contention atomics
+   * are for. Every other compound operator has the same shape, and so do `++`
+   * and `--`.
+   *
+   * **It is refused rather than desugared to `fetch_add`.** Quietly turning `+=`
+   * into one RMW would make this one operator mean something different from every
+   * other compound operator in the language (`*=` on the same field would still be
+   * a read plus a write), and "atomic only when we can guess" is the kind of
+   * invisible change this project refuses. The user writes the RMW, and the source
+   * then says exactly what the machine does.
+   */
+  private refuseAtomicReadModifyWrite(
+    /** The assignment target. */
+    target: Element,
+    /** The operator as written, for the message. */
+    operator: string,
+    /** Node the diagnostic points at. */
+    reportNode: Node
+  ): bool {
+    if (this.atomicFieldOf(target) == null) return false;
+    this.error(
+      DiagnosticCode.Not_implemented_0,
+      reportNode.range,
+      "an @atomic field cannot be updated with `" + operator +
+        "` (a read then a write is two atomic steps, not one). Use `" +
+        Compiler.atomicRmwHint(operator) +
+        "` for a single read-modify-write — the field's address is `changetype<usize>(instance) + offsetof<Class>(\"field\")`."
+    );
+    return true;
   }
 
   /** Makes an assignment expression or block, assigning a value to a target. */
@@ -8898,6 +9521,16 @@ export class Compiler extends DiagnosticEmitter {
         if (thisExpression != null) {
           let sroaReceiver = this.resolveSroaReceiver(thisExpression);
           if (sroaReceiver != null) {
+            // The write half of the SROA refusal the read path states: a local has
+            // no address, so `local.set` cannot be an atomic store.
+            if (propertyInstance.hasDecorator(DecoratorFlags.Atomic)) {
+              this.error(
+                DiagnosticCode.Not_implemented_0,
+                valueExpression.range,
+                "writing an @atomic field of an @inline struct in SROA position (a value-form record lives in WASM locals, which have no address, so the write cannot be atomic; reach the record through memory — a field of a class, or a `@unmanaged` view over bytes — where the accessor carries the atomic instruction)"
+              );
+              return module.unreachable();
+            }
             let fieldLocals = assert(sroaReceiver.fieldLocals);
             if (!fieldLocals.has(propertyInstance.name)) {
               this.error(
@@ -9736,6 +10369,32 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (instance.hasDecorator(DecoratorFlags.Unsafe)) this.checkUnsafe(reportNode);
 
+    // **`Array<Res>` methods other than the index operators are refused by
+    // name.** The std bodies index with `i << alignof<T>()`, which is the
+    // element's size only for a power-of-two scalar; an `@inline struct` element
+    // is inline bytes whose size and alignment can disagree. The compiler emits
+    // `[]`/`[]=` itself, and the layout accessors below are unaffected; every
+    // other method would address the wrong bytes.
+    let arrayThisType = signature.thisType;
+    if (arrayThisType != null) {
+      let arrayElement = this.inlineStructArrayElementOf(arrayThisType);
+      if (
+        arrayElement != null &&
+        !this.isInlineStructArrayMethodAllowed(instance.prototype.name)
+      ) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          reportNode.range,
+          "calling '" + instance.prototype.name + "' on an Array<" +
+            arrayElement.toString() + "> whose element is an @inline struct " +
+            "(the std body indexes elements by alignment, not by sizeof; the " +
+            "index operator `arr[i]` is the supported path)"
+        );
+        this.currentType = signature.returnType;
+        return this.module.unreachable();
+      }
+    }
+
     // Sret: take the destination address **now**, before any argument is
     // compiled. An argument that is itself an sret call allocates its own slot
     // and sets `sretDestSlot` for *its* call; consuming early is what keeps the
@@ -10201,9 +10860,33 @@ export class Compiler extends DiagnosticEmitter {
     let numParameters = parameterTypes.length;
     let tempIndex = 1 + assert(instance.signature).wasmParamCount(); // incl. `this` and the hidden dest
 
-    // Switch over this's rtId and map it to the respective overload
-    let builder = new SwitchBuilder(this.module,
-      module.load(4, false,
+    // **Under wasm GC the receiver is a reference, not a pointer.** There is no
+    // object header to read (`*(this - 8)` is an i32 load through a ref), and
+    // `this` is not an i32 local. The dispatch key is the struct's brand field
+    // instead: `struct.get $<brand>` at `GC_BRAND_INDEX`, which every class in
+    // the hierarchy carries at field 0, so reading through the stub's own `this`
+    // type is well-typed for every override. `ref.test` cannot do this job —
+    // structural type identity makes it true for a sibling with the same layout
+    // (`makeGcBrandTest` documents the measurement) — so the compare is the
+    // brand, exactly.
+    let thisType = instance.signature.thisType;
+    let gcDispatch = isGcReferenceType(thisType);
+    let thisTypeRef = gcDispatch ? assert(thisType).toRef() : sizeTypeRef;
+
+    // Switch over this's rtId (pointer ABI) or brand (GC) and map it to the
+    // respective overload. `SwitchBuilder.render` stores the condition in
+    // `tempIndex` before comparing, so the brand is read exactly once — a
+    // `struct.get` reused in two compares would assert in `LocalCSE` at `-O2`.
+    let condition: ExpressionRef;
+    if (gcDispatch) {
+      condition = module.struct_get(
+        module.heapType(thisTypeRef),
+        GC_BRAND_INDEX,
+        module.local_get(0, thisTypeRef),
+        TypeRef.I32
+      );
+    } else {
+      condition = module.load(4, false,
         module.binary(
           sizeTypeRef == TypeRef.I64
             ? BinaryOp.SubI64
@@ -10214,8 +10897,9 @@ export class Compiler extends DiagnosticEmitter {
             : module.i32(8)
         ),
         TypeRef.I32
-      )
-    );
+      );
+    }
+    let builder = new SwitchBuilder(this.module, condition);
     let overrideInstances = this.resolver.resolveOverrides(instance);
     if (overrideInstances) {
       let mostRecentInheritanceMapping = new Map<Class, Class>();
@@ -10237,7 +10921,15 @@ export class Compiler extends DiagnosticEmitter {
         let overrideParameterTypes = overrideSignature.parameterTypes;
         let overrideNumParameters = overrideParameterTypes.length;
         let paramExprs = new Array<ExpressionRef>(1 + overrideNumParameters);
-        paramExprs[0] = module.local_get(0, sizeTypeRef); // this
+        // The override's `this` is its own class's ref type under GC, which is a
+        // subtype of the stub's. An argument of the stub's (super)type does not
+        // satisfy that parameter, so the brand-proven value is cast down to it.
+        paramExprs[0] = gcDispatch
+          ? module.ref_cast(
+              module.local_get(0, thisTypeRef),
+              assert(overrideSignature.thisType).toRef()
+            )
+          : module.local_get(0, sizeTypeRef); // this
         for (let n = 1; n <= numParameters; ++n) {
           paramExprs[n] = module.local_get(n, parameterTypes[n - 1].toRef());
         }
@@ -10271,7 +10963,7 @@ export class Compiler extends DiagnosticEmitter {
           );
         }
         let classInstance = assert(overrideInstance.getBoundClassOrInterface());
-        builder.addCase(classInstance.id, stmts);
+        builder.addCase(gcDispatch ? gcBrandOf(classInstance) : classInstance.id, stmts);
         // Also alias each extender inheriting this exact overload
         let extenders = classInstance.extenders;
         if (extenders) {
@@ -10286,7 +10978,7 @@ export class Compiler extends DiagnosticEmitter {
               !assert(mostRecentInheritanceMapping.get(extender)).extends(classInstance)
             ) {
               mostRecentInheritanceMapping.set(extender, classInstance);
-              builder.addOrReplaceCase(extender.id, stmts);
+              builder.addOrReplaceCase(gcDispatch ? gcBrandOf(extender) : extender.id, stmts);
             }
           }
         }
@@ -10301,7 +10993,7 @@ export class Compiler extends DiagnosticEmitter {
     let instanceClass = instance.getBoundClassOrInterface();
     if (!instance.is(CommonFlags.Abstract) && !(instanceClass && instanceClass.kind == ElementKind.Interface)) {
       let paramExprs = new Array<ExpressionRef>(numParameters);
-      paramExprs[0] = module.local_get(0, sizeTypeRef); // this
+      paramExprs[0] = module.local_get(0, thisTypeRef); // this
       for (let i = 0, k = parameterTypes.length; i < k; ++i) {
         paramExprs[1 + i] = module.local_get(1 + i, parameterTypes[i].toRef());
       }
@@ -11442,28 +12134,32 @@ export class Compiler extends DiagnosticEmitter {
         expression, sroaArray, isWrite, contextualType, constraints, valueExpression, valueRef
       );
     }
-    // A record element is only reachable in the **view** form: the value form
-    // refuses one at resolution (it would have to lay N records out inline,
-    // Landing 5b). In the view form `y[i]` is the *address* of a record, exactly
-    // as it is for `[T *]`, so the load below must not happen — loading a
-    // record's first four bytes and calling them the record is the mistake that
-    // arm's own comment describes. Same rule, same shape, keyed on the model
-    // here because only this kind has two forms.
-    let isViewForm = arrayType.fixedMemoryModel == MemoryModelCode.Unmanaged ||
-      arrayType.fixedMemoryModel == MemoryModelCode.Managed;
-    let isRecordElement = isViewForm && this.isRecordValueType(elementType);
-    if (isWrite && isRecordElement) {
+    // A record element is reachable in both forms now, and a **nested fixed
+    // array** element is storage for the same reason: `y[i]` of either is an
+    // address, not a loaded value. A record's `toRef` is its 4-byte reference
+    // (loading there would read the record's first field and call it a pointer),
+    // and a value-form array has no slot representation at all (`Type#toRef`),
+    // so both compile to `base + i * sizeof(E)`, typed as the element. A chained
+    // read (`.field`, or a further `[j]`) then indexes from that address.
+    let isAddressElement = this.isRecordValueType(elementType) ||
+      elementType.kind == TypeKind.FixedArray;
+    if (isWrite && isAddressElement) {
       this.error(
         DiagnosticCode.Not_implemented_0,
         expression.range,
-        "whole-record assignment to a `@unmanaged [T * N]` element — `y[i]` of a record is an address, not a value slot; use copyInto(y + i*sizeof(T), v), or write one field with `y[i].field = v`"
+        "whole-element assignment to a `[T * N]` element — `y[i]` of a record or of a nested array is an address, not a value slot; write a field (`y[i].field = v`) or index further (`y[i][j] = v`)"
       );
       this.currentType = Type.void;
       return module.unreachable();
     }
-    let elementSize = elementType.byteSize;
+    // The **extent**, not `byteSize`: those differ for a record (`byteSize` is
+    // the 4-byte reference) and that difference is the element stride. Reading
+    // `byteSize` here made `[S * 2]`'s two elements alias -- both indices landed
+    // in the same 4-byte slot -- while the array's own size, built from
+    // `inlineExtentBytes`, was right.
+    let elementSize = elementType.inlineExtentBytes;
     let address = this.compileFixedArrayElementAddress(expression, arrayType);
-    if (isRecordElement) {
+    if (isAddressElement) {
       this.currentType = elementType;
       return address;
     }
@@ -11508,6 +12204,131 @@ export class Compiler extends DiagnosticEmitter {
     );
   }
 
+  /**
+   * The element type of a std `Array<T>` whose `T` is an `@inline struct`, or
+   * `null`.
+   *
+   * Answered from the `Array` prototype's type arguments, so a user class that
+   * extends `Array<T>` is covered too. Everything else — a typed array, a
+   * `@managed @dynamic`, an `Array` of references — is not this shape.
+   */
+  private inlineStructArrayElementOf(type: Type): Type | null {
+    let classReference = type.classReference;
+    if (classReference == null) return null;
+    let typeArguments = classReference.getTypeArgumentsTo(this.program.arrayPrototype);
+    if (typeArguments == null || typeArguments.length != 1) return null;
+    let element = unchecked(typeArguments[0]);
+    return this.isInlineStructType(element) ? element : null;
+  }
+
+  /**
+   * Whether a method of a std `Array<T>` is correct for an `@inline struct`
+   * element.
+   *
+   * The index operators never reach their std bodies (the compiler emits them),
+   * and the layout accessors are plain field reads whose answer does not depend
+   * on the element's size. Everything else in `Array<T>` indexes with
+   * `i << alignof<T>()`, which equals the element's size only for
+   * power-of-two-sized scalars: `Res{i32,i32}` is 8 bytes at alignment 4, so
+   * `push`, `at`, `slice`, … would address every other element. Named refusal,
+   * never a silent miscompile.
+   */
+  private isInlineStructArrayMethodAllowed(name: string): bool {
+    return name == "constructor" ||
+      name == "__get" ||
+      name == "__uget" ||
+      name == "__set" ||
+      name == "get:length" ||
+      name == "get:length_" ||
+      name == "set:length_" ||
+      name == "get:dataStart" ||
+      name == "get:buffer" ||
+      name == "get:byteLength";
+  }
+
+  /**
+   * The address of `arr[index]` for `Array<Res>` where `Res` is an `@inline
+   * struct`: a bounds check against `length_`, then `dataStart + index *
+   * sizeof(Res)`.
+   *
+   * `sizeof`, not `1 << alignof`. The stride is the element's **extent**
+   * (`inlineExtentBytes`, which for an inline struct is the record's layout
+   * size), the same number `sizeof<Res>()` answers and the same one the C side
+   * uses — a shift by the alignment would land every second element on the same
+   * bytes for a record like `Res{i32,i32}`.
+   *
+   * An out-of-range write does **not** grow the array here: growth would have to
+   * reallocate the buffer with the correct byte size and update the header
+   * fields, which is `Array#push`'s job — and `push` is refused by name for this
+   * element kind (`isInlineStructArrayMethodAllowed`). The trap is the honest
+   * answer for an index past `length`.
+   */
+  private compileInlineStructArrayElementAddress(
+    expression: ElementAccessExpression,
+    arrayType: Type,
+    elementType: Type
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let classReference = assert(arrayType.classReference);
+    let members = classReference.members;
+    assert(members != null);
+    assert(members!.has("dataStart") && members!.has("length_"));
+    let dataOffset = (<PropertyPrototype>assert(members!.get("dataStart")))
+      .instance!.memoryOffset;
+    let lengthOffset = (<PropertyPrototype>assert(members!.get("length_")))
+      .instance!.memoryOffset;
+    let refLocal = flow.getTempLocal(arrayType);
+    let indexLocal = flow.getTempLocal(Type.i32);
+    let length = module.load(
+      4, false, module.local_get(refLocal.index, TypeRef.I32), TypeRef.I32, lengthOffset, 4
+    );
+    let base = module.load(
+      4, false, module.local_get(refLocal.index, TypeRef.I32), TypeRef.I32, dataOffset, 4
+    );
+    let indexRef = module.local_get(indexLocal.index, TypeRef.I32);
+    let elementSize = elementType.inlineExtentBytes;
+    let scaled = module.binary(
+      BinaryOp.MulSize,
+      this.options.isWasm64 ? module.unary(UnaryOp.ExtendU32ToU64, indexRef) : indexRef,
+      this.options.isWasm64 ? module.i64(elementSize) : module.i32(elementSize)
+    );
+    let setup = module.block(null, [
+      module.local_set(
+        refLocal.index,
+        this.compileExpression(expression.expression, arrayType, Constraints.ConvImplicit),
+        false
+      ),
+      module.local_set(
+        indexLocal.index,
+        this.compileExpression(expression.elementExpression, Type.i32, Constraints.ConvImplicit),
+        false
+      ),
+      flow.is(FlowFlags.UncheckedContext)
+        ? module.nop()
+        : module.if(
+            module.binary(
+              BinaryOp.GeU32,
+              module.local_get(indexLocal.index, TypeRef.I32),
+              length
+            ),
+            this.makeAbort(
+              Node.createStringLiteralExpression(
+                "Array index out of bounds",
+                expression.range
+              ),
+              expression
+            ),
+            0
+          )
+    ], TypeRef.None);
+    this.currentType = elementType;
+    return module.block(null, [
+      setup,
+      module.binary(BinaryOp.AddSize, base, scaled)
+    ], TypeRef.I32);
+  }
+
   /** Compiles the byte address of `array[index]`. */
   private compileFixedArrayElementAddress(
     expression: ElementAccessExpression,
@@ -11538,20 +12359,16 @@ export class Compiler extends DiagnosticEmitter {
     // view form (`@unmanaged [Pair * 2]`) makes it ordinary, so the general form
     // is used whenever the two disagree. Scalar elements keep the shift, which is
     // why Landing 1's wat does not move.
-    let elementSize = elementType.byteSize;
-    // `byteSize` is a *reference* size (4) for a record, exactly as it is
-    // everywhere else in the type system — `sizeof<Pair>()` reads
-    // `nextMemoryOffset` instead (`builtins.ts`, `builtin_sizeof`). The stride
-    // has to be the extent, so the extent is what is read here.
-    let elementClass = elementType.classReference;
-    if (
-      elementClass != null &&
-      (elementClass.hasDecorator(DecoratorFlags.Unmanaged) ||
-       elementClass.hasDecorator(DecoratorFlags.ManagedStruct))
-    ) {
-      elementSize = <i32>elementClass.nextMemoryOffset;
-    }
-    let shifts = elementSize == (1 << elementType.alignLog2);
+    let elementSize = elementType.inlineExtentBytes;
+    // `inlineExtentBytes` is the **extent** an element occupies in this array:
+    // `byteSize` for a scalar (and for a nested array, whose `size` is already
+    // its extent), but the record's layout size for a record element -- `byteSize`
+    // there is the 4-byte reference, exactly as it is everywhere else in the
+    // type system (`sizeof<Pair>()` reads `nextMemoryOffset` instead). Reading
+    // `byteSize` here made a `[S * 2]` index every element into the first one:
+    // measured, writing both elements and reading both back gave `134334433`
+    // where `134332211` is right.
+    let shifts = elementSize == (1 << elementType.inlineAlignLog2);
     let extendedIndex = this.options.isWasm64
       ? module.unary(UnaryOp.ExtendU32ToU64, index)
       : index;
@@ -11560,8 +12377,8 @@ export class Compiler extends DiagnosticEmitter {
           BinaryOp.ShlSize,
           extendedIndex,
           this.options.isWasm64
-            ? module.i64(elementType.alignLog2)
-            : module.i32(elementType.alignLog2)
+            ? module.i64(elementType.inlineAlignLog2)
+            : module.i32(elementType.inlineAlignLog2)
         )
       : module.binary(
           BinaryOp.MulSize,
@@ -11632,6 +12449,17 @@ export class Compiler extends DiagnosticEmitter {
       if (this.isManagedDynamicArrayType(targetType)) {
         return this.compileDynamicArrayElementAccess(
           expression, targetType, false, contextualType, constraints
+        );
+      }
+      // **`Array<Res>` indexed where `Res` is an `@inline struct`.** The element
+      // is inline bytes, so its address is `dataStart + i * sizeof(Res)` — and
+      // `sizeof`, not the alignment std's generic `[]` shifts by. The read yields
+      // the element's **address** typed as the element; a consumer copies the
+      // fields out of it (or reads one field, which is a load at that address).
+      let inlineArrayElement = this.inlineStructArrayElementOf(targetType);
+      if (inlineArrayElement != null) {
+        return this.compileInlineStructArrayElementAddress(
+          expression, targetType, inlineArrayElement
         );
       }
       // **A dynamic `Array<T>` indexed: `array.get data[i]`**, checked against
@@ -12008,6 +12836,14 @@ export class Compiler extends DiagnosticEmitter {
           let signatureReference = contextualType.getSignature();
           if (signatureReference) {
             this.currentType = signatureReference.type.asNullable();
+            // **A function value is a `Function<T>` struct under GC**, so its
+            // null is `ref.null` and not a zero word — the same rule the class
+            // arm above applies. Measured on a nullable function-typed global
+            // (`let sink: (exec: i32, slot: i32) => void | null`): the module
+            // failed validation at `global init must have correct type`.
+            if (gcFunctionValueUsable(signatureReference.type)) {
+              return module.ref_null(this.currentType.toRef());
+            }
             return options.isWasm64 ? module.i64(0) : module.i32(0);
           }
           return this.makeZero(contextualType);
@@ -12439,81 +13275,276 @@ export class Compiler extends DiagnosticEmitter {
       return this.compileExpression(expression.operand, contextualType, constraints);
     }
     let valueType = unchecked(typeArguments[0]);
-    if (valueType != Type.void && valueType != Type.i32 && valueType != Type.bool) {
-      this.error(
-        DiagnosticCode.Not_implemented_0,
-        expression.range,
-        "an await whose Task value is not i32 or void (the stackful backend stores the result in TaskRecord.payload)"
-      );
-      return module.unreachable();
-    }
 
-    // Evaluate the task once, then work from its record. The record is a
-    // `TaskRecord`; `_record` is the handle's one field.
+    // Evaluate the task once. One object per execution: `settled` and `value`
+    // are its fields and `drive` runs or resumes it, so the await is
+    // `if (!t.settled) t.drive(); return t.value` — field access only, no
+    // offsets, no record, no arena.
     let taskExpr = this.compileExpression(expression.operand, operandType, Constraints.ConvImplicit);
-    let taskLocal = flow.getTempLocal(operandType);
     let stmts = new Array<ExpressionRef>();
+
+    // A named scoped local, so the source-level property facts below resolve
+    // through the ordinary resolver: a `PropertyAccessExpression` whose
+    // receiver is an identifier is how fields, getters, pointer offsets and GC
+    // `struct.get`s are all decided, and the transform's own IR temp has no
+    // name for the resolver to bind. The name is unique per await.
+    let taskName = "$await$" + expression.range.start.toString();
+    let taskLocal = flow.addScopedLocal(taskName, operandType);
     stmts.push(module.local_set(taskLocal.index, taskExpr, operandType.isManaged));
-    let recordProto = assert(this.program.taskRecordPrototype);
-    let recordType = assert(resolver.resolveClass(recordProto, null)).type;
-    // `Task<T>` is a std class (pointer layout) whose `_record` field is laid
-    // out at `memoryOffset`. Reading it with a load rather than its getter
-    // matters: the generated getter carries the `!` null check, which imports
-    // `env.abort` into a module that never allocates. The arena cell's field is
-    // written by the entry before the handle escapes, so the check would never
-    // fire anyway.
-    let taskMembers = assert(assert(taskClass).members);
-    let recordMember = assert(taskMembers.get("_record"));
-    let recordOffset = assert((<PropertyPrototype>recordMember).instance).memoryOffset;
-    let recordExpr = module.load(
-      4, false,
-      module.local_get(taskLocal.index, operandType.toRef()),
-      TypeRef.I32,
-      recordOffset, 4
+    // The store above is IR, not an assignment the flow analysis saw; without
+    // this the property accesses below are "used before being assigned".
+    flow.setLocalFlag(taskLocal.index, LocalFlags.Initialized);
+    let taskIdent = Node.createIdentifierExpression(taskName, expression.range);
+
+    let settledAccess = Node.createPropertyAccessExpression(
+      taskIdent,
+      Node.createIdentifierExpression("settled", expression.range),
+      expression.range
     );
-    let recordLocal = flow.getTempLocal(recordType);
-    stmts.push(module.local_set(recordLocal.index, recordExpr, false));
+    let settledExpr = this.compileExpression(settledAccess, Type.bool, Constraints.None);
 
-    let doneExpr = this.taskRecordField("done", module.local_get(recordLocal.index, recordType.toRef()), expression);
+    // **The awaiter is stored, and the fallback is not** (`docs/policy-and-threads.md`
+    // §1/§3). `suspend` lands at the `on` label of whoever resumed, so the
+    // fallback needs no storage; what `await` must know is *this task's*
+    // policy. Absent (`null`) means the default, and the default is the inline
+    // park/resume that has always run here.
+    //
+    // Emitted as source-level AST so the field and the virtual call resolve
+    // through the ordinary resolver: a fresh node per use, because Binaryen's IR
+    // is a tree and one node in two operands asserts in `LocalCSE` at `-O2`.
+    //
+    // The policy is read through a local and narrowed by `changetype`: this
+    // compiler does not narrow a nullable *field* to non-null (`TS2322`,
+    // measured), and the check just above is what makes the cast honest.
+    let policyName = "$policy$" + expression.range.start.toString();
+    let policyType = Node.createNamedType(
+      Node.createSimpleTypeName("TaskPolicy", expression.range),
+      null,
+      true, // `TaskPolicy | null`
+      expression.range
+    );
+    let policyDecl = Node.createVariableDeclaration(
+      Node.createIdentifierExpression(policyName, expression.range),
+      null, CommonFlags.Let,
+      policyType,
+      Node.createPropertyAccessExpression(
+        Node.createIdentifierExpression(taskName, expression.range),
+        Node.createIdentifierExpression("policy", expression.range),
+        expression.range
+      ),
+      expression.range
+    );
+    let policyStmt = Node.createVariableStatement(
+      null, [ policyDecl ], expression.range
+    );
 
-    // Park only if the task has not already completed. `done` is 1 on
-    // completion, so `!done` is the park condition. The tag carries the
-    // awaited task's record address (an i32 under the pointer ABI), which is
-    // what the core loop needs to resume it and what its own entry reads as
-    // the current record.
-    stmts.push(module.if(
-      module.unary(UnaryOp.EqzI32, doneExpr),
-      module.suspend(ASYNC_AWAIT_TAG, [ module.local_get(recordLocal.index, recordType.toRef()) ]),
-      module.nop()
-    ));
+    let policyAwaitCall = Node.createCallExpression(
+      Node.createPropertyAccessExpression(
+        Node.createCallExpression(
+          Node.createIdentifierExpression("changetype", expression.range),
+          [ Node.createNamedType(Node.createSimpleTypeName("TaskPolicy", expression.range), null, false, expression.range) ],
+          [ Node.createIdentifierExpression(policyName, expression.range) ],
+          expression.range
+        ),
+        Node.createIdentifierExpression("await", expression.range),
+        expression.range
+      ),
+      null,
+      [ Node.createIdentifierExpression(taskName, expression.range) ],
+      expression.range
+    );
+    let inlineAwaitCall = Node.createCallExpression(
+      Node.createIdentifierExpression("__inlineAwait", expression.range),
+      null,
+      [ Node.createIdentifierExpression(taskName, expression.range) ],
+      expression.range
+    );
+    // `if (policy) policy.await(t); else __inlineAwait(t)`
+    let awaiterStmt = Node.createIfStatement(
+      Node.createIdentifierExpression(policyName, expression.range),
+      Node.createExpressionStatement(policyAwaitCall),
+      Node.createExpressionStatement(inlineAwaitCall),
+      expression.range
+    );
+
+    let parkExpr = module.block(null, [
+      this.compileStatement(policyStmt),
+      this.compileStatement(awaiterStmt)
+    ], TypeRef.None);
+    stmts.push(module.if(settledExpr, module.nop(), parkExpr));
 
     if (valueType == Type.void) {
       this.currentType = Type.void;
       return module.block(null, stmts, TypeRef.None);
     }
 
-    let payload = this.taskRecordField("payload", module.local_get(recordLocal.index, recordType.toRef()), expression);
-    stmts.push(payload);
+    let valueAccess = Node.createPropertyAccessExpression(
+      Node.createIdentifierExpression(taskName, expression.range),
+      Node.createIdentifierExpression("value", expression.range),
+      expression.range
+    );
+    stmts.push(this.compileExpression(valueAccess, valueType, Constraints.None));
+    // The await expression has exactly the task's value type: the accessor is
+    // monomorphized from the declared field type (there is no cast, offset or
+    // runtime check), so the value the getter hands back *is* `T`.
+    //
+    // An `@inline struct` has no value-stack representation, so the `T.value`
+    // read yields the **address** of the inline bytes (the property path's
+    // inline-nesting branch), and the block's type is a pointer — not
+    // `valueType.toRef()`, which would assert. The consumer (`let q: Res = await
+    // t`) copies the fields out of that address; nothing here knows or cares
+    // that the bytes live in a task object.
     this.currentType = valueType;
-    return module.block(null, stmts, valueType.toRef());
+    return module.block(
+      null,
+      stmts,
+      this.isInlineStructType(valueType) ? TypeRef.I32 : valueType.toRef()
+    );
   }
 
-  /** Reads one `TaskRecord` field through its generated getter. */
-  private taskRecordField(
-    name: string,
-    record: ExpressionRef,
-    reportNode: Node
+  /**
+   * `CALL on POLICY` — create the task, attach the policy, let it act.
+   *
+   * `docs/policy-and-threads.md` §2/§3:
+   *
+   * ```
+   * let $t = CALL;            // the task object, as today
+   * let $p = POLICY;          // evaluated in the caller's frame
+   * $t.policy = $p;           // stored, so `await` and the caller can read it
+   * $p.create($t);            // the one moment a policy may submit work
+   * $t                        // the expression's value
+   * ```
+   *
+   * The order is the design's, and it matters: the task exists before the policy
+   * can be asked to run anything, and the policy is evaluated **once** no matter
+   * how many times the expression is used downstream. Absent `on`, none of this
+   * is emitted — `policy` stays `null` and no `create` call exists.
+   *
+   * Emitted as source-level statements so the field write, the null handling and
+   * the virtual call all resolve through the ordinary paths (pointer offset or
+   * GC `struct.set`, per the ABI), rather than being spelled as raw IR here.
+   */
+  private compileOnExpression(
+    expression: OnExpression,
+    contextualType: Type
   ): ExpressionRef {
-    let prototype = assert(this.program.taskRecordPrototype);
-    let instance = assert(this.resolver.resolveClass(prototype, null));
-    let members = assert(instance.members);
-    let member = members.get(name);
-    if (!member) {
-      this.error(DiagnosticCode.Not_implemented_0, reportNode.range, "TaskRecord." + name + " is missing");
-      return this.module.unreachable();
+    let module = this.module;
+    let flow = this.currentFlow;
+    let resolver = this.resolver;
+    let inner = expression.expression;
+
+    // `on` names where a *task* runs, so the inner expression must be a call of
+    // a may-suspend `async function` — the transform's entry, whose type is
+    // `Task<R>`. On anything else the postfix has no meaning, and saying so by
+    // name beats a type error about `TaskPolicy`.
+    let calleeElement: Element | null = null;
+    if (inner.kind == NodeKind.Call) {
+      calleeElement = resolver.lookupExpression(
+        (<CallExpression>inner).expression,
+        flow, Type.auto, ReportMode.Swallow
+      );
     }
-    let property = assert((<PropertyPrototype>member).instance);
-    return this.compileCallDirect(assert(property.getterInstance), [], reportNode, record);
+    let entry: Function | null = null;
+    if (calleeElement != null) {
+      if (calleeElement.kind == ElementKind.Function) {
+        entry = <Function>calleeElement;
+      } else if (calleeElement.kind == ElementKind.FunctionPrototype) {
+        entry = resolver.resolveFunction(<FunctionPrototype>calleeElement, null);
+      }
+    }
+    if (entry == null || !this.program.asyncEntries.has(entry.declaration)) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        expression.range,
+        "`on` applies to a call of an async function (the call this postfix names creates no task)"
+      );
+      return module.unreachable();
+    }
+
+    // The call's own type is what the whole expression has, so the local that
+    // holds the task is typed by resolving the inner expression once.
+    let taskType = resolver.resolveExpression(inner, flow, Type.auto, ReportMode.Report);
+    if (!taskType) return module.unreachable();
+
+    let start = expression.range.start;
+    let taskName = "$onTask$" + start.toString();
+    let policyName = "$onPolicy$" + start.toString();
+
+    let taskDecl = Node.createVariableStatement(
+      null,
+      [
+        Node.createVariableDeclaration(
+          Node.createIdentifierExpression(taskName, expression.range),
+          null, CommonFlags.Let,
+          null, // inferred: the call's `Task<R>`
+          inner,
+          expression.range
+        )
+      ],
+      expression.range
+    );
+
+    let policyType = Node.createNamedType(
+      Node.createSimpleTypeName("TaskPolicy", expression.range),
+      null,
+      false,
+      expression.range
+    );
+    let policyDecl = Node.createVariableStatement(
+      null,
+      [
+        Node.createVariableDeclaration(
+          Node.createIdentifierExpression(policyName, expression.range),
+          null, CommonFlags.Let,
+          policyType,
+          expression.policy,
+          expression.range
+        )
+      ],
+      expression.range
+    );
+
+    // `$t.policy = $p` — the generated setter, so the write is the ABI's.
+    let assignStmt = Node.createExpressionStatement(
+      Node.createBinaryExpression(
+        Token.Equals,
+        Node.createPropertyAccessExpression(
+          Node.createIdentifierExpression(taskName, expression.range),
+          Node.createIdentifierExpression("policy", expression.range),
+          expression.range
+        ),
+        Node.createIdentifierExpression(policyName, expression.range),
+        expression.range
+      )
+    );
+
+    // `$p.create($t)`
+    let createStmt = Node.createExpressionStatement(
+      Node.createCallExpression(
+        Node.createPropertyAccessExpression(
+          Node.createIdentifierExpression(policyName, expression.range),
+          Node.createIdentifierExpression("create", expression.range),
+          expression.range
+        ),
+        null,
+        [ Node.createIdentifierExpression(taskName, expression.range) ],
+        expression.range
+      )
+    );
+
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(this.compileStatement(taskDecl));
+    stmts.push(this.compileStatement(policyDecl));
+    stmts.push(this.compileStatement(assignStmt));
+    stmts.push(this.compileStatement(createStmt));
+    // The value is the task local, read by name: the declaration above owns the
+    // local, so there is no index to carry and no second registration to drift.
+    stmts.push(this.compileExpression(
+      Node.createIdentifierExpression(taskName, expression.range),
+      taskType,
+      Constraints.None
+    ));
+    return module.block(null, stmts, taskType.toRef());
   }
 
   private compileLoweredAwaitExpression(expression: AwaitExpression): ExpressionRef {
@@ -13754,14 +14785,28 @@ export class Compiler extends DiagnosticEmitter {
         case TypeKind.F32:
         case TypeKind.F64: {
           // Can store zeroes directly (no need to __link)
+          //
+          // An `@atomic` field takes an atomic store even here: this is a write of
+          // the field, and "every write is atomic" has no exemption for the
+          // zeroing one. It is also the honest shape — the object is published by
+          // its first store, and a plain store would be a write the guarantee
+          // never covered.
           exprs.push(
-            module.store(
-              propertyType.byteSize,
-              module.local_get(tempLocal.index, classTypeRef),
-              this.makeZero(propertyType),
-              propertyType.toRef(),
-              propertyInstance.memoryOffset
-            )
+            propertyInstance.hasDecorator(DecoratorFlags.Atomic)
+              ? module.atomic_store(
+                  propertyType.byteSize,
+                  module.local_get(tempLocal.index, classTypeRef),
+                  this.makeZero(propertyType),
+                  propertyType.toRef(),
+                  propertyInstance.memoryOffset
+                )
+              : module.store(
+                  propertyType.byteSize,
+                  module.local_get(tempLocal.index, classTypeRef),
+                  this.makeZero(propertyType),
+                  propertyType.toRef(),
+                  propertyInstance.memoryOffset
+                )
           );
           continue;
         }
@@ -14094,6 +15139,30 @@ export class Compiler extends DiagnosticEmitter {
             }
           }
         } else if (property.is(CommonFlags.DefinitelyAssigned)) {
+          // **A field declared with a type parameter is exempt.** `value!: T`
+          // on a generic class is not provably unnecessary at the declaration:
+          // the substitution decides whether the assertion is a no-op (i32), a
+          // runtime check (a reference) or forbidden (void, where the field is
+          // omitted entirely). Warning per instantiation would make a generic
+          // class's own declaration the source of diagnostics the instantiation
+          // cannot avoid — measured: `Task<T>`'s `value!: T` reported AS906 at
+          // every `Task<i32>` and failed the Backend A suites.
+          let fieldDeclaration = property.prototype.fieldDeclaration;
+          let declaredTypeNode = fieldDeclaration != null
+            ? fieldDeclaration.type
+            : null;
+          if (declaredTypeNode != null && declaredTypeNode.kind == NodeKind.NamedType) {
+            let named = <NamedTypeNode>declaredTypeNode;
+            let typeParameters = classInstance.prototype.typeParameterNodes;
+            if (named.name.next == null && typeParameters != null) {
+              let name = named.name.identifier.text;
+              let isTypeParameter = false;
+              for (let j = 0, l = typeParameters.length; j < l; ++j) {
+                if (unchecked(typeParameters[j]).name.text == name) { isTypeParameter = true; break; }
+              }
+              if (isTypeParameter) continue;
+            }
+          }
           if (property.type.isReference) {
             this.warning( // involves a runtime check
               DiagnosticCode.Property_0_is_always_assigned_before_being_used,
@@ -14362,6 +15431,22 @@ export class Compiler extends DiagnosticEmitter {
           ? this.resolveSroaReceiver(thisExpression)
           : null;
         if (sroaReceiver != null) {
+          // **`@atomic` and SROA are mutually exclusive.** An `@inline struct` in
+          // SROA position is a set of WASM locals: there is no address, so there
+          // is no `i32.atomic.load` to emit — the field is a `local.get` and
+          // nothing else. Refused by name here rather than emitted as a plain
+          // local read, which would silently drop the guarantee the declaration
+          // made. The field still works through a memory position (a nested
+          // field of a record, a view over bytes), which is where the accessor
+          // with the atomic instruction exists.
+          if (propertyInstance.hasDecorator(DecoratorFlags.Atomic)) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              expression.range,
+              "reading an @atomic field of an @inline struct in SROA position (a value-form record lives in WASM locals, which have no address, so the read cannot be atomic; reach the record through memory — a field of a class, or a `@unmanaged` view over bytes — where the accessor carries the atomic instruction)"
+            );
+            return module.unreachable();
+          }
           let fieldLocals = assert(sroaReceiver.fieldLocals);
           if (!propertyInstance.isField || !fieldLocals.has(propertyInstance.name)) {
             this.error(
@@ -14930,6 +16015,13 @@ export class Compiler extends DiagnosticEmitter {
     if (!target) {
       return module.unreachable();
     }
+    // `f++` / `f--` on an `@atomic` field: the same read-then-write composite the
+    // compound operators are refused for, so the same refusal.
+    if (this.refuseAtomicReadModifyWrite(
+      target,
+      expression.operator == Token.Plus_Plus ? "++" : "--",
+      expression
+    )) return module.unreachable();
 
     // simplify if dropped anyway
     if (!tempLocal) {
@@ -15367,6 +16459,13 @@ export class Compiler extends DiagnosticEmitter {
     }
     let target = resolver.lookupExpression(expression.operand, this.currentFlow);
     if (!target) return module.unreachable();
+    // `++f` / `--f` on an `@atomic` field: refused for the same reason the postfix
+    // form is (see `refuseAtomicReadModifyWrite`).
+    if (this.refuseAtomicReadModifyWrite(
+      target,
+      expression.operator == Token.Plus_Plus ? "++" : "--",
+      expression
+    )) return module.unreachable();
     return this.makeAssignment(
       target,
       expr,
@@ -15633,6 +16732,26 @@ export class Compiler extends DiagnosticEmitter {
       // A pointer. Exactly `@unmanaged T` semantics: nothing to refuse here.
       return true;
     }
+    // A **nested** value-form array has no leaf representation yet: its element
+    // is itself several leaves, so binding it is the deep-SROA phase. Without
+    // this check a parameter of `[[i32 * 4] * 2]` was accepted and then crashed
+    // in `bindSroaArrayParameterLeaves` -- the element was bound as one local of
+    // an array type, and `Type#toRef` asserts on the value form. A type the
+    // compiler accepts must never reach that assert.
+    // Hoisted: the checker narrows a local through `!= null`, not a member
+    // access repeated inside a compound condition.
+    let fixedElementType = type.fixedElementType;
+    if (
+      fixedElementType != null &&
+      fixedElementType.kind == TypeKind.FixedArray
+    ) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        reportNode.range,
+        "a nested `[T * N]` value as " + position + " (a nested element is several leaves per element, and selecting between them is the deep-SROA phase). Use `@unmanaged [T * N]` for a pointer view"
+      );
+      return false;
+    }
     // A **parameter** of the value form works: the signature flattens to one
     // WASM parameter per element leaf and the callee binds them as SROA locals,
     // so the argument is copied at the call and nothing is aliased.
@@ -15720,6 +16839,19 @@ export class Compiler extends DiagnosticEmitter {
         BinaryOp.AddSize,
         basePtr,
         this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+      );
+    }
+    // An `@atomic` field read through a **view** is the same instruction the
+    // record's own getter emits: the view's address plus the field's offset.
+    // The two branches above are storage (an inline array, a nested value), which
+    // an `@atomic` field cannot be — `atomicFieldTypeRefusal` allows integer
+    // scalars only — so this arm is the whole of the view story.
+    if (field.hasDecorator(DecoratorFlags.Atomic)) {
+      return module.atomic_load(
+        fieldType.byteSize,
+        basePtr,
+        fieldType.toRef(),
+        offset
       );
     }
     return module.load(
@@ -16317,6 +17449,25 @@ export class Compiler extends DiagnosticEmitter {
 
   /** A load of one field of an `@inline struct` at a slot address. */
   private makeSretFieldLoad(destAddress: ExpressionRef, field: Property): ExpressionRef {
+    // An `@atomic` field takes its atomic load here too. `f().x` reads `x` out of a
+    // call's result slot: the slot is memory, the offset is the field's own and the
+    // alignment is the record's, so this is the same access the accessor would make
+    // against the record itself — the guarantee has no hole at this boundary, and
+    // nothing about the slot being a temp makes the field's bytes less shared.
+    //
+    // In practice this arm is unreachable for an `@atomic` field: a value-form record
+    // is produced by writing its fields in SROA position, and those writes are refused
+    // (`compilePropertyAccess`), so no such value can be returned. It is kept because
+    // "unreachable" is an argument about today's producers, and this is the one line
+    // that keeps the guarantee true if one appears.
+    if (field.hasDecorator(DecoratorFlags.Atomic)) {
+      return this.module.atomic_load(
+        field.type.byteSize,
+        destAddress,
+        field.type.toRef(),
+        field.memoryOffset
+      );
+    }
     return this.module.load(
       field.type.byteSize,
       false,
@@ -16377,9 +17528,24 @@ export class Compiler extends DiagnosticEmitter {
       for (let j = 0, n = fields.length; j < n; ++j) {
         let field = unchecked(fields[j]);
         let to = getMapEntry(fieldLocals, field.name);
-        // A field refused at declaration (a `T[N]` or GC-reference field) has
-        // no local: it was never part of the value.
+        // A field refused at declaration (a view array or GC-reference field)
+        // has no local: it was never part of the value.
         if (!to) continue;
+        if (to.index < 0) {
+          let nested = to.fieldLocals;
+          if (nested != null) {
+            if (this.isValueFormFixedArray(field.type)) {
+              this.copyArrayMemoryToSroa(
+                field.type, nested, pointerLocal.index, field.memoryOffset, stmts
+              );
+            } else {
+              this.copyMemoryToSroa(
+                field.type, nested, pointerLocal.index, field.memoryOffset, stmts
+              );
+            }
+          }
+          continue;
+        }
         stmts.push(module.local_set(
           to.index,
           module.load(
@@ -16435,9 +17601,15 @@ export class Compiler extends DiagnosticEmitter {
       if (entry.index < 0) {
         let nested = entry.fieldLocals;
         if (nested != null) {
-          this.emitTempArgumentLeaves(
-            field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
-          );
+          if (this.isValueFormFixedArray(field.type)) {
+            this.emitTempArrayArgumentLeaves(
+              field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
+            );
+          } else {
+            this.emitTempArgumentLeaves(
+              field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
+            );
+          }
         }
         continue;
       }
@@ -16452,6 +17624,38 @@ export class Compiler extends DiagnosticEmitter {
         module.local_get(entry.index, entry.type.toRef()),
         field.type.toRef(),
         field.memoryOffset
+      ));
+    }
+  }
+
+  /** {@link emitTempArgumentLeaves}'s `[T * N]` arm: one store per element leaf. */
+  private emitTempArrayArgumentLeaves(
+    arrayType: Type,
+    elementLocals: Map<string, Local>,
+    markLocal: Local,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let entry = getMapEntry(elementLocals, i.toString());
+      if (entry == null) continue;
+      let offset = baseOffset + i * elementSize;
+      if (Signature.isInlineStructRef(elementType)) {
+        let nested = entry.fieldLocals;
+        if (nested != null) {
+          this.emitTempArgumentLeaves(elementType, nested, markLocal, offset, stmts);
+        }
+        continue;
+      }
+      stmts.push(module.store(
+        elementType.byteSize,
+        this.makeSretAddressPlus(markLocal, offset),
+        module.local_get(entry.index, entry.type.toRef()),
+        entry.type.toRef(),
+        0
       ));
     }
   }
@@ -16652,9 +17856,20 @@ export class Compiler extends DiagnosticEmitter {
       module.binary(BinaryOp.AddI32, module.local_get(markLocal.index, TypeRef.I32), module.i32(size))
     ));
     stmts.push(this.makeSretGuard(markLocal, size, callExpression));
+    // Save the destination a **caller** may have armed before compiling this
+    // one. `sretDestSlot` is per-compiler, not per-flow, and compiling the call
+    // below can compile other functions (`compileFunction` runs a callee's body
+    // lazily), whose own sret calls would otherwise clear an outer arm. The
+    // outer consumer then sees its slot as un-consumed and reads the wrong
+    // address — measured on `let a: Res = await inner()`: `inner$start`'s own
+    // sret write cleared `work$body`'s armed destination, and the field loads
+    // read the mark instead of `t.value`.
+    let previousDest = this.sretDestSlot;
     this.sretDestSlot = this.makeSretAddress(markLocal);
     let callExpr = this.compileCallExpression(callExpression, Type.auto, Constraints.None);
-    if (this.sretDestSlot != 0) {
+    let consumed = this.sretDestSlot == 0;
+    this.sretDestSlot = previousDest;
+    if (!consumed) {
       // The call did not consume its destination: it was refused before
       // reaching `compileCallDirect` (a function value, a virtual call). The
       // refusal is already reported; there is no slot use to emit. The
@@ -16819,6 +18034,23 @@ export class Compiler extends DiagnosticEmitter {
           into.set(field.name, placeholder);
           continue;
         }
+        // A value-form `[T * N]` field is N element leaves behind a placeholder,
+        // the same shape `fillSroaArrayLocals` gives a whole array value. It is
+        // **not** one leaf: an array is an extent, and a single WASM local could
+        // only hold a pointer to bytes this value does not own. The copy helper
+        // (`copyMemoryToSroa` / `copySroaToMemory`) walks the placeholder's
+        // element entries at `i * elementExtent`, so the value stays a value.
+        if (this.isValueFormFixedArray(fieldType)) {
+          let nested = new Map<string, Local>();
+          if (!this.fillSroaArrayLocals(fieldType, fieldPath, declaration, flow, nested)) {
+            refused = true;
+            continue;
+          }
+          let placeholder = new Local(fieldPath, -1, fieldType, flow.targetFunction, declaration);
+          placeholder.fieldLocals = nested;
+          into.set(field.name, placeholder);
+          continue;
+        }
         let fieldDeclaration = assert(field.prototype.fieldDeclaration);
         let fieldTypeNode = fieldDeclaration.type;
         this.error(
@@ -16827,7 +18059,7 @@ export class Compiler extends DiagnosticEmitter {
             ? fieldTypeNode.range
             : fieldDeclaration.name.range,
           fieldType.kind == TypeKind.FixedArray
-            ? "a T[N] field in an @inline struct (SROA keeps one WASM local per field; array fields are the deep-SROA phase)"
+            ? "an `@unmanaged [T * N]` field in an @inline struct (a view is an address, which a value type cannot own; declare it `[T * N]` to store the bytes inline)"
             : "a GC-reference field in an @inline struct (a bare local.set skips the write barrier; deferred)"
         );
         refused = true;
@@ -16877,14 +18109,198 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * **The whole-value copy primitive: memory -> SROA locals.**
+   *
+   * An `@inline struct` value has exactly two representations in this compiler —
+   * one WASM local per leaf, or bytes at an address — and every whole-value use
+   * reduces to a copy between them:
+   *
+   * - `let q: Res = t.value` (an inline field of a heap object),
+   * - `let q: Res = await t` (`t.value` is that same inline field),
+   * - `let value = load<Res>(ptr)` inside `Array<Res>#__get`,
+   * - `let q: Res = arr[0]` (an sret getter, read out of its slot).
+   *
+   * Each field is loaded at the offset the resolver laid it out at (`offsetof`
+   * is the same number) with the field's own load type, straight into its leaf
+   * local — no temporary slot, which is what makes the old message's remedy
+   * ("read a field") inapplicable to a whole-value copy.
+   *
+   * A nested `@inline struct` field is **not** a leaf: it recurses, exactly as
+   * `copySroaValue` does for the local-to-local copy. A value-form `[T * N]`
+   * field recurses per element at `i * elementExtent`; a `memory.copy` of the
+   * extent would need the destination to be an address, and the destination here
+   * is a set of locals, so the elements are copied one leaf at a time (see
+   * `copyArrayMemoryToSroa`).
+   *
+   * **No write barrier is needed and none is emitted.** A managed leaf cannot
+   * reach here: `fillSroaFieldLocals` / `bindSroaParameterLeaves` refuse a
+   * GC-reference field by name, so the tree has no entry for one. The assert
+   * makes that a compiler bug rather than a silent unbarriered store.
+   */
+  copyMemoryToSroa(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    addrIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    let pointerRef = this.options.usizeType.toRef();
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      // A field refused at declaration was never part of the value; the
+      // diagnostic was already reported where the local was created.
+      if (entry == null) continue;
+      let fieldType = field.type;
+      let offset = baseOffset + field.memoryOffset;
+      if (Signature.isInlineStructRef(fieldType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copyMemoryToSroa(fieldType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      if (this.isValueFormFixedArray(fieldType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copyArrayMemoryToSroa(fieldType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      assert(!fieldType.isManaged); // refused at declaration, never in the tree
+      stmts.push(module.local_set(
+        entry.index,
+        module.load(
+          fieldType.byteSize,
+          fieldType.isSignedIntegerValue,
+          module.local_get(addrIndex, pointerRef),
+          fieldType.toRef(),
+          offset
+        ),
+        false
+      ));
+    }
+  }
+
+  /** {@link copyMemoryToSroa}'s `[T * N]` arm: one leaf per element. */
+  private copyArrayMemoryToSroa(
+    arrayType: Type,
+    elementLocals: Map<string, Local>,
+    addrIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    let pointerRef = this.options.usizeType.toRef();
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let entry = getMapEntry(elementLocals, i.toString());
+      if (entry == null) continue;
+      let offset = baseOffset + i * elementSize;
+      if (Signature.isInlineStructRef(elementType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copyMemoryToSroa(elementType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      stmts.push(module.local_set(
+        entry.index,
+        module.load(
+          elementType.byteSize,
+          elementType.isSignedIntegerValue,
+          module.local_get(addrIndex, pointerRef),
+          elementType.toRef(),
+          offset
+        ),
+        false
+      ));
+    }
+  }
+
+  /**
+   * **The mirror: SROA locals -> memory.**
+   *
+   * `obj.field = local`, `store<T>(ptr, local)` and `$rec.value = $r` in the
+   * async lowering all end here: the leaves are stored at the layout offsets the
+   * C side reads, with each leaf's own store type. The sibling of
+   * {@link copyMemoryToSroa}; the shape and the recursion are the same, so a
+   * nested field or an array field cannot be handled by one direction and
+   * silently dropped by the other.
+   */
+  copySroaToMemory(
+    type: Type,
+    fieldLocals: Map<string, Local>,
+    addrIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let fields = this.inlineStructFieldsOf(type);
+    if (fields == null) return;
+    let pointerRef = this.options.usizeType.toRef();
+    for (let i = 0, k = fields.length; i < k; ++i) {
+      let field = unchecked(fields[i]);
+      let entry = getMapEntry(fieldLocals, field.name);
+      if (entry == null) continue;
+      let fieldType = field.type;
+      let offset = baseOffset + field.memoryOffset;
+      if (Signature.isInlineStructRef(fieldType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copySroaToMemory(fieldType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      if (this.isValueFormFixedArray(fieldType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copyArraySroaToMemory(fieldType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      assert(!fieldType.isManaged);
+      stmts.push(module.store(
+        fieldType.byteSize,
+        module.local_get(addrIndex, pointerRef),
+        module.local_get(entry.index, entry.type.toRef()),
+        entry.type.toRef(),
+        offset
+      ));
+    }
+  }
+
+  /** {@link copySroaToMemory}'s `[T * N]` arm: one leaf per element. */
+  private copyArraySroaToMemory(
+    arrayType: Type,
+    elementLocals: Map<string, Local>,
+    addrIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    let pointerRef = this.options.usizeType.toRef();
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let entry = getMapEntry(elementLocals, i.toString());
+      if (entry == null) continue;
+      let offset = baseOffset + i * elementSize;
+      if (Signature.isInlineStructRef(elementType)) {
+        let nested = assert(entry.fieldLocals);
+        this.copySroaToMemory(elementType, nested, addrIndex, offset, stmts);
+        continue;
+      }
+      stmts.push(module.store(
+        elementType.byteSize,
+        module.local_get(addrIndex, pointerRef),
+        module.local_get(entry.index, entry.type.toRef()),
+        entry.type.toRef(),
+        offset
+      ));
+    }
+  }
+
+  /**
    * Stores a `fieldLocals` tree's leaves into the hidden destination slot at
    * `destIndex`, one store per leaf.
    *
-   * The third destination shape for the same recursion: `emitSroaStores` writes
-   * to a compiled `usize`, `emitTempArgumentLeaves` to a call-temp address, and
-   * this one to a **parameter** — the sret slot a `return p` fills. The address
-   * is a fresh `local.get` per store, because Binaryen's passes assume one
-   * parent per node.
+   * The sret slot a `return p` fills. Delegates to {@link copySroaToMemory} so a
+   * `[T * N]` field is written at the same offsets the read side uses.
    */
   emitSroaStoresToLocal(
     type: Type,
@@ -16893,32 +18309,7 @@ export class Compiler extends DiagnosticEmitter {
     baseOffset: i32,
     stmts: ExpressionRef[]
   ): void {
-    let module = this.module;
-    let fields = this.inlineStructFieldsOf(type);
-    if (fields == null) return;
-    for (let i = 0, k = fields.length; i < k; ++i) {
-      let field = unchecked(fields[i]);
-      let entry = getMapEntry(fieldLocals, field.name);
-      // A field refused at declaration was never part of the value; there is
-      // nothing to store and no representation to store it as.
-      if (entry == null) continue;
-      if (entry.index < 0) {
-        let nested = entry.fieldLocals;
-        if (nested != null) {
-          this.emitSroaStoresToLocal(
-            field.type, nested, destIndex, baseOffset + field.memoryOffset, stmts
-          );
-        }
-        continue;
-      }
-      stmts.push(module.store(
-        field.type.byteSize,
-        module.local_get(destIndex, TypeRef.I32),
-        module.local_get(entry.index, entry.type.toRef()),
-        field.type.toRef(),
-        baseOffset + field.memoryOffset
-      ));
-    }
+    this.copySroaToMemory(type, fieldLocals, destIndex, baseOffset, stmts);
   }
 
   /**
@@ -16930,6 +18321,10 @@ export class Compiler extends DiagnosticEmitter {
    * fields is what zeroes a nested field's leaves: measured before this,
    * `return new Outer1()` with `Inner{x,y}` stored only offset 0 and left
    * offsets 4 and 8 holding whatever was there.
+   *
+   * A `[T * N]` field is zeroed per element for the same reason: the element
+   * leaves are separate slots in the value's representation, so "all zeroes"
+   * means one zero store per element.
    */
   emitSroaZerosToLocal(type: Type, destIndex: i32, baseOffset: i32, stmts: ExpressionRef[]): void {
     let module = this.module;
@@ -16937,10 +18332,13 @@ export class Compiler extends DiagnosticEmitter {
     if (fields == null) return;
     for (let i = 0, k = fields.length; i < k; ++i) {
       let field = unchecked(fields[i]);
+      let offset = baseOffset + field.memoryOffset;
       if (Signature.isInlineStructRef(field.type)) {
-        this.emitSroaZerosToLocal(
-          field.type, destIndex, baseOffset + field.memoryOffset, stmts
-        );
+        this.emitSroaZerosToLocal(field.type, destIndex, offset, stmts);
+        continue;
+      }
+      if (this.isValueFormFixedArray(field.type)) {
+        this.emitSroaArrayZerosToLocal(field.type, destIndex, offset, stmts);
         continue;
       }
       if (!this.isSroaFieldType(field.type)) continue;
@@ -16949,7 +18347,42 @@ export class Compiler extends DiagnosticEmitter {
         module.local_get(destIndex, TypeRef.I32),
         this.makeZero(field.type),
         field.type.toRef(),
-        baseOffset + field.memoryOffset
+        offset
+      ));
+    }
+  }
+
+  /** {@link emitSroaZerosToLocal}'s `[T * N]` arm. */
+  private emitSroaArrayZerosToLocal(
+    arrayType: Type,
+    destIndex: i32,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let offset = baseOffset + i * elementSize;
+      if (Signature.isInlineStructRef(elementType)) {
+        this.emitSroaZerosToLocal(elementType, destIndex, offset, stmts);
+        continue;
+      }
+      if (this.isValueFormFixedArray(elementType)) {
+        // A nested value-form array: zero each of its elements at the nested
+        // stride. Only reachable from `return new P()`'s type walk, because a
+        // local refuses a nested array field by name — but zeroing is a type
+        // walk, so it must not silently skip the bytes either.
+        this.emitSroaArrayZerosToLocal(elementType, destIndex, offset, stmts);
+        continue;
+      }
+      if (!this.isSroaFieldType(elementType)) continue;
+      stmts.push(module.store(
+        elementType.byteSize,
+        module.local_get(destIndex, TypeRef.I32),
+        this.makeZero(elementType),
+        elementType.toRef(),
+        offset
       ));
     }
   }
@@ -16959,8 +18392,9 @@ export class Compiler extends DiagnosticEmitter {
    * field locals, one load per leaf.
    *
    * The mirror of {@link emitSroaStoresToLocal}: `let q = make()` reads the slot
-   * back into the leaf locals a read path walks. A fresh slot address per load,
-   * for the same one-parent-per-node reason.
+   * back into the leaf locals a read path walks. Delegates to
+   * {@link copyMemoryToSroa}, with the mark local itself as the address (the
+   * slot's base is the mark — see `makeSretAddress`).
    */
   emitSretLoadsInto(
     type: Type,
@@ -16969,33 +18403,7 @@ export class Compiler extends DiagnosticEmitter {
     baseOffset: i32,
     stmts: ExpressionRef[]
   ): void {
-    let fields = this.inlineStructFieldsOf(type);
-    if (fields == null) return;
-    for (let i = 0, k = fields.length; i < k; ++i) {
-      let field = unchecked(fields[i]);
-      let entry = getMapEntry(fieldLocals, field.name);
-      if (entry == null) continue;
-      if (entry.index < 0) {
-        let nested = entry.fieldLocals;
-        if (nested != null) {
-          this.emitSretLoadsInto(
-            field.type, nested, markLocal, baseOffset + field.memoryOffset, stmts
-          );
-        }
-        continue;
-      }
-      stmts.push(this.module.local_set(
-        entry.index,
-        this.module.load(
-          field.type.byteSize,
-          false,
-          this.makeSretAddress(markLocal),
-          field.type.toRef(),
-          baseOffset + field.memoryOffset
-        ),
-        false
-      ));
-    }
+    this.copyMemoryToSroa(type, fieldLocals, markLocal.index, baseOffset, stmts);
   }
 
   /**
@@ -17013,15 +18421,10 @@ export class Compiler extends DiagnosticEmitter {
   /**
    * Stores an inline value's leaves at `dest + offset`.
    *
-   * The third leaf consumer, beside `copySroaValue` (local-to-local) and the
-   * read path (local-to-stack): same tree, same recursion, an expression
-   * reference instead of a destination map. The offsets come from the **type**
-   * (`property.memoryOffset`, the layout the C side sees), so what lands in
-   * memory is the wire layout, not a packing of the locals.
-   *
-   * Leaves whose local is missing are skipped rather than stored as `-1`: a
-   * field refused at declaration was never part of the value (`isSroaFieldType`
-   * has already reported why), and the caller has been told.
+   * `copyInto(dest, record)` and `store<T>(dest, record)` are the callers: same
+   * tree, same recursion, a compiled address instead of a destination map —
+   * evaluated once into a temp so every store reads the same address and a
+   * side-effecting destination is not recomputed per leaf.
    */
   emitSroaStores(
     type: Type,
@@ -17037,10 +18440,15 @@ export class Compiler extends DiagnosticEmitter {
       let field = unchecked(fields[i]);
       let entry = getMapEntry(fieldLocals, field.name);
       if (entry == null) continue;
+      let offset = baseOffset + field.memoryOffset;
       if (entry.index < 0) {
         let nested = entry.fieldLocals;
         if (nested != null) {
-          this.emitSroaStores(field.type, nested, dest, baseOffset + field.memoryOffset, stmts);
+          if (this.isValueFormFixedArray(field.type)) {
+            this.emitSroaArrayStores(field.type, nested, dest, offset, stmts);
+          } else {
+            this.emitSroaStores(field.type, nested, dest, offset, stmts);
+          }
         }
         continue;
       }
@@ -17048,8 +18456,38 @@ export class Compiler extends DiagnosticEmitter {
         field.type.byteSize,
         dest,
         module.local_get(entry.index, entry.type.toRef()),
-        field.type.toRef(),
-        baseOffset + field.memoryOffset
+        entry.type.toRef(),
+        offset
+      ));
+    }
+  }
+
+  /** {@link emitSroaStores}'s `[T * N]` arm: one store per element leaf. */
+  private emitSroaArrayStores(
+    arrayType: Type,
+    elementLocals: Map<string, Local>,
+    dest: ExpressionRef,
+    baseOffset: i32,
+    stmts: ExpressionRef[]
+  ): void {
+    let module = this.module;
+    let elementType = arrayType.fixedArrayElementType;
+    let elementSize = elementType.inlineExtentBytes;
+    for (let i = 0, k = arrayType.fixedLength; i < k; ++i) {
+      let entry = getMapEntry(elementLocals, i.toString());
+      if (entry == null) continue;
+      let offset = baseOffset + i * elementSize;
+      if (entry.index < 0) {
+        let nested = entry.fieldLocals;
+        if (nested != null) this.emitSroaStores(elementType, nested, dest, offset, stmts);
+        continue;
+      }
+      stmts.push(module.store(
+        elementType.byteSize,
+        dest,
+        module.local_get(entry.index, entry.type.toRef()),
+        entry.type.toRef(),
+        offset
       ));
     }
   }
@@ -17314,8 +18752,12 @@ export class Compiler extends DiagnosticEmitter {
    * address and goes through the ordinary path).
    */
   private resolveSroaValueArray(expression: Expression): Local | null {
-    if (expression.kind != NodeKind.Identifier) return null;
-    let local = this.currentFlow.lookupLocal((<IdentifierExpression>expression).text);
+    // A **path** as well as a bare name: an `@inline struct` field may be a
+    // value-form `[T * N]`, and its element entries live behind the field's
+    // placeholder (`fillSroaFieldLocals` builds that map). `resolveSroaReceiver`
+    // already walks field hops one at a time and returns the placeholder, so the
+    // same tree serves the whole-array local and the field.
+    let local = this.resolveSroaReceiver(expression);
     if (local == null || local.fieldLocals == null) return null;
     return this.isValueFormFixedArray(local.type) ? local : null;
   }
@@ -17416,15 +18858,18 @@ export class Compiler extends DiagnosticEmitter {
       this.currentType = elementType;
       return module.unreachable();
     }
-    if (elementType.getClass() != null) {
+    if (elementType.getClass() != null || elementType.kind == TypeKind.FixedArray) {
       // A record element selected at runtime is several leaves per element, so a
       // single-value `br_table` cannot express it — `arr[i]` alone has no value.
       // Reading a field through the index is supported by the property path,
-      // which selects the *leaf* per block.
+      // which selects the *leaf* per block. A nested array element is the same
+      // claim one step out (deep SROA).
       this.error(
         DiagnosticCode.Not_implemented_0,
         expression.range,
-        "reading or writing a record element of a `[T * N]` value as a whole (an element is several leaves, not one value; read or write one of its fields, `arr[i].x`)"
+        elementType.kind == TypeKind.FixedArray
+          ? "selecting a nested `[T * N]` element of a `[T * N]` value by a runtime index (deep SROA). Use a constant index, or `@unmanaged [T * N]` for a pointer view"
+          : "reading or writing a record element of a `[T * N]` value as a whole (an element is several leaves, not one value; read or write one of its fields, `arr[i].x`)"
       );
       this.currentType = elementType;
       return module.unreachable();
@@ -17520,6 +18965,19 @@ export class Compiler extends DiagnosticEmitter {
     if (elementType.getClass() == null) return 0;    // scalar element: the ordinary path
     if (this.constantIndexValue(elementAccess.elementExpression) >= 0) return 0;
     if (!property.isField) return 0;
+    // **An `@atomic` field has no atomic read here.** These elements are SROA
+    // locals — one WASM local per leaf — so the dispatch below selects a
+    // `local.get` and there is no address for an atomic load. Refused by name
+    // *before* the dispatch, so the read cannot happen non-atomically behind the
+    // refusal.
+    if (property.hasDecorator(DecoratorFlags.Atomic)) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        elementAccess.range,
+        "reading an @atomic field of a value-form record array by a runtime index (the elements are WASM locals, which have no address, so the read cannot be atomic; use a constant index into memory, or reach the record through an address)"
+      );
+      return this.module.unreachable();
+    }
     let fieldLocals = assert(arrayLocal.fieldLocals);
     let length = arrayType.fixedLength;
     if (length > Compiler.VALUE_ARRAY_MAX_RUNTIME_INDEX) {
@@ -17607,6 +19065,16 @@ export class Compiler extends DiagnosticEmitter {
     if (elementType.getClass() == null) return 0;    // scalar element: the ordinary path
     if (this.constantIndexValue(elementAccess.elementExpression) >= 0) return 0;
     if (!property.isField) return 0;
+    // The write half of the refusal in `compileSroaArrayLeafByRuntimeIndex`: the
+    // leaf is a WASM local, and `local.set` cannot be an atomic store.
+    if (property.hasDecorator(DecoratorFlags.Atomic)) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        elementAccess.range,
+        "writing an @atomic field of a value-form record array by a runtime index (the elements are WASM locals, which have no address, so the write cannot be atomic; use a constant index into memory, or reach the record through an address)"
+      );
+      return this.module.unreachable();
+    }
     let fieldLocals = assert(arrayLocal.fieldLocals);
     let length = arrayType.fixedLength;
     if (length > Compiler.VALUE_ARRAY_MAX_RUNTIME_INDEX) {
@@ -17945,25 +19413,170 @@ export class Compiler extends DiagnosticEmitter {
       }
     }
 
-    // `let q: P = p`: a field-wise copy. Not a single `local.set` — there is no
-    // single local — and not a pointer copy, which is the aliasing this whole
-    // phase exists to remove.
-    if (initializerNode.kind == NodeKind.Identifier) {
-      let source = flow.lookupLocal((<IdentifierExpression>initializerNode).text);
-      if (source && source.fieldLocals) {
-        // One `local.set` per **leaf**, through the nesting. `q` has fresh
-        // locals from `fillSroaFieldLocals`, so the copy cannot alias.
-        this.copySroaValue(assert(source.fieldLocals), fieldLocals, initializers);
+    // Any other expression that resolves to an @inline struct value: a copy out
+    // of **memory**. Three shapes reach here, and they differ only in where the
+    // bytes are:
+    //
+    //   `let q: Res = t.value`   — an inline field of a heap object (an address),
+    //   `let q: Res = await t`   — that same field, through the await lowering,
+    //   `let q: Res = arr[0]`    — an sret getter (a slot the call fills),
+    //   `let v = load<Res>(ptr)` — inside `Array<Res>#__get` (an address).
+    //
+    // An SROA **path** (`p.inner`) is still a local copy, not a memory read, so
+    // it is handled first: its leaves already exist as locals, and copying them
+    // cannot alias. Everything below only ever reads bytes, so a value that
+    // lives in memory is copied leaf by leaf into this declaration's own locals.
+    let sourceType = this.resolver.resolveExpression(initializerNode, this.currentFlow);
+    if (sourceType != null && this.isInlineStructType(sourceType)) {
+      if (!sourceType.equals(type)) {
+        this.error(
+          DiagnosticCode.Type_0_is_not_assignable_to_type_1,
+          initializerNode.range,
+          sourceType.toString(), type.toString()
+        );
         return true;
       }
+      let sourceTree = this.sroaTreeOf(initializerNode);
+      if (sourceTree != null) {
+        // One `local.set` per **leaf**, through the nesting. `q` has fresh
+        // locals from `fillSroaFieldLocals`, so the copy cannot alias.
+        this.copySroaValue(sourceTree, fieldLocals, initializers);
+        return true;
+      }
+      let loadAddress = this.inlineStructLoadAddress(initializerNode);
+      if (loadAddress != null) {
+        initializers.push(this.makeMemoryToSroaBlock(loadAddress, type, fieldLocals));
+        return true;
+      }
+      initializers.push(this.makeInlineValueBlock(initializerNode, type, fieldLocals));
+      return true;
     }
 
     this.error(
       DiagnosticCode.Not_implemented_0,
       initializerNode.range,
-      "initialising an @inline struct local from this expression (only `new P(…)`, another @inline struct value, or no initialiser)"
+      "initialising an @inline struct local from this expression (only `new P(…)`, another @inline struct value, an @inline struct-returning call or getter, an inline field, or no initialiser)"
     );
     return true;
+  }
+
+  /**
+   * The address operand of a builtin `load<T>(ptr)` whose `T` is an `@inline
+   * struct`, or `null`.
+   *
+   * `Array<T>#__get` is written in source as `load<T>(this.dataStart + …)`, and
+   * that call cannot produce a value — an inline struct has no value-stack
+   * representation. The declaration that consumes it (`let value = load<T>(…)`)
+   * is therefore the place the copy is emitted: the address is compiled here and
+   * the leaves are loaded into the local's tree. Only the one-argument form is
+   * recognised; a call with an immediate offset is reported by `load` itself,
+   * which is where the refusal belongs.
+   */
+  private inlineStructLoadAddress(expression: Expression): Expression | null {
+    if (expression.kind != NodeKind.Call) return null;
+    let call = <CallExpression>expression;
+    let callee = call.expression;
+    if (callee.kind != NodeKind.Identifier) return null;
+    let target = this.resolver.lookupExpression(
+      callee, this.currentFlow, Type.auto, ReportMode.Swallow
+    );
+    if (target == null || target.kind != ElementKind.FunctionPrototype) return null;
+    let prototype = <FunctionPrototype>target;
+    if (!prototype.hasDecorator(DecoratorFlags.Builtin)) return null;
+    if (prototype.internalName != BuiltinNames.load) return null;
+    let args = call.args;
+    if (args.length != 1) return null;
+    return args[0];
+  }
+
+  /**
+   * Copies an address expression's bytes into an SROA local tree (the `load<T>`
+   * shape). The address is evaluated **once**, into a temp, so a side-effecting
+   * pointer expression cannot run per leaf.
+   */
+  private makeMemoryToSroaBlock(
+    addressExpression: Expression,
+    type: Type,
+    fieldLocals: Map<string, Local>
+  ): ExpressionRef {
+    let module = this.module;
+    let flow = this.currentFlow;
+    let address = flow.getTempLocal(this.options.usizeType);
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(
+      address.index,
+      this.compileExpression(addressExpression, Type.auto),
+      false
+    ));
+    this.copyMemoryToSroa(type, fieldLocals, address.index, 0, stmts);
+    this.currentType = Type.void;
+    return module.block(null, stmts);
+  }
+
+  /**
+   * Materialises an `@inline struct` expression into SROA locals, whether the
+   * expression names memory or fills a call slot.
+   *
+   * The expression is compiled with a call-temp slot **armed** as the hidden
+   * destination. A callee that declares one — any function or getter returning
+   * the record by value (`arr[0]` goes through `Array#__get`) — consumes it, and
+   * the leaves are read out of the slot while it is live. An expression that
+   * declares none — an inline field of a pointer-layout object, or the await
+   * lowering's `t.value` — leaves the slot untouched, and its compiled value is
+   * the **address** of the bytes; those are read instead. Either way the bump
+   * pointer is restored afterwards, so a nested copy in the same statement gets
+   * its own slot.
+   */
+  private makeInlineValueBlock(
+    expression: Expression,
+    type: Type,
+    fieldLocals: Map<string, Local>
+  ): ExpressionRef {
+    let module = this.module;
+    this.ensureSretStack();
+    let global = assert(this.sretStackGlobal);
+    let size = this.sretSizeOf(type);
+    let flow = this.currentFlow;
+    let markLocal = flow.getTempLocal(Type.u32);
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(module.local_set(markLocal.index, module.global_get(global, TypeRef.I32), false));
+    stmts.push(module.global_set(global, module.binary(
+      BinaryOp.AddI32,
+      module.local_get(markLocal.index, TypeRef.I32),
+      module.i32(size)
+    )));
+    stmts.push(this.makeSretGuard(markLocal, size, expression));
+    let previousDest = this.sretDestSlot;
+    this.sretDestSlot = this.makeSretAddress(markLocal);
+    let value = this.compileExpression(expression, Type.auto);
+    let consumed = this.sretDestSlot == 0;
+    this.sretDestSlot = previousDest;
+    if (consumed) {
+      // A callee consumed the destination: the value was written to the slot.
+      stmts.push(value);
+      this.copyMemoryToSroa(type, fieldLocals, markLocal.index, 0, stmts);
+    } else {
+      // Nothing consumed it: the compiled value *is* the address of existing
+      // bytes (an inline field, or the await expression's `t.value`).
+      let valueTypeRef = getExpressionType(value);
+      if (valueTypeRef == TypeRef.Unreachable) {
+        return module.unreachable();
+      }
+      if (valueTypeRef != TypeRef.I32 && valueTypeRef != TypeRef.I64) {
+        this.error(
+          DiagnosticCode.Not_implemented_0,
+          expression.range,
+          "copying an @inline struct value from this expression (it is neither an address into memory nor a call that fills a destination slot)"
+        );
+        return module.unreachable();
+      }
+      let address = flow.getTempLocal(this.options.usizeType);
+      stmts.push(module.local_set(address.index, value, false));
+      this.copyMemoryToSroa(type, fieldLocals, address.index, 0, stmts);
+    }
+    stmts.push(module.global_set(global, module.local_get(markLocal.index, TypeRef.I32)));
+    this.currentType = Type.void;
+    return module.block(null, stmts);
   }
 
   /**
@@ -18022,10 +19635,9 @@ export class Compiler extends DiagnosticEmitter {
    *
    * Scalars (i8..f64, bool) and references (a `struct` pointer, a `@managed
    * struct` reference, a class reference) each occupy one local. A `T[N]` field
-   * does not — it is an extent, not a value — and is refused by name rather than
-   * decomposed, because decomposing it is the deep-SROA phase (a `T[N]` of
-   * scalars would become N locals, which needs a `makeZero` case this phase does
-   * not add; `compiler.ts` `makeZero` still has no `FixedArray` arm).
+   * does not — it is an extent, not a value — so it is not a leaf either: the
+   * caller recurses into its elements instead (`fillSroaFieldLocals` builds the
+   * element map, and the copy walkers descend it).
    */
   isSroaFieldType(type: Type): bool {
     if (type.kind == TypeKind.FixedArray) return false;
@@ -18481,6 +20093,47 @@ export class Compiler extends DiagnosticEmitter {
     return module.struct_new(module.heapType(classTypeRef), operands);
   }
 
+  /**
+   * Emits a zero fill over an inline field's extent at `this + offset`.
+   *
+   * A field whose type is inline bytes -- an `@inline struct`, or a value-form
+   * `[T * N]` -- has no value representation, so its setter cannot assign it.
+   * The constructor defines those bytes the way it defines a scalar's slot: by
+   * writing zero. Doing it here rather than relying on the allocator matters
+   * because `__new`'s `memory.fill` is a runtime promise, and the stub runtime's
+   * `__alloc` does not keep it (`std/assembly/rt/stub.ts`). Without the fill a
+   * plain declaration compiled but its bytes were whatever the bump allocator
+   * left behind -- measured, a fresh instance read a stale 4 bytes.
+   */
+  makeInlineFieldZeroFill(
+    /** The field whose extent is zeroed. */
+    property: Property,
+    /** Index of the `this` local. */
+    thisIndex: i32,
+    /** Type of the `this` local. */
+    thisRef: TypeRef
+  ): ExpressionRef {
+    let module = this.module;
+    let offset = property.memoryOffset;
+    let extent = property.type.inlineExtentBytes;
+    // An empty value has no bytes to define; a zero-length fill would be valid
+    // but noise in every wat that holds one.
+    if (extent <= 0) return module.nop();
+    let addr: ExpressionRef = module.local_get(thisIndex, thisRef);
+    if (offset) {
+      addr = module.binary(
+        BinaryOp.AddSize,
+        addr,
+        this.options.isWasm64 ? module.i64(offset) : module.i32(offset)
+      );
+    }
+    return module.memory_fill(
+      addr,
+      module.i32(0),
+      this.options.isWasm64 ? module.i64(extent) : module.i32(extent)
+    );
+  }
+
   /** Makes the initializers for a class's fields within the constructor. */
   makeFieldInitializationInConstructor(
     /** Class being initialized. */
@@ -18515,36 +20168,58 @@ export class Compiler extends DiagnosticEmitter {
       // value has no address and the field has no single scalar width — so the
       // two cases are separated rather than skipped alike:
       //
-      //   `= {}` (or no initializer): nothing to store. `__new` hands back
-      //      zeroed memory and every leaf is zero, which is exactly what an
-      //      empty literal means. This is the idiom a `@managed` record needs to
-      //      satisfy the definite-assignment rule (TS2564), so it must compile.
+      //   `= {}` (or no initializer): zero, written by the constructor over the
+      //      field's whole extent (`makeInlineFieldZeroFill`). That is what an
+      //      empty literal means, and it is the idiom that satisfies the
+      //      definite-assignment rule (TS2564), so it must compile.
       //
-      //   anything else: a named refusal. Before this branch existed the field
-      //      was refused at declaration, so the skip could not lose anything;
-      //      now the declaration is legal, and a silent skip would compile a
-      //      record whose initializer never ran — measured: `inner: Good =
-      //      { a: 11, b: 22 }` read back 0 with no diagnostic.
+      //   anything else: a named refusal. The declaration itself is legal, so a
+      //      silent skip would compile a record whose initializer never ran —
+      //      measured: `inner: Good = { a: 11, b: 22 }` read back 0 with no
+      //      diagnostic.
       if (this.isInlineStructType(property.type)) {
         let fieldInitializer = property.initializerNode;
-        // A class field is refused by name at declaration (inline-in-heap), so
-        // there is nothing to say here: reporting the initializer too would make
-        // one mistake look like two.
-        let isRecordField = classInstance.hasDecorator(DecoratorFlags.Unmanaged) ||
-          classInstance.hasDecorator(DecoratorFlags.ManagedStruct);
-        if (fieldInitializer != null && isRecordField) {
-          if (
+        // The field is bytes inside this object -- a plain class's heap
+        // allocation, or an `@unmanaged` / `@managed` record's block. No store
+        // can copy a whole value there (the value has no address and the slot
+        // has no single scalar width), so the two cases are separated:
+        //
+        //   `= {}` (or no initializer): zero. The constructor writes that zero
+        //      itself (`makeInlineFieldZeroFill` below), which is what makes the
+        //      bytes defined under every runtime -- the stub's `__alloc` does
+        //      not zero, and `__new` cannot be relied on for a record either.
+        //      `= {}` is the idiom that satisfies TS2564, so it must compile.
+        //
+        //   anything else: a named refusal. A silent skip would compile a
+        //      record whose initializer never ran -- measured: `inner: Good =
+        //      { a: 11, b: 22 }` read back 0 with no diagnostic.
+        if (
+          fieldInitializer != null &&
+          !classInstance.hasDecorator(DecoratorFlags.InlineStruct)
+        ) {
+          let isEmptyLiteral =
             fieldInitializer.kind == NodeKind.Literal &&
             (<LiteralExpression>fieldInitializer).isLiteralKind(LiteralKind.Object) &&
-            (<ObjectLiteralExpression>fieldInitializer).names.length == 0
-          ) {
-            continue; // `= {}`: all zero, which is what the allocation already is
+            (<ObjectLiteralExpression>fieldInitializer).names.length == 0;
+          if (!isEmptyLiteral) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              fieldInitializer.range,
+              "an initializer on an @inline struct field (the value is stored inline and has no address to copy into; the allocation is already zero, so `= {}` is allowed -- assign the field's own fields after construction)"
+            );
           }
-          this.error(
-            DiagnosticCode.Not_implemented_0,
-            fieldInitializer.range,
-            "an initializer on an @inline struct field (the value is stored inline and has no address to copy into; the allocation is already zero, so `= {}` is allowed -- assign the field's own fields after construction)"
+        }
+        // An `@inline` outer has no address: its fields are the constructor's
+        // own SROA locals, created by `compileSroaLocal`, so there is nothing to
+        // fill (and `this` is not a pointer to fill through).
+        if (
+          !classInstance.hasDecorator(DecoratorFlags.InlineStruct) &&
+          !isGcClass(classInstance)
+        ) {
+          stmts.push(
+            this.makeInlineFieldZeroFill(property, thisLocalIndex, sizeTypeRef)
           );
+          flow.setThisFieldFlag(property, FieldFlags.Initialized);
         }
         continue;
       }
@@ -18594,12 +20269,13 @@ export class Compiler extends DiagnosticEmitter {
         // emitter entirely — it would store `sizeof(array)` bytes from a
         // pointer-shaped operand, which the validator rejects.
         //
-        // Nothing needs emitting instead: the record's payload comes back **zeroed**
-        // (`__new` runs `memory.fill(ptr, 0, size)`, `std/assembly/rt/itcms.ts`),
-        // and a value's zero is all-zero bytes. Measured: `new H()` then `h.arr[0]`
-        // is 0. An explicit initializer is not supported yet — it would have to
-        // write the value's leaves into `this + offsetof`, which is the
-        // field-write path, not this one.
+        // Nothing needs a value store instead: the record's payload comes back
+        // **zeroed** under `itcms` (`__new` runs `memory.fill(ptr, 0, size)`),
+        // and a value's zero is all-zero bytes. The constructor writes that zero
+        // itself below anyway (`makeInlineFieldZeroFill`), because the stub
+        // runtime's allocator does not zero. An explicit initializer is not
+        // supported yet — it would have to write the value's leaves into
+        // `this + offsetof`, which is the field-write path, not this one.
         if (fieldType.kind == TypeKind.FixedArray &&
             (fieldType.fixedMemoryModel == MemoryModelCode.None ||
              fieldType.fixedMemoryModel == MemoryModelCode.Inline)) {
@@ -18610,6 +20286,12 @@ export class Compiler extends DiagnosticEmitter {
               "an initializer on a `[T * N]` field in a `new`-constructed record (the field is inline bytes; assign its elements after construction instead, `h.arr[0] = ...`)"
             );
           }
+          if (!isGcClass(classInstance)) {
+            stmts.push(
+              this.makeInlineFieldZeroFill(field, thisLocalIndex, sizeTypeRef)
+            );
+          }
+          flow.setThisFieldFlag(field, FieldFlags.Initialized);
           continue;
         }
         let setterInstance = assert(field.setterInstance);
@@ -18623,6 +20305,12 @@ export class Compiler extends DiagnosticEmitter {
           expr = module.drop(expr);
         }
         stmts.push(expr);
+        // The setter above wrote the field's zero (a null address for the view
+        // form `@unmanaged [T * N]`), which is the same defined zero a scalar
+        // field gets for free -- so it satisfies the definite-assignment rule.
+        if (fieldType.kind == TypeKind.FixedArray) {
+          flow.setThisFieldFlag(field, FieldFlags.Initialized);
+        }
       }
     }
 

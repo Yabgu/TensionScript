@@ -1,4 +1,4 @@
-import { BLOCK, BLOCK_OVERHEAD, OBJECT_OVERHEAD, OBJECT_MAXSIZE, TOTAL_OVERHEAD, DEBUG, TRACE, RTRACE } from "./common";
+import { BLOCK, BLOCK_OVERHEAD, OBJECT_OVERHEAD, OBJECT_MAXSIZE, TOTAL_OVERHEAD, DEBUG, TRACE, RTRACE, ARENA, HEAP_BASE, outsideArena } from "./common";
 import { onvisit, oncollect } from "./rtrace";
 import { E_ALLOCATION_TOO_LARGE, E_ALREADY_PINNED, E_NOT_PINNED } from "../util/error";
 
@@ -98,7 +98,7 @@ function initLazy(space: Object): Object {
   unlink(): void {
     let next = this.next;
     if (next == null) {
-      if (DEBUG) assert(this.prev == null && changetype<usize>(this) < __heap_base);
+      if (DEBUG) assert(this.prev == null && (ARENA ? (HEAP_BASE > changetype<usize>(this)) : (changetype<usize>(this) < __heap_base)));
       return; // static data not yet linked
     }
     let prev = this.prev;
@@ -135,7 +135,7 @@ export function __new(size: usize, id: i32): usize {
 @global @unsafe
 export function __renew(oldPtr: usize, size: usize): usize {
   let oldObj = changetype<Object>(oldPtr - TOTAL_OVERHEAD);
-  if (oldPtr < __heap_base) { // move to heap for simplicity
+  if (ARENA ? (HEAP_BASE > oldPtr) : (oldPtr < __heap_base)) { // move to heap for simplicity
     let newPtr = __new(size, oldObj.rtId);
     memory.copy(newPtr, oldPtr, min(size, oldObj.rtSize));
     return newPtr;
@@ -163,7 +163,7 @@ export function __link(parentPtr: usize, childPtr: usize, expectMultiple: bool):
 // @ts-ignore: decorator
 @global @unsafe
 export function __visit(ptr: usize, cookie: i32): void {
-  if (!ptr) return;
+  if (ARENA ? (!ptr || outsideArena(ptr)) : !ptr) return;
   let obj = changetype<Object>(ptr - TOTAL_OVERHEAD);
   if (RTRACE) if (!onvisit(obj)) return;
   if (obj.color == white) {
@@ -231,7 +231,7 @@ export function __collect(): void {
   while (iter != from) {
     if (DEBUG) assert(iter.color == white);
     let newNext = iter.next;
-    if (changetype<usize>(iter) < __heap_base) {
+    if (ARENA ? (HEAP_BASE > changetype<usize>(iter)) : (changetype<usize>(iter) < __heap_base)) {
       iter.nextWithColor = 0; // may become linked again
       iter.prev = changetype<Object>(0);
     } else {
@@ -251,4 +251,19 @@ export function __collect(): void {
 
   if (TRACE) trace("GC done at", 1, total);
   if (RTRACE) oncollect(total);
+}
+
+// === Arenas ==============================================================================
+
+/** Places this instance's collector state inside its arena; see `itcms.__arenaPlaceState`. */
+// @ts-ignore: decorator
+@global @unsafe
+export function __arenaPlaceState(heapBase: usize, arenaEnd: usize): usize { // eslint-disable-line @typescript-eslint/no-unused-vars
+  let stride = offsetof<Object>();
+  total = 0;
+  white = 0;
+  fromSpace = initLazy(changetype<Object>(heapBase));
+  toSpace = initLazy(changetype<Object>(heapBase + stride));
+  pinSpace = initLazy(changetype<Object>(heapBase + 2 * stride));
+  return heapBase + 3 * stride;
 }

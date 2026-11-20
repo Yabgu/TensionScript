@@ -241,6 +241,12 @@
   i32.const 0
   i32.store
   local.get $0
+  i64.const 0
+  i64.store offset=4 align=1
+  local.get $0
+  i64.const 0
+  i64.store offset=12 align=1
+  local.get $0
  )
  (func $~lib/rt/tlsf/removeBlock (param $0 i32) (param $1 i32)
   (local $2 i32)

@@ -315,6 +315,38 @@ declare namespace atomic {
   export function fence(): void;
 }
 
+// === Address-facing atomics ===============================================================
+//
+// `Atomics.*` takes an `ArrayBufferView` and a *view index*. Runtime code and C interop hold an
+// **address** instead, so these take the `usize` the builtin `atomic.*` takes and forward it with
+// no arithmetic and no bounds check. The read-modify-write family returns the **old** value, which
+// is what the wasm instructions compute.
+
+/** Atomically loads an integer value from `ptr` and returns it. */
+declare function atomicLoad<T>(ptr: usize): T;
+/** Atomically stores `value` at `ptr`. */
+declare function atomicStore<T>(ptr: usize, value: T): void;
+/** Atomically adds `value` at `ptr` and returns the **old** value. */
+declare function atomicAdd<T>(ptr: usize, value: T): T;
+/** Atomically subtracts `value` at `ptr` and returns the **old** value. */
+declare function atomicSub<T>(ptr: usize, value: T): T;
+/** Atomically ANDs `value` into `ptr` and returns the **old** value. */
+declare function atomicAnd<T>(ptr: usize, value: T): T;
+/** Atomically ORs `value` into `ptr` and returns the **old** value. */
+declare function atomicOr<T>(ptr: usize, value: T): T;
+/** Atomically XORs `value` into `ptr` and returns the **old** value. */
+declare function atomicXor<T>(ptr: usize, value: T): T;
+/** Atomically exchanges `value` at `ptr` and returns the **old** value. */
+declare function atomicExchange<T>(ptr: usize, value: T): T;
+/** Atomically compares the value at `ptr` with `expect` and, if equal, replaces it with `replace`. Returns the value the location held before the operation. */
+declare function atomicCompareExchange<T>(ptr: usize, expect: T, replace: T): T;
+/** Performs a sequentially consistent full fence. */
+declare function atomicFence(): void;
+/** Blocks this agent while the value at `ptr` still equals `expect`, or until `timeout` (nanoseconds, -1 for none) elapses. */
+declare function atomicWait<T>(ptr: usize, expect: T, timeout?: i64): AtomicWaitResult;
+/** Wakes up to `count` agents waiting on `ptr` (-1 for all). Returns the count woken. */
+declare function atomicNotify(ptr: usize, count?: i32): i32;
+
 /** Describes the result of an atomic wait operation. */
 declare enum AtomicWaitResult {
   /** Woken by another agent. */
@@ -1845,6 +1877,8 @@ declare namespace Atomics {
   export function compareExchange<T extends i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64>(array: TypedArray<T>, index: i32, expectedValue: T, replacementValue: T): T;
   export function wait<T extends i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64>(array: TypedArray<T>, value: T, timeout?: i64): AtomicWaitResult;
   export function notify<T extends i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64>(array: TypedArray<T>, index: i32, count?: i32): i32;
+  /** Orders every memory access before it against every access after it (a sequentially consistent full fence). */
+  export function fence(): void;
   /** The static Atomics.isLockFree() method is used to determine whether to use locks or atomic operations. It returns true, if the given size is one of the BYTES_PER_ELEMENT */
   export function isLockFree(size: usize): bool;
 }
