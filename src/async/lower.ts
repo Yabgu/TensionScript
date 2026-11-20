@@ -2913,6 +2913,7 @@ function reasonFor(node: Node): string {
     case NodeKind.This: return "this in an async function body (async lowering)";
     case NodeKind.Super: return "super in an async function body (async lowering)";
     case NodeKind.Throw: return "throw in an async function body (async lowering)";
+    case NodeKind.On: return "`on <policy>` needs the continuations backend: a policy decides where a task is created and how its await suspends, and the promise lowering has neither. Build with --enable stack-switching, or drop the `on`.";
     case NodeKind.Try: return "try/catch in an async function body (async lowering)";
     case NodeKind.Switch: return "switch in an async function body (async lowering)";
     case NodeKind.If: return "if in an async function body (async lowering)";

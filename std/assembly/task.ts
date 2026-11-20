@@ -74,6 +74,20 @@ export function setWakeSink(sink: (exec: i32, slot: i32) => void): void {
 }
 
 /**
+ * The backend a policy's `create`/`await` are written against.
+ *
+ * **The numbers are the artifact's encoding** (`tension.async`, emitted by
+ * `src/compiler.ts`): `1` is the stackful continuations backend (wasmfx,
+ * `--enable stack-switching`), `2` is the state-machine promise lowering. They
+ * are not `0`/`1` on purpose — a zeroed byte in a section must not read as
+ * "continuations".
+ */
+export enum AsyncBackend {
+  Continuations = 1,
+  Promise = 2,
+}
+
+/**
  * What a task's `await` does, and what happens the moment the task is created.
  *
  * `docs/policy-and-threads.md` §3. Two moments, two methods, and **no generic
@@ -93,6 +107,18 @@ export abstract class TaskPolicy {
    * addressable rather than a reference into the caller's heap.
    */
   readonly crossesThreads: bool = false;
+
+  /**
+   * The model this policy's create/await are written against. A literal: the
+   * compiler reads it at every `on` site where the class is visible.
+   *
+   * **An enum value, not an allocation.** A top-level initializer is emitted
+   * into the module's start function whether or not anything reads it (the
+   * `inlinePolicy()` note below records that measurement); a compile-time
+   * constant costs nothing. `TaskPolicy` is the stack-model base, so every
+   * existing policy inherits `Continuations` unchanged.
+   */
+  readonly backend: AsyncBackend = AsyncBackend.Continuations;
 
   /**
    * Called at the call site, once the task object exists and before any body
@@ -231,12 +257,32 @@ export abstract class TaskBase {
    * what give the mask its meaning. `~lib/mask` imports nothing, so this
    * import cannot cycle.
    *
-   * Declared **last**, after `entry`, so no earlier field's offset moves. On
-   * wasm32 a reference is four bytes, exactly what the `i32` it replaces cost,
-   * so the record does not grow and `offsetof("mask")` does not move —
-   * `tests/rt/gate4.js` (j) observes both.
+   * Declared after `entry`, so no earlier field's offset moves. On wasm32 a
+   * reference is four bytes, exactly what the `i32` it replaces cost at the
+   * time, so `offsetof("mask")` did not move — `tests/rt/gate4.js` (j)
+   * observes it. The serve context (`serveArg`/`serveKey`/`serveOrigin`) is
+   * appended **after** this field for the same reason.
    */
   mask: MaskBase | null = null;
+  /**
+   * The request words this task was created by, or the zeroes an unserved task
+   * keeps: `__serveArg`'s one `i32`, `__serveKey`'s origin-defined key, and
+   * `__serveOrigin`'s poster.
+   *
+   * **On the task, because the serve and the body have different lifetimes.**
+   * `__drainInbox` serves an entire queue before any body runs (`__serveOne`
+   * resumes `f$spawnStart`, which parks this slot on the new task and returns),
+   * so a word copied into module state at dequeue time names the *last* request
+   * by the time the first body reads it. `__serveOne` writes these three onto
+   * the task it just created, and the body reads its own at any point — before
+   * or after a suspension, nested serves included.
+   *
+   * Appended after `mask`, so no field declared earlier moves; the record grows
+   * by three words and a subclass's own fields shift past them.
+   */
+  serveArg: i32 = 0;
+  serveKey: i32 = 0;
+  serveOrigin: i32 = 0;
 
   /** Runs, or resumes, this task on the current thread. */
   abstract drive(): void;

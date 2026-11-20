@@ -500,6 +500,11 @@ A WasmFX backend implements the same contract with `cont.new` / `suspend` /
 - `Task<T>` semantics — identity, result, wake shape, invariants — are
   unchanged.
 
+Each artifact declares which backend it was built for: the `tension.async`
+custom section carries the backend byte and the policy classes that forced it
+(`src/compiler.ts`, `emitAsyncBackendSection`), so a host reads the declaration
+before instantiating instead of discovering the mismatch at the first suspend.
+
 Backend B changes **when and how the guest's stack is captured**, not what the
 host guarantees. That is the test of whether this contract is a contract: an
 implementation may replace the entire suspension mechanism and still be

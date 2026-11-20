@@ -1890,7 +1890,79 @@ export class Compiler extends DiagnosticEmitter {
       new RtraceMemory(this).walkModule();
     }
 
+    // The artifact's backend, in a section a host can read before it
+    // instantiates anything. Emitted last so every `on` site has been resolved
+    // and its policy class recorded (`Program#asyncPolicyNames`).
+    this.emitAsyncBackendSection();
+
     return module;
+  }
+
+  /**
+   * Writes the `tension.async` custom section, **only when the program has an
+   * `await`**. An artifact with no async runs on any backend, and the section's
+   * absence says exactly that.
+   *
+   * Layout, little-endian:
+   *
+   * | offset | size | field |
+   * |---|---|---|
+   * | 0 | 1 | version = 1 |
+   * | 1 | 1 | backend: 1 = continuations, 2 = promise |
+   * | 2 | 1 | flags: bit 0 set = may suspend |
+   * | 3 | 4 | count (u32): policy class names that follow |
+   * | 7+ | … | count × (u32 length, UTF-8 bytes) |
+   *
+   * The names are the concrete policy classes seen at `on` sites, deduped in
+   * first-use order, dropping a name longer than 256 bytes and keeping at most
+   * 16 — a truncated name that still decodes is worse than a shorter list.
+   *
+   * **On a promise build the list is empty by construction**: the promise
+   * lowering refuses every `on` outright (`src/async/lower.ts`, `reasonFor`),
+   * so a program that gets here on that backend has no policy site to name.
+   * That is the contract, not a gap to fill in later.
+   */
+  private emitAsyncBackendSection(): void {
+    let program = this.program;
+    if (!program.hasAwait) return;
+    let names: string[] = [];
+    let seen = new Set<string>();
+    let recorded = program.asyncPolicyNames;
+    if (recorded) {
+      for (let i = 0, k = recorded.length; i < k && names.length < 16; ++i) {
+        let name = recorded[i];
+        if (seen.has(name)) continue;
+        seen.add(name);
+        // Drop, never truncate: see the method note.
+        if (utf8Length(name) > 256) continue;
+        names.push(name);
+      }
+    }
+    let size = 7;
+    for (let i = 0, k = names.length; i < k; ++i) {
+      size += 4 + utf8Length(names[i]);
+    }
+    let bytes = new Uint8Array(size);
+    bytes[0] = 1; // version
+    bytes[1] = this.asyncShellSuspends ? 1 : 2; // backend
+    bytes[2] = 1; // flags: may suspend
+    let count = names.length;
+    bytes[3] = count & 0xff;
+    bytes[4] = (count >>> 8) & 0xff;
+    bytes[5] = (count >>> 16) & 0xff;
+    bytes[6] = (count >>> 24) & 0xff;
+    let offset = 7;
+    for (let i = 0; i < count; ++i) {
+      let encoded = utf8Encode(names[i]);
+      let length = encoded.length;
+      bytes[offset++] = length & 0xff;
+      bytes[offset++] = (length >>> 8) & 0xff;
+      bytes[offset++] = (length >>> 16) & 0xff;
+      bytes[offset++] = (length >>> 24) & 0xff;
+      bytes.set(encoded, offset);
+      offset += length;
+    }
+    this.module.addCustomSection("tension.async", bytes);
   }
 
   /** Validates and applies `--exportStart`, reporting a conflict by name. */
@@ -13462,8 +13534,11 @@ export class Compiler extends DiagnosticEmitter {
     }
 
     // The call's own type is what the whole expression has, so the local that
-    // holds the task is typed by resolving the inner expression once.
-    let taskType = resolver.resolveExpression(inner, flow, Type.auto, ReportMode.Report);
+    // holds the task is typed by resolving the `on` expression once. Resolving
+    // the wrapper (not just the inner call) is what gives `Resolver`'s
+    // `NodeKind.On` arm its one job: read the policy's static class and compare
+    // its declared `backend` with this build's.
+    let taskType = resolver.resolveExpression(expression, flow, Type.auto, ReportMode.Report);
     if (!taskType) return module.unreachable();
 
     let start = expression.range.start;
@@ -21129,4 +21204,56 @@ function gcFieldIndex(classInstance: Class, property: Property): i32 {
   }
   assert(false); // a field that is not among its class's fields is a compiler bug
   return 0;
+}
+
+/** UTF-8 byte length of `text`, surrogate pairs counted once. */
+function utf8Length(text: string): i32 {
+  let length = 0;
+  for (let i = 0, k = text.length; i < k; ++i) {
+    let code = text.charCodeAt(i);
+    if (code < 0x80) {
+      length += 1;
+    } else if (code < 0x800) {
+      length += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < k) {
+      let next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 4;
+        ++i;
+      } else {
+        length += 3;
+      }
+    } else {
+      length += 3;
+    }
+  }
+  return length;
+}
+
+/** Encodes `text` as UTF-8, surrogate pairs included. */
+function utf8Encode(text: string): Uint8Array {
+  let bytes = new Uint8Array(utf8Length(text));
+  let offset = 0;
+  for (let i = 0, k = text.length; i < k; ++i) {
+    let code = text.charCodeAt(i);
+    if (code < 0x80) {
+      bytes[offset++] = code;
+    } else if (code < 0x800) {
+      bytes[offset++] = 0xc0 | (code >>> 6);
+      bytes[offset++] = 0x80 | (code & 0x3f);
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < k &&
+               text.charCodeAt(i + 1) >= 0xdc00 && text.charCodeAt(i + 1) <= 0xdfff) {
+      let next = text.charCodeAt(++i);
+      let point = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+      bytes[offset++] = 0xf0 | (point >>> 18);
+      bytes[offset++] = 0x80 | ((point >>> 12) & 0x3f);
+      bytes[offset++] = 0x80 | ((point >>> 6) & 0x3f);
+      bytes[offset++] = 0x80 | (point & 0x3f);
+    } else {
+      bytes[offset++] = 0xe0 | (code >>> 12);
+      bytes[offset++] = 0x80 | ((code >>> 6) & 0x3f);
+      bytes[offset++] = 0x80 | (code & 0x3f);
+    }
+  }
+  return bytes;
 }

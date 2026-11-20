@@ -30,6 +30,11 @@
 //       an admission refusal that can only be the mask's width, and a mask the
 //       std does not provide — a program-written `MaskBase`.
 //
+//   (m)–(n) are the round the serve context moved onto the task: three requests
+//       queued before any is served (each body must read its **own** argument,
+//       not the drain's last one), and a served body that serves again from
+//       inside itself (the outer context must survive the nested drain).
+//
 // Node is required, with `--experimental-wasm-wasmfx` (measured: without it,
 // `core stack switching not enabled`), because `wasmtime wast` cannot
 // instantiate a shared-memory module.
@@ -1111,10 +1116,12 @@ export async function main(): i32 { await leaf(); return 0; }
   //
   // The last two rows are the record. `mask` became a reference and, on wasm32,
   // a reference is four bytes — the same as the `i32` it replaced — so the field
-  // stays at 28 and the base record stays 32 bytes: `_record`, the first field of
-  // the first subclass, still starts at 32. The pre-template fixture stored the
-  // `i32` at `offset=28` too; the fixture diff in `tests/compiler` is a type
-  // change, not a layout change.
+  // stayed at 28: `offsetof("mask")` is the row that would move if the mask had
+  // cost the record anything. The base record is 44 bytes now, not the 32 of
+  // that round: the three serve words (`serveArg`/`serveKey`/`serveOrigin`) are
+  // appended after `mask`, so nothing earlier moves and `_record` shifts by the
+  // twelve bytes they add. The `tests/compiler` fixture diff is that shift —
+  // field accessors plus offsets, nothing semantic.
   // ---------------------------------------------------------------------------
 
   console.log("\n# (j) the mask template's arithmetic at both widths");
@@ -1135,6 +1142,9 @@ export function with40(): u64 { return new Mask<u64>(1).with(40).bits; }
 export function unionBits(): u32 { return new Mask<u32>(1).union(new Mask<u32>(2)).bits; }
 export function unnameable(): bool { return new Mask<u32>(1).allows(40); }
 export function offsetMask(): i32 { return offsetof<Task<i32>>("mask"); }
+export function offsetServeArg(): i32 { return offsetof<Task<i32>>("serveArg"); }
+export function offsetServeKey(): i32 { return offsetof<Task<i32>>("serveKey"); }
+export function offsetServeOrigin(): i32 { return offsetof<Task<i32>>("serveOrigin"); }
 export function offsetAfterBase(): i32 { return offsetof<Task<i32>>("_record"); }
 `, ["--runtime", "incremental"]);
     check("the width fixture compiles", built.ok, true);
@@ -1159,7 +1169,13 @@ export function offsetAfterBase(): i32 { return offsetof<Task<i32>>("_record"); 
       // The mask has no opinion about an id it cannot name; the seams decide.
       check("(j10) u32 mask has no opinion about id 40", e.unnameable(), 1);
       check("(j11) TaskBase.mask is still at offset 28", e.offsetMask(), 28);
-      check("(j11) the base record is still 32 bytes", e.offsetAfterBase(), 32);
+      // The serve context is appended **after** `mask`, so every field the
+      // earlier rounds observed keeps its offset and only the record's size
+      // changes: the first subclass field moves from 32 to 44.
+      check("(j11) the serve context starts at 32",
+        [e.offsetServeArg(), e.offsetServeKey(), e.offsetServeOrigin()], [32, 36, 40]);
+      check("(j11) the base record is 44 bytes (was 32 before the serve context)",
+        e.offsetAfterBase(), 44);
     }
   }
 
@@ -1375,6 +1391,246 @@ export async function main(): i32 { await leaf(); return 0; }
       const result = await workerDone;
       check("(l4) the worker exited with the shell's status", result.status, 0);
       check("(l4) `__threadJoin` observes the exit", e.__threadJoin(1), 0);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // (m) three requests queued before any is served: each body reads its own.
+  //
+  // `__drainInbox` serves the **whole** queue before any ready slot runs, and
+  // `$starts[funcIndex]` is `f$spawnStart` — which creates a task and parks the
+  // served continuation on it without running the body. So a request word kept
+  // only in module state names the *last* request by the time a body reads it,
+  // and three posts of 11, 22, 33 answered 33, 33, 33 (measured: sum 99). The
+  // context lives on the task, so identity of the three replies — not their
+  // order — is what this row asserts.
+  // ---------------------------------------------------------------------------
+
+  console.log("\n# (m) queued requests: every body reads its own argument");
+  {
+    const built = compile(`
+import {
+  __spawnOn, __spawnThread, __serveArg, __serveOrigin, __serveKey,
+  __executorExit, __selfExecutor, mainExecutor,
+} from "~lib/thread";
+
+const N: i32 = 3;
+let seen: i32 = 0;
+let sum: i32 = 0;
+// Bit (value / 11 - 1): a reply of 11 sets 0x1, 22 sets 0x2, 33 sets 0x4.
+let multiset: i32 = 0;
+
+export function seenCount(): i32 { return seen; }
+export function sumValue(): i32 { return sum; }
+export function multisetBits(): i32 { return multiset; }
+
+export let replyOrigin: i32 = -1;
+
+async function leaf(): i32 { return 0; }
+
+// Served in the worker: read the argument **first**, echo it to the poster.
+async function work(): i32 {
+  let value = __serveArg();
+  let reply = __serveKey();
+  let origin = __serveOrigin();
+  await leaf();
+  __spawnOn(origin, reply, value, 0);
+  return 0;
+}
+
+// Served in main: collect one reply; the third one ends main's loop.
+async function collect(): i32 {
+  let value = __serveArg();
+  let from = __serveOrigin();
+  await leaf();
+  ++seen;
+  sum += value;
+  let index = value / 11 - 1;
+  if (index >= 0 && index < 8) multiset |= 1 << index;
+  replyOrigin = from;
+  if (seen == N) __executorExit(__selfExecutor());
+  return 0;
+}
+
+// Three posts, back to back, with no pump between them: all three are in the
+// worker's inbox before the first one is served.
+export function boot(workerId: i32, workStart: i32, collectStart: i32): i32 {
+  let r = __spawnThread(workerId, -1, 0);
+  for (let i = 1; i <= N; ++i) __spawnOn(workerId, workStart, i * 11, collectStart);
+  return r;
+}
+
+export function pump(): i32 {
+  let e = mainExecutor();
+  let guard = 0;
+  while (e.inbox.depth > 0 || e.ready.depth > 0) {
+    if (e.step(e)) break;
+    if (++guard > 1000000) break;
+  }
+  return seen;
+}
+
+export async function main(): i32 { await leaf(); return 0; }
+`, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+    check("the queued-request fixture compiles", built.ok, true);
+    if (!built.ok) {
+      console.log(built.output);
+    } else {
+      const names = startsOf(built.wat);
+      const workStart = names.indexOf("$probe/work$spawnStart");
+      const collectStart = names.indexOf("$probe/collect$spawnStart");
+      check("the queued-request fixture has both spawn entries",
+        workStart > 0 && collectStart > 0, true);
+
+      const module = new WebAssembly.Module(built.bytes);
+      const memory = new WebAssembly.Memory({ initial: 1, maximum: 128, shared: true });
+      let workerDone = null;
+      const env = {
+        memory,
+        abort: (a, b, c, d) => { throw new Error(`abort ${a} ${b} ${c} ${d}`); },
+        __executorCount: () => 2,
+        __startThread: (id) => {
+          workerDone = new Promise((resolve, reject) => {
+            const worker = new Worker(new URL(import.meta.url), {
+              workerData: { role: "plain", module, memory, id, total: 2 },
+            });
+            worker.on("message", resolve);
+            worker.on("error", reject);
+          });
+          return 0;
+        },
+      };
+      const e = new WebAssembly.Instance(module, { env }).exports;
+      check("`__threadInit` carves the block", e.__threadInit(64), 0);
+      e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
+      check("`__start` runs the boot body", e.__start(), 0);
+      check("the worker is spawned and all three requests posted",
+        e.boot(1, workStart, collectStart), 0);
+
+      const deadline = Date.now() + 10000;
+      let seen = -1;
+      while (Date.now() < deadline) {
+        seen = e.pump();
+        if (seen >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      check("(m1) all three requests were served", e.seenCount(), 3);
+      // The multiset, not the order: 0x7 is exactly {11, 22, 33}. Before the
+      // context moved onto the task this row was 0x4 — all three replies 33.
+      check("(m2) the three replies are exactly {11, 22, 33}", e.multisetBits(), 7);
+      check("(m3) …and their sum is 66, not 99", e.sumValue(), 66);
+      // Main's collector is served by a request the **worker** posted, so the
+      // origin word is the worker's executor id — the third request word
+      // travelling as the served task's own.
+      check("(m4) every reply names the posting executor as its origin",
+        e.replyOrigin.value, 1);
+      check("(m5) the worker is told to exit", e.__executorExit(1), 0);
+      const result = await workerDone;
+      check("(m5) the worker exited with the shell's status", result.status, 0);
+      check("(m5) `__threadJoin` observes the exit", e.__threadJoin(1), 0);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // (n) a served body that serves again, from inside itself.
+  //
+  // With the request's words on the task, the outer body's context is its task's
+  // and a nested drain cannot overwrite it — but only if the **current slot** is
+  // restored when a resume returns, because `__currentTask()` reads it. Without
+  // that restore the outer body answered 22 after the nested serve (measured),
+  // which is the inner request's argument: the two words had the same lifetime
+  // in the slot table that they used to have in the globals.
+  // ---------------------------------------------------------------------------
+
+  console.log("\n# (n) a served body that serves its own inbox is reentrant");
+  {
+    const built = compile(`
+import {
+  __spawnOn, __drainInbox, __serveArg, __serveKey, __serveOrigin,
+  mainExecutor, __selfExecutor,
+} from "~lib/thread";
+
+export let outerBefore: i32 = -1;
+export let outerAfter: i32 = -1;
+export let afterAwait: i32 = -1;
+export let innerSaw: i32 = -1;
+export let innerKey: i32 = -1;
+let innerStart: i32 = -1;
+
+async function leaf(): i32 { return 0; }
+
+async function inner(): i32 {
+  innerSaw = __serveArg();
+  innerKey = __serveKey();
+  await leaf();
+  return 0;
+}
+
+// Served in this store. Posts a second request at itself and serves it from
+// inside its own body — a resume within a resume.
+async function outer(): i32 {
+  let before = __serveArg();
+  let e = mainExecutor();
+  __spawnOn(__selfExecutor(), innerStart, 22, 7);
+  __drainInbox(e);
+  while (e.ready.depth > 0) e.step(e);
+  outerBefore = before;
+  outerAfter = __serveArg();
+  await leaf();
+  afterAwait = __serveArg();
+  return 0;
+}
+
+export function boot(outerStart: i32, innerIndex: i32): i32 {
+  innerStart = innerIndex;
+  __spawnOn(__selfExecutor(), outerStart, 11, 0);
+  return 0;
+}
+
+export function pump(): i32 {
+  let e = mainExecutor();
+  let guard = 0;
+  while (e.inbox.depth > 0 || e.ready.depth > 0) {
+    if (e.step(e)) break;
+    if (++guard > 1000000) break;
+  }
+  return outerAfter;
+}
+
+export async function main(): i32 { await leaf(); return 0; }
+`, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+    check("the nested-serve fixture compiles", built.ok, true);
+    if (!built.ok) {
+      console.log(built.output);
+    } else {
+      const names = startsOf(built.wat);
+      const outerStart = names.indexOf("$probe/outer$spawnStart");
+      const innerIndex = names.indexOf("$probe/inner$spawnStart");
+      check("the nested-serve fixture has both spawn entries",
+        outerStart > 0 && innerIndex > 0, true);
+
+      const module = new WebAssembly.Module(built.bytes);
+      const memory = new WebAssembly.Memory({ initial: 1, maximum: 128, shared: true });
+      const e = new WebAssembly.Instance(module, {
+        env: {
+          memory,
+          abort: (a, b, c, d) => { throw new Error(`abort ${a} ${b} ${c} ${d}`); },
+          __executorCount: () => 1,
+          __startThread: () => -1,
+        },
+      }).exports;
+      check("`__threadInit` carves the block", e.__threadInit(64), 0);
+      e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
+      check("`__start` runs the boot body", e.__start(), 0);
+      check("the outer request is posted to this executor", e.boot(outerStart, innerIndex), 0);
+      check("(n0) the outer body ran to completion", e.pump(), 11);
+      check("(n1) the outer body read its own argument first", e.outerBefore.value, 11);
+      check("(n2) …and its own again after the nested drain", e.outerAfter.value, 11);
+      check("(n3) …and its own again after its own suspension", e.afterAwait.value, 11);
+      check("(n4) the nested body read its own argument", e.innerSaw.value, 22);
+      check("(n5) …and its own key", e.innerKey.value, 7);
     }
   }
 

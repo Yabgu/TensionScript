@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Fix: a served body read the last queued request's argument, not its own.**
+  `__drainInbox` copies a request's words into module globals and calls
+  `__serveOne` per request, but `$starts[funcIndex]` is `f$spawnStart` — it
+  creates a task, parks the served continuation on it and returns, so the body
+  runs in a **later** step. A drain serves the whole queue first, so by the time
+  any body ran, the globals named the last request: three posts of 11, 22, 33 to
+  one worker were all answered 33 (sum 99 where 66 was asked for). Every
+  `__spawnOn`-carried payload was affected — a pooled job could only be useful if
+  its argument was constant. The words now live on the task (`TaskBase.serveArg`,
+  `serveKey`, `serveOrigin`, written by `__serveOne`), and `__serveArg()` /
+  `__serveKey()` / `__serveOrigin()` read the current task first, so the value is
+  the body's for its whole life and no program has to read it before its first
+  `await`. The globals remain only as the fallback for a resume that creates no
+  task. `__resumeTask` also saves and restores the current slot around a resume,
+  which makes serving **reentrant**: a served body that drains its own inbox no
+  longer hands its own context to the nested body (measured: the outer body read
+  22, the inner request's argument, before the restore). `TaskBase` grows three
+  words — `mask` stays at offset 28, `_record` moves 32 → 44 — so the async
+  compiler fixtures are regenerated (accessors and offsets, nothing semantic).
+  `docs/thread-abi.md` §5.2 states the corrected contract, and Gate 4 (m)/(n)
+  are the two cases: 24 new checks, 110 → 134.
+
 - **Fix: `atomic.fence()` emitted an invalid module.** `src/builtins.ts` called
   `module.atomic_fence()` with no argument and the wrapper passed a cached string
   where Binaryen's C API takes a `MemoryOrder`, so the order that arrived was the
