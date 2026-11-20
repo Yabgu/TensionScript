@@ -24,6 +24,10 @@ export default defineConfig([
     // AS sources too: `struct`/`@unmanaged` are not TypeScript, and the
     // reductions bench is deliberately not compilable by this compiler.
     "tests/benches/**",
+    // The examples are TensionScript sources: `EXPR on POLICY` is this
+    // language's postfix and `tseslint.parser` stops at it. The run scripts
+    // (`*.mjs`) are ordinary JavaScript and stay linted.
+    "examples/**/*.ts",
     // The GC fixtures are TensionScript sources: `@unmanaged` in a type position
     // (`view: @unmanaged [u32 * 4]`) is this language, not TypeScript, and
     // `tseslint.parser` stops at `Type expected`. Narrow on purpose — the
@@ -105,7 +109,7 @@ export default defineConfig([
 
   // === JavaScript ===
   {
-    files: ["**/*.js", "bin/*"],
+    files: ["**/*.js", "**/*.mjs", "bin/*"],
 
     languageOptions: {
       globals: {
