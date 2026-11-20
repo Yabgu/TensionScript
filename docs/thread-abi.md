@@ -100,26 +100,34 @@ Layout, in order:
 
 ### 3.2 Per-executor record, `controlStride` bytes each
 
-`stride = align16((2 * capacity + 12) * 4)`; record `id` is at
+A ring of `capacity` needs `2 * capacity + 3` words, so
+`stride = align16((2 * (2 * capacity + 3) + 6) * 4)`; record `id` is at
 `controlBase + 64 + id * stride`.
 
 | offset | field |
 |---|---|
-| `0` | `ready` ring: head, tail, capacity, then `capacity` cells |
-| `(capacity + 3) * 4` | `inbox` ring, same shape |
-| `2 * (capacity + 3) * 4` | `signal` word |
+| `0` | `ready` ring |
+| `(2 * capacity + 3) * 4` | `inbox` ring, same shape |
+| `2 * (2 * capacity + 3) * 4` | `signal` word |
 | signal `+4` | `arenaBase` |
 | signal `+8` | `arenaSize` |
 | signal `+12` | `state`: 0 unborn, 1 running, 2 exited |
 | signal `+16` | spawn entry (`$starts` index, or `-1`) |
 | signal `+20` | spawn argument |
 
-A ring is `[head, tail, capacity, cells…]`. A cell that a producer has reserved
-but not yet published holds `UNWRITTEN` (`-2`), and a consumer that meets one
-answers "empty" and leaves the head where it is. `push` reserves the tail with
-a CAS and only then publishes the cell, so several producers may push; `pop`
-advances the head with a plain store, because exactly one executor drains a
-given ring. After publishing, a push bumps `signal` and notifies one waiter.
+A ring is `[head, tail, capacity, cells…]`, where each cell is two words: a
+value and a **sequence stamp**. An empty ring's stamps are `0..capacity-1`; a
+producer that reserves index `pos` writes the value and then stamps the cell
+`pos + 1`, and a consumer takes a cell only when the stamp says exactly
+`pos + 1`, then frees it with `pos + capacity`. The stamp is what makes every
+lap distinguishable: with a "not written yet" sentinel, a reserved cell still
+holds the previous lap's value and a consumer would read a stale entry and pass
+a live reservation (measured — the cross-thread test lost entries).
+
+`push` reserves the tail with a CAS and only then publishes, so several
+producers may push concurrently; `pop` advances the head with a plain store,
+because exactly one executor drains a given ring. After publishing, a push
+bumps `signal` and notifies one waiter.
 
 ### 3.3 Request table
 

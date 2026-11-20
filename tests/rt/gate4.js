@@ -343,7 +343,7 @@ export async function main(): i32 { await leaf(); return 0; }
       stride: e.__controlStride.value,
       capacity: e.__ringCapacity.value,
       total: e.__executorTotal.value,
-    }, { base: 65536, stride: 560, capacity: 64, total: 2 });
+    }, { base: 65536, stride: 1072, capacity: 64, total: 2 });
 
     e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
     check("main's arena is configured", e.__arenaHeapBase() > e.__mainArenaBase(), true);

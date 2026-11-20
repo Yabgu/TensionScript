@@ -282,7 +282,7 @@ export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
 export const ASYNC_STATUS = "~asyncStatus";
 /**
- * The exported boot entry of a shared-memory module (`docs/thread-abi.md` §4a).
+ * The exported boot entry of a shared-memory module (`docs/thread-abi.md` §2).
  *
  * A name, not a section: the host calls it on the main instance and calls
  * `__workerMain(rec)` on every other instance, so an instance has exactly one
@@ -1820,7 +1820,7 @@ export class Compiler extends DiagnosticEmitter {
     // copy of the globals, against the same shared memory. So the boot body is
     // a plain exported function, `__start() -> i32`, and the host decides which
     // entry each instance gets — `__start` for main, `__workerMain(rec)` for a
-    // worker (`docs/thread-abi.md` §4a). One entry per instance, chosen by the
+    // worker (`docs/thread-abi.md` §2). One entry per instance, chosen by the
     // host: no boot words in memory and no "am I a worker" branch in the guest.
     //
     // A build without `--sharedMemory` keeps its start section and is unchanged.

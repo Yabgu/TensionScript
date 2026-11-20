@@ -50,15 +50,31 @@ const HEAD: i32 = 0;
 const TAIL: i32 = 1;
 /** Word 2: the capacity, repeated in memory so a raw reader can find it. */
 const CAPACITY_WORD: i32 = 2;
-/** Word 3 onward: the ring's cells. */
+/** Word 3 onward: the ring's cells, two words each. */
 const SLOTS: i32 = 3;
-/** A cell reserved by a producer that has not yet stored its value. */
-const UNWRITTEN: i32 = -2;
+/** A cell's value word, relative to the cell. */
+const VALUE_WORD: i32 = 0;
+/** A cell's sequence word, relative to the cell. */
+const SEQ_WORD: i32 = 1;
+/** Words per cell. */
+const CELL_WORDS: i32 = 2;
 
 const HEAD_OFF: usize = <usize>HEAD << 2;
 const TAIL_OFF: usize = <usize>TAIL << 2;
 const CAPACITY_OFF: usize = <usize>CAPACITY_WORD << 2;
 const SLOTS_OFF: usize = <usize>SLOTS << 2;
+/** Bytes from one cell to the next. */
+const CELL_BYTES: usize = <usize>CELL_WORDS << 2;
+
+/** Bytes of a ring word index. */
+@inline function wordOffset(word: i32): usize {
+  return <usize>word << 2;
+}
+
+/** Words a ring of `capacity` needs: `[head, tail, capacity, cells…]`. */
+@inline function ringWords(capacity: i32): i32 {
+  return 3 + capacity * CELL_WORDS;
+}
 
 
 /**
@@ -81,19 +97,23 @@ const SLOTS_OFF: usize = <usize>SLOTS << 2;
  * sketch is `export class SlotRing`); the words it points at are a plain span
  * of memory, which is the part that has to be shareable.
  *
- * **Ordering.** `push` reserves the tail with a CAS and only then publishes the
- * cell, so several producers may push concurrently; `pop` advances the head
- * with a plain atomic store, because exactly one executor drains a given ring
- * (`STRIDE` gives each executor its own words — `docs/thread-abi.md` §5). A
- * consumer that sees a reserved-but-unwritten cell answers "empty" and leaves
- * the head where it is, so a value is never read before it is published.
+ * **Ordering: a per-cell sequence stamp, not a sentinel.** `push` reserves the
+ * tail with a CAS, writes the value, then writes the cell's stamp (`pos + 1`);
+ * `pop` reads the stamp and takes a cell only when it says `pos + 1`.
+ * A sentinel ("cell not written yet") cannot work across laps: after the first
+ * lap the cell for a reserved-but-unpublished index still holds the *previous*
+ * lap's value, so a consumer would read a stale entry and pass a live
+ * reservation (measured: the cross-thread ring test lost entries). The stamp is
+ * monotone, so every lap is distinguishable. `pop` advances the head with a
+ * plain store — exactly one executor drains a given ring
+ * (`docs/thread-abi.md` §3.2).
  *
  * **A push with a signal wakes the owner.** After the cell is published, a ring
  * with `signal != 0` bumps the signal word and notifies one waiter. That order
  * — publish, bump, notify — is what makes the wake unloseable; a consumer reads
  * the signal *before* it looks at the ring, so a producer that ran in between
  * changes the value the consumer would wait on and the wait returns instead of
- * sleeping (`docs/thread-abi.md` §4).
+ * sleeping (`docs/thread-abi.md` §5.3).
  */
 export class SlotRing {
   /** The ring's words: `[head, tail, capacity, cells…]`. */
@@ -118,8 +138,11 @@ export class SlotRing {
   constructor(capacity: i32) {
     this.capacity = capacity;
     if (capacity > 0) {
-      let words = new Int32Array(capacity + SLOTS);
-      for (let i = 0; i < capacity; ++i) unchecked(words[SLOTS + i] = UNWRITTEN);
+      let words = new Int32Array(ringWords(capacity));
+      for (let i = 0; i < capacity; ++i) {
+        unchecked(words[SLOTS + i * CELL_WORDS + VALUE_WORD] = 0);
+        unchecked(words[SLOTS + i * CELL_WORDS + SEQ_WORD] = i);
+      }
       unchecked(words[HEAD] = 0);
       unchecked(words[TAIL] = 0);
       unchecked(words[CAPACITY_WORD] = capacity);
@@ -133,7 +156,7 @@ export class SlotRing {
    *
    * **Allocates the handle and nothing else.** The caller has carved the words
    * (`__threadInit` does, once, before any thread exists), and they must be
-   * initialised already: head 0, tail 0, capacity, every cell `UNWRITTEN`.
+   * initialised already: head 0, tail 0, capacity, and each cell's stamp `c`.
    */
   static at(base: usize, capacity: i32): SlotRing {
     let ring = new SlotRing(0);
@@ -148,8 +171,8 @@ export class SlotRing {
    * The host-facing half of `at`: `__threadInit` carves the whole control block
    * once, and a test or a program that carves its own span needs the same
    * initial state `new SlotRing` gives one — head 0, tail 0, the capacity word,
-   * every cell `UNWRITTEN`. Allocation-free, because the caller already owns the
-   * memory.
+   * and cell `c` stamped `c`. Allocation-free, because the caller already owns
+   * the memory.
    */
   static carve(base: usize, capacity: i32): SlotRing {
     let ring = new SlotRing(0);
@@ -173,27 +196,40 @@ export class SlotRing {
     let capacity = this.capacity;
     if (capacity <= 0) return false;
     let base = this.base;
-    let tailNow = atomicLoad<i32>(base + <usize>4);
-    let headNow = atomicLoad<i32>(base);
+    // The membership scan reads only **published** cells (`seq == index + 1`).
+    let headNow = atomicLoad<i32>(base + HEAD_OFF);
+    let tailNow = atomicLoad<i32>(base + TAIL_OFF);
     for (let i = headNow; i < tailNow; ++i) {
-      if (atomicLoad<i32>(base + SLOTS_OFF + <usize>(i % capacity << 2)) == slot) return false;
+      let off = base + SLOTS_OFF + <usize>((i % capacity) << 3);
+      if (atomicLoad<i32>(off + wordOffset(SEQ_WORD)) == i + 1
+          && atomicLoad<i32>(off + wordOffset(VALUE_WORD)) == slot) return false;
     }
     while (true) {
-      let tail = atomicLoad<i32>(base + TAIL_OFF);
+      let pos = atomicLoad<i32>(base + TAIL_OFF);
       let head = atomicLoad<i32>(base + HEAD_OFF);
-      if (tail - head >= capacity) return false;
-      if (atomicCompareExchange<i32>(base + TAIL_OFF, tail, tail + 1) == tail) {
-        atomicStore<i32>(base + SLOTS_OFF + <usize>(tail % capacity << 2), slot);
-        // Publish, bump, notify — in that order, so a consumer that reads the
-        // signal before it looks at the ring cannot miss this entry.
-        let signal = this.signal;
-        if (signal != 0) {
-          atomicAdd<i32>(signal, 1);
-          atomicNotify(signal, 1);
+      if (pos - head >= capacity) return false;
+      let off = base + SLOTS_OFF + <usize>((pos % capacity) << 3);
+      let seq = atomicLoad<i32>(off + wordOffset(SEQ_WORD));
+      if (seq == pos) {
+        if (atomicCompareExchange<i32>(base + TAIL_OFF, pos, pos + 1) == pos) {
+          atomicStore<i32>(off + wordOffset(VALUE_WORD), slot);
+          // Publishing is the sequence stamp, written **after** the value: a
+          // consumer that sees `pos + 1` sees the value.
+          atomicStore<i32>(off + wordOffset(SEQ_WORD), pos + 1);
+          // Publish, bump, notify — in that order, so a consumer that reads the
+          // signal before it looks at the ring cannot miss this entry.
+          let signal = this.signal;
+          if (signal != 0) {
+            atomicAdd<i32>(signal, 1);
+            atomicNotify(signal, 1);
+          }
+          return true;
         }
-        return true;
+      } else if (seq < pos) {
+        // The cell still carries an older lap: the ring is full.
+        return false;
       }
-      // Another producer took this index; read the new tail and try again.
+      // `seq > pos`: another producer took this index; read the new one.
     }
   }
 
@@ -202,12 +238,17 @@ export class SlotRing {
     let capacity = this.capacity;
     if (capacity <= 0) return -1;
     let base = this.base;
-    let head = atomicLoad<i32>(base + HEAD_OFF);
+    let pos = atomicLoad<i32>(base + HEAD_OFF);
     let tail = atomicLoad<i32>(base + TAIL_OFF);
-    if (head >= tail) return -1;
-    let value = atomicLoad<i32>(base + SLOTS_OFF + <usize>(head % capacity << 2));
-    if (value == UNWRITTEN) return -1;
-    atomicStore<i32>(base + HEAD_OFF, head + 1);
+    if (pos >= tail) return -1;
+    let off = base + SLOTS_OFF + <usize>((pos % capacity) << 3);
+    if (atomicLoad<i32>(off + wordOffset(SEQ_WORD)) != pos + 1) return -1; // reserved, not published
+    let value = atomicLoad<i32>(off + wordOffset(VALUE_WORD));
+    atomicStore<i32>(base + HEAD_OFF, pos + 1);
+    // Free the cell for the lap after next. **After** the value is in hand and
+    // the head has moved: a producer may only reserve this index again once
+    // `pos + 1` is below the head, and it will see the stamp until then.
+    atomicStore<i32>(off + wordOffset(SEQ_WORD), pos + capacity);
     return value;
   }
 
@@ -231,10 +272,10 @@ export class SlotRing {
     let capacity = this.capacity;
     if (capacity <= 0) return true;
     let base = this.base;
-    let head = atomicLoad<i32>(base + HEAD_OFF);
+    let pos = atomicLoad<i32>(base + HEAD_OFF);
     let tail = atomicLoad<i32>(base + TAIL_OFF);
-    if (head >= tail) return true;
-    return atomicLoad<i32>(base + SLOTS_OFF + <usize>(head % capacity << 2)) == UNWRITTEN;
+    if (pos >= tail) return true;
+    return atomicLoad<i32>(base + SLOTS_OFF + <usize>((pos % capacity) << 3) + wordOffset(SEQ_WORD)) != pos + 1;
   }
 }
 
@@ -629,7 +670,9 @@ function initRingWords(base: usize, capacity: i32): void {
   atomicStore<i32>(base + TAIL_OFF, 0);
   atomicStore<i32>(base + CAPACITY_OFF, capacity);
   for (let i = 0; i < capacity; ++i) {
-    atomicStore<i32>(base + SLOTS_OFF + <usize>(i << 2), UNWRITTEN);
+    let off = base + SLOTS_OFF + <usize>(i << 3);
+    atomicStore<i32>(off + wordOffset(VALUE_WORD), 0);
+    atomicStore<i32>(off + wordOffset(SEQ_WORD), i);
   }
 }
 
@@ -658,7 +701,7 @@ function controlBlockBase(): usize {
 }
 
 @inline function inboxBase(rec: usize): usize {
-  return rec + (<usize>(__ringCapacity + 3) << 2);
+  return rec + (<usize>ringWords(__ringCapacity) << 2);
 }
 
 /**
@@ -669,7 +712,7 @@ function controlBlockBase(): usize {
  * argument.
  */
 @inline function signalBase(rec: usize): usize {
-  return inboxBase(rec) + (<usize>(__ringCapacity + 3) << 2);
+  return inboxBase(rec) + (<usize>ringWords(__ringCapacity) << 2);
 }
 
 /**
@@ -682,16 +725,23 @@ function controlBlockBase(): usize {
  */
 function blockPush(ring: usize, capacity: i32, value: i32, signal: usize): bool {
   while (true) {
-    let tail = atomicLoad<i32>(ring + TAIL_OFF);
+    let pos = atomicLoad<i32>(ring + TAIL_OFF);
     let head = atomicLoad<i32>(ring + HEAD_OFF);
-    if (tail - head >= capacity) return false;
-    if (atomicCompareExchange<i32>(ring + TAIL_OFF, tail, tail + 1) == tail) {
-      atomicStore<i32>(ring + SLOTS_OFF + <usize>(tail % capacity << 2), value);
-      if (signal != 0) {
-        atomicAdd<i32>(signal, 1);
-        atomicNotify(signal, 1);
+    if (pos - head >= capacity) return false;
+    let off = ring + SLOTS_OFF + <usize>((pos % capacity) << 3);
+    let seq = atomicLoad<i32>(off + wordOffset(SEQ_WORD));
+    if (seq == pos) {
+      if (atomicCompareExchange<i32>(ring + TAIL_OFF, pos, pos + 1) == pos) {
+        atomicStore<i32>(off + wordOffset(VALUE_WORD), value);
+        atomicStore<i32>(off + wordOffset(SEQ_WORD), pos + 1);
+        if (signal != 0) {
+          atomicAdd<i32>(signal, 1);
+          atomicNotify(signal, 1);
+        }
+        return true;
       }
-      return true;
+    } else if (seq < pos) {
+      return false;
     }
   }
 }
@@ -814,8 +864,8 @@ export function __threadInit(capacity: i32): i32 {
   let total = __executorCount();
   if (total <= 0) return -1;
 
-  // Two rings of `capacity + 3` words plus six record words, 16-byte aligned.
-  let stride: usize = (<usize>(2 * capacity + 12) * 4 + 15) & ~<usize>15;
+  // Two rings of `ringWords(capacity)` plus six record words, 16-byte aligned.
+  let stride: usize = (<usize>(2 * ringWords(capacity) + 6) * 4 + 15) & ~<usize>15;
   let requests = capacity;
   let recordBytes = <usize>total * stride;
   let requestBytes = <usize>(requests * REQUEST_WORDS) * 4;
@@ -1084,7 +1134,7 @@ export function __workerArenaBase(id: i32): i32 {
   let stride = atomicLoad<i32>(here + (<usize>H_STRIDE << 2));
   let capacity = atomicLoad<i32>(here + (<usize>H_CAPACITY << 2));
   let rec = here + HEADER_BYTES + <usize>id * <usize>stride;
-  let sig = rec + (<usize>(2 * (capacity + 3)) << 2);
+  let sig = rec + (<usize>(2 * ringWords(capacity)) << 2);
   return atomicLoad<i32>(sig + 4);
 }
 
@@ -1097,6 +1147,6 @@ export function __workerArenaSize(id: i32): i32 {
   let stride = atomicLoad<i32>(here + (<usize>H_STRIDE << 2));
   let capacity = atomicLoad<i32>(here + (<usize>H_CAPACITY << 2));
   let rec = here + HEADER_BYTES + <usize>id * <usize>stride;
-  let sig = rec + (<usize>(2 * (capacity + 3)) << 2);
+  let sig = rec + (<usize>(2 * ringWords(capacity)) << 2);
   return atomicLoad<i32>(sig + 8);
 }
