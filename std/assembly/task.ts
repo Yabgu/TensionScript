@@ -213,6 +213,15 @@ export abstract class TaskBase {
    * layout is churn in every async fixture for no reason.
    */
   entry: i32 = -1;
+  /**
+   * The executors this task may run on: bit `i` set = executor `i` allowed,
+   * **`0` = unconstrained** (the default, and the reason the field costs a
+   * program nothing). A policy's `create` sets it; the transform does not.
+   *
+   * Declared **last**, after `entry`, so no earlier field's offset moves and
+   * the only fixture churn is the new accessor and the size constants.
+   */
+  mask: i32 = 0;
 
   /** Runs, or resumes, this task on the current thread. */
   abstract drive(): void;

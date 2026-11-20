@@ -2469,10 +2469,15 @@
   local.get $entry
   i32.store offset=24
  )
+ (func $~lib/task/TaskBase#set:mask (param $this i32) (param $mask i32)
+  local.get $this
+  local.get $mask
+  i32.store offset=28
+ )
  (func $~lib/task/Task<i32>#set:_record (param $this i32) (param $_record i32)
   local.get $this
   local.get $_record
-  i32.store offset=28
+  i32.store offset=32
   local.get $this
   local.get $_record
   i32.const 0
@@ -2481,7 +2486,7 @@
  (func $~lib/task/Task<i32>#set:value (param $this i32) (param $value i32)
   local.get $this
   local.get $value
-  i32.store offset=32
+  i32.store offset=36
  )
  (func $~lib/task/noopWake (param $exec i32) (param $slot i32)
  )
@@ -2994,7 +2999,7 @@
   local.get $1
   call $~lib/task/TaskBase~visit
   local.get $0
-  i32.load offset=28
+  i32.load offset=32
   local.get $1
   call $~lib/rt/itcms/__visit
  )
@@ -3601,7 +3606,7 @@
   i32.eqz
   if
    global.get $~lib/memory/__stack_pointer
-   i32.const 28
+   i32.const 32
    i32.const 5
    call $~lib/rt/itcms/__new
    local.tee $this
@@ -3676,6 +3681,14 @@
   local.get $this
   local.set $1
   global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store offset=4
+  local.get $1
+  i32.const 0
+  call $~lib/task/TaskBase#set:mask
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
   i32.const 8
   i32.add
   global.set $~lib/memory/__stack_pointer
@@ -3695,7 +3708,7 @@
   i32.eqz
   if
    global.get $~lib/memory/__stack_pointer
-   i32.const 36
+   i32.const 40
    i32.const 4
    call $~lib/rt/itcms/__new
    local.tee $this
@@ -7671,7 +7684,7 @@
   i32.store
   global.get $~lib/memory/__stack_pointer
   local.get $this
-  i32.load offset=28
+  i32.load offset=32
   local.tee $1
   i32.store
   local.get $1
@@ -7680,7 +7693,7 @@
   else
    i32.const 688
    i32.const 880
-   i32.const 265
+   i32.const 274
    i32.const 3
    call $~lib/builtins/abort
    unreachable
