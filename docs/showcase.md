@@ -309,48 +309,72 @@ never made.
 
 ## 5. Async/await
 
-`await` is the marker — there is no `async` keyword to write on the await itself.
-A call to an `async function` produces a `Task<T>`; awaiting it parks the current
-task until the host resumes it. The scheduler's contract is park / wake / resume.
+`await` is the marker, and the shipped backend is the **Task**: a suspension
+parks the current continuation, and resuming continues the same stack. A call to
+an `async function` produces a `Task<T>` and runs none of the body; `await t`
+drives the task if it has not settled and then reads the value that the task's
+continuation wrote.
 
 ```ts
-async function step(x: i32): i32 { return x + 1; }
+async function step(x: i32): i32 {
+  await 1;                        // a real suspension: the frame is parked
+  return x + 1;
+}
 
 export async function chain(): i32 {
-  let a: i32 = await step(1);     // parks here until the host resumes
+  let a: i32 = await step(1);     // main parks here; the executor resumes it
   let b: i32 = await step(a);
   return b;                       // 3
 }
-
-export function start(): Task<i32> { return chain(); }
 ```
 
-Compiled: 30 KB wasm, and the emitted module imports
-`(import "scheduler" "park" (func $~lib/task-rt/hostPark (param i64 i32 i32)))` —
-the only scheduler import, and it appears precisely because something suspends.
-Run (settled path): `chain()._record.payload` is **3**.
+What the compiler emits (`src/async/stack.ts`), per suspending function:
 
-Semantics:
+- `f$body` — the original body, unchanged;
+- `f$start` — the continuation `() -> i32`, installed at a slot in the module's
+  `$~asyncCont` table by `__installCont(f$start)` and bound to the task object
+  by `__bindTask`;
+- `f` — the entry the source calls. It allocates a per-function
+  `f$Rec extends Task<R>`, stores the captured parameters as fields, installs the
+  slot, sets `entry = __spawnIndexOf(f$spawnStart)`, and returns the task;
+- for a parameterless function, `f$spawnStart` — the `$starts` entry another
+  store can post by index.
 
-- **The task table is the guest's.** The continuation lives in guest memory, so
-  the executor's table is the guest's table; `park` tells the host the id.
-- **A settled await does not suspend.** Awaiting a task that has already completed
-  returns immediately — no park is registered, so the continuation cannot run
-  twice.
-- **The push path is the shipped path.** Completions are delivered by the host;
-  the older pull path (`__taskDeliver` / `__taskTick`, a guest-side drain the
-  frame loop called) was retired in 0.7.0.
+`await t` lowers to **`if (!t.settled) t.drive(); return t.value`** (with
+`t.policy.await(t)` in place of `drive` when a policy is attached). `drive` parks
+the caller on `t` (`__parkOn`) and suspends; the executor's core loop resumes
+`t`, whose continuation settles it and wakes the caller's slot. The continuation
+table is the guest's: `$~asyncCont` plus `$~asyncNextSlot`, grown by
+`__installCont`. **No scheduler is imported** — nothing leaves the guest.
 
-Refused / limitations:
+The still-true limitations:
 
 - **A reference-typed await result is refused**:
   `AS100: Not implemented: a reference-typed await result` — measured on
-  `Task<string>` and on a class reference. A reference comes from the capability's
-  own reader at the await site instead.
-- **There is no `Promise`, no microtask queue, and no cancellation.** A task is
-  parked until delivered; the contract has no cancellation.
+  `Task<string>` and on a class reference.
 - **Top-level `await` is refused**, despite the diagnostic's TypeScript text
   mentioning it: TensionScript's entry point is an ordinary function.
+- **A parameterized `async function` has no `$starts` spawn entry.** Only a
+  parameterless one gets `f$spawnStart`, so it can be posted across a thread
+  boundary; the parameterized form is local-only until argument capture lands.
+
+`examples/async-main` is this section runnable: no threads, six suspensions, a
+local carried across all of them.
+
+### 5a. The Promise backend (not the shipped path)
+
+The other lowering is **Promise = state machine**. `src/async/lower.ts` rewrites
+each `await` into a numeric resume state and every live local into a field of a
+`TaskRecord` (`std/assembly/task.ts`); `std/assembly/task-rt.ts`'s
+`hostPark` hands the record and the await tag to the host. A compiled program on
+that path imports
+`(import "scheduler" "park" (func $~lib/task-rt/hostPark (param i64 i32 i32)))`,
+and its result is read from `_record.payload`. That backend still compiles and
+its tests still pass, but it is **not** what an `await` produces under
+`--enable stack-switching`, and it is not what the threading suite or the
+examples exercise.
+
+The law and the file table are in [`task-model.md`](task-model.md).
 
 ---
 

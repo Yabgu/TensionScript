@@ -3,7 +3,8 @@
 import { MaskBase } from "./mask";
 
 /**
- * The base class of a task's on-heap record.
+ * A **Promise** record — the state-machine backend's storage. The name is
+ * historical: as of the Task/Promise split this is not a task.
  *
  * **Backend A's record.** The `await`-lowered (state-machine) backend reads and
  * writes this class at fixed byte offsets (§3.2): `payload` at 8, `f0`/`f1` at
@@ -167,6 +168,9 @@ export function inlinePolicy(): TaskPolicy {
 /**
  * The common part of every task: one object per execution, with the fields the
  * scheduler owns and the single abstract operation that runs it.
+ *
+ * **This is the Task of the Task/Promise split** — the stackful backend's
+ * object, not a state-machine record (`docs/task-model.md`).
  *
  * The stackful lowering declares a subclass per `async function` — a
  * `f$Rec extends Task<R>` — carrying the function's captured parameters as

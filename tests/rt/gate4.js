@@ -147,6 +147,28 @@ async function main() {
     return (line.split(" func ")[1] ?? "").match(/\$[^\s)]+/g) ?? [];
   }
 
+  // Wasmfx availability, asked of the engine rather than of the argv. Only the
+  // engine's own "core stack switching not enabled" is a skip; every other
+  // error is a real failure and must not be hidden.
+  {
+    const probe = compile(`
+async function leaf(): i32 { await 1; return 0; }
+export async function main(): i32 { await leaf(); return 0; }
+`, ["--runtime", "stub", "--enable", "stack-switching"]);
+    if (probe.ok) {
+      try {
+        new WebAssembly.Module(probe.bytes);
+      } catch (error) {
+        const message = String(error && error.message || error);
+        if (/core stack switching not enabled/.test(message)) {
+          console.log("SKIP: Node was not started with --experimental-wasm-wasmfx (core stack switching not enabled)");
+          process.exit(0);
+        }
+        throw error;
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // (c) rings only: many producers, one consumer, nothing lost, nothing doubled.
   // ---------------------------------------------------------------------------
