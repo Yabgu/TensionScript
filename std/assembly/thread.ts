@@ -1052,7 +1052,7 @@ export function __spawnOnMasked(
     let policy = changetype<MaskBase>(mask);
     if (target < 0 || target >= policy.width || !policy.allows(target)) {
       __noteMaskRefusal();
-      return -1;
+      return 0;
     }
   }
   return post(target, funcIndex, argSlot, taskKey);
