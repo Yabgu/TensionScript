@@ -290,3 +290,129 @@ module):
   the reply, settles the task, and the caller resumes with `42`; the body ran
   **only** there (`bodyRanAtHome == 0`), the caller's continuation resumed
   exactly once, and `__threadJoin(1)` observes the worker's exit.
+- **(f) the identifier and the mask arithmetic.** Main reads `0`; a worker
+  posts `__selfExecutor()` back and main receives `1`. `executorMask(0) == 1`,
+  `executorMask(1) == 2`, `executorMask(32) == 0`; `maskAllows(0, 7)` is true,
+  `maskAllows(1, 1)` is false, `maskAllows(2, 1)` is true; `maskUnion(1, 2)`
+  is `3`.
+- **(g) admission refuses.** `__spawnOnMasked(1, {0}, …)` answers `-1`, the
+  refusal count is `1`, and the worker's body never runs; the same call with
+  `{1}` answers `0` and the body runs, so the mask, not the channel, was the
+  reason.
+- **(h) a masked policy places work.** `work() on new MaskedPolicy(1, {1}, 21,
+  reply)` from a caller on main's executor: the worker computes `42`, the
+  caller's `await` receives it, and the worker's own id (`1`) comes back in the
+  request key.
+- **(i) a violation is counted.** An unmasked `__spawnOn` places work on worker
+  1; there a task whose policy set mask `{0}` parks anyway. The worker's own
+  `__maskViolations()` reports `1`, and the task still settles (`answer == 3`).
+
+---
+
+## 7. Identity and masks
+
+### 7.1 The identifier
+
+`__selfExecutor() -> i32` (`~lib/thread`) is this **store's** executor id: `0`
+on main, the id `__workerMain` was given in a worker. It is a guest function
+over a store-local global, not a host query, so a program can read it without a
+new import and without a round trip.
+
+That is the whole identity mechanism. A store-local value cannot be read from
+another store — a worker's copy of a global is invisible in main — so anything
+a worker must report has to come back as a request argument (`__serveArg`'s
+word, or the request key). Gate 4 (f) is that rule made a test: the worker
+posts `__selfExecutor()` back and main asserts it received `1`.
+
+### 7.2 The mask
+
+A mask is an `i32` bitmask over executor ids:
+
+```ts
+export function executorMask(id: i32): i32;   // 1 << id, or 0 outside 0..31
+export function maskAllows(mask: i32, id: i32): bool;
+export function maskUnion(a: i32, b: i32): i32;
+```
+
+- **Bit `i` set = executor `i` allowed.**
+- **`0` means unconstrained**, not "nothing allowed". It is the default value of
+  `TaskBase.mask`, so a program that never names a mask pays nothing and is
+  never refused. `maskAllows(0, anything)` is `true`. This is the case people
+  get wrong; it is the reason the field can be a plain `i32` with no sentinel.
+- **32 is the ceiling.** The mask is 32 bits wide, so a process with more than
+  32 executors cannot describe an allowed set with it. `executorMask(id)`
+  answers `0` outside `0..31`, and `maskAllows(mask, id)` answers `true` for
+  such an id: the mask has no opinion, and wrapping `1 << 32` to `1` would
+  silently forbid an executor the program meant to allow.
+- `maskUnion` treats `0` as absorbing — unconstrained unioned with anything is
+  still unconstrained. (The naive `a | b` would narrow `0 | {1}` to `{1}`.)
+- Counters are per store: `__maskRefusals()` counts admissions this store
+  refused, `__maskViolations()` counts parks this store observed on a
+  disallowed executor. A worker's counts are the worker's; to observe them
+  from main, post them back.
+
+`TaskBase.mask: i32 = 0` is declared **last**, after `entry`, so no earlier
+field's offset moves. A policy's `create` sets it (`MaskedPolicy` does); the
+transform does not.
+
+### 7.3 Two enforcement points, and nothing else
+
+**A continuation is store-local.** Only the store that created it can resume
+it, so a mask cannot move a running or parked task between stores. It decides
+where a task is *placed*, and refuses to place it somewhere forbidden. A mask
+that pretended to migrate would be a lie the runtime cannot keep.
+
+1. **Admission** — `__spawnOnMasked(target, mask, funcIndex, argSlot, taskKey)`
+   checks `maskAllows(mask, target)` **before** posting. A disallowed target is
+   refused and counted: the answer is `-1`, `__maskRefusals()` grows by one, and
+   **nothing is posted** — never dropped silently, never redirected.
+   Redirection is a policy's choice, not the runtime's. The answer is `0` when
+   posted and `-2` when the request table is full. `__spawnOn` keeps its
+   signature and behaviour byte for byte: it is the unmasked escape hatch, and
+   both functions share the same posting code.
+
+2. **Verification at park** — `__parkOn` checks the **current** task (the one
+   about to suspend, not the one it parks on). If the mask forbids this store,
+   `__maskViolations()` grows by one **and the park proceeds**. Refusing to
+   park would corrupt the continuation protocol, so the guarantee here is
+   observability, not prevention: a task marked main-only cannot silently park
+   on a worker.
+
+There is deliberately **no second check** on the receiving executor. The
+poster's mask named the target; two checks for one rule is how they drift apart.
+The receiving check that does exist is the park, and it is about the *task's*
+mask, not the request's.
+
+**A mask does not cross with a request.** A request carries four words —
+`funcIndex`, argument, key, origin — and no mask. The served task is created in
+the target store by `f$spawnStart` with the default `mask = 0`; a mask set on
+the origin-side task object is not transferred, because the origin-side object
+is not the one that runs. (This is also why a task object itself does not
+cross: continuations and references are per store.) A program that needs a
+masked task running in a store constructs that task *there*; `(i)` does exactly
+that.
+
+### 7.4 `MaskedPolicy`
+
+`MaskedPolicy(target, mask, arg, reply) extends RemotePolicy`. `create` sets
+`task.mask = this.mask` and posts through `__spawnOnMasked`. A refusal is
+recorded, not thrown: it surfaces as `__maskRefusals()` in the posting store,
+and the task simply never settles — a policy that cannot place its work has no
+channel to fail through. `await` is inherited, so an allowed reply still
+settles the task in the waiting store.
+
+### 7.5 Refusal versus violation
+
+The two counters answer different questions, and `(g)`/`(i)` are the two
+directions:
+
+- **A refusal is the runtime's**: a caller used the checked path and named a
+  target the mask forbids. `__spawnOnMasked` returned `-1`, the request never
+  existed, and the target never saw it.
+- **A violation is a program's**: something was already placed — through the
+  unmasked `__spawnOn`, or by a policy that did not check — and a task with a
+  mask then parked in a store the mask forbids. The park happens; the count is
+  the only observable, and it lives in the store that parked.
+
+A test can produce a violation precisely because the unmasked path stays
+available; without that escape hatch the park check would be unreachable.
