@@ -1,5 +1,7 @@
 /// <reference path="./rt/index.d.ts" />
 
+import { MaskBase } from "./mask";
+
 /**
  * The base class of a task's on-heap record.
  *
@@ -214,14 +216,23 @@ export abstract class TaskBase {
    */
   entry: i32 = -1;
   /**
-   * The executors this task may run on: bit `i` set = executor `i` allowed,
-   * **`0` = unconstrained** (the default, and the reason the field costs a
-   * program nothing). A policy's `create` sets it; the transform does not.
+   * The executors this task may run on, or `null` for unconstrained (the
+   * default, and the reason the field costs a program nothing). A policy's
+   * `create` sets it — as a **reference**, so one mask object serves every
+   * task the policy creates; the transform does not touch it.
    *
-   * Declared **last**, after `entry`, so no earlier field's offset moves and
-   * the only fixture churn is the new accessor and the size constants.
+   * `null` and a zero-bits `Mask<T>` both mean unconstrained. Nothing here
+   * knows the width: `MaskBase` answers `allows` and `width`, and the two seams
+   * that ask (admission in `~lib/thread`, the park in `~lib/task-stack`) are
+   * what give the mask its meaning. `~lib/mask` imports nothing, so this
+   * import cannot cycle.
+   *
+   * Declared **last**, after `entry`, so no earlier field's offset moves. On
+   * wasm32 a reference is four bytes, exactly what the `i32` it replaces cost,
+   * so the record does not grow and `offsetof("mask")` does not move —
+   * `tests/rt/gate4.js` (j) observes both.
    */
-  mask: i32 = 0;
+  mask: MaskBase | null = null;
 
   /** Runs, or resumes, this task on the current thread. */
   abstract drive(): void;

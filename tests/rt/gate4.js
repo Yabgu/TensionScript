@@ -22,6 +22,14 @@
 //       worker posts back to main; the value returns and settles a task created
 //       in main's store. Needs stack switching.
 //
+//   (e)–(i) are the identity and mask round: a cross-store await, the thread
+//       identifier, admission, a masked policy, and a park on a forbidden store.
+//
+//   (j)–(l) are the round the mask became a template: the width arithmetic for
+//       both instantiations (and the record's offsets, which must not move),
+//       an admission refusal that can only be the mask's width, and a mask the
+//       std does not provide — a program-written `MaskBase`.
+//
 // Node is required, with `--experimental-wasm-wasmfx` (measured: without it,
 // `core stack switching not enabled`), because `wasmtime wast` cannot
 // instantiate a shared-memory module.
@@ -522,24 +530,24 @@ export async function main(): i32 { await leaf(); return 0; }
 
 
   // ---------------------------------------------------------------------------
-  // (f) the thread identifier, and the mask arithmetic.
+  // (f) the thread identifier, and the mask over the template.
   //
   // `__selfExecutor()` is the identifier: 0 on main, the id `__workerMain` was
   // given in a worker. A worker's globals are store-local, so main cannot read
   // the worker's copy; the served body posts it back and main asserts on what
   // arrived. Absent the feature, `__selfExecutor` would answer 0 in both stores
-  // and `maskAllows`/`executorMask` would not exist (the fixture would not
-  // compile), so `reported == 1` is the row that protects the identity and the
-  // six arithmetic rows protect the encoding.
+  // and `Mask` would not exist (the fixture would not compile), so
+  // `reported == 1` is the row that protects the identity and the mask rows
+  // protect the surface the template exposes through `~lib/thread` — which is
+  // the re-export, not a second arithmetic.
   // ---------------------------------------------------------------------------
 
-  console.log("\n# (f) the thread identifier and the mask arithmetic");
+  console.log("\n# (f) the thread identifier and the mask");
   {
     const built = compile(`
 import {
   __spawnOn, __spawnThread, __serveArg, __serveOrigin, __serveKey,
-  __executorExit, __selfExecutor, mainExecutor,
-  executorMask, maskAllows, maskUnion,
+  __executorExit, __selfExecutor, mainExecutor, Mask,
 } from "~lib/thread";
 
 export let reported: i32 = -1;
@@ -582,9 +590,14 @@ export function pump(): i32 {
 }
 
 export function selfId(): i32 { return __selfExecutor(); }
-export function maskOf(id: i32): i32 { return executorMask(id); }
-export function allows(mask: i32, id: i32): bool { return maskAllows(mask, id); }
-export function union(a: i32, b: i32): i32 { return maskUnion(a, b); }
+// {0}: executor 0 is allowed, 1 is not.
+export function allowsMain(): bool { return new Mask<u32>(1).allows(0); }
+export function forbidsWorker(): bool { return new Mask<u32>(1).allows(1); }
+// {1}: the other way round.
+export function allowsWorker(): bool { return new Mask<u32>(2).allows(1); }
+// {0} | {1} = {0,1}, and an unconstrained mask absorbs the union.
+export function unionBits(): i32 { return new Mask<u32>(1).union(new Mask<u32>(2)).bits; }
+export function unionZero(): i32 { return new Mask<u32>(0).union(new Mask<u32>(2)).bits; }
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
@@ -633,13 +646,11 @@ export async function main(): i32 { await leaf(); return 0; }
         await new Promise((resolve) => setTimeout(resolve, 2));
       }
       check("(f1) main received the worker's own executor id", reported, 1);
-      check("(f2) executorMask(0) is {0}", e.maskOf(0), 1);
-      check("(f2) executorMask(1) is {1}", e.maskOf(1), 2);
-      check("(f2) executorMask(32) is out of range", e.maskOf(32), 0);
-      check("(f3) mask 0 is unconstrained", e.allows(0, 7), 1);
-      check("(f4) {0} forbids worker 1", e.allows(1, 1), 0);
-      check("(f4) {1} allows worker 1", e.allows(2, 1), 1);
-      check("(f5) maskUnion(1, 2) is 3", e.union(1, 2), 3);
+      check("(f2) {0} allows main", e.allowsMain(), 1);
+      check("(f2) {0} forbids worker 1", e.forbidsWorker(), 0);
+      check("(f3) {1} allows worker 1", e.allowsWorker(), 1);
+      check("(f4) {0} | {1} is 3", e.unionBits(), 3);
+      check("(f5) unconstrained absorbs the union", e.unionZero(), 0);
       const result = await workerDone;
       check("(f6) the worker exited with the shell's status", result.status, 0);
       check("(f6) `__threadJoin` observes the exit", e.__threadJoin(1), 0);
@@ -662,7 +673,7 @@ export async function main(): i32 { await leaf(); return 0; }
     const built = compile(`
 import {
   __spawnOnMasked, __spawnThread, __serveArg, __serveOrigin, __serveKey,
-  __executorExit, __selfExecutor, __maskRefusals, mainExecutor,
+  __executorExit, __selfExecutor, __maskRefusals, mainExecutor, Mask,
 } from "~lib/thread";
 
 export let refused: i32 = 0;
@@ -691,13 +702,13 @@ async function deliver(): i32 {
 export function boot(workerId: i32, workStart: i32, deliverStart: i32): i32 {
   let status = __spawnThread(workerId, -1, 0);
   // mask {0} onto worker 1: refused, counted, and not posted.
-  refused = __spawnOnMasked(workerId, 1, workStart, 0, deliverStart);
+  refused = __spawnOnMasked(workerId, new Mask<u32>(1), workStart, 0, deliverStart);
   return status;
 }
 
 export function postAllowed(workStart: i32, deliverStart: i32): i32 {
   // mask {1}: worker 1 is allowed, so the same call must return 0.
-  allowed = __spawnOnMasked(1, 2, workStart, 0, deliverStart);
+  allowed = __spawnOnMasked(1, new Mask<u32>(2), workStart, 0, deliverStart);
   return allowed;
 }
 
@@ -785,12 +796,15 @@ export async function main(): i32 { await leaf(); return 0; }
   // asserts on the 1 it received. Without the mask, the post is unchecked and
   // the same answer arrives — the row that distinguishes this from (e) is that
   // the policy's mask is {1} and the placement is the one it permits.
+  //
+  // The mask is a **reference**: `sameMask` asserts the task carries the very
+  // object the policy holds, not a copy of its bits.
   // ---------------------------------------------------------------------------
 
   console.log("\n# (h) a masked policy places work");
   {
     const built = compile(`
-import { MaskedPolicy } from "~lib/thread";
+import { MaskedPolicy, Mask, MaskBase } from "~lib/thread";
 import {
   __spawnOn, __spawnThread, __serveArg, __serveOrigin, __serveKey,
   __executorExit, __selfExecutor, mainExecutor,
@@ -802,6 +816,7 @@ export let answer: i32 = -1;
 export let workerId: i32 = -1;
 export let bodyRanAtHome: i32 = 0;
 export let resumed: i32 = 0;
+export let sameMask: i32 = 0;
 
 async function leaf(): i32 { return 0; }
 
@@ -836,9 +851,12 @@ async function deliver(): i32 {
 
 // Posted to main's own executor, so the caller really executes.
 async function caller(): i32 {
-  let policy = new MaskedPolicy(1, 2, 21, replyEntry); // mask {1}: the worker
+  let policy = new MaskedPolicy(1, new Mask<u32>(2), 21, replyEntry); // {1}: the worker
   let t = work() on policy;
   pending = t;
+  // The task's mask is the policy's mask object, not a copy of its bits.
+  let carried = t.mask;
+  if (carried != null && changetype<MaskBase>(carried) == policy.mask) sameMask = 1;
   let v = await t;
   answer = v;
   resumed = resumed + 1;
@@ -911,6 +929,8 @@ export async function main(): i32 { await leaf(); return 0; }
       check("(h2) the body ran in the worker, not in main", e.bodyRanAtHome.value, 0);
       check("(h3) the worker's own id came back as 1", e.workerId.value, 1);
       check("(h4) the caller resumed exactly once", e.resumed.value, 1);
+      check("(h4) the task holds the policy's mask object, not a copy",
+        e.sameMask.value, 1);
       const result = await workerDone;
       check("(h5) the worker exited with the shell's status", result.status, 0);
       check("(h5) `__threadJoin` observes the exit", e.__threadJoin(1), 0);
@@ -936,7 +956,7 @@ export async function main(): i32 { await leaf(); return 0; }
 import { TaskBase, TaskPolicy } from "~lib/task";
 import {
   __spawnOn, __spawnThread, __serveArg, __serveOrigin, __serveKey,
-  __executorExit, __selfExecutor, __maskViolations, executorMask, mainExecutor,
+  __executorExit, __selfExecutor, __maskViolations, mainExecutor, Mask,
 } from "~lib/thread";
 
 export let answer: i32 = -1;
@@ -956,7 +976,7 @@ async function inner(): i32 {
 }
 
 @final class MainOnly extends TaskPolicy {
-  create(task: TaskBase): void { task.mask = executorMask(0); } // {0}
+  create(task: TaskBase): void { task.mask = new Mask<u32>(1); } // {0}
   await(task: TaskBase): void { task.drive(); }
 }
 
@@ -1051,6 +1071,288 @@ export async function main(): i32 { await leaf(); return 0; }
       const result = await workerDone;
       check("(i3) the worker exited with the shell's status", result.status, 0);
       check("(i3) `__threadJoin` observes the exit", e.__threadJoin(1), 0);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // (j) the template's arithmetic, at both widths.
+  //
+  // The mask is `Mask<T>`, not an `i32`: `T` decides how many executor ids it
+  // can name, so `Mask<u64>` is a 64-executor mask with no runtime change — the
+  // ABI asks the mask, it does not count bits. `bits == 0` is unconstrained, so
+  // `allows` answers `true` for an id no bit names.
+  //
+  // The shifts are computed **in `T`** (`<u64>1 << <u64>40`), which is the
+  // whole reason the template exists: the old `i32` arithmetic wrapped 40 to 8
+  // (wasm's shift count is mod the operand width), so a 32-bit mask could not
+  // even be asked about bit 40 without lying.
+  //
+  // The last two rows are the record. `mask` became a reference and, on wasm32,
+  // a reference is four bytes — the same as the `i32` it replaced — so the field
+  // stays at 28 and the base record stays 32 bytes: `_record`, the first field of
+  // the first subclass, still starts at 32. The pre-template fixture stored the
+  // `i32` at `offset=28` too; the fixture diff in `tests/compiler` is a type
+  // change, not a layout change.
+  // ---------------------------------------------------------------------------
+
+  console.log("\n# (j) the mask template's arithmetic at both widths");
+  {
+    const built = compile(`
+import { Mask } from "~lib/mask";
+import { Task } from "~lib/task";
+
+export function u32Bit31(): bool { return new Mask<u32>(<u32>1 << <u32>31).allows(31); }
+export function u32One31(): bool { return new Mask<u32>(1).allows(31); }
+export function u64Bit40(): bool { return new Mask<u64>(<u64>1 << <u64>40).allows(40); }
+export function u64Bit40On8(): bool { return new Mask<u64>(<u64>1 << <u64>40).allows(8); }
+export function u64Zero40(): bool { return new Mask<u64>(0).allows(40); }
+export function u64Bit63(): bool { return new Mask<u64>(<u64>1 << <u64>63).allows(63); }
+export function width32(): i32 { return new Mask<u32>(1).width; }
+export function width64(): i32 { return new Mask<u64>(1).width; }
+export function with40(): u64 { return new Mask<u64>(1).with(40).bits; }
+export function unionBits(): u32 { return new Mask<u32>(1).union(new Mask<u32>(2)).bits; }
+export function unnameable(): bool { return new Mask<u32>(1).allows(40); }
+export function offsetMask(): i32 { return offsetof<Task<i32>>("mask"); }
+export function offsetAfterBase(): i32 { return offsetof<Task<i32>>("_record"); }
+`, ["--runtime", "incremental"]);
+    check("the width fixture compiles", built.ok, true);
+    if (!built.ok) {
+      console.log(built.output);
+    } else {
+      const module = new WebAssembly.Module(built.bytes);
+      const e = new WebAssembly.Instance(module, {
+        env: { abort: (a, b, c, d) => { throw new Error(`abort ${a} ${b} ${c} ${d}`); } },
+      }).exports;
+      check("(j1) u32: <u32>1 << <u32>31 allows 31", e.u32Bit31(), 1);
+      check("(j2) u32: 1 does not allow 31", e.u32One31(), 0);
+      check("(j3) u64: <u64>1 << <u64>40 allows 40", e.u64Bit40(), 1);
+      check("(j4) u64: <u64>1 << <u64>40 does not allow 8", e.u64Bit40On8(), 0);
+      check("(j5) u64: 0 bits is unconstrained", e.u64Zero40(), 1);
+      check("(j6) u64: <u64>1 << <u64>63 allows 63", e.u64Bit63(), 1);
+      check("(j7) width of Mask<u32>", e.width32(), 32);
+      check("(j7) width of Mask<u64>", e.width64(), 64);
+      // 2^40 + 1, exactly: the shift is 64-bit, so bit 40 survives.
+      check("(j8) with(40) on {0} sets bit 40", Number(e.with40()), 1099511627777);
+      check("(j9) {0} | {1} is 3", e.unionBits(), 3);
+      // The mask has no opinion about an id it cannot name; the seams decide.
+      check("(j10) u32 mask has no opinion about id 40", e.unnameable(), 1);
+      check("(j11) TaskBase.mask is still at offset 28", e.offsetMask(), 28);
+      check("(j11) the base record is still 32 bytes", e.offsetAfterBase(), 32);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // (k) admission refuses a target past the old ceiling.
+  //
+  // The harness fixes `__executorCount()` at 2, so a 33-executor process is not
+  // available; the *rule* is testable anyway because the two refusal reasons are
+  // distinguishable. The width check answers `-1` and counts a refusal; a
+  // missing executor answers `-2` and counts nothing. `narrow()` posts to target
+  // 40 with `Mask<u32>` — a mask that names only 0..31 — and gets `-1` plus one
+  // refusal. `wide()` posts to the **same** target with `Mask<u64>` whose bit 40
+  // is set: the mask names it and allows it, the width check passes, the post is
+  // attempted, and there is no executor 40 → `-2`, count unchanged. Had the
+  // width check been absent, `narrow()` would be `-2` with the count at 0,
+  // because `Mask<u32>.allows(40)` answers `true` (row (j10)) — so nothing else
+  // in the path can produce `-1`, which is what makes the width the only reason.
+  // ---------------------------------------------------------------------------
+
+  console.log("\n# (k) admission refuses a target past the mask's width");
+  {
+    const built = compile(`
+import { Mask, __spawnOnMasked, __maskRefusals } from "~lib/thread";
+
+async function leaf(): i32 { return 0; }
+
+const TARGET: i32 = 40; // no executor 40 exists here, and no Mask<u32> can name it
+
+export function narrow(): i32 {
+  return __spawnOnMasked(TARGET, new Mask<u32>(0x80000000), 0, 0, 0);
+}
+
+export function wide(): i32 {
+  return __spawnOnMasked(TARGET, new Mask<u64>(<u64>1 << <u64>40), 0, 0, 0);
+}
+
+export function unconstrained(): i32 {
+  return __spawnOnMasked(TARGET, null, 0, 0, 0);
+}
+
+export function refusals(): i32 { return __maskRefusals(); }
+
+export async function main(): i32 { await leaf(); return 0; }
+`, ["--runtime", "incremental", "--enable", "threads",
+      "--enable", "stack-switching"]);
+    check("the ceiling fixture compiles", built.ok, true);
+    if (!built.ok) {
+      console.log(built.output);
+    } else {
+      const module = new WebAssembly.Module(built.bytes);
+      const e = new WebAssembly.Instance(module, {
+        env: {
+          abort: (a, b, c, d) => { throw new Error(`abort ${a} ${b} ${c} ${d}`); },
+          __executorCount: () => 2,
+          __startThread: () => -1,
+        },
+      }).exports;
+      check("(k1) a Mask<u32> cannot admit target 40: -1", e.narrow(), -1);
+      check("(k2) and the refusal is counted", e.refusals(), 1);
+      check("(k3) a Mask<u64> names 40, so the post is attempted (no executor 40 → -2)",
+        e.wide(), -2);
+      check("(k4) a null mask posts unchecked (→ -2 as well)", e.unconstrained(), -2);
+      check("(k5) neither attempted post counted a refusal", e.refusals(), 1);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // (l) a `MaskBase` the std does not provide.
+  //
+  // The reason `TaskBase.mask` is a **reference** is that the ABI has no width:
+  // it asks `allows` and `width` and nothing else. So a program can ship its own
+  // representation — here two `u32` words, 64 bits, with a hand-rolled `allows`
+  // — and `MaskedPolicy` places work under it exactly as it does under
+  // `Mask<u32>`. `work() on new MaskedPolicy(1, new TwoWordMask(2, 0), 21, reply)`
+  // must answer 42 with the body in the worker: the placement decided by a mask
+  // no std file ever saw.
+  // ---------------------------------------------------------------------------
+
+  console.log("\n# (l) a program-written MaskBase places work");
+  {
+    const built = compile(`
+import { MaskBase, MaskedPolicy } from "~lib/thread";
+import {
+  __spawnOn, __spawnThread, __serveArg, __serveOrigin, __serveKey,
+  __executorExit, __selfExecutor, mainExecutor,
+} from "~lib/thread";
+
+let pending: Task<i32> | null = null;
+let replyEntry: i32 = -1;
+export let answer: i32 = -1;
+export let workerId: i32 = -1;
+export let bodyRanAtHome: i32 = 0;
+
+/** 64 bits in two 32-bit words: the std has no such mask, and does not need one. */
+@final class TwoWordMask extends MaskBase {
+  lo: u32;
+  hi: u32;
+  constructor(lo: u32, hi: u32) {
+    super();
+    this.lo = lo;
+    this.hi = hi;
+  }
+  get width(): i32 { return 64; }
+  allows(id: i32): bool {
+    if (id < 0 || id >= 64) return true; // no opinion about what it cannot name
+    if (id < 32) return (this.lo & (1 << id)) != 0;
+    return (this.hi & (1 << (id - 32))) != 0;
+  }
+}
+
+async function leaf(): i32 { return 0; }
+
+async function work(): i32 {
+  bodyRanAtHome = 1;
+  let value = __serveArg();
+  let reply = __serveKey();
+  let origin = __serveOrigin();
+  await leaf();
+  __spawnOn(origin, reply, value * 2, __selfExecutor());
+  __executorExit(__selfExecutor());
+  return 0;
+}
+
+async function deliver(): i32 {
+  let value = __serveArg();
+  let from = __serveKey();
+  await leaf();
+  workerId = from;
+  let t = pending;
+  if (t) {
+    let task = changetype<Task<i32>>(t);
+    task.value = value;
+    task.settle(0);
+  }
+  return 0;
+}
+
+async function caller(): i32 {
+  // {1} in the low word: executor 1 allowed, in a mask with no std type.
+  let policy = new MaskedPolicy(1, new TwoWordMask(2, 0), 21, replyEntry);
+  let t = work() on policy;
+  pending = t;
+  let v = await t;
+  answer = v;
+  return 0;
+}
+
+export function boot(workerId: i32, callerStart: i32, replyStart: i32): i32 {
+  replyEntry = replyStart;
+  let r = __spawnThread(workerId, -1, 0);
+  __spawnOn(0, callerStart, 0, 0);
+  return r;
+}
+
+export function pump(): i32 {
+  let e = mainExecutor();
+  let guard = 0;
+  while (e.inbox.depth > 0 || e.ready.depth > 0) {
+    if (e.step(e)) break;
+    if (++guard > 1000000) break;
+  }
+  return answer;
+}
+
+export async function main(): i32 { await leaf(); return 0; }
+`, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+    check("the program-mask fixture compiles", built.ok, true);
+    if (!built.ok) {
+      console.log(built.output);
+    } else {
+      const names = startsOf(built.wat);
+      const callerStart = names.indexOf("$probe/caller$spawnStart");
+      const replyStart = names.indexOf("$probe/deliver$spawnStart");
+      check("the program-mask fixture has the caller and reply entries",
+        callerStart > 0 && replyStart > 0, true);
+
+      const module = new WebAssembly.Module(built.bytes);
+      const memory = new WebAssembly.Memory({ initial: 1, maximum: 128, shared: true });
+      let workerDone = null;
+      const env = {
+        memory,
+        abort: (a, b, c, d) => { throw new Error(`abort ${a} ${b} ${c} ${d}`); },
+        __executorCount: () => 2,
+        __startThread: (id) => {
+          workerDone = new Promise((resolve, reject) => {
+            const worker = new Worker(new URL(import.meta.url), {
+              workerData: { role: "plain", module, memory, id, total: 2 },
+            });
+            worker.on("message", resolve);
+            worker.on("error", reject);
+          });
+          return 0;
+        },
+      };
+      const e = new WebAssembly.Instance(module, { env }).exports;
+      check("`__threadInit` carves the block", e.__threadInit(64), 0);
+      e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
+      check("`__start` runs the boot body", e.__start(), 0);
+      check("the worker is spawned and the caller posted to main",
+        e.boot(1, callerStart, replyStart), 0);
+
+      const deadline = Date.now() + 10000;
+      let answer = -1;
+      while (Date.now() < deadline) {
+        answer = e.pump();
+        if (answer >= 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      check("(l1) the caller received the worker's value", answer, 42);
+      check("(l2) the body ran in the worker, not in main", e.bodyRanAtHome.value, 0);
+      check("(l3) the worker's own id came back as 1", e.workerId.value, 1);
+      const result = await workerDone;
+      check("(l4) the worker exited with the shell's status", result.status, 0);
+      check("(l4) `__threadJoin` observes the exit", e.__threadJoin(1), 0);
     }
   }
 

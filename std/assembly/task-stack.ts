@@ -14,6 +14,7 @@
  */
 
 import { TaskBase, Waiter } from "./task";
+import { MaskBase } from "./mask";
 
 // ── the stackful task object (one object per execution) ─────────────────────
 //
@@ -139,45 +140,16 @@ export function __setSelfExecutor(id: i32): void {
 
 // ── identity and masks ──────────────────────────────────────────────────────
 //
-// A mask is an `i32` bitmask over executor ids: bit `i` set = executor `i` is
-// allowed. **`0` means unconstrained**, not "no executor" — the default value
-// of `TaskBase.mask`, so a program that never names a mask is never refused.
+// A mask is a **reference** to a `MaskBase` (`~lib/mask`): bit `i` set =
+// executor `i` is allowed, and unconstrained is `null` or a `Mask<T>` with no
+// bits set. Nothing here counts bits, so nothing here caps the number of
+// executors — `Mask<u32>` and `Mask<u64>` are the std's two instantiations, and
+// a program may supply its own representation.
 //
-// The helpers live here, not in `~lib/thread`, because `__parkOn` below must
+// The counters live here, not in `~lib/thread`, because `__parkOn` below must
 // reach them and `~lib/thread` imports this file: the other direction would be
 // a cycle whose initialisation order decides the layout. `~lib/thread` exports
 // the program-facing surface.
-
-/** Executor `id`'s bit (`1 << id`), or `0` when `id` is outside 0..31. */
-export function __executorMask(id: i32): i32 {
-  if (id < 0 || id > 31) return 0;
-  return 1 << id;
-}
-
-/**
- * Whether `mask` allows executor `id`.
- *
- * `0` is unconstrained (`true`). An id outside 0..31 is also allowed: a 32-bit
- * mask cannot name it, so it has no opinion — the alternative would silently
- * wrap `1 << id` and forbid an executor the program meant to allow, in a
- * process with more than 32 executors.
- */
-export function __maskAllows(mask: i32, id: i32): bool {
-  if (mask == 0) return true;
-  if (id < 0 || id > 31) return true;
-  return (mask & (1 << id)) != 0;
-}
-
-/**
- * The union of two masks.
- *
- * `0` absorbs: an unconstrained mask unioned with anything is still
- * unconstrained. Plain `a | b` would silently narrow `0 | {1}` to `{1}`.
- */
-export function __maskUnion(a: i32, b: i32): i32 {
-  if (a == 0 || b == 0) return 0;
-  return a | b;
-}
 
 /** Admissions refused because the target was not in the mask (this store). */
 let maskRefusals: i32 = 0;
@@ -221,10 +193,26 @@ export function __parkOn(task: TaskBase): void {
   // parks on. A mask that forbids this store is counted, and then the park
   // proceeds: refusing to park would corrupt the continuation protocol, so the
   // guarantee here is observability, not prevention.
+  //
+  // **An id the mask cannot name counts nothing.** The mask never forbade this
+  // executor — `Mask<T>.allows` has no opinion about an id past its width, and
+  // the seam must not turn that silence into a violation: counting it would be
+  // a false positive. Admission, which *can* tell the caller no, fails closed
+  // on the same id instead (`__spawnOnMasked`). The asymmetry is deliberate;
+  // `docs/thread-abi.md` §7.3 states it in both places.
   let current = __currentTask();
   if (current) {
     let mask = current.mask;
-    if (mask != 0 && !__maskAllows(mask, selfExecutor)) ++maskViolations;
+    // Truthiness, not `!= null`: under `--wasmGc` a nullable class reference
+    // is a GC reference and `ref != null` lowers to an `i32.ne` against
+    // `ref.null` (measured: `binary child types must be equal`, a validation
+    // error). `if (mask)` is the form that lowers correctly on both ABIs.
+    if (mask) {
+      let policy = changetype<MaskBase>(mask);
+      if (selfExecutor >= 0 && selfExecutor < policy.width) {
+        if (!policy.allows(selfExecutor)) ++maskViolations;
+      }
+    }
   }
   let waiter = new Waiter();
   waiter.exec = selfExecutor;

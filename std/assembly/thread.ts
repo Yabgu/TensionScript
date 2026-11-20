@@ -282,38 +282,28 @@ export class SlotRing {
 // ── the executor ────────────────────────────────────────────────────────────
 
 import { setWakeSink, TaskBase, TaskPolicy } from "./task";
+// re-exported below, from the one file that defines them
+export { MaskBase, Mask } from "./mask";
 import {
   __taskAt, __resumeTask, __serveSlot, __lastStatus, __parkOn, __suspendParked,
   __setSelfExecutor,
-  __maskAllows, __executorMask, __maskUnion,
   __maskRefusalCount, __maskViolationCount,
   __noteMaskRefusal,
 } from "./task-stack";
 
 // ── identity and masks: the program-facing surface ──────────────────────────
 //
-// The implementation lives in `~lib/task-stack`, because `__parkOn` there must
-// reach it and this file imports that one (the reverse would be a cycle).
-// Programs import these from `~lib/thread`.
+// The mask itself is `~lib/mask` (`MaskBase`, `Mask<T>`), re-exported here so a
+// program that places work does not have to know which file owns it. The
+// counters live in `~lib/task-stack`, because `__parkOn` there must reach them
+// and this file imports that one (the reverse would be a cycle).
 //
 // The executor id is `__selfExecutor()` below: `0` on main, the id
-// `__workerMain` was given in a worker. A mask is 32 bits wide over executor
-// ids; see `docs/thread-abi.md` §7 for what it can and cannot do.
+// `__workerMain` was given in a worker. **The runtime counts no bits**: a mask
+// is a reference, and the width it can describe is the mask's own business
+// (`Mask<u32>` names 32 ids, `Mask<u64>` 64, a program's subclass whatever it
+// says). See `docs/thread-abi.md` §7.
 
-/** Executor `id`'s bit (`1 << id`), or `0` when `id` is outside 0..31. */
-export function executorMask(id: i32): i32 {
-  return __executorMask(id);
-}
-
-/** Whether `mask` allows executor `id`. `0` is unconstrained. */
-export function maskAllows(mask: i32, id: i32): bool {
-  return __maskAllows(mask, id);
-}
-
-/** The union of two masks; `0` (unconstrained) absorbs. */
-export function maskUnion(a: i32, b: i32): i32 {
-  return __maskUnion(a, b);
-}
 
 /** Admissions refused in **this store** because the target was not in the mask. */
 export function __maskRefusals(): i32 {
@@ -461,15 +451,18 @@ export class RemotePolicy extends TaskPolicy {
  * `await` is inherited: the reply still settles the task in the waiting store.
  */
 export class MaskedPolicy extends RemotePolicy {
-  /** Bit `i` set = executor `i` allowed; `0` is unconstrained. */
-  mask: i32;
+  /** The executors this policy may place work on; unconstrained is a zero-bits mask. */
+  mask: MaskBase;
 
-  constructor(target: i32, mask: i32, arg: i32, reply: i32) {
+  constructor(target: i32, mask: MaskBase, arg: i32, reply: i32) {
     super(target, arg, reply);
     this.mask = mask;
   }
 
   create(task: TaskBase): void {
+    // A reference copy: **one** mask object serves every task this policy
+    // creates, and it is never mutated by the runtime (a mask is a value the
+    // program holds; the seams only read it).
     task.mask = this.mask;
     __spawnOnMasked(this.target, this.mask, task.entry, this.arg, this.reply);
   }
@@ -685,17 +678,32 @@ export function __spawnOn(target: i32, funcIndex: i32, argSlot: i32, taskKey: i3
 /**
  * `__spawnOn`, with the target checked against `mask` **before** posting.
  *
- * Answers `0` posted, `-1` refused because the mask forbids `target`, `-2`
- * refused because the request table is full. A refusal is counted in
+ * Answers `0` posted, `-1` refused by the mask, `-2` refused because the
+ * request table is full (or no such executor exists). A refusal is counted in
  * `__maskRefusals()` and **nothing is posted** — never dropped silently, never
  * redirected: redirection is a policy's choice, not the runtime's.
+ *
+ * A `null` mask, or an unconstrained one (no bits set), posts unchecked: there
+ * is no restriction to apply, and `allows` says so by itself.
+ *
+ * **A target the mask cannot name is refused**, counted, and never posted —
+ * fail closed. The caller is present and asking, so it can be told no; and a
+ * mask that cannot describe executor 40 must not be read as permitting it.
+ * The park in `__parkOn` deliberately does the opposite with the same id (it
+ * counts nothing there): the asymmetry is stated in both places and in
+ * `docs/thread-abi.md` §7.3.
  */
 export function __spawnOnMasked(
-  target: i32, mask: i32, funcIndex: i32, argSlot: i32, taskKey: i32
+  target: i32, mask: MaskBase | null, funcIndex: i32, argSlot: i32, taskKey: i32
 ): i32 {
-  if (!__maskAllows(mask, target)) {
-    __noteMaskRefusal();
-    return -1;
+  // Truthiness, not `!= null`: see `__parkOn` — under `--wasmGc` the null
+  // comparison lowers to an invalid `i32.ne` against `ref.null`.
+  if (mask) {
+    let policy = changetype<MaskBase>(mask);
+    if (target < 0 || target >= policy.width || !policy.allows(target)) {
+      __noteMaskRefusal();
+      return -1;
+    }
   }
   return post(target, funcIndex, argSlot, taskKey);
 }

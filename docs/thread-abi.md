@@ -290,22 +290,44 @@ module):
   the reply, settles the task, and the caller resumes with `42`; the body ran
   **only** there (`bodyRanAtHome == 0`), the caller's continuation resumed
   exactly once, and `__threadJoin(1)` observes the worker's exit.
-- **(f) the identifier and the mask arithmetic.** Main reads `0`; a worker
-  posts `__selfExecutor()` back and main receives `1`. `executorMask(0) == 1`,
-  `executorMask(1) == 2`, `executorMask(32) == 0`; `maskAllows(0, 7)` is true,
-  `maskAllows(1, 1)` is false, `maskAllows(2, 1)` is true; `maskUnion(1, 2)`
-  is `3`.
-- **(g) admission refuses.** `__spawnOnMasked(1, {0}, …)` answers `-1`, the
-  refusal count is `1`, and the worker's body never runs; the same call with
-  `{1}` answers `0` and the body runs, so the mask, not the channel, was the
-  reason.
-- **(h) a masked policy places work.** `work() on new MaskedPolicy(1, {1}, 21,
-  reply)` from a caller on main's executor: the worker computes `42`, the
-  caller's `await` receives it, and the worker's own id (`1`) comes back in the
-  request key.
+- **(f) the identifier and the mask.** Main reads `0`; a worker posts
+  `__selfExecutor()` back and main receives `1`. With `Mask<u32>`, `{0}` allows
+  executor 0 and forbids 1, `{1}` allows 1, `{0} | {1}` is `3`, and an
+  unconstrained mask absorbs the union. `Mask` reaches the program through
+  `~lib/thread`'s re-export, so this row is also the one that says the template
+  is part of the public surface.
+- **(g) admission refuses.** `__spawnOnMasked(1, new Mask<u32>(1), …)` answers
+  `-1`, the refusal count is `1`, and the worker's body never runs; the same
+  call with `new Mask<u32>(2)` answers `0` and the body runs, so the mask, not
+  the channel, was the reason.
+- **(h) a masked policy places work.** `work() on new MaskedPolicy(1, new
+  Mask<u32>(2), 21, reply)` from a caller on main's executor: the worker
+  computes `42`, the caller's `await` receives it, and the worker's own id (`1`)
+  comes back in the request key. The task's `mask` field is asserted to be the
+  policy's mask **object**, not a copy of its bits.
 - **(i) a violation is counted.** An unmasked `__spawnOn` places work on worker
-  1; there a task whose policy set mask `{0}` parks anyway. The worker's own
-  `__maskViolations()` reports `1`, and the task still settles (`answer == 3`).
+  1; there a task whose policy set `task.mask = new Mask<u32>(1)` parks anyway.
+  The worker's own `__maskViolations()` reports `1`, and the task still settles
+  (`answer == 3`).
+- **(j) the template's arithmetic, at both widths** — and the record. `Mask<u32>`
+  with `<u32>1 << <u32>31` allows 31; `Mask<u32>(1)` does not. `Mask<u64>` with
+  `<u64>1 << <u64>40` allows 40 and not 8; zero bits allows 40; `<u64>1 <<
+  <u64>63` allows 63. `width` is 32 and 64. `Mask<u64>(1).with(40).bits` is
+  `1099511627777` (2^40 + 1) — the shift happened in 64 bits, which is the whole
+  point. A `Mask<u32>` answers `true` for id 40: it has no opinion. And the
+  record: `offsetof("mask")` is `28` and the first subclass field is still at
+  `32`, exactly where the `i32` was.
+- **(k) admission refuses a target past the mask's width.** With
+  `__executorCount()` fixed at 2 the scale is not testable, but the rule is:
+  `__spawnOnMasked(40, Mask<u32>, …)` answers `-1` and counts a refusal, while
+  the same target under `Mask<u64>` with bit 40 set is posted (`-2`, no
+  executor 40, no count) and `null` is posted as well. `-1` can only come from
+  the width check, because `Mask<u32>.allows(40)` answers `true` — so the
+  fixture proves the width was the only reason.
+- **(l) a program-written `MaskBase`.** Two `u32` words, 64 bits, hand-rolled
+  `allows`, used as a `MaskedPolicy`'s mask: the work is placed on the worker
+  and answers `42`. The ABI asked `allows` and `width` of a type no std file
+  declares.
 
 ---
 
@@ -326,50 +348,103 @@ posts `__selfExecutor()` back and main asserts it received `1`.
 
 ### 7.2 The mask
 
-A mask is an `i32` bitmask over executor ids:
+**The mask is a template, and the ABI has no width.** `std/assembly/mask.ts`
+(imported by `~lib/task` and `~lib/thread`, importing nothing itself) declares
+the contract and the std implementation:
 
 ```ts
-export function executorMask(id: i32): i32;   // 1 << id, or 0 outside 0..31
-export function maskAllows(mask: i32, id: i32): bool;
-export function maskUnion(a: i32, b: i32): i32;
+export abstract class MaskBase {
+  abstract allows(id: i32): bool;   // does this mask allow executor `id`?
+  abstract get width(): i32;        // how many ids it can name: 0 .. width-1
+}
+
+export class Mask<T> extends MaskBase {
+  bits: T;                          // bit `i` set = executor `i` allowed
+  constructor(bits: T);
+  get width(): i32;                 // sizeof<T>() * 8
+  allows(id: i32): bool;
+  with(id: i32): Mask<T>;           // bits | (1 << id)
+  union(other: Mask<T>): Mask<T>;   // 0 absorbs
+}
 ```
 
-- **Bit `i` set = executor `i` allowed.**
-- **`0` means unconstrained**, not "nothing allowed". It is the default value of
-  `TaskBase.mask`, so a program that never names a mask pays nothing and is
-  never refused. `maskAllows(0, anything)` is `true`. This is the case people
-  get wrong; it is the reason the field can be a plain `i32` with no sentinel.
-- **32 is the ceiling.** The mask is 32 bits wide, so a process with more than
-  32 executors cannot describe an allowed set with it. `executorMask(id)`
-  answers `0` outside `0..31`, and `maskAllows(mask, id)` answers `true` for
-  such an id: the mask has no opinion, and wrapping `1 << 32` to `1` would
-  silently forbid an executor the program meant to allow.
-- `maskUnion` treats `0` as absorbing — unconstrained unioned with anything is
-  still unconstrained. (The naive `a | b` would narrow `0 | {1}` to `{1}`.)
-- Counters are per store: `__maskRefusals()` counts admissions this store
-  refused, `__maskViolations()` counts parks this store observed on a
-  disallowed executor. A worker's counts are the worker's; to observe them
-  from main, post them back.
+`Mask<u32>` names 32 executors, `Mask<u64>` names 64, and a program that wants
+another representation subclasses `MaskBase` and says what its own width is —
+`(l)` in `tests/rt/gate4.js` is a hand-rolled 64-bit mask in two `u32` words.
+Nothing in the runtime counts bits: `TaskBase.mask` is a **reference**
+(`MaskBase | null`), and the two seams that consult it ask those two questions
+and nothing else.
 
-`TaskBase.mask: i32 = 0` is declared **last**, after `entry`, so no earlier
-field's offset moves. A policy's `create` sets it (`MaskedPolicy` does); the
-transform does not.
+**The previous revision's "32 is the ceiling" is superseded.** That ceiling was
+never in the compiler — the eight mask symbols had zero occurrences under
+`src/`, so the compiler did not know a mask existed — it was entirely the ABI's
+choice of `i32` for `TaskBase.mask` and for `__spawnOnMasked`'s parameter. A
+process with more than 32 executors could not describe an allowed set with it.
+With the reference, the width belongs to the mask, and a program picks one by
+picking an instantiation.
 
-### 7.3 Two enforcement points, and nothing else
+The i32 conveniences `executorMask(id)`, `maskAllows(mask, id)` and
+`maskUnion(a, b)` are **gone**, not kept beside the template: two arithmetics
+for one rule is how they drift apart, and `Mask<T>` expresses all three
+(`new Mask<u32>(<u32>1 << <u32>id)`, `.allows(id)`, `.union(other)`).
+
+What the type parameter buys is the shift. `<u64>1 << <u64>40` sets bit 40;
+the old `i32` arithmetic computed the same expression mod 32 and set bit 8
+instead. Bit 40 is exactly the executor a 32-bit mask cannot express.
+
+- **`bits == 0` is unconstrained**, not "nothing allowed". `TaskBase.mask`'s
+  default is `null`, which is unconstrained too, and `Mask<T>(0)` is the same
+  thing said as a value: a program that never names a mask is never refused.
+  This is the case people get wrong.
+- **An id the mask cannot name is allowed by `allows`.** For `id >= width` (and
+  negative ids) `allows` answers `true`. The reason is measured: wasm's shift
+  count is taken mod the operand width, so `1 << id` past the width wraps to a
+  bit the program never set; answering `false` would forbid an executor the
+  program meant to allow. `true` is the honest answer — the mask has no opinion
+  — and §7.3 is where the two seams decide what to do with that silence.
+- **`union` treats `0` as absorbing**: unconstrained unioned with anything is
+  still unconstrained. (Plain `a | b` would narrow `0 | {1}` to `{1}`.)
+- **`with(id)` inserts a bit; it does not relax a constraint.** On an
+  unconstrained mask `0 | bit` is `bit`, so a builder should start from the set
+  it means and use `union` to combine masks. An id past the width changes
+  nothing — there is no bit to set, and wrapping the shift would name a
+  different executor.
+- Counters are unchanged and still per store: `__maskRefusals()` counts
+  admissions this store refused, `__maskViolations()` counts parks this store
+  observed on a forbidden executor, both implemented in `~lib/task-stack` and
+  re-exported by `~lib/thread`. A worker's counts are the worker's; to observe
+  them from main, post them back.
+- `TaskBase.mask` is declared **last**, after `entry`. It is a reference now,
+  and on wasm32 a reference is four bytes — the same as the `i32` it replaces —
+  so the field stays at `offsetof == 28` and the base record stays 32 bytes;
+  `(j)` asserts both. The `tests/compiler` async fixtures changed in exactly two
+  ways: the accessor stores a reference and calls `__link`, and `TaskBase`'s
+  visitor visits offset 28 (`MaskBase` also gained an RTTI entry, because the
+  field's type is now a class). No offset moved.
+
+A **class**, not a generic function: generic functions do not parse on this
+fork (`TS1003 Identifier expected`, measured), so there is no
+`executorMask<T>(id)`. `new Mask<u64>(0)` is the unconstrained value; there is
+no static factory, because `Mask<u64>.none()` does not parse either (`TS1109`,
+measured).
+
+### 7.3 Two enforcement points, and the asymmetry between them
 
 **A continuation is store-local.** Only the store that created it can resume
 it, so a mask cannot move a running or parked task between stores. It decides
 where a task is *placed*, and refuses to place it somewhere forbidden. A mask
 that pretended to migrate would be a lie the runtime cannot keep.
 
-1. **Admission** — `__spawnOnMasked(target, mask, funcIndex, argSlot, taskKey)`
-   checks `maskAllows(mask, target)` **before** posting. A disallowed target is
-   refused and counted: the answer is `-1`, `__maskRefusals()` grows by one, and
-   **nothing is posted** — never dropped silently, never redirected.
+1. **Admission** — `__spawnOnMasked(target, mask: MaskBase | null, funcIndex,
+   argSlot, taskKey)` asks the mask **before** posting. A disallowed target is
+   refused and counted: the answer is `-1`, `__maskRefusals()` grows by one,
+   and **nothing is posted** — never dropped silently, never redirected.
    Redirection is a policy's choice, not the runtime's. The answer is `0` when
-   posted and `-2` when the request table is full. `__spawnOn` keeps its
-   signature and behaviour byte for byte: it is the unmasked escape hatch, and
-   both functions share the same posting code.
+   posted and `-2` when the request table is full or no such executor exists. A
+   `null` mask posts unchecked, and so does an unconstrained one (`allows`
+   answers `true` by itself). `__spawnOn` keeps its signature and behaviour
+   byte for byte: it is the unmasked escape hatch, and both functions share the
+   same posting code.
 
 2. **Verification at park** — `__parkOn` checks the **current** task (the one
    about to suspend, not the one it parks on). If the mask forbids this store,
@@ -378,28 +453,44 @@ that pretended to migrate would be a lie the runtime cannot keep.
    observability, not prevention: a task marked main-only cannot silently park
    on a worker.
 
+**The unnameable id is treated differently at the two points, deliberately:**
+
+- **Admission refuses an id the mask cannot name** (`target < 0 || target >=
+  mask.width`): `-1`, counted, nothing posted. Fail closed — the caller is
+  present and can be told no, and a mask that cannot describe executor 40 must
+  not be read as permitting it.
+- **The park counts nothing for an id the mask cannot name.** Refusing would
+  corrupt the continuation protocol, and counting it would be a false positive:
+  the mask never forbade that executor. The park asks `width` first and only
+  counts what the mask could actually have forbidden.
+
+A program-written `MaskBase` is subject to the same two rules by reporting its
+own `width`; `(l)` relies on it, and `(k)` is the admission half of the
+asymmetry made observable.
+
 There is deliberately **no second check** on the receiving executor. The
 poster's mask named the target; two checks for one rule is how they drift apart.
 The receiving check that does exist is the park, and it is about the *task's*
 mask, not the request's.
 
 **A mask does not cross with a request.** A request carries four words —
-`funcIndex`, argument, key, origin — and no mask. The served task is created in
-the target store by `f$spawnStart` with the default `mask = 0`; a mask set on
-the origin-side task object is not transferred, because the origin-side object
-is not the one that runs. (This is also why a task object itself does not
-cross: continuations and references are per store.) A program that needs a
-masked task running in a store constructs that task *there*; `(i)` does exactly
-that.
+`funcIndex`, argument, key, origin — and no mask (a reference could not cross
+stores anyway). The served task is created in the target store by
+`f$spawnStart` with the default `mask = null`; a mask set on the origin-side
+task object is not transferred, because the origin-side object is not the one
+that runs. A program that needs a masked task running in a store constructs
+that task *there*; `(i)` does exactly that.
 
 ### 7.4 `MaskedPolicy`
 
-`MaskedPolicy(target, mask, arg, reply) extends RemotePolicy`. `create` sets
-`task.mask = this.mask` and posts through `__spawnOnMasked`. A refusal is
-recorded, not thrown: it surfaces as `__maskRefusals()` in the posting store,
-and the task simply never settles — a policy that cannot place its work has no
-channel to fail through. `await` is inherited, so an allowed reply still
-settles the task in the waiting store.
+`MaskedPolicy(target, mask: MaskBase, arg, reply) extends RemotePolicy`.
+`create` assigns `task.mask = this.mask` — a **reference copy**, so one mask
+object serves every task the policy creates, and `(h)` asserts the identity —
+and posts through `__spawnOnMasked`. A refusal is recorded, not thrown: it
+surfaces as `__maskRefusals()` in the posting store, and the task simply never
+settles — a policy that cannot place its work has no channel to fail through.
+`await` is inherited, so an allowed reply still settles the task in the waiting
+store.
 
 ### 7.5 Refusal versus violation
 
@@ -407,8 +498,8 @@ The two counters answer different questions, and `(g)`/`(i)` are the two
 directions:
 
 - **A refusal is the runtime's**: a caller used the checked path and named a
-  target the mask forbids. `__spawnOnMasked` returned `-1`, the request never
-  existed, and the target never saw it.
+  target the mask forbids — or one it cannot name at all. `__spawnOnMasked`
+  returned `-1`, the request never existed, and the target never saw it.
 - **A violation is a program's**: something was already placed — through the
   unmasked `__spawnOn`, or by a policy that did not check — and a task with a
   mask then parked in a store the mask forbids. The park happens; the count is
