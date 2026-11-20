@@ -48,6 +48,21 @@ export declare function __lastStatus(): i32;
 export declare function __serveCont(funcIndex: i32): i32;
 
 /**
+ * `__serveSlot` — create the served continuation **in its own function**.
+ *
+ * V8's wasmfx backend refuses to compile a function that contains both a
+ * `cont.new` (with the table read/cast it needs) and a `resume`: measured as
+ * `Check failed: !op.Effects().can_write()`, a hard abort of the process, not a
+ * `WebAssembly.CompileError`. The builtins inline at their call sites, so
+ * `__serveOne` — which must also call `__resumeTask` — cannot hold the creation
+ * itself. This wrapper is the seam: `__serveOne` calls it, gets a slot, and
+ * resumes; the two operations live in different wasm bodies.
+ */
+export function __serveSlot(funcIndex: i32): i32 {
+  return __serveCont(funcIndex);
+}
+
+/**
  * Resumes `table[slot]` with the shell's `$await` handler and answers the
  * awaited slot, or `-1` when the task ran to its own completion.
  *

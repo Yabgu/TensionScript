@@ -1,21 +1,26 @@
 (module
  (type $0 (func (param i32 i32)))
- (type $1 (func (param i32) (result i32)))
+ (type $1 (func (result i32)))
  (type $2 (func))
- (type $3 (func (result i32)))
+ (type $3 (func (param i32) (result i32)))
  (type $4 (func (param i32 i32) (result i32)))
  (type $5 (func (param i32 i32 i32 i32)))
  (type $6 (func (param i32 i32 i64) (result i32)))
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
  (global $~lib/native/ASC_FEATURE_THREADS i32 (i32.const 1))
  (global $~lib/rt/common/ARENA_END (mut i32) (i32.const 0))
+ (global $~lib/rt/common/ARENA_BASE_CONFIGURED (mut i32) (i32.const 0))
  (global $~lib/rt/common/HEAP_BASE (mut i32) (i32.const 0))
+ (global $~lib/rt/common/ARENA_END_CONFIGURED (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/total (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/state (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/white (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/visitCount (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/ARENA_FROM_SPACE (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/fromSpace (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/ARENA_TO_SPACE (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/toSpace (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/ARENA_PIN_SPACE (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/pinSpace (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/iter (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/threshold (mut i32) (i32.const 0))
@@ -570,6 +575,28 @@
   call $features/threads/testAtomic
   call $features/threads/testAtomicAsm
  )
+ (func $~lib/rt/common/initialHeapBase (result i32)
+  (local $heap i32)
+  i32.const 1
+  drop
+  global.get $~lib/rt/common/ARENA_BASE_CONFIGURED
+  local.set $heap
+  local.get $heap
+  i32.const 0
+  i32.ne
+  if
+   local.get $heap
+   return
+  end
+  global.get $~lib/memory/__heap_base
+  return
+ )
+ (func $~lib/rt/common/noteArena (param $end i32) (param $heap i32)
+  local.get $end
+  global.set $~lib/rt/common/ARENA_END_CONFIGURED
+  local.get $heap
+  global.set $~lib/rt/common/ARENA_BASE_CONFIGURED
+ )
  (func $~lib/rt/common/enterArena (param $base i32) (param $size i32) (result i32)
   (local $start i32)
   (local $end i32)
@@ -617,6 +644,9 @@
   global.set $~lib/rt/common/ARENA_END
   local.get $heap
   global.set $~lib/rt/common/HEAP_BASE
+  local.get $end
+  local.get $heap
+  call $~lib/rt/common/noteArena
   local.get $heap
   return
  )
@@ -639,6 +669,65 @@
   call $~lib/rt/itcms/Object#set:prev
   local.get $space
   return
+ )
+ (func $~lib/rt/itcms/initialFromSpace (result i32)
+  (local $s i32)
+  i32.const 1
+  drop
+  global.get $~lib/rt/itcms/ARENA_FROM_SPACE
+  local.set $s
+  local.get $s
+  i32.const 0
+  i32.ne
+  if
+   local.get $s
+   return
+  end
+  i32.const 16
+  call $~lib/rt/itcms/initLazy
+  return
+ )
+ (func $~lib/rt/itcms/initialToSpace (result i32)
+  (local $s i32)
+  i32.const 1
+  drop
+  global.get $~lib/rt/itcms/ARENA_TO_SPACE
+  local.set $s
+  local.get $s
+  i32.const 0
+  i32.ne
+  if
+   local.get $s
+   return
+  end
+  i32.const 48
+  call $~lib/rt/itcms/initLazy
+  return
+ )
+ (func $~lib/rt/itcms/initialPinSpace (result i32)
+  (local $s i32)
+  i32.const 1
+  drop
+  global.get $~lib/rt/itcms/ARENA_PIN_SPACE
+  local.set $s
+  local.get $s
+  i32.const 0
+  i32.ne
+  if
+   local.get $s
+   return
+  end
+  i32.const 80
+  call $~lib/rt/itcms/initLazy
+  return
+ )
+ (func $~lib/rt/itcms/noteArenaSpaces
+  global.get $~lib/rt/itcms/fromSpace
+  global.set $~lib/rt/itcms/ARENA_FROM_SPACE
+  global.get $~lib/rt/itcms/toSpace
+  global.set $~lib/rt/itcms/ARENA_TO_SPACE
+  global.get $~lib/rt/itcms/pinSpace
+  global.set $~lib/rt/itcms/ARENA_PIN_SPACE
  )
  (func $~lib/rt/itcms/__arenaPlaceState (param $heapBase i32) (param $arenaEnd i32) (result i32)
   (local $stride i32)
@@ -667,6 +756,7 @@
   i32.add
   call $~lib/rt/itcms/initLazy
   global.set $~lib/rt/itcms/pinSpace
+  call $~lib/rt/itcms/noteArenaSpaces
   global.get $~lib/rt/itcms/toSpace
   global.set $~lib/rt/itcms/iter
   local.get $arenaEnd
@@ -1618,16 +1708,13 @@
  )
  (func $~start
   call $start:features/threads
-  global.get $~lib/memory/__heap_base
+  call $~lib/rt/common/initialHeapBase
   global.set $~lib/rt/common/HEAP_BASE
-  i32.const 16
-  call $~lib/rt/itcms/initLazy
+  call $~lib/rt/itcms/initialFromSpace
   global.set $~lib/rt/itcms/fromSpace
-  i32.const 48
-  call $~lib/rt/itcms/initLazy
+  call $~lib/rt/itcms/initialToSpace
   global.set $~lib/rt/itcms/toSpace
-  i32.const 80
-  call $~lib/rt/itcms/initLazy
+  call $~lib/rt/itcms/initialPinSpace
   global.set $~lib/rt/itcms/pinSpace
   memory.size
   i32.const 16

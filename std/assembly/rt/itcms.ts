@@ -43,11 +43,11 @@ import { E_ALLOCATION_TOO_LARGE, E_ALREADY_PINNED, E_NOT_PINNED } from "../util/
 @lazy let state = STATE_IDLE;
 
 // @ts-ignore: decorator
-@lazy let fromSpace = initLazy(changetype<Object>(memory.data(offsetof<Object>())));
+@lazy let fromSpace = ARENA ? initialFromSpace() : initLazy(changetype<Object>(memory.data(offsetof<Object>())));
 // @ts-ignore: decorator
-@lazy let toSpace = initLazy(changetype<Object>(memory.data(offsetof<Object>())));
+@lazy let toSpace = ARENA ? initialToSpace() : initLazy(changetype<Object>(memory.data(offsetof<Object>())));
 // @ts-ignore: decorator
-@lazy let pinSpace = initLazy(changetype<Object>(memory.data(offsetof<Object>())));
+@lazy let pinSpace = ARENA ? initialPinSpace() : initLazy(changetype<Object>(memory.data(offsetof<Object>())));
 // @ts-ignore: decorator
 @lazy let iter: Object = changetype<Object>(0); // unsafe initializion below
 
@@ -446,8 +446,56 @@ export function __arenaPlaceState(heapBase: usize, arenaEnd: usize): usize {
   visitCount = 0;
   fromSpace = initLazy(changetype<Object>(heapBase));
   toSpace = initLazy(changetype<Object>(heapBase + stride));
-  pinSpace = initLazy(changetype<Object>(heapBase + 2 * stride));
+  pinSpace = initLazy(changetype<Object>(heapBase + 2 * stride)); noteArenaSpaces();
   iter = toSpace;
   threshold = (arenaEnd - heapBase) >> 1;
   return heapBase + 3 * stride;
+}
+
+// ── the arena's space heads, published for the start function ────────────────
+//
+// `__arenaPlaceState` places them inside the arena, and the host calls it before
+// `__start()`; `$~start`'s `@lazy` initialisers must then keep them rather than
+// point them at the module's static data. A global's initialiser may not name
+// that same global (`TS2448`), so these copies are what it reads. Kept at the
+// end of the file so no existing line moves.
+// @ts-ignore: decorator
+@lazy let ARENA_FROM_SPACE: Object = changetype<Object>(0);
+// @ts-ignore: decorator
+@lazy let ARENA_TO_SPACE: Object = changetype<Object>(0);
+// @ts-ignore: decorator
+@lazy let ARENA_PIN_SPACE: Object = changetype<Object>(0);
+
+/** Records what `__arenaPlaceState` placed. */
+function noteArenaSpaces(): void {
+  ARENA_FROM_SPACE = fromSpace;
+  ARENA_TO_SPACE = toSpace;
+  ARENA_PIN_SPACE = pinSpace;
+}
+
+/** The start-function initialiser for `fromSpace`. */
+function initialFromSpace(): Object {
+  if (ARENA) {
+    let s = ARENA_FROM_SPACE;
+    if (changetype<usize>(s) != 0) return s;
+  }
+  return initLazy(changetype<Object>(memory.data(offsetof<Object>())));
+}
+
+/** The start-function initialiser for `toSpace`. */
+function initialToSpace(): Object {
+  if (ARENA) {
+    let s = ARENA_TO_SPACE;
+    if (changetype<usize>(s) != 0) return s;
+  }
+  return initLazy(changetype<Object>(memory.data(offsetof<Object>())));
+}
+
+/** The start-function initialiser for `pinSpace`. */
+function initialPinSpace(): Object {
+  if (ARENA) {
+    let s = ARENA_PIN_SPACE;
+    if (changetype<usize>(s) != 0) return s;
+  }
+  return initLazy(changetype<Object>(memory.data(offsetof<Object>())));
 }

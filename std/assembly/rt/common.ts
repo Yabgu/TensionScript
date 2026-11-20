@@ -112,8 +112,12 @@
  * invariant `visitStack` relies on — live stack in `[__stack_pointer, HEAP_BASE)`
  * — holds inside an arena exactly as it holds outside one.
  */
+// **Survives the start function when an arena is configured.** `HEAP_BASE`'s
+// initialiser *is* emitted into `$~start` (it names `__heap_base`), and a shared
+// build's host configures the arena *before* `__start()` because the boot body
+// must allocate in it. `initialHeapBase` keeps the configured value.
 // @ts-ignore: decorator
-@lazy export let HEAP_BASE: usize = __heap_base;
+@lazy export let HEAP_BASE: usize = ARENA ? initialHeapBase() : __heap_base;
 
 /**
  * Whether `ptr` lies outside this instance's arena. False while no arena is
@@ -169,6 +173,35 @@ export function enterArena(base: usize, size: usize): usize {
   let heap = (start + reserve + AL_MASK) & ~AL_MASK;
   if (end < heap + MIN_ARENA_HEAP) unreachable();
   ARENA_END = end;
-  HEAP_BASE = heap;
+  HEAP_BASE = heap; noteArena(end, heap);
   return heap;
+}
+
+// ── the arena configuration, published for the start function ────────────────
+//
+// `@lazy` initialisers are emitted into `$~start`. A shared build's host
+// configures the arena *before* `__start()` (the boot body must allocate in it),
+// so those initialisers must not throw the configuration away — but a global's
+// initialiser may not name that same global (`TS2448`). These unpublished copies
+// are what the initialisers read: nonzero means an arena exists and its own
+// values survive. Kept at the end of the file so no existing line moves: the
+// assert line numbers in these runtime files are part of every fixture.
+// @ts-ignore: decorator
+@lazy let ARENA_BASE_CONFIGURED: usize = 0;
+// @ts-ignore: decorator
+@lazy let ARENA_END_CONFIGURED: usize = 0;
+
+/** Records what `enterArena` configured. */
+function noteArena(end: usize, heap: usize): void {
+  ARENA_END_CONFIGURED = end;
+  ARENA_BASE_CONFIGURED = heap;
+}
+
+/** The start-function initialiser for `HEAP_BASE`. */
+function initialHeapBase(): usize {
+  if (ARENA) {
+    let heap = ARENA_BASE_CONFIGURED;
+    if (heap != 0) return heap;
+  }
+  return __heap_base;
 }

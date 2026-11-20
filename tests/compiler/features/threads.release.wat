@@ -5,7 +5,14 @@
  (type $3 (func (param i32 i32 i32 i32)))
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
  (global $~lib/rt/common/ARENA_END (mut i32) (i32.const 0))
+ (global $~lib/rt/common/ARENA_BASE_CONFIGURED (mut i32) (i32.const 0))
  (global $~lib/rt/common/HEAP_BASE (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/ARENA_FROM_SPACE (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/fromSpace (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/ARENA_TO_SPACE (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/toSpace (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/ARENA_PIN_SPACE (mut i32) (i32.const 0))
+ (global $~lib/rt/itcms/pinSpace (mut i32) (i32.const 0))
  (memory $0 1 10 shared)
  (data $3 (i32.const 108) "<")
  (data $3.1 (i32.const 120) "\02\00\00\00\1e\00\00\00~\00l\00i\00b\00/\00r\00t\00/\00t\00l\00s\00f\00.\00t\00s")
@@ -439,11 +446,15 @@
   local.get $0
   global.set $~lib/rt/common/HEAP_BASE
   local.get $0
+  global.set $~lib/rt/common/ARENA_BASE_CONFIGURED
+  local.get $0
   local.get $0
   i32.store offset=4
   local.get $0
   local.get $0
   i32.store offset=8
+  local.get $0
+  global.set $~lib/rt/itcms/fromSpace
   local.get $0
   i32.const 20
   i32.add
@@ -453,6 +464,8 @@
   local.get $1
   local.get $1
   i32.store offset=8
+  local.get $1
+  global.set $~lib/rt/itcms/toSpace
   local.get $0
   i32.const 40
   i32.add
@@ -462,6 +475,14 @@
   local.get $1
   local.get $1
   i32.store offset=8
+  local.get $1
+  global.set $~lib/rt/itcms/pinSpace
+  global.get $~lib/rt/itcms/fromSpace
+  global.set $~lib/rt/itcms/ARENA_FROM_SPACE
+  global.get $~lib/rt/itcms/toSpace
+  global.set $~lib/rt/itcms/ARENA_TO_SPACE
+  global.get $~lib/rt/itcms/pinSpace
+  global.set $~lib/rt/itcms/ARENA_PIN_SPACE
   global.get $~lib/rt/common/ARENA_END
   local.get $0
   i32.const 75
@@ -1169,28 +1190,57 @@
   drop
  )
  (func $__start (result i32)
+  (local $0 i32)
   call $features/threads/testAtomic
   call $features/threads/testAtomicAsm
+  global.get $~lib/rt/common/ARENA_BASE_CONFIGURED
+  local.tee $0
   i32.const 32940
+  local.get $0
+  select
   global.set $~lib/rt/common/HEAP_BASE
-  i32.const 20
-  i32.const 16
-  i32.store
-  i32.const 24
-  i32.const 16
-  i32.store
-  i32.const 52
-  i32.const 48
-  i32.store
-  i32.const 56
-  i32.const 48
-  i32.store
-  i32.const 84
-  i32.const 80
-  i32.store
-  i32.const 88
-  i32.const 80
-  i32.store
+  global.get $~lib/rt/itcms/ARENA_FROM_SPACE
+  local.tee $0
+  if (result i32)
+   local.get $0
+  else
+   i32.const 20
+   i32.const 16
+   i32.store
+   i32.const 24
+   i32.const 16
+   i32.store
+   i32.const 16
+  end
+  global.set $~lib/rt/itcms/fromSpace
+  global.get $~lib/rt/itcms/ARENA_TO_SPACE
+  local.tee $0
+  if (result i32)
+   local.get $0
+  else
+   i32.const 52
+   i32.const 48
+   i32.store
+   i32.const 56
+   i32.const 48
+   i32.store
+   i32.const 48
+  end
+  global.set $~lib/rt/itcms/toSpace
+  global.get $~lib/rt/itcms/ARENA_PIN_SPACE
+  local.tee $0
+  if (result i32)
+   local.get $0
+  else
+   i32.const 84
+   i32.const 80
+   i32.store
+   i32.const 88
+   i32.const 80
+   i32.store
+   i32.const 80
+  end
+  global.set $~lib/rt/itcms/pinSpace
   memory.size
   drop
   i32.const 0

@@ -573,6 +573,10 @@ export const threadFunctions = [
   "__workerMain",
   "__spawnThread",
   "__executorExit",
+  "__mainArenaBase",
+  "__mainArenaSize",
+  "__workerArenaBase",
+  "__workerArenaSize",
 ];
 /** The carved layout, exported so a host and the tests can read it back. */
 export const threadGlobals = [
@@ -1604,20 +1608,27 @@ export class Compiler extends DiagnosticEmitter {
           module.addFunctionExport(instance.internalName, name);
         }
       }
-      for (let i = 0, k = threadFunctions.length; i < k; ++i) {
-        let name = threadFunctions[i];
-        if (program.lookup(name) == null) continue; // no async shell, no threads
-        let instance = program.requireFunction(name);
-        if (this.compileFunction(instance) && !module.hasExport(name)) {
-          module.addFunctionExport(instance.internalName, name);
+      // **Only with the async shell.** The entries operate on `$starts` and
+      // `$~asyncCont`, and a shared program that merely imports `SlotRing` has
+      // neither: exporting them would pull the shell into a program that has no
+      // continuation table to serve from. `--sharedMemory` alone still decides
+      // whether a program *with* a shell gets them.
+      if (this.asyncShellPrepared) {
+        for (let i = 0, k = threadFunctions.length; i < k; ++i) {
+          let name = threadFunctions[i];
+          if (program.lookup(name) == null) continue; // no async shell, no threads
+          let instance = program.requireFunction(name);
+          if (this.compileFunction(instance) && !module.hasExport(name)) {
+            module.addFunctionExport(instance.internalName, name);
+          }
         }
-      }
-      for (let i = 0, k = threadGlobals.length; i < k; ++i) {
-        let name = threadGlobals[i];
-        if (program.lookup(name) == null) continue;
-        let instance = program.requireGlobal(name);
-        if (this.compileGlobal(instance) && !module.hasExport(name)) {
-          module.addGlobalExport(instance.internalName, name);
+        for (let i = 0, k = threadGlobals.length; i < k; ++i) {
+          let name = threadGlobals[i];
+          if (program.lookup(name) == null) continue;
+          let instance = program.requireGlobal(name);
+          if (this.compileGlobal(instance) && !module.hasExport(name)) {
+            module.addGlobalExport(instance.internalName, name);
+          }
         }
       }
     }
