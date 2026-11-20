@@ -106,6 +106,7 @@
     "test:gc": "node tests/gc/wasm-gc.js",
     "test:holders": "node --enable-source-maps tests/interop/holders.js",
     "test:arena": "node --enable-source-maps tests/rt/arena.js",
+    "test:gate4": "node --experimental-wasm-wasmfx tests/rt/gate4.js",
     "test:atomics": "node --enable-source-maps tests/rt/atomics.js",
     "test:debug": "node tests/debug/runner.js --check",
     "test:debug:unit": "node --enable-source-maps tests/debug/unit/dwarf.js && node --enable-source-maps tests/debug/unit/library-path.js",
