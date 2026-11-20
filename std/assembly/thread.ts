@@ -689,6 +689,12 @@ export class ThreadPool {
     // id it does not have, and never report a worker that did not start.
     let available = __executorTotal - 1;
     if (available < 0) available = 0;
+    if (available < workers) {
+      // The host carved for a different total. Start what the block can hold
+      // and report the disagreement; the pool is honest about its size, and
+      // `lastStatus` says why it is smaller than asked.
+      pool.lastStatus = -4;
+    }
     let wanted = workers < available ? workers : available;
     for (let id = 1; id <= wanted; ++id) {
       let status = __spawnThread(id, -1, 0);
