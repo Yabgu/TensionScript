@@ -32,7 +32,8 @@ function check(name, actual, expected) {
 /** Runs one example and returns `{ tag: [values…] }`. */
 function runExample(name) {
   const out = execFileSync(process.execPath, [
-    "--experimental-wasm-wasmfx", join(root, "examples", name, "run.mjs"),
+    join(root, "scripts", "run-wasmfx.js"),
+    join(root, "examples", name, "run.mjs"),
   ], { encoding: "utf8", timeout: 60000 });
   const tags = {};
   for (const line of out.split("\n")) {
