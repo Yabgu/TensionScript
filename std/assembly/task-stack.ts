@@ -137,6 +137,66 @@ export function __setSelfExecutor(id: i32): void {
   selfExecutor = id;
 }
 
+// ── identity and masks ──────────────────────────────────────────────────────
+//
+// A mask is an `i32` bitmask over executor ids: bit `i` set = executor `i` is
+// allowed. **`0` means unconstrained**, not "no executor" — the default value
+// of `TaskBase.mask`, so a program that never names a mask is never refused.
+//
+// The helpers live here, not in `~lib/thread`, because `__parkOn` below must
+// reach them and `~lib/thread` imports this file: the other direction would be
+// a cycle whose initialisation order decides the layout. `~lib/thread` exports
+// the program-facing surface.
+
+/** Executor `id`'s bit (`1 << id`), or `0` when `id` is outside 0..31. */
+export function __executorMask(id: i32): i32 {
+  if (id < 0 || id > 31) return 0;
+  return 1 << id;
+}
+
+/**
+ * Whether `mask` allows executor `id`.
+ *
+ * `0` is unconstrained (`true`). An id outside 0..31 is also allowed: a 32-bit
+ * mask cannot name it, so it has no opinion — the alternative would silently
+ * wrap `1 << id` and forbid an executor the program meant to allow, in a
+ * process with more than 32 executors.
+ */
+export function __maskAllows(mask: i32, id: i32): bool {
+  if (mask == 0) return true;
+  if (id < 0 || id > 31) return true;
+  return (mask & (1 << id)) != 0;
+}
+
+/**
+ * The union of two masks.
+ *
+ * `0` absorbs: an unconstrained mask unioned with anything is still
+ * unconstrained. Plain `a | b` would silently narrow `0 | {1}` to `{1}`.
+ */
+export function __maskUnion(a: i32, b: i32): i32 {
+  if (a == 0 || b == 0) return 0;
+  return a | b;
+}
+
+/** Admissions refused because the target was not in the mask (this store). */
+let maskRefusals: i32 = 0;
+/** Parks observed on an executor the current task's mask forbids (this store). */
+let maskViolations: i32 = 0;
+
+export function __maskRefusalCount(): i32 {
+  return maskRefusals;
+}
+
+export function __maskViolationCount(): i32 {
+  return maskViolations;
+}
+
+/** Records one refused admission (`__spawnOnMasked`). */
+export function __noteMaskRefusal(): void {
+  ++maskRefusals;
+}
+
 /**
  * Parks the **current** task on `task`.
  *
@@ -157,6 +217,15 @@ export function __setSelfExecutor(id: i32): void {
  * and that is the store it is suspended in.
  */
 export function __parkOn(task: TaskBase): void {
+  // The task that is about to suspend is the **current** one; `task` is what it
+  // parks on. A mask that forbids this store is counted, and then the park
+  // proceeds: refusing to park would corrupt the continuation protocol, so the
+  // guarantee here is observability, not prevention.
+  let current = __currentTask();
+  if (current) {
+    let mask = current.mask;
+    if (mask != 0 && !__maskAllows(mask, selfExecutor)) ++maskViolations;
+  }
   let waiter = new Waiter();
   waiter.exec = selfExecutor;
   waiter.slot = __currentSlot();

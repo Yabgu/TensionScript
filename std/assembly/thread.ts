@@ -285,7 +285,45 @@ import { setWakeSink, TaskBase, TaskPolicy } from "./task";
 import {
   __taskAt, __resumeTask, __serveSlot, __lastStatus, __parkOn, __suspendParked,
   __setSelfExecutor,
+  __maskAllows, __executorMask, __maskUnion,
+  __maskRefusalCount, __maskViolationCount,
+  __noteMaskRefusal,
 } from "./task-stack";
+
+// ── identity and masks: the program-facing surface ──────────────────────────
+//
+// The implementation lives in `~lib/task-stack`, because `__parkOn` there must
+// reach it and this file imports that one (the reverse would be a cycle).
+// Programs import these from `~lib/thread`.
+//
+// The executor id is `__selfExecutor()` below: `0` on main, the id
+// `__workerMain` was given in a worker. A mask is 32 bits wide over executor
+// ids; see `docs/thread-abi.md` §7 for what it can and cannot do.
+
+/** Executor `id`'s bit (`1 << id`), or `0` when `id` is outside 0..31. */
+export function executorMask(id: i32): i32 {
+  return __executorMask(id);
+}
+
+/** Whether `mask` allows executor `id`. `0` is unconstrained. */
+export function maskAllows(mask: i32, id: i32): bool {
+  return __maskAllows(mask, id);
+}
+
+/** The union of two masks; `0` (unconstrained) absorbs. */
+export function maskUnion(a: i32, b: i32): i32 {
+  return __maskUnion(a, b);
+}
+
+/** Admissions refused in **this store** because the target was not in the mask. */
+export function __maskRefusals(): i32 {
+  return __maskRefusalCount();
+}
+
+/** Parks observed in **this store** on an executor the task's mask forbids. */
+export function __maskViolations(): i32 {
+  return __maskViolationCount();
+}
 
 /** Default ring capacity. A pool sizes its own (§6.4); this is main's. */
 const DEFAULT_CAPACITY: i32 = 1024;
@@ -407,6 +445,33 @@ export class RemotePolicy extends TaskPolicy {
   await(task: TaskBase): void {
     __parkOn(task);
     __suspendParked();
+  }
+}
+
+/**
+ * `RemotePolicy` with an **admission** check on the target.
+ *
+ * `create` records the mask on the task and posts through `__spawnOnMasked`:
+ * a target the mask forbids is **refused and counted**, never dropped silently
+ * and never redirected (redirection is a policy's choice, not the runtime's).
+ * A refusal is not thrown: it surfaces as `__maskRefusals()` in the posting
+ * store, and the task simply never settles — a policy that cannot place its
+ * work has no channel to fail through.
+ *
+ * `await` is inherited: the reply still settles the task in the waiting store.
+ */
+export class MaskedPolicy extends RemotePolicy {
+  /** Bit `i` set = executor `i` allowed; `0` is unconstrained. */
+  mask: i32;
+
+  constructor(target: i32, mask: i32, arg: i32, reply: i32) {
+    super(target, arg, reply);
+    this.mask = mask;
+  }
+
+  create(task: TaskBase): void {
+    task.mask = this.mask;
+    __spawnOnMasked(this.target, this.mask, task.entry, this.arg, this.reply);
   }
 }
 
@@ -570,13 +635,13 @@ function requestAt(index: i32): Request | null {
 }
 
 /**
- * Post a request to executor `target` (0 = main). Never runs anything here.
+ * The posting body shared by `__spawnOn` and `__spawnOnMasked`.
  *
- * Guest function: it writes a ring in guest memory, which a step on the target
- * drains. The host is not involved, so a thread that has not been created yet
- * is still addressable — the request simply waits.
+ * Answers `0` when the request was posted, `-2` when no request record could
+ * be taken. Everything else — the carved table under `--sharedMemory`, the
+ * per-store array without it — is exactly the protocol `__spawnOn` documents.
  */
-export function __spawnOn(target: i32, funcIndex: i32, argSlot: i32, taskKey: i32): void {
+function post(target: i32, funcIndex: i32, argSlot: i32, taskKey: i32): i32 {
   __executorInit();
   // **Shared space: the request table is in the control block**, addressed by
   // index, so an index pushed by one store means the same request in another
@@ -584,22 +649,55 @@ export function __spawnOn(target: i32, funcIndex: i32, argSlot: i32, taskKey: i3
   // second store's array is simply a different array.
   if (SHARED && __controlBase != 0) {
     let index = blockAllocRequest();
-    if (index < 0) return; // the table is full; the request is refused, not lost
+    if (index < 0) return -2; // the table is full; the request is refused, not lost
     atomicStore<i32>(requestWord(index, REQ_FUNC), funcIndex);
     atomicStore<i32>(requestWord(index, REQ_ARG), argSlot);
     atomicStore<i32>(requestWord(index, REQ_KEY), taskKey);
     atomicStore<i32>(requestWord(index, REQ_ORIGIN), selfExec);
     pushToExecutor(target, inboxBase(recordBase(target)), index);
-    return;
+    return 0;
   }
   let e = __executorOf(target);
-  if (!e) return;
+  if (!e) return -2;
   let index = allocRequest();
   let request = changetype<Request>(requestAt(index));
   request.funcIndex = funcIndex;
   request.argSlot = argSlot;
   request.taskKey = taskKey;
   e.inbox.push(index);
+  return 0;
+}
+
+/**
+ * Post a request to executor `target` (0 = main). Never runs anything here.
+ *
+ * Guest function: it writes a ring in guest memory, which a step on the target
+ * drains. The host is not involved, so a thread that has not been created yet
+ * is still addressable — the request simply waits.
+ *
+ * **The unmasked escape hatch.** Its signature and behaviour are unchanged;
+ * a mask is enforced only by `__spawnOnMasked`, which shares this posting code.
+ */
+export function __spawnOn(target: i32, funcIndex: i32, argSlot: i32, taskKey: i32): void {
+  post(target, funcIndex, argSlot, taskKey);
+}
+
+/**
+ * `__spawnOn`, with the target checked against `mask` **before** posting.
+ *
+ * Answers `0` posted, `-1` refused because the mask forbids `target`, `-2`
+ * refused because the request table is full. A refusal is counted in
+ * `__maskRefusals()` and **nothing is posted** — never dropped silently, never
+ * redirected: redirection is a policy's choice, not the runtime's.
+ */
+export function __spawnOnMasked(
+  target: i32, mask: i32, funcIndex: i32, argSlot: i32, taskKey: i32
+): i32 {
+  if (!__maskAllows(mask, target)) {
+    __noteMaskRefusal();
+    return -1;
+  }
+  return post(target, funcIndex, argSlot, taskKey);
 }
 
 /**
