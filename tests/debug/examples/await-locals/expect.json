@@ -1,0 +1,49 @@
+{
+  "description": "A `.ts` breakpoint binds inside a stackful async frame, after the resume",
+  "notes": "The stop is inside game/work$body, a frame that was suspended at `await inner(before)` and resumed by the core loop: `r = 12` is the value `inner` computed for `before = 11`, so the frame's state crossed the suspension. Measured: a breakpoint requested at game.ts:23 or :24 resolves to game.ts:24, and one requested at game.ts:21 or :22 resolves to game.ts:22 (the pre-suspension await line) - so :23 is not separately observable in this JIT image. `before` and `after` report no location at this stop (both are consumed on the line above), which is the same live-range contract add-locals asserts; `x` is the parameter and `r` the resumed callee's result. `maxStops: 1`: continuing past this stop makes the consumer report extra SIGTRAP/SIGSEGV stops at the same line (measured on lldb 20.1.4-codelldb + wasmtime 50.0.2 with the jit-loader plugin), so the fixture asserts the stop and leaves the process there. wasmtime 50.0.2 is pinned per fixture because the harness default, 24.0.13, cannot parse a continuation type at all (`invalid leading byte (0x5d) for type`) and has no -W stack-switching option.",
+  "compile": {
+    "flags": [
+      "--debug",
+      "--sourceMap",
+      "--enable",
+      "stack-switching"
+    ],
+    "optLevel": "O0"
+  },
+  "invoke": "_start_game",
+  "wasmtime": {
+    "version": "50.0.2",
+    "args": [
+      "-W",
+      "stack-switching=y",
+      "-W",
+      "unknown-imports-trap=y"
+    ]
+  },
+  "breakpoints": [
+    {
+      "file": "game.ts",
+      "line": 24
+    }
+  ],
+  "stops": [
+    {
+      "file": "game.ts",
+      "line": 24,
+      "reason": "breakpoint 1.1"
+    }
+  ],
+  "variables": [
+    {
+      "name": "x",
+      "type": "int",
+      "value": "10"
+    },
+    {
+      "name": "r",
+      "type": "int",
+      "value": "12"
+    }
+  ],
+  "maxStops": 1
+}

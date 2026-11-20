@@ -49,6 +49,31 @@ export class Reader {
     }
   }
 
+  /**
+   * Signed LEB128, the complement of `uleb`. `bits` bounds the encoding; the
+   * wasm `s33` heap type that follows `ref null ht` / `ref ht` is the only
+   * caller, and its value is consumed, not interpreted.
+   */
+  sleb(bits: i32 = 32): i32 {
+    let result = 0;
+    let shift = 0;
+    while (true) {
+      if (this.i >= this.b.length) throw new Error("truncated sleb");
+      let byte = this.b[this.i];
+      this.i += 1;
+      if (shift >= bits) throw new Error("sleb too long");
+      let digit = <i32>(byte & 0x7f);
+      result = result | (digit << <u32>shift);
+      shift += 7;
+      if ((byte & 0x80) == 0) {
+        // Sign-extend from the final byte. A value that filled the width is
+        // already complete in `result`.
+        if (shift < 32 && (byte & 0x40) != 0) result = result | ((-1) << <u32>shift);
+        return result;
+      }
+    }
+  }
+
   name(): string {
     let n = this.uleb();
     let start = this.i;
@@ -168,6 +193,24 @@ export class FuncType {
   }
 }
 
+/**
+ * One entry of the type section, at one wasm type index. `func` is set only
+ * when the entry is a function type; every other form (continuation, struct,
+ * array, ...) is describable only as `null`, but still occupies its index.
+ * The array must stay indexed by type index: the function section names real
+ * type indices, so dropping an entry would relabel every later function's
+ * parameters.
+ */
+export class TypeEntry {
+  form: i32;
+  func: FuncType | null;
+
+  constructor(form: i32, func: FuncType | null) {
+    this.form = form;
+    this.func = func;
+  }
+}
+
 /** What the synthesizer must learn from the guest module itself. */
 export class Layout {
   /** File offset of the code section payload: DWARF address 0. */
@@ -186,8 +229,15 @@ export class Layout {
   localNames: LocalNameEntry[] = [];
   /** Function type indices from the function section, one per defined function. */
   funcTypes: u32[] = [];
-  /** Function types from the type section. */
-  types: FuncType[] = [];
+  /** Type-section entries, indexed by type index (a rec group expands). */
+  types: TypeEntry[] = [];
+  /**
+   * False when the type section held a form this reader cannot describe and
+   * parsing stopped. Line tables do not need the type section, so synthesis
+   * still runs; variable DIEs are omitted because a function's parameter count
+   * is then unknown.
+   */
+  typesComplete: bool = true;
 
   /** Name of the function defined by body `i`, if the guest kept names. */
   nameForBody(body: i32): string | null {
@@ -207,11 +257,19 @@ export class Layout {
     let func = this.importedFuncs + <u32>body;
     let out: LocalInfo[] = [];
 
+    // Variables need the function's parameter types. When the type section was
+    // not fully read, or the function's type entry is not a function type, the
+    // parameter count is unknown, and guessing it would mislabel every declared
+    // local after the parameters. Emit no variables rather than wrong ones.
+    if (!this.typesComplete) return out;
+
     let paramTypes: i32[] = [];
-    if (body < this.funcTypes.length) {
-      let typeIndex = this.funcTypes[body];
-      if (<i32>typeIndex < this.types.length) paramTypes = this.types[typeIndex].params;
-    }
+    if (body >= this.funcTypes.length) return out;
+    let typeIndex = this.funcTypes[body];
+    if (<i32>typeIndex >= this.types.length) return out;
+    let entry = this.types[typeIndex];
+    if (entry.func === null) return out;
+    paramTypes = (<FuncType>entry.func).params;
     for (let i = 0; i < paramTypes.length; i++) {
       let named = this.localName(func, <u32>i);
       let name = named !== null ? <string>named : "param" + i.toString();
@@ -277,20 +335,115 @@ function countImportedFuncs(sec: Uint8Array): u32 {
   return funcs;
 }
 
-function readTypes(sec: Uint8Array): FuncType[] {
+/**
+ * Reads one wasm value type. Most are a single byte; `ref null ht` (`0x63`)
+ * and `ref ht` (`0x64`) are followed by an s33 heap type that must be
+ * consumed even though the type itself has no DWARF base type here. `v128`
+ * is one byte and maps to `None` like any other undescribable scalar.
+ */
+function readValType(r: Reader): i32 {
+  let b = r.u8();
+  if (b == 0x63 || b == 0x64) {
+    r.sleb(33);
+    return ValType.None;
+  }
+  return b;
+}
+
+/** `fieldtype ::= storagetype mut`; a packed `i8`/`i16` is one byte like a valtype. */
+function readFieldType(r: Reader): void {
+  readValType(r);
+  r.u8(); // mutability
+}
+
+function readFuncType(r: Reader): FuncType {
+  let np = r.uleb();
+  let params: i32[] = [];
+  for (let k: u32 = 0; k < np; k++) params.push(readValType(r));
+  let nr = r.uleb();
+  let results: i32[] = [];
+  for (let k: u32 = 0; k < nr; k++) results.push(readValType(r));
+  return new FuncType(params, results);
+}
+
+/** The two parallel arrays `readTypes` produces. */
+export class TypeSection {
+  /** One entry per type index; a rec group contributes one entry per member. */
+  entries: TypeEntry[] = [];
+  /** False when parsing stopped at a form this reader cannot describe. */
+  complete: bool = true;
+}
+
+/**
+ * Reads one comptype into `out`. Returns false (and marks the section
+ * incomplete) on a form this reader cannot describe, so the caller stops
+ * instead of throwing away the whole synthesis.
+ */
+function readCompType(r: Reader, form: i32, out: TypeSection): bool {
+  if (form == 0x60) {
+    out.entries.push(new TypeEntry(form, readFuncType(r)));
+    return true;
+  }
+  if (form == 0x5d) {
+    // conttype ::= 0x5D typeidx - one uleb and no subtype byte (measured;
+    // a second byte here desyncs two types later).
+    r.uleb();
+    out.entries.push(new TypeEntry(form, null));
+    return true;
+  }
+  if (form == 0x5f) {
+    let n = r.uleb();
+    for (let i: u32 = 0; i < n; i++) readFieldType(r);
+    out.entries.push(new TypeEntry(form, null));
+    return true;
+  }
+  if (form == 0x5e) {
+    readFieldType(r);
+    out.entries.push(new TypeEntry(form, null));
+    return true;
+  }
+  out.complete = false;
+  return false;
+}
+
+/**
+ * `subtype ::= 0x50 vec(typeidx) comptype | comptype`. `0x4F` is the older
+ * `sub final` spelling of the same shape; both carry the supertype vector.
+ * A subtype still introduces exactly one type index.
+ */
+function readSubType(r: Reader, out: TypeSection): bool {
+  let form = r.u8();
+  if (form == 0x50 || form == 0x4f) {
+    let supers = r.uleb();
+    for (let i: u32 = 0; i < supers; i++) r.uleb();
+    return readCompType(r, r.u8(), out);
+  }
+  return readCompType(r, form, out);
+}
+
+/**
+ * The whole type section, including continuation types and the GC forms.
+ * Non-function entries occupy their type index with `func === null`.
+ */
+function readTypes(sec: Uint8Array): TypeSection {
+  let out = new TypeSection();
   let r = sectionReader(sec);
   let n = r.uleb();
-  let out: FuncType[] = [];
   for (let i: u32 = 0; i < n; i++) {
     let form = r.u8();
-    if (form != 0x60) throw new Error("type form is not a function type");
-    let np = r.uleb();
-    let params: i32[] = [];
-    for (let k: u32 = 0; k < np; k++) params.push(r.u8());
-    let nr = r.uleb();
-    let results: i32[] = [];
-    for (let k: u32 = 0; k < nr; k++) results.push(r.u8());
-    out.push(new FuncType(params, results));
+    if (form == 0x4e) {
+      // rectype ::= 0x4E vec(subtype): each member is its own type index.
+      let members = r.uleb();
+      for (let k: u32 = 0; k < members; k++) {
+        if (!readSubType(r, out)) return out;
+      }
+    } else if (form == 0x50 || form == 0x4f) {
+      let supers = r.uleb();
+      for (let k: u32 = 0; k < supers; k++) r.uleb();
+      if (!readCompType(r, r.u8(), out)) return out;
+    } else {
+      if (!readCompType(r, form, out)) return out;
+    }
   }
   return out;
 }
@@ -324,7 +477,7 @@ function readCodeBodies(sec: Uint8Array, base: i32): CodeBodies {
     let decls: LocalDecl[] = [];
     for (let g: u32 = 0; g < groups; g++) {
       let count = b.uleb();
-      let ty = b.u8();
+      let ty = readValType(b);
       decls.push(new LocalDecl(count, ty));
     }
     out.bodies.push(new BodyRange(base + start, base + end));
@@ -388,7 +541,9 @@ export function parseLayout(wasm: Uint8Array): Layout {
     if (end > wasm.length) throw new Error("section extends past end of module");
     let sec = wasm.subarray(payload, end);
     if (id == 1) {
-      out.types = readTypes(sec);
+      let types = readTypes(sec);
+      out.types = types.entries;
+      out.typesComplete = types.complete;
     } else if (id == 2) {
       out.importedFuncs = countImportedFuncs(sec);
     } else if (id == 3) {

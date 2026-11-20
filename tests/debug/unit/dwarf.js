@@ -8,8 +8,15 @@
 // ../runner.js and does not.
 
 import assert from "assert";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { synthesizeDwarf } from "../../../dist/assemblyscript.js";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 // --- a module shaped like a guest -------------------------------------------
 
@@ -245,4 +252,216 @@ function u32le(value) {
   }
 }
 
-console.log("dwarf unit tests: ok (3 cases)");
+// The degradation rule: an undescribable type form stops the *type* reader,
+// not the synthesis. Line tables come from the source map and the code bodies,
+// so a module the reader cannot fully describe still ships `.debug_line`, and
+// therefore still supports a `.ts` breakpoint — with no variable DIEs, because
+// a function's parameter count would otherwise be a guess.
+{
+  let wasm = [...wasmHeader];
+
+  // Type 0 is a function type; type 1 is a form this reader does not know.
+  wasm.push(...section(1, [...uleb(2), 0x60, ...uleb(2), 0x7f, 0x7e, ...uleb(0), 0x7a]));
+
+  // One import: env.abort, function, type 0.
+  let imports = [...uleb(1), ...lenPrefixed([...Buffer.from("env")]), ...lenPrefixed([...Buffer.from("abort")]), 0x00, ...uleb(0)];
+  wasm.push(...section(2, imports));
+
+  wasm.push(...section(3, [...uleb(1), ...uleb(0)]));
+
+  // Body: one declared i32 local, then `end`.
+  let body = [...uleb(1), 1, 0x7f, 0x0b];
+  wasm.push(...section(10, [...uleb(1), ...lenPrefixed(body)]));
+
+  let fnNames = [...uleb(1), ...uleb(1), ...lenPrefixed([...Buffer.from("game/f")])];
+  let locNames = [...uleb(1), ...uleb(1), ...uleb(1), ...uleb(2), ...lenPrefixed([...Buffer.from("sum")])];
+  let nameSec = [
+    ...uleb(4), ...Buffer.from("name"),
+    0x01, ...lenPrefixed(fnNames),
+    0x02, ...lenPrefixed(locNames),
+  ];
+  wasm.push(...section(0, nameSec));
+
+  wasm = Uint8Array.from(wasm);
+  const start = codePayloadStart(wasm);
+  const out = synthesizeDwarf(wasm, sourceMap(`${vlqEncode(start + 2)}AIA`), "/tmp", "game.wasm");
+
+  for (const name of [".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges"]) {
+    assert.ok(customPayload(out, name).length > 0, `${name} is still emitted`);
+  }
+  let info = Array.from(customPayload(out, ".debug_info"));
+  assert.ok(contains(info, [...Buffer.from("game/f"), 0]), "the subprogram DIE survives");
+  assert.ok(!contains(info, [...Buffer.from("sum"), 0]), "no variable DIE, since the type list is incomplete");
+}
+
+// --- a real stack-switching module ------------------------------------------
+//
+// Every other case here builds its module byte by byte, so none of them can
+// reach the reader this round fixed: it is only a *compiler-emitted*
+// stack-switching module that carries continuation types (`0x5d`) and
+// reference value types (`0x63 <s33>`) in its type section. The assertion is
+// the one this round exists to make impossible to regress: such an artifact
+// ships `.debug_info` and `.debug_line` at all. The lldb fixture in
+// ../examples/await-locals proves the tables are usable; this proves they are
+// emitted, without needing a debugger.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dwarf-async-"));
+  try {
+    const source = path.join(dir, "game.ts");
+    const wasmPath = path.join(dir, "game.wasm");
+    // One suspension, one value: `inner` is awaited so `work` parks and
+    // resumes. Nothing here is asked to run — only to compile.
+    fs.writeFileSync(source, [
+      "async function inner(v: i32): i32 {",
+      "  await 1;",
+      "  return v + 1;",
+      "}",
+      "async function work(x: i32): i32 {",
+      "  let before: i32 = x + 1;",
+      "  let r = await inner(before);",
+      "  return before + r;",
+      "}",
+      "export async function main(): i32 {",
+      "  return await work(10);",
+      "}",
+      "export function _start_game(): void {}",
+      "",
+    ].join("\n"));
+
+    const output = execFileSync(process.execPath, [
+      path.resolve(here, "..", "..", "..", "bin", "tensionscript.js"),
+      "game.ts", "-o", "game.wasm",
+      "--debug", "--sourceMap", "--enable", "stack-switching",
+    ], { encoding: "utf8", cwd: dir, stdio: "pipe" });
+    assert.ok(
+      !/DWARF emission failed/.test(output),
+      "the compiler reported no DWARF emission failure"
+    );
+
+    const wasm = fs.readFileSync(wasmPath);
+    // The module really is a stack-switching one: its type section holds a
+    // continuation type, which is what the reader used to reject. Asserted
+    // from an independent walk of the type section, so a compiler change that
+    // stopped emitting continuations could not quietly weaken this case.
+    const forms = typeForms(wasm);
+    assert.ok(forms.includes(0x5d), `the type section holds a continuation type (forms: ${forms.map(hex).join(" ")})`);
+    assert.ok(forms.includes(0x60), "and function types besides");
+
+    for (const name of [".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges"]) {
+      assert.ok(
+        customPayload(wasm, name).length > 0,
+        `the stack-switching artifact carries a non-empty ${name}`
+      );
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function hex(byte) {
+  return `0x${byte.toString(16)}`;
+}
+
+/**
+ * The type-index-order list of type forms in the module's type section, from
+ * an independent walk of the bytes (not the compiler's reader), so the
+ * assertion above states a fact about the artifact: function (`0x60`),
+ * continuation (`0x5d`), struct (`0x5f`), array (`0x5e`).
+ */
+function typeForms(wasm) {
+  let payload = -1;
+  let size = 0;
+  {
+    let i = 8;
+    while (i < wasm.length) {
+      const id = wasm[i++];
+      let len = 0;
+      let shift = 0;
+      for (;;) {
+        const byte = wasm[i++];
+        len |= (byte & 0x7f) << shift;
+        if (!(byte & 0x80)) break;
+        shift += 7;
+      }
+      if (id === 1) {
+        payload = i;
+        size = len;
+        break;
+      }
+      i += len;
+    }
+  }
+  if (payload < 0) throw new Error("no type section");
+
+  const end = payload + size;
+  let at = payload;
+  const uleb = () => {
+    let value = 0;
+    let shift = 0;
+    for (;;) {
+      const byte = wasm[at++];
+      value |= (byte & 0x7f) << shift;
+      if (!(byte & 0x80)) return value;
+      shift += 7;
+    }
+  };
+  const valType = () => {
+    const byte = wasm[at++];
+    // `ref null ht` / `ref ht`: a signed LEB heap type follows.
+    if (byte === 0x63 || byte === 0x64) {
+      for (;;) {
+        if (!(wasm[at++] & 0x80)) break;
+      }
+    }
+  };
+  const field = () => {
+    valType();
+    at++; // mutability
+  };
+
+  const forms = [];
+  const compType = () => {
+    const form = wasm[at++];
+    forms.push(form);
+    if (form === 0x60) {
+      const np = uleb();
+      for (let k = 0; k < np; k++) valType();
+      const nr = uleb();
+      for (let k = 0; k < nr; k++) valType();
+    } else if (form === 0x5d) {
+      uleb(); // the continuation's function type index; no subtype byte
+    } else if (form === 0x5f) {
+      const n = uleb();
+      for (let k = 0; k < n; k++) field();
+    } else if (form === 0x5e) {
+      field();
+    } else {
+      throw new Error(`unexpected type form ${hex(form)} at ${at - 1}`);
+    }
+  };
+  const subType = () => {
+    const form = wasm[at++];
+    if (form === 0x50 || form === 0x4f) {
+      const supers = uleb();
+      for (let k = 0; k < supers; k++) uleb();
+      compType();
+    } else {
+      at--; // the subtype's comptype is the byte already read
+      compType();
+    }
+  };
+
+  const count = uleb();
+  for (let t = 0; t < count && at < end; t++) {
+    if (wasm[at] === 0x4e) {
+      at++;
+      const members = uleb();
+      for (let m = 0; m < members; m++) subType();
+    } else {
+      subType();
+    }
+  }
+  return forms;
+}
+
+console.log("dwarf unit tests: ok (5 cases)");
