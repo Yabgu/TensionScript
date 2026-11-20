@@ -18,6 +18,7 @@
  * ```ts
  * class f$Rec extends Task<R> {                      // the task (and arguments)
  *   $p0: T0; ...
+ *   constructor($a0: T0, ...) { super(); this.$p0 = $a0; ... }
  *   drive(): void { if (!this.settled) { __parkOn(this); __suspendAwait(this.slot); } }
  * }
  * function f$body(...): R { <the original body> }    // the body, unchanged
@@ -28,8 +29,7 @@
  *   return 0;
  * }
  * function f(...): Task<R> {                         // the entry (the call site)
- *   let $rec = new f$Rec();
- *   $rec.$p0 = a; ...
+ *   let $rec = new f$Rec(a, ...);                    // the constructor captures
  *   $rec.slot = __installCont(f$start);
  *   __bindTask($rec.slot, $rec);
  *   $rec.entry = __spawnIndexOf(f$spawnStart);     // postable from any store
@@ -447,6 +447,72 @@ export class StackfulAsyncTransform {
       driveBody,
       range
     ));
+    // `constructor($a0: T0, ...) { super(); this.$p0 = $a0; ... }`
+    //
+    // **The captured parameters are initialized where the class says they
+    // are.** The entry used to write them after `new f$Rec()`, which left the
+    // synthesized class declaring fields no constructor ever assigned —
+    // measured as `TS2564: Property 'work$Rec#$p0' has no initializer and is
+    // not assigned in the constructor before 'this' is used or returned`, a
+    // compile error on every parameterized async function. A field assigned in
+    // the constructor is initialized by the definite-assignment rule, and the
+    // record is complete the moment `new` returns: there is no window in which
+    // a task exists with zeroed arguments.
+    //
+    // The parameter list is the function's own, in order and with its types, so
+    // the entry hands over exactly what the body reads back through `f$start` —
+    // including a reference, which the constructor stores as one reference and
+    // never inspects. `super()` is explicit: the record extends `Task<R>`, and a
+    // derived constructor must say so.
+    //
+    // **No parameters, no constructor.** A record with no captured fields has
+    // nothing to initialize, and a synthesized `constructor() { super(); }`
+    // would put a call in the path of every parameterless task for no gain.
+    // Leaving it out keeps the emitted code for the common case exactly what it
+    // was before this change.
+    if (parameters.length > 0) {
+      let constructorParameters = new Array<ParameterNode>(parameters.length);
+      let constructorStatements = new Array<Statement>(parameters.length + 1);
+      unchecked(constructorStatements[0] = Node.createExpressionStatement(
+        Node.createCallExpression(
+          Node.createSuperExpression(range),
+          null,
+          [],
+          range
+        )
+      ));
+      for (let i = 0, k = parameters.length; i < k; ++i) {
+        let parameter = parameters[i];
+        unchecked(constructorParameters[i] = Node.createParameter(
+          ParameterKind.Default,
+          Node.createIdentifierExpression(constructorParameterName(i), parameter.range),
+          parameter.type,
+          null,
+          parameter.range
+        ));
+        unchecked(constructorStatements[i + 1] = Node.createExpressionStatement(
+          assignField(
+            Node.createThisExpression(range),
+            parameterFieldName(i),
+            Node.createIdentifierExpression(constructorParameterName(i), parameter.range),
+            parameter.range
+          )
+        ));
+      }
+      recordFields.push(Node.createMethodDeclaration(
+        Node.createConstructorExpression(range),
+        null, CommonFlags.Constructor | CommonFlags.Instance,
+        null,
+        Node.createFunctionType(
+          constructorParameters,
+          typeNode("void", range),
+          null, false,
+          range
+        ),
+        Node.createBlockStatement(constructorStatements, range),
+        range
+      ));
+    }
     let recordClass = Node.createClassDeclaration(
       Node.createIdentifierExpression(recordName, declaration.name.range),
       null, CommonFlags.None,
@@ -546,12 +612,25 @@ export class StackfulAsyncTransform {
 
     // --- the entry (the declaration itself) --------------------------------
 
-    // `function f(...): Task<R> { let $rec = new f$Rec();
-    //                             $rec.$p0 = a; ...
+    // `function f(...): Task<R> { let $rec = new f$Rec(a, b, ...);
     //                             $rec.slot = __installCont(f$start);
     //                             __bindTask($rec.slot, $rec); return $rec; }`
+    //
+    // The captured parameters are **constructor arguments**, not writes after
+    // the fact: the record's own constructor assigns its fields, which is what
+    // makes them initialized rather than merely assigned (see the constructor
+    // above). The order of the arguments is the function's parameter order, so
+    // `f$start`'s reads through `$p{i}` and the entry's writes agree by
+    // construction rather than by two list comprehensions staying in step.
     let entryStatements = new Array<Statement>();
     let recVar = Node.createIdentifierExpression("$rec", range);
+    let constructorArguments = new Array<Expression>(parameters.length);
+    for (let i = 0, k = parameters.length; i < k; ++i) {
+      unchecked(constructorArguments[i] = Node.createIdentifierExpression(
+        parameters[i].name.text,
+        parameters[i].range
+      ));
+    }
     entryStatements.push(Node.createVariableStatement(
       null,
       [
@@ -562,7 +641,7 @@ export class StackfulAsyncTransform {
           Node.createNewExpression(
             Node.createSimpleTypeName(recordName, range),
             null,
-            [],
+            constructorArguments,
             range
           ),
           range
@@ -570,16 +649,6 @@ export class StackfulAsyncTransform {
       ],
       range
     ));
-    for (let i = 0, k = parameters.length; i < k; ++i) {
-      entryStatements.push(Node.createExpressionStatement(
-        assignField(
-          recVar,
-          parameterFieldName(i),
-          Node.createIdentifierExpression(parameters[i].name.text, parameters[i].range),
-          parameters[i].range
-        )
-      ));
-    }
     // `$rec.slot = __installCont(f$start)` — the slot is the task's identity in
     // the executor's continuation table.
     entryStatements.push(Node.createExpressionStatement(
@@ -836,6 +905,20 @@ export class StackfulAsyncTransform {
 
 function parameterFieldName(index: i32): string {
   return "$p" + index.toString();
+}
+
+/**
+ * The synthesized constructor's own parameter for field `i` (`$a{i}`).
+ *
+ * Deliberately **not** the field's name (`$p{i}`). `this.$p0 = $p0` would read
+ * fine, but a user parameter named `$p0` at a different index would then share
+ * the constructor's scope with a field of that name — one shadowing the other
+ * — and the failure would be a silently wrong captured value. `$a{i}` is
+ * synthesized in every case, so the constructor is `this.$p{i} = $a{i}` with
+ * nothing to disambiguate.
+ */
+function constructorParameterName(index: i32): string {
+  return "$a" + index.toString();
 }
 
 function typeNode(name: string, range: Range): NamedTypeNode {

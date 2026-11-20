@@ -12121,15 +12121,29 @@ function checkTypeOptional(ctx: BuiltinFunctionContext, setCurrentTypeOnError: b
  * resolver carries — which is a larger change than this round, and one whose
  * absence today costs a program that is deliberately lying about its path.
  */
-function checkAsyncIntrinsic(ctx: BuiltinFunctionContext): i32 {
+function checkAsyncIntrinsic(ctx: BuiltinFunctionContext, readableByStep: bool = false): i32 {
   let compiler = ctx.compiler;
   // **The shell's own std machinery, and nothing else.** `~lib/async` is the
   // core loop; `~lib/thread` is the executor that drives it and reads the last
   // status after serving a request; `~lib/task-stack` is where those two reach
   // the slot table. The list is explicit so a user source — or a future std file
   // — has to be added deliberately rather than inherit access by accident.
+  //
+  // **`readableByStep` is the one opening in that list, and it is a read.**
+  // `__lastStatus` answers a module global the compiler wrote after the last
+  // `resume`; a program that compiles one cannot corrupt a scheduling invariant
+  // by looking at it, and a **step author has to be able to see it** — it is the
+  // only report a step gets about how the resume it just performed ended. The
+  // primitives that *decide* something (`__suspendAwait`, `__suspendParked`,
+  // `__resumeMain`, `__suspendDone`) stay closed: their arguments are the
+  // protocol, and a program inventing one is a program inventing a payload the
+  // runtime does not define. This parameter exists for exactly one builtin;
+  // anything else passing it is a review question.
   let path = ctx.reportNode.range.source.internalPath;
-  if (path != "~lib/async" && path != "~lib/thread" && path != "~lib/task-stack") {
+  if (
+    !readableByStep &&
+    path != "~lib/async" && path != "~lib/thread" && path != "~lib/task-stack"
+  ) {
     compiler.error(
       DiagnosticCode.Not_implemented_0,
       ctx.reportNode.range,
@@ -12526,6 +12540,13 @@ function builtin_async_currentSlot(ctx: BuiltinFunctionContext): ExpressionRef {
 builtinFunctions.set(BuiltinNames.asyncCurrentSlot, builtin_async_currentSlot);
 
 // __lastStatus() -> i32
+//
+// The status the last normal `resume` returned on this thread. `~lib/thread`
+// re-exports it so a program that writes its own step has one import for the
+// whole surface (`docs/task-model.md`, "Writing a step"), and it is the **one**
+// async intrinsic a program may call: it reads a global and writes nothing, so
+// reading it cannot invent a protocol payload. Every primitive that decides
+// something stays gated — see `checkAsyncIntrinsic`.
 function builtin_async_lastStatus(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
@@ -12533,7 +12554,7 @@ function builtin_async_lastStatus(ctx: BuiltinFunctionContext): ExpressionRef {
   if (
     checkTypeAbsent(ctx) |
     checkArgsRequired(ctx, 0) |
-    checkAsyncIntrinsic(ctx)
+    checkAsyncIntrinsic(ctx, true)
   ) return module.unreachable();
   return module.global_get(ASYNC_LAST_STATUS, TypeRef.I32);
 }
