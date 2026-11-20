@@ -318,7 +318,8 @@ import { setWakeSink, TaskBase, TaskPolicy } from "./task";
 // re-exported below, from the one file that defines them
 export { MaskBase, Mask } from "./mask";
 import {
-  __taskAt, __resumeTask, __serveSlot, __lastStatus, __parkOn, __suspendParked,
+  __taskAt, __currentTask, __resumeTask, __serveSlot, __lastStatus, __parkOn,
+  __suspendParked,
   __setSelfExecutor,
   __maskRefusalCount, __maskViolationCount,
   __noteMaskRefusal,
@@ -1071,11 +1072,42 @@ export function __spawnOnMasked(
  * continuation through `__serveCont`; resuming it with the shell's `$await`
  * handler means a served body that suspends parks normally, and its slot is
  * queued for this executor.
+ *
+ * **The request's words are written onto the task, and only mirrored into the
+ * module globals.** `$starts[funcIndex]` is `f$spawnStart`, which creates a
+ * task and parks on it without running the body, so the resume answers *that
+ * task's slot* and not the served continuation's: the body runs later, from
+ * `driveReady` → `__resumeTask(taskSlot)`. A word kept only in module state is
+ * overwritten by the next request `__drainInbox` serves — which is exactly the
+ * whole queue, since draining happens before any ready slot does — so a body
+ * that read `__serveArg()` after an `await` saw the last request's argument
+ * (three posts of 11, 22, 33 answered 33, 33, 33). The task carries its own
+ * copy, so the lifetime is the body's and not the drain's.
+ *
+ * The globals stay for the paths that have no task to write to: a resume that
+ * answers a negative payload (no suspension, or a park on something that is not
+ * a local slot) created nothing to attach to, and a store that serves without
+ * `--sharedMemory` never had a request record to read from.
  */
-export function __serveOne(e: Executor, funcIndex: i32, argSlot: i32, taskKey: i32): i32 {
+export function __serveOne(
+  e: Executor, funcIndex: i32, argSlot: i32, taskKey: i32, origin: i32
+): i32 {
+  servingArg = argSlot;
+  servingKey = taskKey;
+  servingOrigin = origin;
   let slot = __serveSlot(funcIndex);
   let awaited = __resumeTask(slot);
-  if (awaited >= 0) e.ready.push(awaited);
+  if (awaited >= 0) {
+    // The task `f$spawnStart` created, before the executor may run it.
+    let taskOrNull = __taskAt(awaited);
+    if (taskOrNull) {
+      let task = changetype<TaskBase>(taskOrNull);
+      task.serveArg = argSlot;
+      task.serveKey = taskKey;
+      task.serveOrigin = origin;
+    }
+    e.ready.push(awaited);
+  }
   return __lastStatus();
 }
 
@@ -1092,19 +1124,16 @@ export function __drainInbox(e: Executor): i32 {
     let index = e.inbox.pop();
     if (index < 0) break;
     if (SHARED && __controlBase != 0) {
-      // Read the request's words into store-local globals **before** serving and
-      // before freeing the record: the served body reads them through
-      // `__serveArg`/`__serveKey`/`__serveOrigin` and may suspend, after which
-      // the record may already belong to another producer.
+      // Read the request's words into locals **before** freeing the record, and
+      // hand them to the serve as operands: the body runs in a later step, so
+      // nothing may still be pointing at a record another producer may own by
+      // then. `__serveOne` copies them onto the task it creates.
       let funcIndex = atomicLoad<i32>(requestWord(index, REQ_FUNC));
       let argSlot = atomicLoad<i32>(requestWord(index, REQ_ARG));
       let taskKey = atomicLoad<i32>(requestWord(index, REQ_KEY));
       let origin = atomicLoad<i32>(requestWord(index, REQ_ORIGIN));
       blockFreeRequest(index);
-      servingArg = argSlot;
-      servingKey = taskKey;
-      servingOrigin = origin;
-      last = __serveOne(e, funcIndex, argSlot, taskKey);
+      last = __serveOne(e, funcIndex, argSlot, taskKey, origin);
       continue;
     }
     let requestOrNull = requestAt(index);
@@ -1119,7 +1148,7 @@ export function __drainInbox(e: Executor): i32 {
       freeRequests = free;
     }
     free.push(index);
-    last = __serveOne(e, funcIndex, argSlot, taskKey);
+    last = __serveOne(e, funcIndex, argSlot, taskKey, 0);
   }
   return last;
 }
@@ -1170,7 +1199,15 @@ let selfExec: i32 = 0;
 let requestBase: usize = 0;
 let freeRingBase: usize = 0;
 let requestCount: i32 = 0;
-/** The request currently being served by this store (see `__serveArg`). */
+/**
+ * The request most recently handed to `__serveOne` in this store.
+ *
+ * **A fallback, not the contract.** The request's words live on the task the
+ * serve created (`TaskBase.serveArg` and its two neighbours) because the drain
+ * outlives nothing: `__drainInbox` serves a whole queue before any body runs, so
+ * these name the last request by the time a body reads them. The accessors above
+ * ask the task first and land here only when there is no task to ask.
+ */
 let servingArg: i32 = 0;
 let servingKey: i32 = 0;
 let servingOrigin: i32 = 0;
@@ -1513,10 +1550,7 @@ export function __workerMain(id: i32): i32 {
 
   let entry = atomicLoad<i32>(sig + 16);
   if (entry >= 0) {
-    servingArg = atomicLoad<i32>(sig + 20);
-    servingKey = 0;
-    servingOrigin = 0;
-    __serveOne(e, entry, servingArg, 0);
+    __serveOne(e, entry, atomicLoad<i32>(sig + 20), 0, 0);
   }
 
   while (!e.stop && atomicLoad<i32>(sig + 12) != 2) {
@@ -1600,24 +1634,35 @@ export function __threadJoin(id: i32): i32 {
 }
 
 /**
- * The argument word of the request being served.
+ * The argument word of the request this task was created by.
  *
  * `$starts` entries are canonical `() -> i32`: a served continuation is handed
  * no operands, so the request record carries the one `i32` a served body takes.
- * Read it **before the body's first suspension** if the value has to survive
- * one; the runtime copies it into this store when it dequeues the request.
+ *
+ * **The current task answers first.** A served body always has one — the task
+ * `f$spawnStart` created, which `__serveOne` wrote the request's words onto —
+ * so the value is the body's own for its whole life, across suspensions and
+ * across a nested drain. The module global is the fallback for a resume that
+ * created no task (a payload below zero) and for the non-shared path, where
+ * there is no request record to have copied from.
  */
 export function __serveArg(): i32 {
+  let task = __currentTask();
+  if (task) return task.serveArg;
   return servingArg;
 }
 
-/** The origin-defined key of the request being served (see `__spawnOn`). */
+/** The origin-defined key of the request this task was created by (see `__spawnOn`). */
 export function __serveKey(): i32 {
+  let task = __currentTask();
+  if (task) return task.serveKey;
   return servingKey;
 }
 
-/** The executor that posted the request being served. */
+/** The executor that posted the request this task was created by. */
 export function __serveOrigin(): i32 {
+  let task = __currentTask();
+  if (task) return task.serveOrigin;
   return servingOrigin;
 }
 

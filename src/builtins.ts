@@ -12506,9 +12506,12 @@ builtinFunctions.set(BuiltinNames.asyncServeCont, builtin_async_serveCont);
 // __currentSlot() -> i32
 //
 // The slot of the task being resumed, written by `__resumeTask` immediately
-// before the resume. `0` is main. The continuation's `f$start` reads its own
-// task object from the runtime's slot table through this index, because resume
-// sends no operands.
+// before the resume and **put back when the resume returns**. `0` is main. The
+// continuation's `f$start` reads its own task object from the runtime's slot
+// table through this index, because resume sends no operands. `__currentTask`
+// and `__parkOn` read it too, which is why a resume in the middle of a
+// continuation (a served body draining its own inbox) restores instead of
+// leaving the inner slot in place.
 function builtin_async_currentSlot(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
@@ -12586,6 +12589,21 @@ function builtin_async_resumeTask(ctx: BuiltinFunctionContext): ExpressionRef {
 
   let stmts = new Array<ExpressionRef>();
   stmts.push(module.local_set(slotLocal.index, slot, false));
+  // **Saved and restored, so a resume inside a resume is not a corruption.**
+  // `ASYNC_CURRENT_SLOT` is what `__currentSlot()` — and through it
+  // `__currentTask()` and `__parkOn` — answers with, and a served body may
+  // drain its own inbox, which resumes a second continuation from inside the
+  // first. Leaving the global at the inner slot made the outer body's
+  // `__currentTask()` name the inner task: measured as the outer task's
+  // `__serveArg()` answering the inner request's argument, and as a park
+  // registered under the wrong slot. The save is in this frame, so the handler
+  // branch below restores it on both exits — normal completion and suspension.
+  let savedSlotLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  stmts.push(module.local_set(
+    savedSlotLocal.index,
+    module.global_get(ASYNC_CURRENT_SLOT, TypeRef.I32),
+    false
+  ));
   stmts.push(module.global_set(ASYNC_CURRENT_SLOT, module.local_get(slotLocal.index, TypeRef.I32)));
 
   // The handler block's result is the tag payload (the awaited slot) followed
@@ -12606,6 +12624,13 @@ function builtin_async_resumeTask(ctx: BuiltinFunctionContext): ExpressionRef {
   ], tupleType);
 
   stmts.push(module.local_set(pairLocal.index, onAwait, false));
+  // The resumed continuation is done, one way or the other (`resume` returning
+  // normally, or the handler branch carrying a suspension out). Whoever was
+  // current before this call is current again.
+  stmts.push(module.global_set(
+    ASYNC_CURRENT_SLOT,
+    module.local_get(savedSlotLocal.index, TypeRef.I32)
+  ));
   // One extract to a local: the payload is read by the store condition, the
   // result, and both compares, and a shared IR node used in several parents is
   // the shape LocalCSE asserts on.

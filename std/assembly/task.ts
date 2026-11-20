@@ -231,12 +231,32 @@ export abstract class TaskBase {
    * what give the mask its meaning. `~lib/mask` imports nothing, so this
    * import cannot cycle.
    *
-   * Declared **last**, after `entry`, so no earlier field's offset moves. On
-   * wasm32 a reference is four bytes, exactly what the `i32` it replaces cost,
-   * so the record does not grow and `offsetof("mask")` does not move —
-   * `tests/rt/gate4.js` (j) observes both.
+   * Declared after `entry`, so no earlier field's offset moves. On wasm32 a
+   * reference is four bytes, exactly what the `i32` it replaces cost at the
+   * time, so `offsetof("mask")` did not move — `tests/rt/gate4.js` (j)
+   * observes it. The serve context (`serveArg`/`serveKey`/`serveOrigin`) is
+   * appended **after** this field for the same reason.
    */
   mask: MaskBase | null = null;
+  /**
+   * The request words this task was created by, or the zeroes an unserved task
+   * keeps: `__serveArg`'s one `i32`, `__serveKey`'s origin-defined key, and
+   * `__serveOrigin`'s poster.
+   *
+   * **On the task, because the serve and the body have different lifetimes.**
+   * `__drainInbox` serves an entire queue before any body runs (`__serveOne`
+   * resumes `f$spawnStart`, which parks this slot on the new task and returns),
+   * so a word copied into module state at dequeue time names the *last* request
+   * by the time the first body reads it. `__serveOne` writes these three onto
+   * the task it just created, and the body reads its own at any point — before
+   * or after a suspension, nested serves included.
+   *
+   * Appended after `mask`, so no field declared earlier moves; the record grows
+   * by three words and a subclass's own fields shift past them.
+   */
+  serveArg: i32 = 0;
+  serveKey: i32 = 0;
+  serveOrigin: i32 = 0;
 
   /** Runs, or resumes, this task on the current thread. */
   abstract drive(): void;

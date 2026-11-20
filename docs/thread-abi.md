@@ -218,12 +218,27 @@ with that key. A `taskKey` is *not* interpreted by the target.
 
 ### 5.2 Serving a request
 
-`__drainInbox(e)` pops a request index, copies its four words into this store's
-globals, frees the record, and resumes `$starts[funcIndex]` as a continuation.
-The served body reads them through `__serveArg()`, `__serveKey()` and
-`__serveOrigin()`; read them **before the body's first suspension** if they have
-to survive one. Serving is not reentrant: a served body that itself drains an
-inbox would overwrite them.
+`__drainInbox(e)` pops a request index, reads its four words into locals, frees
+the record, and resumes `$starts[funcIndex]` as a continuation. **The resume
+answers the served task, not the served body:** `$starts[funcIndex]` is
+`f$spawnStart`, which creates a task, parks the served continuation on it, and
+returns — the body runs later, from `driveReady` → `__resumeTask(taskSlot)`.
+
+So the four words are copied **onto that task** (`TaskBase.serveArg`,
+`serveKey`, `serveOrigin`) by `__serveOne`, and the body reads them through
+`__serveArg()`, `__serveKey()` and `__serveOrigin()` at any point in its life —
+before or after a suspension. There is no rule for a program to keep here. A
+module global would have been the drain's lifetime, not the body's, and a drain
+serves the whole queue before any body runs: three posts of 11, 22, 33 answered
+33, 33, 33 that way (Gate 4 (m)). The globals remain only as the fallback for a
+resume that created no task (a negative payload) and for the non-shared path.
+
+**Serving is reentrant.** A served body may drain its own inbox and serve
+further requests from inside itself: each task carries its own words, and
+`__resumeTask` saves and restores the current slot around the resume, so
+`__currentTask()` is the outer task again when the nested serve returns. Gate 4
+(n) is that case — the outer body reads its own argument before the nested
+drain, after it, and after its own suspension.
 
 `$starts` entries are canonical `() -> i32`, so a served body takes no operands;
 the request's argument word is the "one `i32` in" and its own `__spawnOn` is the
