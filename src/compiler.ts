@@ -15126,8 +15126,9 @@ export class Compiler extends DiagnosticEmitter {
           // class's own declaration the source of diagnostics the instantiation
           // cannot avoid — measured: `Task<T>`'s `value!: T` reported AS906 at
           // every `Task<i32>` and failed the Backend A suites.
-          let declaredTypeNode = property.prototype.fieldDeclaration != null
-            ? property.prototype.fieldDeclaration.type
+          let fieldDeclaration = property.prototype.fieldDeclaration;
+          let declaredTypeNode = fieldDeclaration != null
+            ? fieldDeclaration.type
             : null;
           if (declaredTypeNode != null && declaredTypeNode.kind == NodeKind.NamedType) {
             let named = <NamedTypeNode>declaredTypeNode;
@@ -16716,9 +16717,12 @@ export class Compiler extends DiagnosticEmitter {
     // in `bindSroaArrayParameterLeaves` -- the element was bound as one local of
     // an array type, and `Type#toRef` asserts on the value form. A type the
     // compiler accepts must never reach that assert.
+    // Hoisted: the checker narrows a local through `!= null`, not a member
+    // access repeated inside a compound condition.
+    let fixedElementType = type.fixedElementType;
     if (
-      type.fixedElementType != null &&
-      type.fixedElementType.kind == TypeKind.FixedArray
+      fixedElementType != null &&
+      fixedElementType.kind == TypeKind.FixedArray
     ) {
       this.error(
         DiagnosticCode.Not_implemented_0,
