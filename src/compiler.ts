@@ -1084,7 +1084,8 @@ export class Compiler extends DiagnosticEmitter {
         ),
         this.asyncCtCoreHeap,
         doneHandlers,
-        doneLabels
+        doneLabels,
+        [ this.asyncCtCoreRef, createType([ TypeRef.I32, this.asyncCtCoreRef ]) ]
       ),
       // A core loop that returns normally never runs a handler; exiting the
       // start function is the only sensible continuation.
@@ -1323,7 +1324,8 @@ export class Compiler extends DiagnosticEmitter {
         ),
         this.asyncCtCoreHeap,
         doneHandlers,
-        doneLabels
+        doneLabels,
+        [ this.asyncCtCoreRef, createType([ TypeRef.I32, this.asyncCtCoreRef ]) ]
       ),
       module.return()
     ], createType([ TypeRef.I32, this.asyncCtCoreRef ]));

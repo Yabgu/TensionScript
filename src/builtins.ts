@@ -12307,17 +12307,33 @@ function builtin_async_installCont(ctx: BuiltinFunctionContext): ExpressionRef {
 
   // Grow the table when the slot is past the end. `table.grow` is a
   // side-effecting call; the guard keeps the delta positive.
-  let size = module.table_size(ASYNC_CONT_TABLE);
-  let need = module.binary(
+  //
+  // **Both operands go through locals, because Binaryen's IR is a tree.** The
+  // comparison and the subtraction need the same two values; handing the same
+  // `ExpressionRef` to both makes one node a child of two parents, which the
+  // type checker tolerates and `local-cse` does not (`!(requests && original)`
+  // at -O2). Measured on a three-line async module.
+  let sizeLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  stmts.push(module.local_set(sizeLocal.index, module.table_size(ASYNC_CONT_TABLE), false));
+  let needLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  stmts.push(module.local_set(needLocal.index, module.binary(
     BinaryOp.AddI32,
     module.local_get(slotLocal.index, TypeRef.I32),
     module.i32(1)
-  );
+  ), false));
   stmts.push(module.if(
-    module.binary(BinaryOp.GtI32, need, size),
+    module.binary(
+      BinaryOp.GtI32,
+      module.local_get(needLocal.index, TypeRef.I32),
+      module.local_get(sizeLocal.index, TypeRef.I32)
+    ),
     module.drop(module.table_grow(
       ASYNC_CONT_TABLE,
-      module.binary(BinaryOp.SubI32, need, size),
+      module.binary(
+        BinaryOp.SubI32,
+        module.local_get(needLocal.index, TypeRef.I32),
+        module.local_get(sizeLocal.index, TypeRef.I32)
+      ),
       module.ref_null(compiler.asyncCtMainRef)
     )),
     module.nop()
@@ -12480,18 +12496,29 @@ function builtin_async_serveCont(ctx: BuiltinFunctionContext): ExpressionRef {
     module.i32(1)
   )));
 
-  // Grow the continuation table when the slot is past the end.
-  let size = module.table_size(ASYNC_CONT_TABLE);
-  let need = module.binary(
+  // Grow the continuation table when the slot is past the end. Same pair of
+  // locals as the other slot site: one node, one parent (see the note there).
+  let sizeLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  stmts.push(module.local_set(sizeLocal.index, module.table_size(ASYNC_CONT_TABLE), false));
+  let needLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  stmts.push(module.local_set(needLocal.index, module.binary(
     BinaryOp.AddI32,
     module.local_get(slotLocal.index, TypeRef.I32),
     module.i32(1)
-  );
+  ), false));
   stmts.push(module.if(
-    module.binary(BinaryOp.GtI32, need, size),
+    module.binary(
+      BinaryOp.GtI32,
+      module.local_get(needLocal.index, TypeRef.I32),
+      module.local_get(sizeLocal.index, TypeRef.I32)
+    ),
     module.drop(module.table_grow(
       ASYNC_CONT_TABLE,
-      module.binary(BinaryOp.SubI32, need, size),
+      module.binary(
+        BinaryOp.SubI32,
+        module.local_get(needLocal.index, TypeRef.I32),
+        module.local_get(sizeLocal.index, TypeRef.I32)
+      ),
       module.ref_null(compiler.asyncCtMainRef)
     )),
     module.nop()
@@ -12635,7 +12662,8 @@ function builtin_async_resumeTask(ctx: BuiltinFunctionContext): ExpressionRef {
       module.table_get(ASYNC_CONT_TABLE, module.local_get(slotLocal.index, TypeRef.I32), compiler.asyncCtMainRef),
       compiler.asyncCtMainHeap,
       [ ASYNC_AWAIT_TAG ],
-      [ label ]
+      [ label ],
+      [ tupleType ]
     ), false),
     module.global_set(ASYNC_LAST_STATUS, module.local_get(statusLocal.index, TypeRef.I32)),
     module.tuple_make([
