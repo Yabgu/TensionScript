@@ -727,6 +727,12 @@ export class Compiler extends DiagnosticEmitter {
   asyncShellStartReady: bool = false;
   /** The `f$start` functions `__installCont` has installed, for the elem segment. */
   asyncStartFunctions: Set<string> = new Set<string>();
+  /**
+   * Helpers answering a `$spawnStart` function's `$starts` index: helper name →
+   * the function's internal name (`__spawnIndexOf` emits the call; the body is
+   * added by `emitStartsTable`, when the index is final).
+   */
+  spawnIndexTargets: Map<string, string> = new Map<string, string>();
 
   /** The program's own `mainStep`, once found and validated (design §6). */
   mainStepOverride: Function | null = null;
@@ -1457,6 +1463,21 @@ export class Compiler extends DiagnosticEmitter {
       module.addActiveElementSegment(STARTS_TABLE, "$starts$elem", list, module.i32(0));
     }
     module.addTableExport(STARTS_TABLE, STARTS_TABLE_EXPORT);
+
+    // `__spawnIndexOf` emitted a call per spawn entry; their bodies are the
+    // index the entry holds **now that the table is final**. A plain function
+    // per entry, not a global: a worker's copy of a module global is zero (its
+    // `$start` never ran), while a constant in code is the same in every store.
+    let helpers = this.spawnIndexTargets;
+    for (let _names = Map_keys(helpers), i = 0, k = _names.length; i < k; ++i) {
+      let helper = _names[i];
+      let target = unchecked(helpers.get(helper));
+      let index = -1;
+      for (let j = 0; j < count; ++j) {
+        if (unchecked(list[j]) == target) { index = j; break; }
+      }
+      module.addFunction(helper, TypeRef.None, TypeRef.I32, null, module.i32(index));
+    }
   }
 
   /** Performs compilation of the underlying {@link Program} to a {@link Module}. */

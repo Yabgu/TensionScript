@@ -32,6 +32,7 @@
  *   $rec.$p0 = a; ...
  *   $rec.slot = __installCont(f$start);
  *   __bindTask($rec.slot, $rec);
+ *   $rec.entry = __spawnIndexOf(f$spawnStart);     // postable from any store
  *   return $rec;
  * }
  * ```
@@ -124,6 +125,10 @@ const RECORD_SUFFIX = "$Rec";
 const SPAWN_SUFFIX = "$spawnStart";
 /** The task's continuation slot (`TaskBase.slot`). */
 const SLOT_FIELD = "slot";
+/** The task's spawn entry index (`TaskBase.entry`). */
+const ENTRY_FIELD = "entry";
+/** The `$starts` index of a spawn entry (`src/builtins.ts`). */
+const SPAWN_INDEX = "__spawnIndexOf";
 /** The task's completion flag (`TaskBase.settled`). */
 const SETTLED_FIELD = "settled";
 /** The task's result word (`Task.value`). */
@@ -609,6 +614,37 @@ export class StackfulAsyncTransform {
         range
       )
     ));
+    // `$rec.entry = __spawnIndexOf(f$spawnStart)` — the task carries the
+    // `$starts` index a policy posts it by (`TaskBase.entry`). Only a
+    // parameterless async function gets a spawn entry (Gate 3d), so a
+    // parameterized one keeps `-1` and cannot be posted by index.
+    let hasSpawnStart = false;
+    let spawnName = "";
+    if (parameters.length == 0) {
+      spawnName = name + SPAWN_SUFFIX;
+      let takenCollision = false;
+      for (let i = 0, k = declared.length; i < k; ++i) {
+        if (unchecked(declared[i]) == spawnName) takenCollision = true;
+      }
+      if (takenCollision) {
+        this.refuse(parser, declaration.name.range, "an async function whose synthesized spawn entry name is taken (the stackful backend)");
+        return null;
+      }
+      hasSpawnStart = true;
+      entryStatements.push(Node.createExpressionStatement(
+        assignField(
+          recVar,
+          ENTRY_FIELD,
+          Node.createCallExpression(
+            Node.createIdentifierExpression(SPAWN_INDEX, range),
+            null,
+            [ Node.createIdentifierExpression(spawnName, declaration.name.range) ],
+            range
+          ),
+          range
+        )
+      ));
+    }
     entryStatements.push(Node.createReturnStatement(recVar, range));
     declaration.body = Node.createBlockStatement(entryStatements, range);
     declaration.signature.returnType = taskTypeNode(returnType, range);
@@ -639,16 +675,7 @@ export class StackfulAsyncTransform {
     artifacts.push(recordClass);
     artifacts.push(bodyFunction);
     artifacts.push(startFunction);
-    if (parameters.length == 0) {
-      let spawnName = name + SPAWN_SUFFIX;
-      let takenCollision = false;
-      for (let i = 0, k = declared.length; i < k; ++i) {
-        if (unchecked(declared[i]) == spawnName) takenCollision = true;
-      }
-      if (takenCollision) {
-        this.refuse(parser, declaration.name.range, "an async function whose synthesized spawn entry name is taken (the stackful backend)");
-        return null;
-      }
+    if (hasSpawnStart) {
       let taskIdentSpawn = Node.createIdentifierExpression("$spawnTask", range);
       let spawnStatements = new Array<Statement>();
       spawnStatements.push(Node.createVariableStatement(

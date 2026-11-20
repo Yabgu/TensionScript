@@ -766,6 +766,8 @@ export namespace BuiltinNames {
   export const asyncLastStatus = "~lib/task-stack/__lastStatus";
   export const asyncInstallCont = "~lib/async-stack/__installCont";
   export const asyncSuspendAwait = "~lib/async-stack/__suspendAwait";
+  export const asyncSuspendParked = "~lib/task-stack/__suspendParked";
+  export const asyncSpawnIndexOf = "~lib/task-stack/__spawnIndexOf";
   export const asyncServeCont = "~lib/task-stack/__serveCont";
   export const asyncCurrentSlot = "~lib/task-stack/__currentSlot";
 
@@ -12346,6 +12348,92 @@ function builtin_async_suspendAwait(ctx: BuiltinFunctionContext): ExpressionRef 
 }
 builtinFunctions.set(BuiltinNames.asyncSuspendAwait, builtin_async_suspendAwait);
 
+// __suspendParked() -> void
+//
+// The park half for a task that waits on **something that is not a local
+// slot** — a request in another store (`~lib/thread`'s `RemotePolicy`). The
+// payload is `-2`, the third of `__resumeTask`'s three answers: the suspended
+// continuation is this task's and is written back at its slot, and nothing is
+// queued, because no slot in this table will ever make it runnable; the wake
+// arrives from the store that settles the task.
+//
+// A builtin and not a literal: `-1` used to be the only other negative value,
+// and a program that spelled `__suspendAwait(-2)` itself would be inventing a
+// payload the runtime does not define. Programs say `__suspendAwait(t.slot)` or
+// `__suspendParked()`.
+function builtin_async_suspendParked(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.void;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 0) |
+    checkStackIntrinsic(ctx, ctx.prototype.internalName)
+  ) return module.unreachable();
+  return module.suspend(ASYNC_AWAIT_TAG, [ module.i32(-2) ]);
+}
+builtinFunctions.set(BuiltinNames.asyncSuspendParked, builtin_async_suspendParked);
+
+// __spawnIndexOf(start: () => i32) -> i32
+//
+// The `$starts` index of a synthesized `f$spawnStart`, so a task can carry the
+// index it is posted by (`TaskBase.entry`).
+//
+// **The index is not known when a body is compiled.** `$starts` is assembled
+// after every function has been compiled, and its order is the registration
+// order of the continuation set (`docs/task-design.md` §3). So this builtin
+// emits a call to a per-function helper, and `Compiler#emitStartsTable` adds
+// that helper's body — `i32.const <index>` — once the table is final. The
+// constant makes the field the same in every store: the table belongs to the
+// module, not to an instance.
+function builtin_async_spawnIndexOf(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.i32;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 1) |
+    checkStackIntrinsic(ctx, ctx.prototype.internalName)
+  ) return module.unreachable();
+
+  let start = ctx.operands[0];
+  if (start.kind != NodeKind.Identifier) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      start.range,
+      "a spawn entry that is not a function name (the stackful backend)"
+    );
+    return module.unreachable();
+  }
+  let element = compiler.resolver.lookupIdentifierExpression(
+    <IdentifierExpression>start,
+    compiler.currentFlow,
+    compiler.currentFlow.sourceFunction,
+    ReportMode.Report
+  );
+  let target: Function | null = null;
+  if (element) {
+    if (element.kind == ElementKind.Function) {
+      target = <Function>element;
+    } else if (element.kind == ElementKind.FunctionPrototype) {
+      target = compiler.resolver.resolveFunction(<FunctionPrototype>element, null);
+    }
+  }
+  if (!target) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      start.range,
+      "a spawn entry that does not name a function (the stackful backend)"
+    );
+    return module.unreachable();
+  }
+  compiler.compileFunction(target);
+  let helper = "~spawnIndex/" + target.internalName;
+  compiler.spawnIndexTargets.set(helper, target.internalName);
+  return module.call(helper, [], TypeRef.I32);
+}
+builtinFunctions.set(BuiltinNames.asyncSpawnIndexOf, builtin_async_spawnIndexOf);
+
 // __serveCont(funcIndex: i32) -> i32
 //
 // Turn `$starts[funcIndex]` into a continuation and install it at a fresh slot,
@@ -12456,12 +12544,23 @@ builtinFunctions.set(BuiltinNames.asyncLastStatus, builtin_async_lastStatus);
 //   resume table[slot] with an `on $await` handler,
 //   normal completion: store the status, answer -1,
 //   suspension: write the suspended continuation back at the same slot and
-//   answer the awaited task's slot.
+//   answer the payload the suspension carried.
 //
 // **`-1` is the "no suspension" sentinel and `0` is a real slot** (main's).
 // A1/A2 used `0` for both, which made an awaited task whose slot was 0
 // indistinguishable from a normal completion; the slot table now starts task
 // slots at 1, and the sentinel is negative.
+//
+// **Three payloads, three meanings** (`__suspendAwait` / `__suspendParked`):
+//   `>= 0` — parked on the local task slot it names: store the suspended
+//            continuation back at its own slot and answer that slot, so the
+//            caller (`driveReady`, `__serveOne`) may queue it;
+//   `-1`   — ran to completion: there is no suspended continuation to store
+//            and no slot to queue;
+//   `-2`   — parked on something that is **not** a local slot (a request in
+//            another store): the continuation is still this task's, so store it
+//            back, but queue nothing — the settle that wakes it arrives from the
+//            store that owns the work.
 //
 // The suspended continuation is written back at the *current task's* slot —
 // the slot is the task's identity, so a task that parks twice uses one table
@@ -12507,10 +12606,24 @@ function builtin_async_resumeTask(ctx: BuiltinFunctionContext): ExpressionRef {
   ], tupleType);
 
   stmts.push(module.local_set(pairLocal.index, onAwait, false));
-  let awaited = module.tuple_extract(module.local_get(pairLocal.index, tupleType), 0);
+  // One extract to a local: the payload is read by the store condition, the
+  // result, and both compares, and a shared IR node used in several parents is
+  // the shape LocalCSE asserts on.
+  let awaitedLocal = compiler.currentFlow.getTempLocal(Type.i32);
+  stmts.push(module.local_set(
+    awaitedLocal.index,
+    module.tuple_extract(module.local_get(pairLocal.index, tupleType), 0),
+    false
+  ));
   let suspended = module.tuple_extract(module.local_get(pairLocal.index, tupleType), 1);
+  let parkedOnSlot = module.binary(
+    BinaryOp.GeI32, module.local_get(awaitedLocal.index, TypeRef.I32), module.i32(0)
+  );
+  let parkedElsewhere = module.binary(
+    BinaryOp.EqI32, module.local_get(awaitedLocal.index, TypeRef.I32), module.i32(-2)
+  );
   stmts.push(module.if(
-    module.binary(BinaryOp.GeI32, awaited, module.i32(0)),
+    module.binary(BinaryOp.OrI32, parkedOnSlot, parkedElsewhere),
     module.table_set(
       ASYNC_CONT_TABLE,
       module.local_get(slotLocal.index, TypeRef.I32),
@@ -12518,7 +12631,7 @@ function builtin_async_resumeTask(ctx: BuiltinFunctionContext): ExpressionRef {
     ),
     module.nop()
   ));
-  stmts.push(module.tuple_extract(module.local_get(pairLocal.index, tupleType), 0));
+  stmts.push(module.local_get(awaitedLocal.index, TypeRef.I32));
   return module.block(null, stmts, TypeRef.I32);
 }
 builtinFunctions.set(BuiltinNames.asyncResumeTask, builtin_async_resumeTask);

@@ -821,7 +821,7 @@
    i64.const 0
    i64.store
    global.get $~lib/memory/__stack_pointer
-   i32.const 32
+   i32.const 36
    i32.const 4
    call $~lib/rt/itcms/__new
    local.tee $0
@@ -845,7 +845,7 @@
    i32.eqz
    if
     global.get $~lib/memory/__stack_pointer
-    i32.const 24
+    i32.const 28
     i32.const 5
     call $~lib/rt/itcms/__new
     local.tee $0
@@ -904,6 +904,12 @@
    i32.const 0
    call $~lib/rt/itcms/__link
    global.get $~lib/memory/__stack_pointer
+   local.get $0
+   i32.store offset=4
+   local.get $0
+   i32.const -1
+   i32.store offset=24
+   global.get $~lib/memory/__stack_pointer
    i32.const 8
    i32.add
    global.set $~lib/memory/__stack_pointer
@@ -914,7 +920,7 @@
    i32.store offset=4
    local.get $0
    i32.const 0
-   i32.store offset=24
+   i32.store offset=28
    local.get $0
    i32.const 0
    i32.const 0
@@ -924,7 +930,7 @@
    i32.store offset=4
    local.get $0
    i32.const 0
-   i32.store offset=28
+   i32.store offset=32
    global.get $~lib/memory/__stack_pointer
    i32.const 8
    i32.add
@@ -1191,7 +1197,7 @@
   i32.store
   global.get $~lib/memory/__stack_pointer
   local.get $0
-  i32.load offset=24
+  i32.load offset=28
   local.tee $0
   i32.store
   local.get $0
@@ -1199,7 +1205,7 @@
   if
    i32.const 1712
    i32.const 2160
-   i32.const 242
+   i32.const 265
    i32.const 3
    call $~lib/builtins/abort
    unreachable
@@ -1607,7 +1613,7 @@
     i32.store offset=8
     local.get $2
     local.get $0
-    i32.store offset=24
+    i32.store offset=28
     local.get $2
     local.get $0
     i32.const 0
@@ -2100,7 +2106,7 @@
    local.get $1
    global.set $~lib/rt/itcms/iter
   end
-  block $__inlined_func$~lib/rt/itcms/Object#unlink$481
+  block $__inlined_func$~lib/rt/itcms/Object#unlink$482
    local.get $0
    i32.load offset=4
    i32.const -4
@@ -2124,7 +2130,7 @@
      call $~lib/builtins/abort
      unreachable
     end
-    br $__inlined_func$~lib/rt/itcms/Object#unlink$481
+    br $__inlined_func$~lib/rt/itcms/Object#unlink$482
    end
    local.get $0
    i32.load offset=8
@@ -2261,7 +2267,7 @@
                      i32.load offset=20
                      call $~lib/rt/itcms/__visit
                      local.get $0
-                     i32.load offset=24
+                     i32.load offset=28
                      call $~lib/rt/itcms/__visit
                      return
                     end
@@ -3475,7 +3481,7 @@
     select
     local.set $1
    end
-   block $__inlined_func$~lib/rt/itcms/__renew$471
+   block $__inlined_func$~lib/rt/itcms/__renew$472
     local.get $3
     i32.const 20
     i32.sub
@@ -3493,7 +3499,7 @@
      i32.store offset=16
      local.get $3
      local.set $2
-     br $__inlined_func$~lib/rt/itcms/__renew$471
+     br $__inlined_func$~lib/rt/itcms/__renew$472
     end
     local.get $1
     local.get $4
@@ -5263,7 +5269,7 @@
    i32.store offset=8
    local.get $1
    local.get $2
-   i32.store offset=24
+   i32.store offset=28
    local.get $1
    local.get $2
    i32.const 0
@@ -5429,7 +5435,7 @@
     i32.store offset=8
     local.get $0
     local.get $2
-    i32.store offset=24
+    i32.store offset=28
     local.get $0
     local.get $2
     i32.const 0
@@ -5911,7 +5917,7 @@
    i32.store offset=8
    local.get $1
    local.get $2
-   i32.store offset=24
+   i32.store offset=28
    local.get $1
    local.get $2
    i32.const 0
@@ -6444,7 +6450,7 @@
    i32.store offset=8
    local.get $0
    local.get $2
-   i32.store offset=24
+   i32.store offset=28
    local.get $0
    local.get $2
    i32.const 0

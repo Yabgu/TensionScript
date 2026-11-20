@@ -39,8 +39,9 @@ export class TaskRecord {
  *
  * A slot, not an object reference, so the same entry is meaningful to the
  * scheduler regardless of the guest program's class representation, and so a
- * cross-thread wake can carry it (design §3/§4). `exec` is the executor id;
- * `0` is main until `spawn` gives a worker its own id.
+ * cross-thread wake can carry it (design §3/§4). `exec` is the id of the
+ * executor that must resume the waiter — the store it parked in, not the
+ * task's declared `home` (`docs/thread-abi.md`; `__parkOn` sets it).
  */
 export class Waiter {
   /** The executor that will resume this waiter. */
@@ -172,9 +173,16 @@ export function inlinePolicy(): TaskPolicy {
  * its fields, reached by field access rather than by literal byte offsets.
  */
 export abstract class TaskBase {
-  /** The task's continuation slot in the executor's table. `-1` before it is installed. */
+  /**
+   * The task's continuation slot in the executor's table. `-1` before it is installed.
+   */
   slot: i32 = -1;
-  /** The executor that owns this task. `0` is main. */
+  /**
+   * The executor the spawn entry recorded for this task. `0` is main, which is
+   * also the value the transform emits in `f$spawnStart` when it runs elsewhere;
+   * **routing does not read this** — a waiter is resumed by the store that
+   * parked it (`Waiter.exec`), because a served continuation has no task at all.
+   */
   home: i32 = 0;
   /** Whether the task has completed (its result is available). */
   settled: bool = false;
@@ -189,6 +197,22 @@ export abstract class TaskBase {
    * about where a task runs is hidden from the caller who asked for it.
    */
   policy: TaskPolicy | null = null;
+  /**
+   * The `$starts` index of this task's synthesized `f$spawnStart`, or `-1` when
+   * it has none (a parameterized async function, whose spawn entry the
+   * transform does not synthesize yet).
+   *
+   * A **module fact, not a store fact**: every instance of the module has the
+   * same `$starts` layout, so an index written here in one store names the same
+   * function in another, which is what lets a policy post a task it did not
+   * create. The value comes from `__spawnIndexOf` (`src/builtins.ts`), a
+   * compile-time constant per function.
+   *
+   * Declared **last** so the fields before it keep their offsets: the class is
+   * not `TaskRecord` (whose offsets are the Backend A contract), but a moving
+   * layout is churn in every async fixture for no reason.
+   */
+  entry: i32 = -1;
 
   /** Runs, or resumes, this task on the current thread. */
   abstract drive(): void;

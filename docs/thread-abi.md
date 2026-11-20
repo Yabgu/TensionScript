@@ -238,6 +238,34 @@ executor number**, with raw atomics, and bumps that record's signal. That is
 what lets a worker completing a task make main runnable; the worker still cannot
 run main, and main still cannot run a worker.
 
+`waiter.exec` is the id of the store that **parked** the continuation
+(`__parkOn`), not the task's `home`: a served continuation has no task object at
+all, and a task created by a worker's `f$spawnStart` still carries the default
+`home = 0`. Routing by `home` pushed a worker's slot number into main's ready
+ring, where it named an unrelated continuation (measured: `resuming an invalid
+continuation`).
+
+### 5.4 Awaiting a task that runs elsewhere
+
+`RemotePolicy` (`~lib/thread`, next to `Executor`) is the first real
+`TaskPolicy`. `create` posts the task's `$starts` index to the policy's target;
+`await` parks and suspends without naming a slot.
+
+The index comes from `TaskBase.entry`, set by the transform in the generated
+entry next to `slot` and `bindTask`. Its value is `__spawnIndexOf(f$spawnStart)`
+— a compiler-emitted constant, because a `$starts` index is a fact of the module
+and therefore identical in every store (a global would be zero in a worker,
+whose `$start` never ran). A parameterized async function has no `$spawnStart`
+yet, so its tasks keep `entry = -1` and cannot be posted by index.
+
+`__resumeTask` distinguishes three suspension payloads: `>= 0` parks on the
+local slot it names (continuation stored back, slot queued); `-1` means the task
+resumed to completion (nothing stored, nothing queued); **`-2`** means parked on
+something that is not a local slot — the continuation is still stored back at
+the task's slot, but nothing is queued, because no slot here can make it
+runnable. Programs reach `-2` only through `__suspendParked()`, a builtin with no
+argument, so a payload the runtime does not define cannot be spelled.
+
 ---
 
 ## 6. What the tests observe
@@ -256,3 +284,9 @@ module):
   posts an acknowledgement back to the worker, which serves it and exits. The
   worker reports the acknowledgement it saw; `__threadJoin(1)` observes the
   exit.
+- **(e) a cross-store await.** Main posts a caller to its own executor; the
+  caller creates `work() on new RemotePolicy(1, 21, reply)` and awaits it, so the
+  body is served in the worker's store and answered with `21 * 2`. The waiting store serves
+  the reply, settles the task, and the caller resumes with `42`; the body ran
+  **only** there (`bodyRanAtHome == 0`), the caller's continuation resumed
+  exactly once, and `__threadJoin(1)` observes the worker's exit.

@@ -73,6 +73,27 @@ export function __serveSlot(funcIndex: i32): i32 {
 @builtin
 export declare function __resumeTask(slot: i32): i32;
 
+/**
+ * Suspends the **current** task on something that is not a continuation slot.
+ *
+ * Declared here rather than beside `__suspendAwait` in `~lib/async-stack`
+ * because it is the other half of `__resumeTask`'s payload rule — the `-2` the
+ * resume stores back without queueing — and because this file is where a policy
+ * already finds `__parkOn`. A builtin, not a literal: see `src/builtins.ts`.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function __suspendParked(): void;
+
+/**
+ * The `$starts` index of the spawn entry `start` names, as a compile-time
+ * constant in every store (`TaskBase.entry`). Emitted by the transform for a
+ * task that may be posted elsewhere.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function __spawnIndexOf(start: () => i32): i32;
+
 /** Registers `task` under its continuation slot, for `__currentTask`. */
 export function __bindTask(slot: i32, task: TaskBase): void {
   let table = tasks;
@@ -101,18 +122,43 @@ export function __currentTask(): TaskBase | null {
 }
 
 /**
+ * This store's executor id: `0` on main, the id `__workerMain` was given in a
+ * worker.
+ *
+ * A store-local fact, so it lives here rather than being asked of `~lib/thread`
+ * (`thread.ts` imports this file, and a cycle would make one's layout depend on
+ * the other's initialisation). `~lib/thread` installs it, because only that file
+ * knows which instance it is running in.
+ */
+let selfExecutor: i32 = 0;
+
+/** Installs this store's executor id. Called by `~lib/thread`'s `__workerMain`. */
+export function __setSelfExecutor(id: i32): void {
+  selfExecutor = id;
+}
+
+/**
  * Parks the **current** task on `task`.
  *
  * Called by the generated `f$Rec#drive` immediately before the `$await`
- * suspend. The waiter records its own slot and executor; the awaited task is
- * queued by the executor when the resume reports it (`driveReady` pushes
- * `__resumeTask`'s answer), so parking itself only registers the waiter. The
- * awaited task's `settle` pushes that waiter back onto its own executor.
+ * suspend. The waiter records its own slot and **this store's** executor; the
+ * awaited task is queued by the executor when the resume reports it
+ * (`driveReady` pushes `__resumeTask`'s answer), so parking itself only
+ * registers the waiter. The awaited task's `settle` pushes that waiter back
+ * onto its own executor.
+ *
+ * **The executor is the store's id, not the task's `home`.** A served
+ * continuation has no task object at all (`__taskAt` answers `null`), and a task
+ * created by `f$spawnStart` in a worker carries `home = 0` (the transform emits
+ * the default). Routing by `home` therefore pushed the *worker's* slot index
+ * into **main's** ready ring, where it named an unrelated continuation —
+ * measured as `resuming an invalid continuation` at the end of Gate 4 (e).
+ * What a parked continuation always needs is the executor that can resume it,
+ * and that is the store it is suspended in.
  */
 export function __parkOn(task: TaskBase): void {
   let waiter = new Waiter();
-  let current = __currentTask();
-  if (current) waiter.exec = current.home;
+  waiter.exec = selfExecutor;
   waiter.slot = __currentSlot();
   let list = task.waiters;
   if (!list) {

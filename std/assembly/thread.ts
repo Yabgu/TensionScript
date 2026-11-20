@@ -281,8 +281,11 @@ export class SlotRing {
 
 // ── the executor ────────────────────────────────────────────────────────────
 
-import { setWakeSink, TaskBase } from "./task";
-import { __taskAt, __resumeTask, __serveSlot, __lastStatus } from "./task-stack";
+import { setWakeSink, TaskBase, TaskPolicy } from "./task";
+import {
+  __taskAt, __resumeTask, __serveSlot, __lastStatus, __parkOn, __suspendParked,
+  __setSelfExecutor,
+} from "./task-stack";
 
 /** Default ring capacity. A pool sizes its own (§6.4); this is main's. */
 const DEFAULT_CAPACITY: i32 = 1024;
@@ -348,6 +351,62 @@ export class Executor {
     e.ready = ready;
     e.inbox = inbox;
     return e;
+  }
+}
+
+/**
+ * The first real `TaskPolicy`: a task whose body runs in another store.
+ *
+ * **`create` posts, and runs nothing here.** The four words a request carries
+ * are `(target, funcIndex, arg, key)`; this policy supplies the target it was
+ * constructed with, the `$starts` index the task carries (`TaskBase.entry`),
+ * the one `i32` the served body reads through `__serveArg`, and the index of
+ * the continuation that will settle the task (`__spawnOn` sends it as the
+ * origin-defined key).
+ *
+ * **`await` parks and suspends without naming a slot.** The caller is the task
+ * that is running here, so the suspended continuation is its own and
+ * `__resumeTask` stores it back — but no slot in this table can make it
+ * runnable, because the body belongs to the worker. `__suspendParked()` is the
+ * payload that says exactly that (`-2`); the reply's `task.settle(0)`, served
+ * by the origin executor, is what wakes the waiter through the wake sink.
+ *
+ * `reply` must be the `$starts` index of a continuation that runs **in the
+ * waiting store** — it is posted back to `__serveOrigin()`. Gate 4 (d) is that
+ * path; this policy does not add a second one.
+ *
+ * Small on purpose: it is the first policy, and its shape will be copied.
+ */
+export class RemotePolicy extends TaskPolicy {
+  /** The executor the body runs on (`0` is main). */
+  target: i32;
+  /** The one `i32` the served body reads through `__serveArg`. */
+  arg: i32;
+  /** The `$starts` index of the continuation that settles the task at home. */
+  reply: i32;
+
+  constructor(target: i32, arg: i32, reply: i32) {
+    super();
+    this.target = target;
+    this.arg = arg;
+    this.reply = reply;
+  }
+
+  /** Posts the task's spawn entry to `target`. Nothing runs in this store. */
+  create(task: TaskBase): void {
+    __spawnOn(this.target, task.entry, this.arg, this.reply);
+  }
+
+  /**
+   * Parks the current task on `task` and suspends with no local slot to queue.
+   *
+   * `__parkOn` is the same registration the default policy makes — it is what
+   * `task.settle` walks when the reply lands — and the difference is only the
+   * payload: `-2` instead of a slot.
+   */
+  await(task: TaskBase): void {
+    __parkOn(task);
+    __suspendParked();
   }
 }
 
@@ -970,6 +1029,10 @@ export function __workerMain(id: i32): i32 {
   requestBase = here + HEADER_BYTES + <usize>total * <usize>__controlStride;
   freeRingBase = requestBase + <usize>(requestCount * REQUEST_WORDS) * 4;
   selfExec = id;
+  // The store-local id the park primitive routes by (`~lib/task-stack`): a
+  // waiter registered here must be woken **here**, and no task object knows
+  // that — a served continuation has none, and a spawn entry's task says 0.
+  __setSelfExecutor(id);
 
   let rec = recordBase(id);
   let sig = signalBase(rec);
