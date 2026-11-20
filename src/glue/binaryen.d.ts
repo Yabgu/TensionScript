@@ -462,7 +462,7 @@ export declare function _BinaryenRefFuncSetFunc(expr: ExpressionRef, funcName: S
 export declare function _BinaryenContNew(module: ModuleRef, type: HeapTypeRef, func: ExpressionRef): ExpressionRef;
 export declare function _BinaryenSuspend(module: ModuleRef, tag: StringRef, args: ArrayRef<ExpressionRef>, numArgs: Index): ExpressionRef;
 export declare function _BinaryenResume(module: ModuleRef, cont: ExpressionRef, contType: HeapTypeRef): ExpressionRef;
-export declare function _BinaryenResumeWithHandlers(module: ModuleRef, cont: ExpressionRef, contType: HeapTypeRef, handlerTags: ArrayRef<StringRef>, handlerBlocks: ArrayRef<StringRef>, numHandlers: Index): ExpressionRef;
+export declare function _BinaryenResumeWithHandlers(module: ModuleRef, cont: ExpressionRef, contType: HeapTypeRef, handlerTags: ArrayRef<StringRef>, handlerBlocks: ArrayRef<StringRef>, sentTypes: ArrayRef<TypeRef>, numHandlers: Index): ExpressionRef;
 export declare function _BinaryenResumeThrow(module: ModuleRef, cont: ExpressionRef, contType: HeapTypeRef, tag: StringRef, args: ArrayRef<ExpressionRef>, numArgs: Index): ExpressionRef;
 
 export declare function _BinaryenRefEq(module: ModuleRef, leftExpr: ExpressionRef, rightExpr: ExpressionRef): ExpressionRef;

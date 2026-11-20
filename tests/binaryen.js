@@ -92,7 +92,7 @@ check("Features.StackSwitching is 1 << 16", binaryen.Features.StackSwitching, 65
   const parked = module.block("parked", [
     module.resume_with_handlers(
       module.cont.new(ctHeap, module.ref.func("body", ftHeap)),
-      ctHeap, ["yield"], ["parked"]),
+      ctHeap, ["yield"], ["parked"], [ctRef]),
     module.unreachable(),
   ], ctRef);
   // The `resume` yields the parked continuation; dropping it keeps `go` `() -> ()`

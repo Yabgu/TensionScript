@@ -2056,10 +2056,13 @@ export class Module {
     value: ExpressionRef,
     isManaged: bool
   ): ExpressionRef {
-    value = guardRef(value, "local_set.value");
+    // `tostack` *consumes* the value as its call operand, so the guard must
+    // see the node that actually lands in the set — the wrapped call — not the
+    // operand it forwarded. Guard first and this reads as a re-use (measured).
     if (isManaged && this.useShadowStack) {
       value = this.tostack(value);
     }
+    value = guardRef(value, "local_set.value");
     return binaryen._BinaryenLocalSet(this.ref, index, value);
   }
 
@@ -2553,28 +2556,40 @@ export class Module {
    * `(resume $ct (on $tag $label) ... $cont)` — a suspension of `$tag` branches
    * to the named block. The block's type must be the tag's parameters followed
    * by the continuation reference, which is why the emitter owns the block.
+   *
+   * `sentTypes[i]` is that block's type, one per handler in the same order.
+   * Binaryen's branch analysis indexes it per handler (`BranchUtils`), so an
+   * empty array is not "no information" — it is an out-of-bounds read that
+   * aborts `dce` on a module that validates. The emitter already knows each
+   * label's type, so it passes it.
    */
   resume_with_handlers(
     cont: ExpressionRef,
     contType: HeapTypeRef,
     handlerTags: string[],
-    handlerBlocks: string[]
+    handlerBlocks: string[],
+    sentTypes: TypeRef[]
   ): ExpressionRef {
     assert(handlerTags.length == handlerBlocks.length);
+    assert(sentTypes.length == handlerTags.length);
     let numHandlers = handlerTags.length;
     let tagPtrs = new Array<StringRef>(numHandlers);
     let blockPtrs = new Array<StringRef>(numHandlers);
+    let typePtrs = new Array<TypeRef>(numHandlers);
     for (let i = 0; i < numHandlers; ++i) {
       unchecked(tagPtrs[i] = this.allocStringCached(handlerTags[i]));
       unchecked(blockPtrs[i] = this.allocStringCached(handlerBlocks[i]));
+      unchecked(typePtrs[i] = sentTypes[i]);
     }
     let tagsArr = allocPtrArray(tagPtrs);
     let blocksArr = allocPtrArray(blockPtrs);
+    let typesArr = allocPtrArray(typePtrs);
     let ret = binaryen._BinaryenResumeWithHandlers(
-      this.ref, cont, contType, tagsArr, blocksArr, numHandlers
+      this.ref, cont, contType, tagsArr, blocksArr, typesArr, numHandlers
     );
     binaryen._free(tagsArr);
     binaryen._free(blocksArr);
+    binaryen._free(typesArr);
     return ret;
   }
 
@@ -3394,7 +3409,17 @@ export class Module {
       passes.push("dae-optimizing"); // reduce arity
       if (optimizeLevel >= 3 || shrinkLevel >= 1) {
         // whole-program value-flow analysis
-        passes.push("gufa-optimizing");
+        //
+        // **GUFA does not model continuations.** Its `handleResume` asserts the
+        // handler block's type is non-empty, and an earlier pass may leave that
+        // block unreachable; measured as `Assertion failed: targetType.size() >= 1`
+        // (possible-contents.cpp) on a three-line async module at -O3. The pass
+        // is a pure optimization — Binaryen's own continuation cases say
+        // `TODO: optimize when possible` — so a stack-switching module skips it
+        // instead of aborting the compile.
+        if ((this.getFeatures() & FeatureFlags.StackSwitching) == 0) {
+          passes.push("gufa-optimizing");
+        }
       }
       passes.push("inlining-optimizing"); // and inline if possible
       if (optimizeLevel >= 2 || shrinkLevel >= 1) {
