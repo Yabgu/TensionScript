@@ -1,4 +1,4 @@
-import { BLOCK, BLOCK_OVERHEAD, OBJECT_OVERHEAD, OBJECT_MAXSIZE, TOTAL_OVERHEAD, DEBUG, TRACE, RTRACE, PROFILE } from "./common";
+import { BLOCK, BLOCK_OVERHEAD, OBJECT_OVERHEAD, OBJECT_MAXSIZE, TOTAL_OVERHEAD, DEBUG, TRACE, RTRACE, PROFILE, ARENA, ARENA_END, HEAP_BASE, outsideArena } from "./common";
 import { onvisit, oncollect, oninterrupt, onyield } from "./rtrace";
 import { TypeinfoFlags } from "../shared/typeinfo";
 import { E_ALLOCATION_TOO_LARGE, E_ALREADY_PINNED, E_NOT_PINNED } from "../util/error";
@@ -125,7 +125,7 @@ function initLazy(space: Object): Object {
   unlink(): void {
     let next = this.next;
     if (next == null) {
-      if (DEBUG) assert(this.prev == null && changetype<usize>(this) < __heap_base);
+      if (DEBUG) assert(this.prev == null && (ARENA ? (HEAP_BASE > changetype<usize>(this)) : (changetype<usize>(this) < __heap_base)));
       return; // static data not yet linked
     }
     let prev = this.prev;
@@ -166,7 +166,7 @@ function visitRoots(cookie: u32): void {
 /** Visits all objects on the stack. */
 function visitStack(cookie: u32): void {
   let ptr = __stack_pointer;
-  while (ptr < __heap_base) {
+  while (ARENA ? (HEAP_BASE > ptr) : (ptr < __heap_base)) {
     __visit(load<usize>(ptr), cookie);
     ptr += sizeof<usize>();
   }
@@ -241,7 +241,7 @@ function step(): usize {
 
 /** Frees an object. */
 function free(obj: Object): void {
-  if (changetype<usize>(obj) < __heap_base) {
+  if (ARENA ? (HEAP_BASE > changetype<usize>(obj)) : (changetype<usize>(obj) < __heap_base)) {
     obj.nextWithColor = 0; // may become linked again
     obj.prev = changetype<Object>(0);
   } else {
@@ -291,7 +291,7 @@ export function __renew(oldPtr: usize, size: usize): usize {
 @global @unsafe
 export function __link(parentPtr: usize, childPtr: usize, expectMultiple: bool): void {
   // Write barrier is unnecessary if non-incremental
-  if (!childPtr) return;
+  if (ARENA ? (!childPtr || outsideArena(childPtr)) : !childPtr) return;
   if (DEBUG) assert(parentPtr);
   let child = changetype<Object>(childPtr - TOTAL_OVERHEAD);
   if (child.color == white) {
@@ -320,7 +320,7 @@ export function __link(parentPtr: usize, childPtr: usize, expectMultiple: bool):
 // @ts-ignore: decorator
 @global @unsafe
 export function __visit(ptr: usize, cookie: i32): void {
-  if (!ptr) return;
+  if (ARENA ? (!ptr || outsideArena(ptr)) : !ptr) return;
   let obj = changetype<Object>(ptr - TOTAL_OVERHEAD);
   if (RTRACE) if (!onvisit(obj)) return;
   if (obj.color == white) {
@@ -392,7 +392,7 @@ export function __collect(): void {
 
 /** Threshold of memory used by objects to exceed before interrupting again. */
 // @ts-ignore: decorator
-@lazy let threshold: usize = ((<usize>memory.size() << 16) - __heap_base) >> 1;
+@lazy let threshold: usize = ((<usize>memory.size() << 16) - (ARENA ? HEAP_BASE : __heap_base)) >> 1;
 
 /** Performs a reasonable amount of incremental GC steps. */
 function interrupt(): void {
@@ -416,4 +416,38 @@ function interrupt(): void {
   if (TRACE) trace("└ GC (auto) ongoing at", 1, total);
   threshold = total + GRANULARITY * usize(total - threshold < GRANULARITY);
   if (PROFILE) onyield(total);
+}
+
+// === Arenas ==============================================================================
+
+/**
+ * Places this instance's collector state inside its arena and re-initializes it.
+ *
+ * The three space heads are linked-list sentinels, and they live in **memory**,
+ * not in globals — which is why an arena cannot simply re-point them: they have
+ * to move, or two instances sharing one memory share one set of chains and each
+ * one's sweep frees the other's objects. So they are placed at the bottom of the
+ * arena's heap region, above the stack and below the allocator's root, and
+ * `heapBase` is answered onward from them (`heapBase` here is the arena's heap
+ * base, i.e. what `visitStack` calls the top of the stack region).
+ *
+ * Everything else the collector keeps — the colours, the counters, the current
+ * phase, the threshold — is a wasm global, and wasm globals are per instance
+ * already. Losing the objects of a previous arena here is what re-initializing
+ * this instance means.
+ */
+// @ts-ignore: decorator
+@global @unsafe
+export function __arenaPlaceState(heapBase: usize, arenaEnd: usize): usize {
+  let stride = offsetof<Object>();
+  total = 0;
+  state = STATE_IDLE;
+  white = 0;
+  visitCount = 0;
+  fromSpace = initLazy(changetype<Object>(heapBase));
+  toSpace = initLazy(changetype<Object>(heapBase + stride));
+  pinSpace = initLazy(changetype<Object>(heapBase + 2 * stride));
+  iter = toSpace;
+  threshold = (arenaEnd - heapBase) >> 1;
+  return heapBase + 3 * stride;
 }

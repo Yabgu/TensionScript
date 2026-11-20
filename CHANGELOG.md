@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Add: arenas — one heap per thread, in one shared memory (`--sharedMemory`).**
+  The runtime is now parametrized by an arena: a `[base, end)` span that owns its
+  allocator state, its collector state and its stack region. `__arenaInit(base,
+  size)` (exported under `--sharedMemory --exportRuntime`) points an instance at
+  its arena, and `__arenaHeapBase()` / `__arenaEnd()` read the bounds back. Two
+  consequences, both measured at `3238905b` and closed here: `tlsf`'s free lists
+  were shared between threads and corrupted on the first concurrent allocation,
+  and `itcms.visitStack` covered only the collecting thread's stack, so a live
+  object reachable only from another thread was swept. Disjoint arenas make the
+  allocator's absent atomics *correct* (one arena, one owner — the atomic count is
+  still zero, and now that is a property rather than a defect) and make
+  `visitStack` correct as written. The collector's space heads move inside the
+  arena (`itcms.__arenaPlaceState`), because they live in memory and two instances
+  sharing one would otherwise share one set of chains; `__visit` / `__link` skip a
+  pointer the arena does not own. Default behaviour is unchanged — no arena
+  configured means the runtime spans the whole memory, and a build without
+  `--sharedMemory` emits byte-identical `.wat`. Measured by `npm run test:arena`
+  (68 checks: bounds, re-init, collection isolation with guard bytes, two arenas
+  in one shared memory over `--importMemory`, the stub runtime, and the atomic
+  count). `--wasmGc` has no arena: its linear allocator is the compiler's, so it
+  exports no entry point rather than one that bounds nothing. See
+  [`docs/arena.md`](docs/arena.md).
+
 - **Add: `changetype<@unmanaged T>(ptr)` with `T` inline-typed** is now legal;
   the result is a call-scoped view over the caller's bytes. Field access on the
   view routes through the record-load path (`i32.load`/`f32.load` at the field's

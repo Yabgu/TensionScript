@@ -149,6 +149,8 @@ The full deferred list, with the reason for each, is
 - Roadmap — deferred features, durable findings, and the workflow:
   [`docs/roadmap.md`](docs/roadmap.md)
 - Scheduler contract: [`docs/scheduler-contract.md`](docs/scheduler-contract.md)
+- Arenas — one heap per thread, in one shared memory:
+  [`docs/arena.md`](docs/arena.md)
 - Changelog: [`CHANGELOG.md`](CHANGELOG.md)
 
 ## Attribution and license

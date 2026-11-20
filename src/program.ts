@@ -1207,6 +1207,14 @@ export class Program extends DiagnosticEmitter {
     // while the same code in a live arm is AS100.
     this.registerConstantInteger(CommonNames.ASC_WASM_GC, Type.i32,
       i64_new(options.wasmGc ? 1 : 0));
+    // **`ASC_ARENA`** — registered only under `--sharedMemory`, so that
+    // `isDefined(ASC_ARENA)` in `std/assembly/rt/common.ts` is the compile-time
+    // switch the runtime folds on. Not registered means not even a global is
+    // emitted (the `ASC_RTRACE` discipline), which is what lets a build that does
+    // not share memory emit exactly the module it emitted before arenas existed.
+    if (options.sharedMemory) {
+      this.registerConstantInteger(CommonNames.ASC_ARENA, Type.bool, i64_new(1, 0));
+    }
     this.registerConstantInteger(CommonNames.ASC_NO_ASSERT, Type.bool,
       i64_new(options.noAssert ? 1 : 0, 0));
     this.registerConstantInteger(CommonNames.ASC_MEMORY_BASE, Type.i32,

@@ -536,6 +536,15 @@ export namespace ExportNames {
 
 /** Functions to export if `--exportRuntime` is set. */
 export const runtimeFunctions = [ "__new", "__pin", "__unpin", "__collect" ];
+/**
+ * Arena entry points, exported when `--sharedMemory` is set and the selected
+ * runtime implements them (`std/assembly/rt/**`). A host configures one arena
+ * per instance it creates, which is how a spawned thread learns where its heap
+ * is: `__arenaInit(base, size)`, plus two read-backs for the host and the tests.
+ * The list is looked up, not required, so a runtime without arenas (or a custom
+ * runtime) simply exports nothing here instead of failing to compile.
+ */
+export const arenaFunctions = [ "__arenaInit", "__arenaHeapBase", "__arenaEnd" ];
 /** Globals to export if `--exportRuntime` is set. */
 export const runtimeGlobals = [ "__rtti_base" ];
 
@@ -1527,6 +1536,32 @@ export class Compiler extends DiagnosticEmitter {
         let instance = program.requireGlobal(name);
         if (this.compileGlobal(instance) && !module.hasExport(name)) {
           module.addGlobalExport(instance.internalName, name);
+        }
+      }
+    }
+
+    // Export the arena entry points of a shared-memory module — the one guest
+    // function a host calls on every instance it creates to say where that
+    // instance's heap lives. They belong to the same family as `__new` /
+    // `__collect` and are exported on the same condition: `--exportRuntime`, the
+    // switch that says a host drives this module's runtime. `program.lookup`
+    // decides the rest — a runtime that does not implement arenas exports none.
+    //
+    // Not under `--wasmGc`: there the linear allocator is emitted by this
+    // compiler (`~gc/linNew`), not by `std/assembly/rt`, so a runtime-side arena
+    // would bound nothing. Exporting an entry point that cannot bound the heap
+    // would be worse than exporting none — a host would believe it had configured
+    // a heap. Parametrizing that allocator is a separate front.
+    if (
+      (this.options.exportRuntime || (this.options.bindingsHint && this.desiresExportRuntime)) &&
+      this.options.sharedMemory && !this.gcActive
+    ) {
+      for (let i = 0, k = arenaFunctions.length; i < k; ++i) {
+        let name = arenaFunctions[i];
+        if (program.lookup(name) == null) continue; // runtime has no arenas
+        let instance = program.requireFunction(name);
+        if (this.compileFunction(instance) && !module.hasExport(name)) {
+          module.addFunctionExport(instance.internalName, name);
         }
       }
     }

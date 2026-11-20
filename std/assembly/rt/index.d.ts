@@ -4,6 +4,12 @@ declare function __realloc(ptr: usize, size: usize): usize;
 declare function __free(ptr: usize): void;
 declare function __reset(): void;
 
+// Arenas (shared memory)
+declare function __arenaInit(base: usize, size: usize): void;
+declare function __arenaPlaceState(heapBase: usize, arenaEnd: usize): usize;
+declare function __arenaHeapBase(): usize;
+declare function __arenaEnd(): usize;
+
 // Garbage collector
 declare function __new(size: usize, id: u32): usize;
 declare function __renew(ptr: usize, size: usize): usize;

@@ -181,6 +181,8 @@ export namespace CommonNames {
   export const ASC_RUNTIME = "ASC_RUNTIME";
   /** `--wasmGc`: emit user classes and `StaticArray` as wasm GC types. */
   export const ASC_WASM_GC = "ASC_WASM_GC";
+  /** `--sharedMemory`: the runtime can be pointed at a per-instance arena. */
+  export const ASC_ARENA = "ASC_ARENA";
   export const ASC_NO_ASSERT = "ASC_NO_ASSERT";
   export const ASC_MEMORY_BASE = "ASC_MEMORY_BASE";
   export const ASC_TABLE_BASE = "ASC_TABLE_BASE";

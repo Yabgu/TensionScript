@@ -1,4 +1,4 @@
-import { AL_BITS, AL_SIZE, AL_MASK, DEBUG, BLOCK, BLOCK_OVERHEAD, BLOCK_MAXSIZE } from "./common";
+import { AL_BITS, AL_SIZE, AL_MASK, DEBUG, BLOCK, BLOCK_OVERHEAD, BLOCK_MAXSIZE, ARENA, ARENA_END, HEAP_BASE, enterArena } from "./common";
 import { oninit, onalloc, onresize, onmove, onfree } from "./rtrace";
 import { E_ALLOCATION_TOO_LARGE } from "../util/error";
 
@@ -494,7 +494,7 @@ export function allocateBlock(root: Root, size: usize): Block {
   let payloadSize = prepareSize(size);
   let block = searchBlock(root, payloadSize);
   if (!block) {
-    growMemory(root, payloadSize);
+    ARENA ? growMemoryGated(root, payloadSize) : growMemory(root, payloadSize);
     block = changetype<Block>(searchBlock(root, payloadSize));
     if (DEBUG) assert(block); // must be found now
   }
@@ -542,7 +542,7 @@ export function reallocateBlock(root: Root, block: Block, size: usize): Block {
 function moveBlock(root: Root, block: Block, newSize: usize): Block {
   let newBlock = allocateBlock(root, newSize);
   memory.copy(changetype<usize>(newBlock) + BLOCK_OVERHEAD, changetype<usize>(block) + BLOCK_OVERHEAD, block.mmInfo & ~TAGS_MASK);
-  if (changetype<usize>(block) >= __heap_base) {
+  if (changetype<usize>(block) >= (ARENA ? HEAP_BASE : __heap_base)) {
     if (isDefined(ASC_RTRACE)) onmove(block, newBlock);
     freeBlock(root, block);
   }
@@ -577,7 +577,7 @@ export function __alloc(size: usize): usize {
 @global @unsafe
 export function __realloc(ptr: usize, size: usize): usize {
   if (!ROOT) initialize();
-  return (ptr < __heap_base
+  return ((ARENA ? (HEAP_BASE > ptr) : (ptr < __heap_base))
     ? changetype<usize>(moveBlock(ROOT, checkUsedBlock(ptr), size))
     : changetype<usize>(reallocateBlock(ROOT, checkUsedBlock(ptr), size))
   ) + BLOCK_OVERHEAD;
@@ -586,7 +586,75 @@ export function __realloc(ptr: usize, size: usize): usize {
 // @ts-ignore: decorator
 @global @unsafe
 export function __free(ptr: usize): void {
-  if (ptr < __heap_base) return;
+  if (ARENA ? (HEAP_BASE > ptr) : (ptr < __heap_base)) return;
   if (!ROOT) initialize();
   freeBlock(ROOT, checkUsedBlock(ptr));
+}
+
+// === Arenas ==============================================================================
+
+/**
+ * Grows memory, or refuses to when this instance is confined to an arena.
+ *
+ * An arena's free lists already hold every byte of `[heapBase, end)`, so a failed
+ * search means the arena is exhausted — and growing linear memory would hand out
+ * pages outside it. There is nothing to grow into, so this traps, exactly as
+ * `growMemory` traps when `memory.grow` fails. Neither call site changes: the
+ * `ARENA` fold picks one function or the other at compile time.
+ */
+function growMemoryGated(root: Root, size: usize): void {
+  if (ARENA_END) unreachable();
+  growMemory(root, size);
+}
+
+/**
+ * Builds a fresh root at `rootOffset` owning `[rootOffset + ROOT_SIZE, memEnd)`.
+ *
+ * Deliberately not shared with `initialize()`: folding them together would turn
+ * `initialize`'s inlined body into a call, and the default path's emitted code is
+ * part of this round's contract. Under `ASC_ARENA` off this function is never
+ * referenced and is not emitted at all.
+ */
+function initializeAt(rootOffset: usize, memEnd: usize): void {
+  if (isDefined(ASC_RTRACE)) oninit(rootOffset);
+  let root = changetype<Root>(rootOffset);
+  root.flMap = 0;
+  SETTAIL(root, changetype<Block>(0));
+  for (let fl: usize = 0; fl < FL_BITS; ++fl) {
+    SETSL(root, fl, 0);
+    for (let sl: u32 = 0; sl < SL_SIZE; ++sl) {
+      SETHEAD(root, fl, sl, null);
+    }
+  }
+  ROOT = root;
+  addMemory(root, rootOffset + ROOT_SIZE, <u64>memEnd);
+}
+
+/**
+ * Points this instance's runtime at `[base, base + size)` and re-initializes it.
+ *
+ * This is what a host calls on every instance it creates, and it is how a spawned
+ * thread learns where its heap is. The arena holds the stack region at the bottom
+ * (`[base, heapBase)`, sized as this module's `--stackSize` sized the default
+ * one), then the collector's space heads, then the TLSF root, then free memory —
+ * the default layout, mirrored, so `visitStack`'s window
+ * `[__stack_pointer, HEAP_BASE)` is exactly this instance's stack and the space
+ * heads belong to this instance alone. Every byte the allocator hands out afterwards lies in the arena, and
+ * `growMemory` no longer grows: an exhausted arena traps instead of reaching for
+ * pages outside itself.
+ *
+ * Safe to call more than once. Each call discards the previous arena's runtime
+ * state — objects, pinned objects, the allocator — so any handle from before the
+ * call is dangling by contract, exactly as `memory.reset()` would leave it. It
+ * must be called with no live guest frame (at instantiation, or from the host),
+ * because it moves `__stack_pointer`; the assignment is last so that the frames
+ * of the helpers above it still unwind against the old stack region.
+ */
+// @ts-ignore: decorator
+@global @unsafe
+export function __arenaInit(base: usize, size: usize): void {
+  let heap = enterArena(base, size);
+  let rootOffset = (__arenaPlaceState(heap, ARENA_END) + AL_MASK) & ~AL_MASK;
+  initializeAt(rootOffset, ARENA_END);
+  __stack_pointer = heap;
 }
