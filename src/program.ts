@@ -536,6 +536,18 @@ export class Program extends DiagnosticEmitter {
   hasAwait: bool = false;
 
   /**
+   * The policy classes seen at `on` sites whose type was statically visible, in
+   * first-use order. `src/resolver.ts` appends; `src/compiler.ts` dedupes,
+   * bounds and writes them into the `tension.async` custom section.
+   *
+   * Null until an `on` site names a concrete class. A policy held as a
+   * `TaskPolicy` value (or produced by a call such as `inlinePolicy()`) is not
+   * statically a concrete class, so it does not appear here — and the section
+   * says nothing about it.
+   */
+  asyncPolicyNames: string[] | null = null;
+
+  /**
    * The synthesized `$spawnStart` declarations the stackful transform emitted —
    * one per parameterless may-suspend function (`docs/task-design.md` §8.5's
    * "compiler-synthesized start", narrowed to what Gate 3 needs). Declarations,

@@ -82,6 +82,8 @@ import {
   InstanceOfExpression,
   TernaryExpression,
   isTypeOmitted,
+  FieldDeclaration,
+  ClassDeclaration,
   FunctionExpression,
   NewExpression,
   ArrayLiteralExpression,
@@ -1981,12 +1983,156 @@ export class Resolver extends DiagnosticEmitter {
         // value, an unknown name) is reported at its own range, not later as a
         // whole-expression mismatch.
         let type = this.resolveExpression(on.expression, ctxFlow, ctxType, reportMode);
-        if (type) this.resolveExpression(on.policy, ctxFlow, Type.auto, reportMode);
+        if (type) {
+          let policyType = this.resolveExpression(on.policy, ctxFlow, Type.auto, reportMode);
+          // The policy's static backend is checked only where the class is
+          // visible; a `TaskPolicy`-typed variable or a call is portable by
+          // construction and stays out of it (see the method's note).
+          if (policyType && reportMode == ReportMode.Report) {
+            this.checkOnPolicyBackend(on, policyType, ctxFlow);
+          }
+        }
         return type;
       }
     }
     assert(false);
     return null;
+  }
+
+  /**
+   * Reads a policy class's literal `backend` initializer and compares it with
+   * the backend this build selected.
+   *
+   * **Only a statically visible concrete class is checked.** A `TaskPolicy`
+   * variable or a call (`inlinePolicy()`, `work() on policy`) is the portable
+   * form: no class is named, so there is nothing to disagree with, and the
+   * build's backend remains the hard gate — a promise build refuses every `on`
+   * outright (`src/async/lower.ts`, `reasonFor`). A class whose `backend` is not
+   * a literal initializer is skipped for now; the next round can decide whether
+   * that must be refused.
+   */
+  private checkOnPolicyBackend(
+    /** The `on` expression whose policy is being checked. */
+    on: OnExpression,
+    /** The policy expression's resolved type. */
+    policyType: Type,
+    /** Flow used to resolve the initializer's names. */
+    ctxFlow: Flow
+  ): void {
+    let classReference = policyType.getClass();
+    if (!classReference) return;
+    let prototype = classReference.prototype;
+    // An abstract base (`TaskPolicy`) names no concrete policy: the object on
+    // the right of `on` could be any subclass, so this site cannot be checked.
+    if (prototype.is(CommonFlags.Abstract)) return;
+    let name = prototype.name;
+    // The section lists every class the compiler can name at an `on` site,
+    // whether or not its backend is a literal (the check below may have to skip
+    // the value while the name is still known).
+    let names = this.program.asyncPolicyNames;
+    if (!names) {
+      names = [];
+      this.program.asyncPolicyNames = names;
+    }
+    names.push(name);
+    let field = this.findPolicyBackendField(prototype);
+    if (!field) return;
+    let initializer = field.initializer;
+    if (!initializer) return;
+    // Read the initializer in the flow of the file that declares it: a policy
+    // in another module may import the enum under a name this call site never
+    // had in scope.
+    let source = field.range.source;
+    let file = this.program.filesByName.get(source.internalPath);
+    let initializerFlow = file ? file.startFunction.flow : ctxFlow;
+    let wanted = this.staticIntegerValue(initializer, initializerFlow);
+    if (wanted < 0) return;
+    let build = this.program.hasAwait && this.program.options.hasFeature(Feature.StackSwitching)
+      ? 1  // AsyncBackend.Continuations
+      : 2; // AsyncBackend.Promise
+    if (wanted == build) return;
+    this.error(
+      DiagnosticCode.Policy_0_is_written_for_the_1_backend_but_this_build_has_the_2_backend_Rebuild_with_enable_stack_switching_or_use_a_policy_that_does_not_name_a_backend,
+      on.policy.range,
+      name,
+      wanted == 1 ? "continuations" : "promise",
+      build == 1 ? "continuations" : "promise"
+    );
+  }
+
+  /** The `backend` field declaration on `prototype` or its nearest base. */
+  private findPolicyBackendField(prototype: ClassPrototype): FieldDeclaration | null {
+    let current: ClassPrototype | null = prototype;
+    while (current) {
+      let members = (<ClassDeclaration>current.declaration).members;
+      for (let i = 0, k = members.length; i < k; ++i) {
+        let member = members[i];
+        if (member.kind == NodeKind.FieldDeclaration &&
+            (<FieldDeclaration>member).name.text == "backend") {
+          return <FieldDeclaration>member;
+        }
+      }
+      current = current.basePrototype;
+    }
+    return null;
+  }
+
+  /**
+   * Evaluates an integer literal, or an enum member, to its value; `-1` when
+   * the expression is not one of those forms.
+   *
+   * Deliberately narrow: the policy table says a `backend` is a literal, and a
+   * computed value is not something this round can read without evaluating
+   * arbitrary expressions before codegen.
+   */
+  private staticIntegerValue(expression: Expression, ctxFlow: Flow): i32 {
+    switch (expression.kind) {
+      case NodeKind.Literal: {
+        let literal = <LiteralExpression>expression;
+        if (literal.literalKind == LiteralKind.Integer) {
+          return <i32>i64_low((<IntegerLiteralExpression>literal).value);
+        }
+        return -1;
+      }
+      case NodeKind.Identifier: {
+        let element = this.lookupIdentifierExpression(
+          <IdentifierExpression>expression, ctxFlow, ctxFlow.sourceFunction, ReportMode.Swallow
+        );
+        return element && element.kind == ElementKind.EnumValue
+          ? this.enumValueInteger(<EnumValue>element, ctxFlow)
+          : -1;
+      }
+      case NodeKind.PropertyAccess: {
+        let access = <PropertyAccessExpression>expression;
+        if (access.expression.kind != NodeKind.Identifier) return -1;
+        let base = this.lookupIdentifierExpression(
+          <IdentifierExpression>access.expression, ctxFlow, ctxFlow.sourceFunction, ReportMode.Swallow
+        );
+        if (!base || base.kind != ElementKind.Enum) return -1;
+        let member = (<Enum>base).getMember(access.property.text);
+        return member && member.kind == ElementKind.EnumValue
+          ? this.enumValueInteger(<EnumValue>member, ctxFlow)
+          : -1;
+      }
+      case NodeKind.Parenthesized: {
+        return this.staticIntegerValue((<ParenthesizedExpression>expression).expression, ctxFlow);
+      }
+    }
+    return -1;
+  }
+
+  /** An enum member's integer value, explicit or implicit. */
+  private enumValueInteger(value: EnumValue, ctxFlow: Flow): i32 {
+    let initializer = value.initializerNode;
+    if (initializer) return this.staticIntegerValue(initializer, ctxFlow);
+    let parent = value.parent;
+    if (parent.kind == ElementKind.Enum) {
+      let values = (<EnumDeclaration>(<Enum>parent).declaration).values;
+      for (let i = 0, k = values.length; i < k; ++i) {
+        if (values[i] === value.declaration) return i;
+      }
+    }
+    return -1;
   }
 
   /**

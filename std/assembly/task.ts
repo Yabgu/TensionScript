@@ -74,6 +74,20 @@ export function setWakeSink(sink: (exec: i32, slot: i32) => void): void {
 }
 
 /**
+ * The backend a policy's `create`/`await` are written against.
+ *
+ * **The numbers are the artifact's encoding** (`tension.async`, emitted by
+ * `src/compiler.ts`): `1` is the stackful continuations backend (wasmfx,
+ * `--enable stack-switching`), `2` is the state-machine promise lowering. They
+ * are not `0`/`1` on purpose — a zeroed byte in a section must not read as
+ * "continuations".
+ */
+export enum AsyncBackend {
+  Continuations = 1,
+  Promise = 2,
+}
+
+/**
  * What a task's `await` does, and what happens the moment the task is created.
  *
  * `docs/policy-and-threads.md` §3. Two moments, two methods, and **no generic
@@ -93,6 +107,18 @@ export abstract class TaskPolicy {
    * addressable rather than a reference into the caller's heap.
    */
   readonly crossesThreads: bool = false;
+
+  /**
+   * The model this policy's create/await are written against. A literal: the
+   * compiler reads it at every `on` site where the class is visible.
+   *
+   * **An enum value, not an allocation.** A top-level initializer is emitted
+   * into the module's start function whether or not anything reads it (the
+   * `inlinePolicy()` note below records that measurement); a compile-time
+   * constant costs nothing. `TaskPolicy` is the stack-model base, so every
+   * existing policy inherits `Continuations` unchanged.
+   */
+  readonly backend: AsyncBackend = AsyncBackend.Continuations;
 
   /**
    * Called at the call site, once the task object exists and before any body

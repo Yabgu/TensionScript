@@ -66,6 +66,49 @@ A Task suspension has three builtins in its protocol:
 awaiter is `t.policy.await(t)` when a policy is attached, and `t.drive()`
 otherwise.
 
+## Backends and policies
+
+A build has exactly one backend — the lowering chosen in `src/transforms.ts`:
+`hasAwait && --enable stack-switching` selects the continuations (Task) backend,
+and every other program, including one with an `await`, keeps the promise
+(state-machine) backend.
+
+A policy declares which backend its `create`/`await` are written against, in a
+literal the compiler can read:
+
+```ts
+export enum AsyncBackend {
+  Continuations = 1,
+  Promise = 2,
+}
+
+export abstract class TaskPolicy {
+  readonly backend: AsyncBackend = AsyncBackend.Continuations;
+}
+```
+
+`1`/`2`, not `0`/`1`: the numbers are the artifact's encoding, and a zeroed byte
+must not read as "continuations". `TaskPolicy` is the stack model's base, so
+every existing policy inherits `Continuations`; a promise-side policy would
+declare `AsyncBackend.Promise` once that path grows a policy seam.
+
+At an `on` site whose policy class is statically visible, the resolver compares
+that literal with the build's backend (`src/resolver.ts`,
+`checkOnPolicyBackend`). A mismatch is one diagnostic naming the class, the
+backend it wants, the backend the build has, and the two ways out. A policy held
+as a `TaskPolicy` value — a variable or a call — names no concrete class and is
+skipped: the build's backend is still the hard gate, because a promise build
+refuses `on` outright (`src/async/lower.ts`, `reasonFor`).
+
+The artifact records the choice in the `tension.async` custom section, emitted
+only when the program contains an `await` (`src/compiler.ts`,
+`emitAsyncBackendSection`). Its layout is version `u8`, backend `u8` (1 =
+continuations, 2 = promise), flags `u8` (bit 0 = may suspend), count `u32`, then
+`count` × (length `u32`, UTF-8 class name). The names are the policy classes the
+compiler saw at `on` sites, deduped in first-use order; the list is empty on a
+promise build by construction. A host reads the section before instantiating and
+refuses a guest built for another backend, naming the policies that forced it.
+
 ## Why `TaskRecord` is still named that
 
 `TaskRecord` is a Promise record and its name is historical. It is **not** being

@@ -2571,7 +2571,7 @@
      if
       i32.const 1712
       i32.const 1920
-      i32.const 309
+      i32.const 335
       i32.const 3
       call $~lib/builtins/abort
       unreachable
@@ -4610,4 +4610,5 @@
   call $~lib/builtins/abort
   unreachable
  )
+ ;; custom section "tension.async", size 7
 )

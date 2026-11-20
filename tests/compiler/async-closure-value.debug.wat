@@ -29,6 +29,8 @@
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
  (global $~lib/native/ASC_LOW_MEMORY_LIMIT i32 (i32.const 0))
  (global $~lib/task/__wakeSink (mut i32) (i32.const 432))
+ (global $~lib/task/AsyncBackend.Continuations i32 (i32.const 1))
+ (global $~lib/task/AsyncBackend.Promise i32 (i32.const 2))
  (global $~lib/task/inlinePolicyInstance (mut i32) (i32.const 0))
  (global $~lib/task-rt/recordFactory (mut i32) (i32.const 0))
  (global $~lib/task-rt/families (mut i32) (i32.const 0))
@@ -7743,7 +7745,7 @@
   else
    i32.const 688
    i32.const 880
-   i32.const 309
+   i32.const 335
    i32.const 3
    call $~lib/builtins/abort
    unreachable
@@ -7898,4 +7900,5 @@
   global.set $~lib/memory/__stack_pointer
   local.get $2
  )
+ ;; custom section "tension.async", size 7
 )
