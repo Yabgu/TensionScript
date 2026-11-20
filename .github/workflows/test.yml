@@ -196,6 +196,34 @@ jobs:
         wasmtime --version
         npm run test:coreloop
         npm run test:await
+  gate4:
+    name: "Gate 4 (threads)"
+    runs-on: ubuntu-latest
+    needs: [check, binaryen]
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: true
+    - name: "Download the vendored Binaryen"
+      uses: actions/download-artifact@v4
+      with:
+        name: binaryen-out
+        path: third_party/binaryen-out
+    - uses: actions/setup-node@v6
+      with:
+        # `current` only, deliberately not the lts/* matrix: wasmfx is what the
+        # suite executes, and an LTS without it would turn this job red for a
+        # reason that has nothing to do with the code.
+        node-version: current
+    - name: Install dependencies
+      run: npm ci --no-audit
+    - name: Build
+      run: npm run build
+    - name: "Run Gate 4 (110 checks)"
+      run: npm run test:gate4
+    - name: "Run the four showcase programs"
+      run: npm run test:examples
+
   runtimes:
     name: "Runtimes"
     runs-on: ubuntu-latest
