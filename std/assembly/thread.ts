@@ -183,6 +183,27 @@ export class SlotRing {
   }
 
   /**
+   * A handle over an **already initialised** ring, with the capacity read from
+   * the ring itself (word 2).
+   *
+   * The worker half of a shared queue: the producer allocated and initialised
+   * the words, and hands the consumer one number. `at` needs the capacity
+   * out of band; this one does not, which is what makes a ring passable as the
+   * single `i32` a served body reads through `__serveArg()`.
+   */
+  static fromBase(base: usize): SlotRing {
+    let ring = new SlotRing(0);
+    ring.base = base;
+    ring.capacity = atomicLoad<i32>(base + CAPACITY_OFF);
+    return ring;
+  }
+
+  /** The address just past this ring's words — where a pool puts its own. */
+  get after(): usize {
+    return this.base + <usize>(ringWords(this.capacity) << 2);
+  }
+
+  /**
    * Appends `slot`; false when the ring is full **or already holds it**.
    *
    * **At most one entry per slot.** A task can be made ready twice — two tasks
@@ -233,23 +254,35 @@ export class SlotRing {
     }
   }
 
-  /** Removes the oldest slot, or `-1` when there is nothing published yet. */
+  /**
+   * Removes the oldest slot, or `-1` when there is nothing published yet.
+   *
+   * **The head is a CAS, so several consumers may pop one ring** — a pool's
+   * work ring is drained by every worker at once. A plain store was correct
+   * for the single-consumer rings (an executor's own ready queue) and wrong
+   * here: two workers read the same `pos`, both took the cell, and one item
+   * was published twice while another was lost (measured: one duplicate and
+   * one hole per pass in the 4-worker stress run). The losing CAS simply
+   * re-reads.
+   */
   pop(): i32 {
     let capacity = this.capacity;
     if (capacity <= 0) return -1;
     let base = this.base;
-    let pos = atomicLoad<i32>(base + HEAD_OFF);
-    let tail = atomicLoad<i32>(base + TAIL_OFF);
-    if (pos >= tail) return -1;
-    let off = base + SLOTS_OFF + <usize>((pos % capacity) << 3);
-    if (atomicLoad<i32>(off + wordOffset(SEQ_WORD)) != pos + 1) return -1; // reserved, not published
-    let value = atomicLoad<i32>(off + wordOffset(VALUE_WORD));
-    atomicStore<i32>(base + HEAD_OFF, pos + 1);
-    // Free the cell for the lap after next. **After** the value is in hand and
-    // the head has moved: a producer may only reserve this index again once
-    // `pos + 1` is below the head, and it will see the stamp until then.
-    atomicStore<i32>(off + wordOffset(SEQ_WORD), pos + capacity);
-    return value;
+    while (true) {
+      let pos = atomicLoad<i32>(base + HEAD_OFF);
+      let tail = atomicLoad<i32>(base + TAIL_OFF);
+      if (pos >= tail) return -1;
+      let off = base + SLOTS_OFF + <usize>((pos % capacity) << 3);
+      if (atomicLoad<i32>(off + wordOffset(SEQ_WORD)) != pos + 1) return -1; // reserved, not published
+      if (atomicCompareExchange<i32>(base + HEAD_OFF, pos, pos + 1) != pos) continue;
+      let value = atomicLoad<i32>(off + wordOffset(VALUE_WORD));
+      // Free the cell for the lap after next. **After** the value is in hand and
+      // the head has moved: a producer may only reserve this index again once
+      // `pos + 1` is below the head, and it will see the stamp until then.
+      atomicStore<i32>(off + wordOffset(SEQ_WORD), pos + capacity);
+      return value;
+    }
   }
 
   /** How many entries are published and not yet consumed. */
@@ -379,6 +412,323 @@ export class Executor {
     e.ready = ready;
     e.inbox = inbox;
     return e;
+  }
+}
+
+// ── the pool ────────────────────────────────────────────────────────────────
+//
+// A pool is a **seam**, not a manager: it owns a dispatcher (the decision of
+// where a post goes) and the workers it started, and nothing else. The control
+// block already carves one executor per worker (`__threadInit`), `__spawnThread`
+// already asks the host for the machine, and `__spawnOn`/`__spawnOnMasked`
+// already target any of them. This layer is only the choice and the teardown.
+//
+// The shape is chosen so an on-demand manager is a *different Dispatcher plus a
+// create/join policy*, not a rewrite: `pick` sees the pool (and so its size and
+// dispatcher) and may read any executor's inbox depth; a future manager can
+// spawn up to `__executorTotal - 1` before a post and exit idle workers in
+// `join`. Nothing here assumes a static worker count beyond what it started.
+
+/** Picks the executor a post goes to. The seam that makes pools pluggable. */
+export abstract class Dispatcher {
+  /** The executor id (1..pool.size) the next post goes to. */
+  abstract pick(pool: ThreadPool): i32;
+}
+
+/** `1, 2, 3 … pool.size, 1 …` — deterministic, cheap, uneven under skew. */
+export class RoundRobin extends Dispatcher {
+  /** The next offset, modulo the pool's size. */
+  private next: i32 = 0;
+
+  pick(pool: ThreadPool): i32 {
+    let size = pool.size;
+    if (size <= 0) return 0;
+    let index = this.next;
+    this.next = index + 1 >= size ? 0 : index + 1;
+    return index + 1;
+  }
+}
+
+/** The worker whose inbox is shallowest. One read per worker per post. */
+export class LeastLoaded extends Dispatcher {
+  pick(pool: ThreadPool): i32 {
+    let size = pool.size;
+    if (size <= 0) return 0;
+    let best = 1;
+    let bestDepth = 0x7fffffff;
+    for (let id = 1; id <= size; ++id) {
+      let depth = __inboxDepth(id);
+      if (depth < bestDepth) {
+        bestDepth = depth;
+        best = id;
+      }
+    }
+    return best;
+  }
+}
+
+/**
+ * The inbox depth of executor `id`, from this store.
+ *
+ * Over the carved ring under `--sharedMemory` (a worker's `Executor` object
+ * lives in the worker's own store, so main cannot read its `depth` getter);
+ * over the ordinary handle when the executor is in this store. One atomic load
+ * pair, no allocation — which is what `LeastLoaded` promises per post.
+ */
+function __inboxDepth(id: i32): i32 {
+  if (SHARED && __controlBase != 0) {
+    if (id < 0 || id >= __executorTotal) return 0;
+    let ring = inboxBase(recordBase(id));
+    let depth = atomicLoad<i32>(ring + TAIL_OFF) - atomicLoad<i32>(ring + HEAD_OFF);
+    return depth > 0 ? depth : 0;
+  }
+  let e = __executorOf(id);
+  return e ? changetype<Executor>(e).inbox.depth : 0;
+}
+
+/**
+ * The policy a pool hands out: **placement only**.
+ *
+ * `create` asks the pool's dispatcher for a target and posts the task's spawn
+ * entry there, through `__spawnOnMasked` so the mask rules of
+ * `docs/thread-abi.md` §7 apply unchanged. It runs nothing here — that is what
+ * makes `f() on pool.policy()` a post and not a call.
+ *
+ * **What it cannot do, and does not pretend to:** a request is one `i32`
+ * (`arg`) and a reply continuation index, and the pool has no way to invent the
+ * latter. A task body that needs to answer the caller posts its own reply with
+ * `__spawnOn(__serveOrigin(), __spawnIndexOf(report), value, 0)` — the index is
+ * a module constant in every store (`__spawnIndexOf`). `await` on a pooled task
+ * therefore parks; only a body that settles it (the program's own reply
+ * continuation does) wakes it. Placement and completion are separate seams in
+ * this ABI, and the pool keeps to its own.
+ *
+ * `arg` is public and mutable **on purpose**: it is the one word the served
+ * body reads through `__serveArg()`, and a caller that posts many tasks with
+ * one policy sets it before each call. `lastStatus` is the last post's answer
+ * (`-2` = no request record, `-1` = refused by the mask, `-3` = no spawn
+ * entry), so a driver can back off instead of losing work silently.
+ */
+export class PoolPolicy extends TaskPolicy {
+  /** The pool whose dispatcher decides placement. */
+  pool: ThreadPool;
+  /** Applied to every task this policy creates; `null` is unconstrained. */
+  mask: MaskBase | null;
+  /** The word the served body reads through `__serveArg()`. */
+  arg: i32 = 0;
+  /** The served body's reply continuation index, read through `__serveKey()`. */
+  reply: i32 = -1;
+  /** The last `create`'s post status (0 posted; see the class note). */
+  lastStatus: i32 = 0;
+
+  constructor(pool: ThreadPool, mask: MaskBase | null) {
+    super();
+    this.pool = pool;
+    this.mask = mask;
+    // The default service: the pool's own work ring, by address. A task body
+    // that wants a different word sets `arg` before its `on` call.
+    this.arg = <i32>pool.workBase;
+  }
+
+  /** Posts the task to the dispatcher's target; nothing runs in this store. */
+  create(task: TaskBase): void {
+    let entry = task.entry;
+    if (entry < 0) {
+      // A parameterized async function has no `$starts` entry (the transform
+      // synthesizes one for parameterless functions only), so there is nothing
+      // a request could name. Refused and reported, not posted with `-1`.
+      this.lastStatus = -3;
+      return;
+    }
+    let mask = this.mask;
+    if (mask) task.mask = changetype<MaskBase>(mask);
+    let target = this.pool.dispatcher.pick(this.pool);
+    this.lastStatus = __spawnOnMasked(target, mask, entry, this.arg, this.reply);
+  }
+
+  /**
+   * Parks the current task on `task`; the body's own reply settles it.
+   *
+   * The payload is `-2` (no local slot will make this runnable), exactly as
+   * `RemotePolicy` — the wake must come from the store that settles the task.
+   */
+  await(task: TaskBase): void {
+    __parkOn(task);
+    __suspendParked();
+  }
+}
+
+/**
+ * A static pool of workers over the carved control block.
+ *
+ * `create` spawns workers `1..workers`; `size` is how many actually started
+ * (a refused `__spawnThread` is reported, never hidden), `policy` hands out a
+ * placement policy, and `join` exits and joins every worker deterministically.
+ * It does **not** allocate a new control block when one exists, and it refuses
+ * to mislabel workers when the host carved fewer executors than requested —
+ * it starts what the block can hold and answers that count.
+ */
+export class ThreadPool {
+  /** Workers that started (not counting main). */
+  private workers: i32 = 0;
+  /** The current placement decision. Replaceable at runtime. */
+  private dispatcherValue: Dispatcher;
+  /** The pool's work items, addressed by `workBase`. */
+  private work: SlotRing = new SlotRing(0);
+  /** Keeps the work + results + counter block alive (the handles do not). */
+  private control: Int32Array | null = null;
+  /** `capacity` result words, one per publication slot. */
+  private results: usize = 0;
+  /** The shared completion counter, one word (after the slot counter). */
+  private done: usize = 0;
+  /** The last `create`'s failure status, or 0. Readable for diagnostics. */
+  lastStatus: i32 = 0;
+
+  constructor() {
+    this.dispatcherValue = new RoundRobin();
+  }
+
+  /** The address of the pool's work ring (0 for an empty pool). */
+  get workBase(): usize {
+    return this.work.base;
+  }
+
+  /** The address of the result table: `resultAt(index)` is one word. */
+  get resultBase(): usize {
+    return this.results;
+  }
+
+  /** The address of the completion counter (`completed()`). */
+  get doneBase(): usize {
+    return this.done;
+  }
+
+  /** Adds a work item. False when the ring is full — the caller retries. */
+  submit(value: i32): bool {
+    return this.work.push(value);
+  }
+
+  /** Removes the next work item, or `-1` when there is none. */
+  take(): i32 {
+    return this.work.pop();
+  }
+
+  /** How many results have been published (the shared counter). */
+  completed(): i32 {
+    let base = this.done;
+    return base == 0 ? 0 : atomicLoad<i32>(base);
+  }
+
+  /** Reads one published result word, or `-1` before it is written. */
+  resultAt(index: i32): i32 {
+    let base = this.results;
+    if (base == 0 || index < 0 || index >= this.work.capacity) return -1;
+    return atomicLoad<i32>(base + <usize>(index << 2));
+  }
+
+  /**
+   * Zeroes the result table and both counters, **without touching the ring**.
+   *
+   * A long run can be consumed in waves: the ring keeps its head/tail and
+   * therefore keeps wrapping, while the result words are reused. The work ring
+   * must be empty when this is called (every published item already popped).
+   */
+  clearResults(): void {
+    if (!this.control) return;
+    memory.fill(this.results, 0, <usize>((this.work.capacity + 2) << 2));
+  }
+
+  /**
+   * Empties the work ring, the result table and the completion counter.
+   *
+   * The workers stay alive, so one pool serves several runs — the stress test
+   * is three passes in one process, and re-spawning is not possible after an
+   * executor exits (`__spawnThread` refuses an id already born).
+   */
+  reset(): void {
+    if (!this.control) return;
+    initRingWords(this.work.base, this.work.capacity);
+    this.clearResults();
+  }
+
+  /** Spawns `workers` workers (ids 1..workers) and returns the pool. */
+  static create(
+    workers: i32, dispatcher: Dispatcher | null = null, capacity: i32 = 64
+  ): ThreadPool {
+    let pool = new ThreadPool();
+    if (dispatcher) pool.dispatcherValue = changetype<Dispatcher>(dispatcher);
+    if (capacity > 0) {
+      // One block: the work ring, then `capacity` result words, then the
+      // completion counter. A task gets the ring's address and finds the rest
+      // with `SlotRing.after`.
+      let words = new Int32Array(ringWords(capacity) + capacity * 2 + 2);
+      let base = changetype<usize>(words.buffer);
+      pool.control = words;
+      pool.work = SlotRing.carve(base, capacity);
+      pool.results = base + <usize>(ringWords(capacity) << 2);
+      // results… | next slot | completed
+      pool.done = pool.results + <usize>((capacity + 1) << 2);
+    }
+    if (workers <= 0) return pool;
+    // A pool needs OS threads; a non-shared build has no `__startThread`.
+    if (!SHARED) {
+      pool.lastStatus = -1;
+      return pool;
+    }
+    // **Only carve if nobody has.** The host normally carves before `__start`
+    // (docs/thread-abi.md §2), but a program that calls `create` first is a
+    // legitimate entry; `__threadInit` is idempotent and answers 0 then.
+    if (__controlBase == 0) {
+      let carved = __threadInit(capacity);
+      if (carved != 0) {
+        pool.lastStatus = carved;
+        return pool;
+      }
+    }
+    // The block is the truth about how many executors exist. Never ask for an
+    // id it does not have, and never report a worker that did not start.
+    let available = __executorTotal - 1;
+    if (available < 0) available = 0;
+    let wanted = workers < available ? workers : available;
+    for (let id = 1; id <= wanted; ++id) {
+      let status = __spawnThread(id, -1, 0);
+      if (status != 0) {
+        // Out of range (cannot happen: `wanted` is bounded) or already born.
+        // Report it and keep the workers that did start; a pool of `id - 1`
+        // workers is honest, a pool labelled `workers` would not be.
+        pool.lastStatus = status;
+        break;
+      }
+      ++pool.workers;
+    }
+    return pool;
+  }
+
+  /** Workers in this pool, not counting main. */
+  get size(): i32 {
+    return this.workers;
+  }
+
+  /** The current placement decision. */
+  get dispatcher(): Dispatcher {
+    return this.dispatcherValue;
+  }
+
+  /** Replaces the placement decision; takes effect on the next post. */
+  set dispatcher(value: Dispatcher) {
+    this.dispatcherValue = value;
+  }
+
+  /** A policy that posts every task it creates to the dispatcher's target. */
+  policy(mask: MaskBase | null = null): PoolPolicy {
+    return new PoolPolicy(this, mask);
+  }
+
+  /** `__executorExit` every worker, then `__threadJoin` each. Safe twice. */
+  join(): void {
+    let n = this.workers;
+    for (let id = 1; id <= n; ++id) __executorExit(id);
+    for (let id = 1; id <= n; ++id) __threadJoin(id);
   }
 }
 
