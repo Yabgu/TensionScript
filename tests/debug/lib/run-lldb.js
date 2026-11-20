@@ -10,8 +10,13 @@
 //     JIT image at all (measured against wasmtime 24.0.13, the pinned
 //     consumer).
 //   * the guest path is absolute. `--invoke` names the fixture's export
-//     (`_start_game`); Wasmtime's default entry point `_start` does not exist
-//     in these fixtures.
+//     (`_start_game` unless the expect.json names another); Wasmtime's default
+//     entry point `_start` does not exist in these fixtures.
+//
+// `inferiorArgs` are Wasmtime options the fixture needs before the guest path:
+// a stack-switching guest needs `-W stack-switching=y`, and a guest whose
+// runtime allocates imports `env.abort`, which the CLI satisfies as a trap with
+// `-W unknown-imports-trap=y` (the fixture never takes that path).
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -105,6 +110,7 @@ print("@@LLDB_JSON " + json.dumps({
  *   workDir: string,
  *   invoke?: string,
  *   maxStops?: number,
+ *   inferiorArgs?: string[],
  * }} options
  */
 export function runUnderLldb({
@@ -116,6 +122,7 @@ export function runUnderLldb({
   workDir,
   invoke = "_start_game",
   maxStops = 20,
+  inferiorArgs = [],
 }) {
   fs.mkdirSync(workDir, { recursive: true });
   const driverPath = path.join(workDir, "driver.py");
@@ -142,7 +149,7 @@ export function runUnderLldb({
   const result = spawnSync(
     lldb,
     ["-b", "-s", commandsPath, "--", wasmtime, "run", "-D", "debug-info",
-      "--invoke", invoke, path.resolve(wasm)],
+      ...inferiorArgs, "--invoke", invoke, path.resolve(wasm)],
     { encoding: "utf8", cwd: workDir, maxBuffer: 32 * 1024 * 1024 }
   );
 

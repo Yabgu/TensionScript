@@ -12,8 +12,14 @@
 //   * 44.0.0 / 48.0.0            -> a line-10 breakpoint resolves into `add`.
 //   * 50.0.1, -O0                -> line 10 resolves correctly but `i` has no
 //     location, where 24 showed 5.
-// So the pin stays at 24.0.13 until a newer consumer is measured to be at
+// So the default stays at 24.0.13 until a newer consumer is measured to be at
 // least as precise (see tests/debug/README.md).
+//
+// A fixture may pin a different version in its expect.json (`wasmtime.version`).
+// 50.0.2 is there because 24.0.13 cannot parse a continuation type at all:
+// `invalid leading byte (0x5d) for type`, and it has no `-W stack-switching`
+// option. A stack-switching fixture cannot run on the default consumer, and
+// cannot move the default without changing what `add-locals` asserts.
 //
 // A prebuilt release tarball is used rather than `cargo install`: measured at
 // landing, the download is ~2.8 s and 8.5 MB, the cargo build 6 m 42 s and
@@ -30,55 +36,96 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const debugRoot = path.resolve(here, "..");
 const cacheRoot = path.join(debugRoot, ".cache");
 
-/** The version pin lives in one file so a bump is a one-line review. */
+/** The default version pin lives in one file so a bump is a one-line review. */
 export const pinnedVersion = fs
   .readFileSync(path.join(debugRoot, "wasmtime.version"), "utf8")
   .trim();
 
 /**
- * Release assets for the pinned version. `name` is the asset filename; the
+ * Release assets, by version and platform. `name` is the asset filename; the
  * extracted directory is the filename without its archive suffix.
  */
 const ASSETS = {
-  "linux-x64": {
-    name: "wasmtime-v24.0.13-x86_64-linux.tar.xz",
-    sha256: "6a81ae0c0a47915f5b739a8c6905c2f74dc7e79a883ab3e2db858015d0980a5a",
-    dir: "wasmtime-v24.0.13-x86_64-linux",
-    exe: "wasmtime",
+  "24.0.13": {
+    "linux-x64": {
+      name: "wasmtime-v24.0.13-x86_64-linux.tar.xz",
+      sha256: "6a81ae0c0a47915f5b739a8c6905c2f74dc7e79a883ab3e2db858015d0980a5a",
+      dir: "wasmtime-v24.0.13-x86_64-linux",
+      exe: "wasmtime",
+    },
+    "linux-arm64": {
+      name: "wasmtime-v24.0.13-aarch64-linux.tar.xz",
+      sha256: "1aaff5cc5c0ce901a36fe2d600cf6d9965a710f75d86f78383343bf69efb73eb",
+      dir: "wasmtime-v24.0.13-aarch64-linux",
+      exe: "wasmtime",
+    },
+    "darwin-x64": {
+      name: "wasmtime-v24.0.13-x86_64-macos.tar.xz",
+      sha256: "7f2ce6643e5488f3725d42991ed8f67febdd0fd044126c3dce396ea8dfb0fc30",
+      dir: "wasmtime-v24.0.13-x86_64-macos",
+      exe: "wasmtime",
+    },
+    "darwin-arm64": {
+      name: "wasmtime-v24.0.13-aarch64-macos.tar.xz",
+      sha256: "712af9df269abc7aa32b895edbfd043c1c465a2d14667fb2117f732cad59735d",
+      dir: "wasmtime-v24.0.13-aarch64-macos",
+      exe: "wasmtime",
+    },
+    "win32-x64": {
+      name: "wasmtime-v24.0.13-x86_64-mingw.zip",
+      sha256: "7958c6a3c9e95a72c17274822fa84151d1cfb8de42196927e16d905acf68d34e",
+      dir: "wasmtime-v24.0.13-x86_64-mingw",
+      exe: "wasmtime.exe",
+    },
   },
-  "linux-arm64": {
-    name: "wasmtime-v24.0.13-aarch64-linux.tar.xz",
-    sha256: "1aaff5cc5c0ce901a36fe2d600cf6d9965a710f75d86f78383343bf69efb73eb",
-    dir: "wasmtime-v24.0.13-aarch64-linux",
-    exe: "wasmtime",
-  },
-  "darwin-x64": {
-    name: "wasmtime-v24.0.13-x86_64-macos.tar.xz",
-    sha256: "7f2ce6643e5488f3725d42991ed8f67febdd0fd044126c3dce396ea8dfb0fc30",
-    dir: "wasmtime-v24.0.13-x86_64-macos",
-    exe: "wasmtime",
-  },
-  "darwin-arm64": {
-    name: "wasmtime-v24.0.13-aarch64-macos.tar.xz",
-    sha256: "712af9df269abc7aa32b895edbfd043c1c465a2d14667fb2117f732cad59735d",
-    dir: "wasmtime-v24.0.13-aarch64-macos",
-    exe: "wasmtime",
-  },
-  "win32-x64": {
-    name: "wasmtime-v24.0.13-x86_64-mingw.zip",
-    sha256: "7958c6a3c9e95a72c17274822fa84151d1cfb8de42196927e16d905acf68d34e",
-    dir: "wasmtime-v24.0.13-x86_64-mingw",
-    exe: "wasmtime.exe",
+  "50.0.2": {
+    "linux-x64": {
+      name: "wasmtime-v50.0.2-x86_64-linux.tar.xz",
+      sha256: "5db0ca8e838ab95a51ba9acdf11f42888bcd0092dda45a86129ae540c4fa952c",
+      dir: "wasmtime-v50.0.2-x86_64-linux",
+      exe: "wasmtime",
+    },
+    "linux-arm64": {
+      name: "wasmtime-v50.0.2-aarch64-linux.tar.xz",
+      sha256: "c3665e79d97a8d42484f3d0320c2911441ca87c58daab3f360ff1cf8770b9960",
+      dir: "wasmtime-v50.0.2-aarch64-linux",
+      exe: "wasmtime",
+    },
+    "darwin-x64": {
+      name: "wasmtime-v50.0.2-x86_64-macos.tar.xz",
+      sha256: "09ef39b5b7f6b6964f1aa718d9319e938b4a242e46155516e780988586bf8ee5",
+      dir: "wasmtime-v50.0.2-x86_64-macos",
+      exe: "wasmtime",
+    },
+    "darwin-arm64": {
+      name: "wasmtime-v50.0.2-aarch64-macos.tar.xz",
+      sha256: "42b066764fb5ccd92f4378375202627b457be8ef0e85806784304ce9b07a721a",
+      dir: "wasmtime-v50.0.2-aarch64-macos",
+      exe: "wasmtime",
+    },
+    "win32-x64": {
+      name: "wasmtime-v50.0.2-x86_64-mingw.zip",
+      sha256: "5d452f924d7b230c5ed81f030e939bd19bf0273f1079a10f1a0f4a058b7219d2",
+      dir: "wasmtime-v50.0.2-x86_64-mingw",
+      exe: "wasmtime.exe",
+    },
   },
 };
 
-function assetForPlatform() {
+function assetForPlatform(version) {
   const key = `${process.platform}-${process.arch}`;
-  const asset = ASSETS[key];
+  const assets = ASSETS[version];
+  if (!assets) {
+    throw new Error(
+      `no pinned Wasmtime assets for version ${version}; ` +
+        `known versions: ${Object.keys(ASSETS).join(", ")}`
+    );
+  }
+  const asset = assets[key];
   if (!asset) {
     throw new Error(
-      `no pinned Wasmtime asset for ${key}; add one to tests/debug/lib/wasmtime.js ` +
-        `(version ${pinnedVersion} is pinned in tests/debug/wasmtime.version)`
+      `no pinned Wasmtime ${version} asset for ${key}; add one to ` +
+        `tests/debug/lib/wasmtime.js`
     );
   }
   return asset;
@@ -122,32 +169,35 @@ export function wasmtimeVersion(executable) {
 }
 
 /**
+ * Resolves the guest's Wasmtime. `version` defaults to the repo pin; a fixture
+ * that needs a feature the default consumer lacks names its own.
+ *
  * @returns {Promise<{executable: string, version: string, pinned: string}>}
  */
-export async function resolveWasmtime({ log = () => {} } = {}) {
-  const asset = assetForPlatform();
-  const installDir = path.join(cacheRoot, `wasmtime-${pinnedVersion}`);
+export async function resolveWasmtime({ version: wanted = pinnedVersion, log = () => {} } = {}) {
+  const asset = assetForPlatform(wanted);
+  const installDir = path.join(cacheRoot, `wasmtime-${wanted}`);
   const executable = path.join(installDir, asset.exe);
 
   if (fs.existsSync(executable)) {
     const version = wasmtimeVersion(executable);
-    if (!version.includes(pinnedVersion)) {
+    if (!version.includes(wanted)) {
       throw new Error(
-        `cached ${executable} reports "${version}", expected ${pinnedVersion}; ` +
+        `cached ${executable} reports "${version}", expected ${wanted}; ` +
           `delete ${installDir} to reinstall`
       );
     }
-    return { executable, version, pinned: pinnedVersion };
+    return { executable, version, pinned: wanted };
   }
 
-  log(`installing wasmtime ${pinnedVersion} (${asset.name})`);
+  log(`installing wasmtime ${wanted} (${asset.name})`);
   const downloads = path.join(cacheRoot, "downloads");
   fs.mkdirSync(downloads, { recursive: true });
   fs.mkdirSync(installDir, { recursive: true });
 
   const archive = path.join(downloads, asset.name);
   if (!fs.existsSync(archive)) {
-    const url = `https://github.com/bytecodealliance/wasmtime/releases/download/v${pinnedVersion}/${asset.name}`;
+    const url = `https://github.com/bytecodealliance/wasmtime/releases/download/v${wanted}/${asset.name}`;
     await download(url, archive);
   }
 
@@ -176,10 +226,10 @@ export async function resolveWasmtime({ log = () => {} } = {}) {
   }
 
   const version = wasmtimeVersion(executable);
-  if (!version.includes(pinnedVersion)) {
-    throw new Error(`installed wasmtime reports "${version}", expected ${pinnedVersion}`);
+  if (!version.includes(wanted)) {
+    throw new Error(`installed wasmtime reports "${version}", expected ${wanted}`);
   }
-  return { executable, version, pinned: pinnedVersion };
+  return { executable, version, pinned: wanted };
 }
 
 /** One line naming the version and path, for the runner's log. */

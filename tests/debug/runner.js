@@ -66,10 +66,22 @@ async function main() {
   const lldbBuild = lldbBuildString(lldbInfo.executable);
   console.log(`debug harness: ${describeLldb(lldbInfo, lldbBuild)}`);
 
-  const wasmtime = await resolveWasmtime({
-    log: (line) => console.log(`debug harness: ${line}`),
-  });
-  console.log(`debug harness: ${describeWasmtime(wasmtime)}`);
+  // A fixture may pin its own Wasmtime (expect.json `wasmtime.version`); the
+  // default is the repo pin. Resolved on first use so a fixture that never runs
+  // does not download a consumer it does not need.
+  const wasmtimeByVersion = new Map();
+  const wasmtimeFor = async (version) => {
+    const key = version ?? "(default)";
+    if (!wasmtimeByVersion.has(key)) {
+      const info = await resolveWasmtime({
+        version,
+        log: (line) => console.log(`debug harness: ${line}`),
+      });
+      console.log(`debug harness: ${describeWasmtime(info)}`);
+      wasmtimeByVersion.set(key, info);
+    }
+    return wasmtimeByVersion.get(key);
+  };
 
   let failures = 0;
   for (const name of names) {
@@ -81,6 +93,7 @@ async function main() {
       continue;
     }
 
+    const wasmtime = await wasmtimeFor(expect.wasmtime?.version);
     const workDir = path.join(here, ".cache", name);
     const { wasm } = compileFixture({
       sourcePath: path.join(fixtureDir, "game.ts"),
@@ -96,6 +109,11 @@ async function main() {
       symbolPath: fixtureDir,
       breakpoints: expect.breakpoints,
       workDir,
+      invoke: expect.invoke ?? "_start_game",
+      inferiorArgs: expect.wasmtime?.args ?? [],
+      // A fixture may assert only the stops it names: the driver then leaves
+      // the process stopped instead of continuing past the last one.
+      maxStops: expect.maxStops ?? 20,
     });
 
     for (const [index, stop] of observed.stops.entries()) {
