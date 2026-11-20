@@ -107,9 +107,21 @@ function compile(source, flags = BASE_FLAGS) {
   return { ok, output, bytes, wat };
 }
 
-/** Validates bytes with `wasm-tools` when available; otherwise says so. */
+/** Validates bytes with `wasm-tools` when available; otherwise Node validates. */
 function validate(bytes, features = ["threads"]) {
-  if (!wasmTools) return "skipped (wasm-tools not on PATH; Node validates on instantiate)";
+  if (!wasmTools) {
+    // **Compiling the module is validation** — this is the fallback the comment
+    // above promises. It returned `"skipped (…)"` before, and every caller
+    // compares against `"valid"`, so a CI runner without `wasm-tools` on PATH
+    // failed seven checks that were never about the output (measured: the
+    // Compiler matrix and Coverage jobs on ubuntu, node lts).
+    try {
+      new WebAssembly.Module(bytes);
+      return "valid";
+    } catch (error) {
+      return `invalid: ${error.message}`;
+    }
+  }
   try {
     execFileSync("wasm-tools", ["validate", "-", "--features", features.join(",")], {
       input: bytes, stdio: "pipe",
