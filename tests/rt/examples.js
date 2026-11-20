@@ -50,16 +50,16 @@ function one(tags, name) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. async-main: no threads, six suspensions, a value that needs all of them.
+// 1. async-main: no threads, seven suspensions, a value that needs all of them.
 // ---------------------------------------------------------------------------
 console.log("\n# async-main");
 {
   const { tags, out } = runExample("async-main");
   check("three loop iterations carried their local", tags.carried, [11, 12, 13]);
-  check("six suspensions", one(tags, "suspensions"), 6);
+  check("seven suspensions (one task created early, awaited last)", one(tags, "suspensions"), 7);
   check("the loop's total", one(tags, "total"), 33);
-  check("the chained final value", one(tags, "final"), 149);
-  check("main's status is the final value", one(tags, "status"), 149);
+  check("the chained final value", one(tags, "final"), 1150);
+  check("main's status is the final value", one(tags, "status"), 1150);
   check("there is no pool and no worker in the transcript", /pool-size|worker/.test(out), false);
 }
 
