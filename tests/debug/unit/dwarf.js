@@ -194,6 +194,19 @@ function u32le(value) {
 // (mod.rs:619-650): an in-range mapping becomes a line row, an out-of-range one
 // is dropped rather than remapped, and the line program records line 5 at
 // payload address 2.
+//
+// The sequence is asserted **byte for byte**, marker included:
+//
+//   00 05 02 <addr>        DW_LNE_set_address 2
+//   03 04                  DW_LNS_advance_line +4   (line 1 -> 5)
+//   0a                     DW_LNS_set_prologue_end  (the sequence's first row)
+//   01                     DW_LNS_copy
+//   00 01 01               DW_LNE_end_sequence
+//
+// The marker byte is part of the assertion rather than dropped from it: this
+// is the only unit test that pins the emitted line program's shape, and a fix
+// that adds an opcode without a test noticing is how the next reader concludes
+// it was never there.
 {
   let wasm = syntheticGuest();
   let start = codePayloadStart(wasm);
@@ -201,8 +214,8 @@ function u32le(value) {
   let out = synthesizeDwarf(wasm, sourceMap(mappings), "/tmp", "game.wasm");
 
   let line = customPayload(out, ".debug_line");
-  let seq = [0x00, 0x05, 0x02, 0x02, 0x00, 0x00, 0x00, 0x03, 0x04, 0x01, 0x00, 0x01, 0x01];
-  assert.ok(contains(line, seq), "line program records source line 5 at payload address 2");
+  let seq = [0x00, 0x05, 0x02, 0x02, 0x00, 0x00, 0x00, 0x03, 0x04, 0x0a, 0x01, 0x00, 0x01, 0x01];
+  assert.ok(contains(line, seq), "line program records source line 5 at payload address 2, prologue end marked");
 
   let bogus = [0x00, 0x05, 0x02, 0x64, 0x00, 0x00, 0x00]; // set_address 100
   assert.ok(!contains(line, bogus), "no sequence starts at the dropped address");
