@@ -512,10 +512,10 @@ function parseLineTable(bytes, unit, str) {
     if (name === "") break;
     let dirIndex;
     [dirIndex, at] = uleb(bytes, at);
-    let mtime;
-    [mtime, at] = uleb(bytes, at);
-    let length;
-    [length, at] = uleb(bytes, at);
+    // `mtime` and `length` are part of the entry and nothing here reads them;
+    // the cursor still has to pass over both.
+    at = uleb(bytes, at)[1];
+    at = uleb(bytes, at)[1];
     const directory = dirIndex === 0 ? "" : directories[dirIndex - 1] ?? "";
     files.push(directory && !name.includes("/") && !name.includes("\\") ? `${directory}/${name}` : name);
   }
@@ -625,10 +625,7 @@ function parseLineTable(bytes, unit, str) {
         // A standard opcode past the ones named above: skip the operand count
         // the header declared for it.
         const count = standardLengths[opcode] ?? 0;
-        for (let i = 0; i < count; ++i) {
-          let ignored;
-          [ignored, cursor] = uleb(bytes, cursor);
-        }
+        for (let i = 0; i < count; ++i) cursor = uleb(bytes, cursor)[1];
         break;
       }
     }
