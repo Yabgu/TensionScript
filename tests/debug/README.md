@@ -67,3 +67,53 @@ Optional keys, all defaulted for a plain fixture:
 compile the fixture, dump its `.debug_line`/`.debug_info` with
 `llvm-dwarfdump`, normalise paths. The DWARF is in the wasm on disk, so there is
 no host and no in-memory peek.
+
+## The line census, and its ratchet
+
+`tests/debug/census.js` counts the two ways a debug build can fail a source
+breakpoint, per file and in total:
+
+- **`unreachable_lines`** — a line the DWARF *mentions* but gives no address
+  range (every row for it has zero span). The "breakpoint pending forever" class.
+- **`unpaired_addresses`** — a line-table address inside no compile unit's range.
+  The `unable to resolve a line table file address … back to a compile unit`
+  class.
+
+It reads `.debug_info`, `.debug_abbrev`, `.debug_line` and `.debug_ranges` from
+the module itself, never `.wasm.map` — the debugger does not open a source map,
+so a manifest built from one would measure the compiler against its own opinion.
+Output is deterministic (files by path, lines by number, addresses by value), so
+the manifest can be committed and diffed.
+
+    node tests/debug/census.js <module.wasm | dir> ...            # manifest out
+    node tests/debug/census.js --out <file> <module...>           # write it
+    node tests/debug/census.js --check <file> <module...>         # ratchet
+    npm run test:debug:census                                     # the gate
+
+`census-manifest.txt` is the committed manifest, and it is measured against the
+**unpatched** compiler: 24 modules, `unreachable_lines 153`,
+`unpaired_addresses 0`. The artifacts are the ones the engine repository's
+conformance matrix builds (`scripts/build-test-programs.mjs --debug` in the
+Tension checkout), so the gate needs that tree:
+
+    TENSION_DEBUG_ARTIFACTS=<tension>/tension-core/tests/programs/build/debug \
+      npm run test:debug:census
+
+No artifacts and no `TENSION_DEBUG_ARTIFACTS` is an **error**, not a skip: a
+census that silently measures nothing is the hole it exists to find.
+
+### The ratchet rule
+
+**Counts may improve freely. Any line that worsens needs a one-line reason in
+the commit that lands it.**
+
+Concretely, `--check` fails on: a line that became unreachable, a line whose
+byte span shrank, a new unreachable line, an address that became unpaired, or a
+total that went up. Improvements are printed and allowed. So a compiler change
+that trades one hole for another cannot land quietly, and one that closes holes
+cannot be stalled by a stale manifest — regenerate with `--out` and read the
+diff.
+
+The reason goes in the commit message, one line per worsened entry, because the
+diff shows *which* entries moved and only the author knows *why*. "Regenerated"
+is not a reason.

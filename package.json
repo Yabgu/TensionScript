@@ -114,6 +114,7 @@
     "test:atomics": "node --enable-source-maps tests/rt/atomics.js",
     "test:debug": "node tests/debug/runner.js --check",
     "test:debug:unit": "node --enable-source-maps tests/debug/unit/dwarf.js && node --enable-source-maps tests/debug/unit/library-path.js",
+    "test:debug:census": "node --enable-source-maps tests/debug/census.js --check tests/debug/census-manifest.txt",
     "asbuild": "npm run asbuild:debug && npm run asbuild:release",
     "asbuild:debug": "node bin/tensionscript.js --config src/asconfig.json --target debug",
     "asbuild:release": "node bin/tensionscript.js --config src/asconfig.json --target release",
