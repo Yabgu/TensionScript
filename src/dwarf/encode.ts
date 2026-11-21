@@ -179,9 +179,16 @@ export function encodeDebugLine(
   prologue.push(-5); // line_base
   prologue.push(14); // line_range
   prologue.push(13); // opcode_base
-  // standard_opcode_lengths for opcodes 1..12. Push them one at a time:
-  // AssemblyScript's Uint8Array constructor takes a length, not an array.
-  let opcodeLengths = [0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0];
+  // `standard_opcode_lengths` for opcodes 1..12 — the *operand* count of each
+  // standard opcode, DWARF4 §6.2.5.2. A parser that meets an opcode it does not
+  // know skips it using this table, so a wrong entry desynchronises every reader
+  // that trusts it: `0x09` (DW_LNS_fixed_advance_pc) takes one operand and was
+  // declared zero, `0x0a` (DW_LNS_set_prologue_end) takes none and was declared
+  // one, `0x0c` (DW_LNS_set_isa) takes one and was declared zero. We emit `0x0a`
+  // ourselves now, which makes the table load-bearing rather than merely wrong.
+  // Push them one at a time: AssemblyScript's Uint8Array constructor takes a
+  // length, not an array.
+  let opcodeLengths = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1];
   for (let i = 0; i < opcodeLengths.length; i++) prologue.push(opcodeLengths[i]);
   prologue.cstr(compDir);
   prologue.push(0); // end of include_directories
@@ -226,6 +233,20 @@ export function encodeDebugLine(
     let col: u32 = 0;
     // The prologue belongs to the function's first statement, so give it that
     // statement's location instead of leaving it unmapped.
+    //
+    // **Every sequence is marked as ending its prologue, exactly once**, on the
+    // first row it emits, and *whether* it is marked depends on nothing. Where
+    // it lands depends on the body: on the leading-edge row when the first
+    // mapped row is past that edge, on the first mapped row when they coincide.
+    //
+    // The previous form put the marker only inside the `head.addr > seqStart`
+    // branch, so a sequence whose first mapped row sits exactly at the body's
+    // first byte was never marked at all — dead code in the case it was written
+    // for. Marking the *first mapped row* instead of the leading edge was also
+    // measured (DL6 variant 2) and is worse: 66 pass / 16 no-source, against
+    // 71 / 11 for this placement, losing `main_policy#1`, `fallback_loop#1`,
+    // `main_step_replaced#1`, `schedule_order#9` and `spawn_refusals#1`.
+    let marked = false;
     let head = rows[first];
     if (head.addr > seqStart) {
       if (head.file + 1 != file) {
@@ -243,12 +264,16 @@ export function encodeDebugLine(
         prog.uleb(head.col);
         col = head.col;
       }
-      // Mark this row as the end of the prologue: without it a debugger treats
-      // the first entry of a sequence as the function's prologue and will not
-      // place a line breakpoint there, leaving only the later rows for that
-      // statement - which is where the unattributable addresses are.
+      // The sequence starts before its first source row, so this leading-edge
+      // row is where the function is entered: mark it as the end of the
+      // prologue. Without a prologue_end a debugger treats the whole run from
+      // the sequence start as prologue and will not place a line breakpoint in
+      // it, sliding the request forward to the next row naming a different line
+      // (W3's measurement, and DL6's 6 `wrong-line` cases on the unpatched
+      // compiler are all exactly one line forward).
       prog.push(10); // DW_LNS_set_prologue_end
       prog.push(1); // DW_LNS_copy
+      marked = true;
     }
     for (let i = first; i < last; i++) {
       let row = rows[i];
@@ -271,6 +296,13 @@ export function encodeDebugLine(
         prog.push(5); // DW_LNS_set_column
         prog.uleb(row.col);
         col = row.col;
+      }
+      if (!marked) {
+        // The first mapped row is the body's first byte, so there is no leading
+        // edge to mark separately: this row is the sequence's first row, and it
+        // carries the marker. Every sequence reaches one of these two branches.
+        prog.push(10); // DW_LNS_set_prologue_end
+        marked = true;
       }
       prog.push(1); // DW_LNS_copy
     }
