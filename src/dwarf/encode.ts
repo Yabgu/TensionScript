@@ -207,7 +207,14 @@ export function encodeDebugLine(
     let last = partitionPoint(rows, end);
     if (first >= last) continue;
 
-    let seqStart = rows[first].addr;
+    // The sequence starts at the body, not at the first mapped row. wasmtime
+    // gives a wasm operator a source location by looking up the row covering
+    // its offset; an operator before the first row gets none, and an operator
+    // without a source location has no entry in cranelift's instruction map -
+    // which is what both the debugger's line table and the unit's range list
+    // are built from. The symptom is a breakpoint that binds to an address
+    // lldb cannot attribute to a compile unit.
+    let seqStart = start;
     prog.push(0); // extended opcode
     prog.push(5); // length: opcode + 4-byte address
     prog.push(2); // DW_LNE_set_address
@@ -217,6 +224,32 @@ export function encodeDebugLine(
     let line: u32 = 1;
     let file: u32 = 1;
     let col: u32 = 0;
+    // The prologue belongs to the function's first statement, so give it that
+    // statement's location instead of leaving it unmapped.
+    let head = rows[first];
+    if (head.addr > seqStart) {
+      if (head.file + 1 != file) {
+        prog.push(4); // DW_LNS_set_file
+        prog.uleb(head.file + 1);
+        file = head.file + 1;
+      }
+      if (head.line != line) {
+        prog.push(3); // DW_LNS_advance_line
+        prog.sleb(<i32>head.line - <i32>line);
+        line = head.line;
+      }
+      if (head.col != col) {
+        prog.push(5); // DW_LNS_set_column
+        prog.uleb(head.col);
+        col = head.col;
+      }
+      // Mark this row as the end of the prologue: without it a debugger treats
+      // the first entry of a sequence as the function's prologue and will not
+      // place a line breakpoint there, leaving only the later rows for that
+      // statement - which is where the unattributable addresses are.
+      prog.push(10); // DW_LNS_set_prologue_end
+      prog.push(1); // DW_LNS_copy
+    }
     for (let i = first; i < last; i++) {
       let row = rows[i];
       if (row.addr != pc) {
