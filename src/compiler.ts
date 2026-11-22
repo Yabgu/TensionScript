@@ -1716,15 +1716,35 @@ export class Compiler extends DiagnosticEmitter {
           module.addFunctionExport(instance.internalName, name);
         }
       }
-      // **Only with the async shell.** The entries operate on `$starts` and
-      // `$~asyncCont`, and a shared program that merely imports `SlotRing` has
-      // neither: exporting them would pull the shell into a program that has no
-      // continuation table to serve from. `--sharedMemory` alone still decides
-      // whether a program *with* a shell gets them.
-      if (this.asyncShellPrepared) {
+      // **Whatever shell the program has, or none at all** — with one measured
+      // exception. Threads are a build configuration: `--sharedMemory` says this
+      // module is instantiated more than once over one memory, and that is the
+      // condition for a host to drive the pool. Keying the whole surface on the
+      // async shell made a promise build — and any await-free program —
+      // invisible to the host, which then answered `__startThread` without
+      // carving anything, and the guest aborted at its first arena assertion
+      // (`itcms.ts:128`).
+      //
+      // `__workerMain` is the exception, and it is not a policy choice: its body
+      // is `__serveOne` / `__drainInbox` / `Executor.step` / `__lastStatus`, and
+      // the last three reach `__serveCont` and `__resumeTask` — the *served body*
+      // path, which is the suspending shell's by construction (a continuation
+      // cannot leave the store that made it). Emitting it without that shell is
+      // an AS100 compile error, measured, not a run-time shape. So the worker
+      // half is emitted where it can be compiled and a promise build gets the
+      // carveable half — which is what makes `__controlBase`, the globals and the
+      // arena bounds answerable, and makes the missing worker a host sentence
+      // ("the module exports no `__workerMain`") instead of a silent no-op.
+      //
+      // `program.lookup` still decides each name, so a program that never pulls
+      // in `~lib/thread` exports nothing here and every existing artifact is
+      // unchanged (`docs/thread-abi.md` §5).
+      {
         for (let i = 0, k = threadFunctions.length; i < k; ++i) {
           let name = threadFunctions[i];
-          if (program.lookup(name) == null) continue; // no async shell, no threads
+          if (program.lookup(name) == null) continue; // program has no thread surface
+          // The served-body entry point needs the suspending shell to compile.
+          if (name == "__workerMain" && !this.asyncShellSuspends) continue;
           let instance = program.requireFunction(name);
           if (this.compileFunction(instance) && !module.hasExport(name)) {
             module.addFunctionExport(instance.internalName, name);
