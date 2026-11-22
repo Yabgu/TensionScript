@@ -606,3 +606,29 @@ export function __taskBindFamily(class_: i32, family: i32): void {
   }
   map.set(class_, family);
 }
+
+/**
+ * Resume everything the guest has made runnable, to quiescence.
+ *
+ * **The Promise shell's driver.** A program built without `--enable
+ * stack-switching` gets no continuation and no core loop; `main` is a state
+ * machine, its awaits park against **guest** records (class 0, so `parkState`
+ * posts nothing to the host), and a completion queues the waiter on `ready`
+ * from `wake`. In a session guest the frame loop drains that list, and a
+ * host-driven guest reaches it from `__taskResume`; a plain guest has neither,
+ * which is why the compiler calls this once from `__start`, after `main` has
+ * returned its handle.
+ *
+ * **Reached by internal name, not exported**, exactly as `~lib/async/__coreloop`
+ * is: the compiler is the only caller that should exist, and an export would be
+ * a second entry a source could reach.
+ *
+ * **Appended at the end of the file on purpose.** The line table records line
+ * numbers, so a function inserted before existing code moves every later line in
+ * this file by its own length — and this file has line rows in every guest that
+ * references it. Appending keeps a program that does not use the driver
+ * byte-identical.
+ */
+function __taskDrainReady(): void {
+  drainReady();
+}

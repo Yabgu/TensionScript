@@ -22,7 +22,7 @@
  */
 
 import { Program } from "./program";
-import { Feature } from "./common";
+import { CommonFlags, Feature } from "./common";
 import { ClosureLowerTransform } from "./closure/lower";
 import { LazyAwaitTransform } from "./lazy/lower";
 import { AsyncLowerTransform } from "./async/lower";
@@ -90,9 +90,37 @@ import {
  */
 function latchAsyncUsage(program: Program): void {
   let sources = program.sources;
+  // **The entry first**, and in its own pass: whether `main` itself is `async`
+  // decides whether a shell exists at all (`shouldEmitAsyncShell`), while the
+  // scan below stops as soon as it has seen an async declaration and an await
+  // — which may be before it reaches `main`. A module exporting a synchronous
+  // `main` that contains an async helper is not a program a shell should start.
+  for (let i = 0, k = sources.length; i < k; ++i) {
+    latchAsyncEntry(sources[i].statements, program);
+  }
   for (let i = 0, k = sources.length; i < k; ++i) {
     scanStatements(sources[i].statements, program);
     if (program.hasAsync && program.hasAwait) return;
+  }
+}
+
+/**
+ * Top-level declarations only: `export async function main` is the entry a
+ * shell can start.
+ *
+ * Exported is part of the test because `mainFunction` is set from the *export*
+ * table (`compiler.ts:2247`) — a nested or unexported `async function main` is
+ * not an entry and must not make a sync `main` look startable.
+ */
+function latchAsyncEntry(statements: Statement[], program: Program): void {
+  for (let i = 0, k = statements.length; i < k; ++i) {
+    let statement = statements[i];
+    if (statement.kind != NodeKind.FunctionDeclaration) continue;
+    let declaration = <FunctionDeclaration>statement;
+    if (!declaration.isAsync) continue;
+    if (!declaration.is(CommonFlags.Export)) continue;
+    if (declaration.name.text != "main") continue;
+    program.hasAsyncMain = true;
   }
 }
 

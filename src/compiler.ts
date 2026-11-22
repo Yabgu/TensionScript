@@ -723,6 +723,18 @@ export class Compiler extends DiagnosticEmitter {
   asyncShellPrepared: bool = false;
   /** Whether the surviving shell is A2's (suspension) rather than A1's. */
   asyncShellSuspends: bool = false;
+  /**
+   * Whether the Promise backend's shell was prepared — the third shell, for a
+   * program with an `await` and no stack switching.
+   *
+   * Deliberately **not** folded into {@link asyncShellPrepared}: that flag means
+   * "a continuation shell exists", and three things read it — the shared-memory
+   * thread entries, `emitStartEntry`'s status word, and the A1/A2 `__start`
+   * rewrite. The Promise shell has no continuation types, no tags, no table and
+   * no status global, so setting that flag would make the compiler emit
+   * references to globals this shell never declares.
+   */
+  promiseShellPrepared: bool = false;
   /** Whether `main$start` was installed (false after a named shell refusal). */
   asyncShellStartReady: bool = false;
   /** The `f$start` functions `__installCont` has installed, for the elem segment. */
@@ -884,21 +896,87 @@ export class Compiler extends DiagnosticEmitter {
    * - **A may-suspend declaration exists.** That is `program.hasAsync`, latched
    *   before the lowering clears `isAsync`. A program that declares no `async`
    *   function keeps emitting exactly the bytes it emitted before this round.
-   * - **It contains no `await`.** A1 is the shell without suspension; a program
-   *   with an `await` belongs to Backend A and must stay byte-identical (gate
-   *   of the round). P2 removes this condition together with Backend A.
-   * - **It exports `main`.** `main` is what is resumed; a library module with
-   *   an async function but no entry point has no continuation to start.
+   * - **It exports `main`.** `main` is what is started; a library module with an
+   *   async function but no entry point has nothing to start.
+   * - **An `await` decides *which* shell**, not whether there is one. With stack
+   *   switching the shell is A2's (a continuation that can suspend); without it
+   *   the shell is the Promise one, which starts `main` and drains the guest
+   *   ready queue.
+   *
+   * **Before AS2 the second condition was the wrong way round for the Promise
+   * backend.** It read "and it contains no `await`", so on a build without
+   * stack switching `hasAwait` made the whole expression false and *no* shell
+   * was emitted — `main` had zero call sites and the program exited 0 having
+   * printed nothing. Because `hasAwait` is latched from every parsed source
+   * (`transforms.ts`), one unreachable `await` in an imported library file was
+   * enough to do it. Measured: `game.ts`, and the framework/io probe pair.
    */
   private shouldEmitAsyncShell(): bool {
     let program = this.program;
-    // A2 is opt-in: continuations are the stack-switching feature, so a
-    // program that uses `await` today keeps Backend A unless it asks for them.
+    if (this.mainFunction == null) return false;
     if (program.hasAwait) {
-      return this.asyncShellSuspends && this.mainFunction != null;
+      // A2 when continuations are available, the Promise driver when they are
+      // not — but **only for an async entry**. A synchronous `main` in a
+      // program that merely contains an `await` somewhere (an async helper, or
+      // an imported library file) gets no shell, exactly as before: the shell
+      // is a starter for the entry, and there was never one for a sync `main`.
+      return program.hasAsyncMain;
     }
     if (!program.hasAsync) return false;
-    return this.mainFunction != null;
+    return true;
+  }
+
+  /**
+   * The Promise backend's shell: start `main`, then drain the ready queue.
+   *
+   * `main` under Backend A is a state machine — its entry allocates the state,
+   * registers the record and runs the synchronous prefix, returning the task
+   * handle. Every `await` inside it that cannot fall through parks against a
+   * **guest** record, and when that callee completes in its own entry `wake`
+   * queues the waiter on the runtime's `ready` list. Nothing in a plain guest
+   * drains that list, so the shell does it once, after `main` returns.
+   *
+   * Why there is no loop over "is the handle settled": a guest await either
+   * falls through (callee settled in its own entry) or parks on a completion
+   * only the host can post. `drainReady` already loops to quiescence over the
+   * first kind; the second kind has no producer in a plain guest and stopping
+   * is the honest outcome — the alternative is a spin.
+   */
+  private preparePromiseShell(): void {
+    let program = this.program;
+    let main = assert(this.mainFunction);
+    if (main.signature.parameterTypes.length != 0) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        main.declaration.name.range,
+        "an async program whose main takes parameters (the promise shell starts main with no arguments)"
+      );
+      return;
+    }
+    this.promiseShellPrepared = true;
+    // Compiled here so the call `emitPromiseShellStart` appends is what makes
+    // the driver reachable, exactly as the A1 shell's `__coreloop` call does.
+    let drain = program.requireFunction(BuiltinNames.taskDrainReady);
+    this.compileFunction(drain);
+  }
+
+  /**
+   * Appends the Promise shell's two statements to `__start`.
+   *
+   * The handle `main` returns is dropped: its result is not what the shell is
+   * for, and a program that wants it reads `__asyncStatus`-shaped surfaces it
+   * declares itself. A void `main` is called for effect.
+   */
+  private emitPromiseShellStart(body: ExpressionRef[]): void {
+    let module = this.module;
+    let main = assert(this.mainFunction);
+    let drain = this.program.requireFunction(BuiltinNames.taskDrainReady);
+    let returnType = main.signature.returnType;
+    body.push(returnType == Type.void
+      ? module.call(main.internalName, [], TypeRef.None)
+      : module.drop(module.call(main.internalName, [], returnType.toRef()))
+    );
+    body.push(module.call(drain.internalName, [], TypeRef.None));
   }
 
   /**
@@ -913,6 +991,13 @@ export class Compiler extends DiagnosticEmitter {
   private prepareAsyncShell(): void {
     if (this.asyncShellSuspends) {
       this.prepareAsyncStackShell();
+      return;
+    }
+    // An `await` with no stack switching: the Promise backend's shell. There is
+    // nothing to declare — no continuation type, no tag, no table — so this is
+    // preparation only in the sense that it resolves and compiles the driver.
+    if (this.program.hasAwait) {
+      this.preparePromiseShell();
       return;
     }
     let module = this.module;
@@ -1835,6 +1920,8 @@ export class Compiler extends DiagnosticEmitter {
       } else {
         this.emitAsyncShellStart(startFunctionBody);
       }
+    } else if (this.promiseShellPrepared) {
+      this.emitPromiseShellStart(startFunctionBody);
     }
 
     // **A shared-memory module has no start section.** The host instantiates

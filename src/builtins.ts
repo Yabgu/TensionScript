@@ -762,6 +762,10 @@ export namespace BuiltinNames {
   export const asyncCoreloop = "~lib/async/__coreloop";
   export const asyncCoreloopAwait = "~lib/async/__coreloopAwait";
   export const asyncPump = "~lib/async/__asyncPump";
+  // std/task-rt.ts — the Promise backend's driver: drain the guest ready queue
+  // to quiescence. Not exported from the library; the shell's `__start` is the
+  // only caller.
+  export const taskDrainReady = "~lib/task-rt/__taskDrainReady";
   export const asyncResumeTask = "~lib/task-stack/__resumeTask";
   export const asyncLastStatus = "~lib/task-stack/__lastStatus";
   export const asyncInstallCont = "~lib/async-stack/__installCont";

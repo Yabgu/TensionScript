@@ -536,6 +536,21 @@ export class Program extends DiagnosticEmitter {
   hasAwait: bool = false;
 
   /**
+   * Whether the program's **entry** is declared `async` — latched at the same
+   * point as {@link hasAsync}, from a top-level `export async function main`.
+   *
+   * This is the flag that decides whether a shell exists at all, and it is not
+   * the same question as {@link hasAsync}: a module can export a synchronous
+   * `main` and still contain an async helper (or an `await` in an imported
+   * library file). Such a program must gain nothing — round AS2's promise shell
+   * is a *starter* for an async entry, and starting a sync `main` would run it
+   * in a shell that pre-AS2 programs never had. Measured: the two
+   * `async-closure*` compiler fixtures, whose `main` is sync, changed bytes
+   * when the gate was `hasAwait` alone.
+   */
+  hasAsyncMain: bool = false;
+
+  /**
    * The synthesized `$spawnStart` declarations the stackful transform emitted —
    * one per parameterless may-suspend function (`docs/task-design.md` §8.5's
    * "compiler-synthesized start", narrowed to what Gate 3 needs). Declarations,
