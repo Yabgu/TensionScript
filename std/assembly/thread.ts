@@ -1795,3 +1795,106 @@ export function __workerArenaSize(id: i32): i32 {
   let sig = rec + (<usize>(2 * ringWords(capacity)) << 2);
   return atomicLoad<i32>(sig + 8);
 }
+
+// ── the plain worker: a worker that runs one entry, no continuations ────────
+//
+// Appended rather than inserted: this file's line numbers are in the released
+// artifacts' DWARF, and a new line above an existing body moves every
+// `DW_LNS_advance_line` after it.
+
+/**
+ * `__callStart(funcIndex) -> i32` — call `$starts[funcIndex]` as a plain call.
+ *
+ * The receiving half of a spawn record for a worker that has no continuation
+ * table to install into. `$starts` holds canonical `() -> i32` functions
+ * (`docs/thread-abi.md` §5.1), so this is `call_indirect` on that table and
+ * nothing else: no slot is allocated, no reference is created, nothing crosses
+ * but the index.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function __callStart(funcIndex: i32): i32;
+
+/**
+ * `__workerMainPlain(id) -> i32` — a worker's whole life, without continuations.
+ *
+ * Exported **as `__workerMain`** when the program has no suspending async shell
+ * (`src/compiler.ts`, the thread-surface export loop); the host contract is
+ * unchanged because the host only knows the name. The served body stays exactly
+ * where it is, for the shell that can compile it.
+ *
+ * What it does: the same block discovery, the same layout globals, the same
+ * arena check, then the spawn record's entry and argument, one call, and the
+ * state word. What it does **not** do, and why that is correct here:
+ *
+ * - **no `Executor`, no wake sink, no inbox loop.** Those move *tasks* between
+ *   stores, and a task is a continuation. A build that cannot make one has
+ *   nothing to serve, so a worker that drained an inbox would drain nothing.
+ * - **no `__setSelfExecutor`.** That is the store-local id `__parkOn` routes by;
+ *   a body that cannot park never reads it. `selfExec` is still set, so
+ *   `__selfExecutor()` answers the worker's own id.
+ * - **one entry, then exit.** There is no "wait for more work" state that could
+ *   ever be satisfied, and blocking on it would hang `__threadJoin`.
+ *
+ * The status is the entry's own answer, or `0` when the record carried `-1`
+ * (a worker started with nothing to run). The exit codes the host and
+ * `__threadJoin` understand are unchanged, so no new value is introduced.
+ */
+// @ts-ignore: decorator
+@global @unsafe
+export function __workerMainPlain(id: i32): i32 {
+  if (!SHARED) return -1;
+  let here = controlBlockBase();
+  if (here == 0) return -2;
+  let total = atomicLoad<i32>(here + (<usize>H_TOTAL << 2));
+  if (id <= 0 || id >= total) return -1;
+
+  __controlBase = <i32>here;
+  __controlStride = atomicLoad<i32>(here + (<usize>H_STRIDE << 2));
+  __ringCapacity = atomicLoad<i32>(here + (<usize>H_CAPACITY << 2));
+  __executorTotal = total;
+  requestCount = atomicLoad<i32>(here + (<usize>H_REQUESTS << 2));
+  requestBase = here + HEADER_BYTES + <usize>total * <usize>__controlStride;
+  freeRingBase = requestBase + <usize>(requestCount * REQUEST_WORDS) * 4;
+  selfExec = id;
+
+  let rec = recordBase(id);
+  let sig = signalBase(rec);
+  // The host called `__arenaInit` before this, exactly as for main and for the
+  // served worker: this frame's slots are addressed off `__stack_pointer`.
+  let arenaBase = <usize>atomicLoad<i32>(sig + 4);
+  let arenaSize = <usize>atomicLoad<i32>(sig + 8);
+  let heapBase = __arenaHeapBase();
+  if (heapBase <= arenaBase || heapBase >= arenaBase + arenaSize) return -3;
+
+  let entry = atomicLoad<i32>(sig + 16);
+  let status: i32 = 0;
+  if (entry >= 0) {
+    // What `__serveOne` records before it resumes, so the entry reads its one
+    // `i32` through `__serveArg()`. Key and origin are the request's, and a
+    // plain worker has no request: they stay `0`.
+    servingArg = atomicLoad<i32>(sig + 20);
+    servingKey = 0;
+    servingOrigin = 0;
+    status = __callStart(entry);
+  }
+
+  atomicStore<i32>(sig + 12, 2);
+  atomicNotify(sig + 12, -1);
+  atomicNotify(sig, -1);
+  return status;
+}
+
+/**
+ * The spawn record's argument word, for a worker body that has no task.
+ *
+ * `__serveArg()` answers the *task's* argument first, and a task is a
+ * continuation — so on a build that cannot make one it does not compile.
+ * `__workerMainPlain` records the record's word in `servingArg` before it calls
+ * the entry, and this is the reader for exactly that path: the one `i32` a
+ * worker's entry receives, carried in the record rather than in a module global
+ * (a worker's globals are zero, because `__start` never ran in its store).
+ */
+export function __workerArg(): i32 {
+  return servingArg;
+}

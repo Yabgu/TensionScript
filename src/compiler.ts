@@ -737,6 +737,14 @@ export class Compiler extends DiagnosticEmitter {
   promiseShellPrepared: bool = false;
   /** Whether `main$start` was installed (false after a named shell refusal). */
   asyncShellStartReady: bool = false;
+  /**
+   * Whether a worker body was exported under the host's name (`__workerMain`).
+   *
+   * It decides one thing: a non-suspending build emits `$starts` because the
+   * plain worker's dispatch is `call_indirect` on it, and a table has to exist
+   * for the instruction to type-check even on a run that never spawns.
+   */
+  workerExported: bool = false;
   /** The `f$start` functions `__installCont` has installed, for the elem segment. */
   asyncStartFunctions: Set<string> = new Set<string>();
   /**
@@ -824,6 +832,14 @@ export class Compiler extends DiagnosticEmitter {
     // (`setGcClassesEnabled` already ran, in `Program`'s constructor — before any
     // type was built. Setting it twice would be harmless and misleading.)
     if (options.wasmGc) options.features |= Feature.GC | Feature.ReferenceTypes;
+
+    // **A second table is a reference-types module.** A `--sharedMemory` build
+    // that exports a worker carries `$starts` beside the function table, and
+    // Binaryen's validator refuses the second one in MVP
+    // (`Only 1 table definition allowed in MVP`). Enabling stack switching
+    // already implies this (`setFeature`); the plain worker reaches the same
+    // shape without it, so the dependency is stated where the mask is built.
+    if (options.sharedMemory) options.features |= Feature.ReferenceTypes;
 
     if (options.memoryBase) {
       this.memoryOffset = i64_new(options.memoryBase);
@@ -1540,7 +1556,24 @@ export class Compiler extends DiagnosticEmitter {
    * merely declared for `ref.func`'s sake.
    */
   private emitStartsTable(): void {
-    let names = Set_values(this.asyncStartFunctions);
+    let seeds = Set_values(this.asyncStartFunctions);
+    let names = new Array<string>(seeds.length);
+    for (let i = 0, k = seeds.length; i < k; ++i) unchecked(names[i] = unchecked(seeds[i]));
+    // **Every entry `__spawnIndexOf` named, appended after the shell's own.**
+    // A named entry that is not already in the set (a plain function is never
+    // installed as a continuation) has no index otherwise — that is what made
+    // `__spawnIndexOf` answer `-1`. Appending, not inserting: the suspending
+    // shell's entries keep the indices it wrote down, so a served request still
+    // reads the continuation it asked for.
+    let helpers = this.spawnIndexTargets;
+    for (let _names = Map_keys(helpers), i = 0, k = _names.length; i < k; ++i) {
+      let target = <string>unchecked(helpers.get(_names[i]));
+      let known = false;
+      for (let j = 0, n = names.length; j < n; ++j) {
+        if (unchecked(names[j]) == target) { known = true; break; }
+      }
+      if (!known) names.push(target);
+    }
     let count = names.length;
     let list = new Array<string>(count);
     for (let i = 0; i < count; ++i) unchecked(list[i] = unchecked(names[i]));
@@ -1555,7 +1588,6 @@ export class Compiler extends DiagnosticEmitter {
     // index the entry holds **now that the table is final**. A plain function
     // per entry, not a global: a worker's copy of a module global is zero (its
     // `$start` never ran), while a constant in code is the same in every store.
-    let helpers = this.spawnIndexTargets;
     for (let _names = Map_keys(helpers), i = 0, k = _names.length; i < k; ++i) {
       let helper = _names[i];
       let target = unchecked(helpers.get(helper));
@@ -1743,12 +1775,20 @@ export class Compiler extends DiagnosticEmitter {
         for (let i = 0, k = threadFunctions.length; i < k; ++i) {
           let name = threadFunctions[i];
           if (program.lookup(name) == null) continue; // program has no thread surface
-          // The served-body entry point needs the suspending shell to compile.
-          if (name == "__workerMain" && !this.asyncShellSuspends) continue;
-          let instance = program.requireFunction(name);
+          // **Two worker bodies, one export name.** With a suspending shell the
+          // served body is the worker; without one it cannot be compiled at all
+          // (its callees reach `__serveCont` / `__resumeTask`), so the plain body
+          // takes the name instead. The host knows only `__workerMain`.
+          let impl = name;
+          if (name == "__workerMain" && !this.asyncShellSuspends) {
+            impl = "__workerMainPlain";
+            if (program.lookup(impl) == null) continue;
+          }
+          let instance = program.requireFunction(impl);
           if (this.compileFunction(instance) && !module.hasExport(name)) {
             module.addFunctionExport(instance.internalName, name);
           }
+          if (name == "__workerMain") this.workerExported = true;
         }
         for (let i = 0, k = threadGlobals.length; i < k; ++i) {
           let name = threadGlobals[i];
@@ -1942,6 +1982,16 @@ export class Compiler extends DiagnosticEmitter {
       }
     } else if (this.promiseShellPrepared) {
       this.emitPromiseShellStart(startFunctionBody);
+    }
+
+    // **The spawn table, for a build with no continuation shell.** The plain
+    // worker dispatches through `$starts` with `call_indirect`, so the table must
+    // exist whenever a worker body was exported — even one built from a program
+    // that registers no entry yet, because the instruction's type is checked
+    // before any run. A suspending build already emitted it above, in its own
+    // order; this branch is the non-suspending half and touches nothing there.
+    if (!this.asyncShellSuspends && this.workerExported) {
+      this.emitStartsTable();
     }
 
     // **A shared-memory module has no start section.** The host instantiates

@@ -772,6 +772,8 @@ export namespace BuiltinNames {
   export const asyncSuspendAwait = "~lib/async-stack/__suspendAwait";
   export const asyncSuspendParked = "~lib/task-stack/__suspendParked";
   export const asyncSpawnIndexOf = "~lib/task-stack/__spawnIndexOf";
+  // std/thread.ts — the plain worker's dispatch: `$starts[i]` as a plain call.
+  export const threadCallStart = "~lib/thread/__callStart";
   export const asyncServeCont = "~lib/task-stack/__serveCont";
   export const asyncCurrentSlot = "~lib/task-stack/__currentSlot";
 
@@ -12420,15 +12422,34 @@ builtinFunctions.set(BuiltinNames.asyncSuspendParked, builtin_async_suspendParke
 // that helper's body — `i32.const <index>` — once the table is final. The
 // constant makes the field the same in every store: the table belongs to the
 // module, not to an instance.
+//
+// **Any shared build, with or without a shell.** The value is a `$starts` index,
+// and naming a cross-store entry is exactly what a worker needs; a plain worker
+// (`__workerMainPlain`) calls it with `call_indirect` instead of `cont.new`. The
+// target is **added** to the table when it is not already in it — a plain
+// function is never installed as a continuation, so before this it answered `-1`
+// for every function the served path had not already reached.
 function builtin_async_spawnIndexOf(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
   compiler.currentType = Type.i32;
   if (
     checkTypeAbsent(ctx) |
-    checkArgsRequired(ctx, 1) |
-    checkStackIntrinsic(ctx, ctx.prototype.internalName)
+    checkArgsRequired(ctx, 1)
   ) return module.unreachable();
+  // A `$starts` table has to exist for the index to mean anything: the
+  // suspending shell always emits one, and a shared build emits one for its
+  // worker (`emitStartsTable`, the non-suspending half). A GC build gets no
+  // thread surface, so it gets no table either. Anything else has nothing the
+  // index could name.
+  if (!compiler.asyncShellSuspends && !(compiler.options.sharedMemory && !compiler.gcActive)) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.range,
+      ctx.prototype.internalName + " requires a `$starts` table (a suspending shell, or --sharedMemory without --wasmGc)"
+    );
+    return module.unreachable();
+  }
 
   let start = ctx.operands[0];
   if (start.kind != NodeKind.Identifier) {
@@ -12467,6 +12488,45 @@ function builtin_async_spawnIndexOf(ctx: BuiltinFunctionContext): ExpressionRef 
   return module.call(helper, [], TypeRef.I32);
 }
 builtinFunctions.set(BuiltinNames.asyncSpawnIndexOf, builtin_async_spawnIndexOf);
+
+// __callStart(funcIndex: i32) -> i32
+//
+// Call `$starts[funcIndex]` **as a plain function** — no continuation, no slot,
+// no resume. The receiving half of a spawn record for a worker that has no
+// continuation table to install into (`__workerMainPlain`): the record carried an
+// index, and this is the one instruction that turns it into a call.
+//
+// `$starts` entries are declared canonical `() -> i32` (`docs/thread-abi.md`
+// §5.1), so the call type is that, and a table entry of another shape traps here
+// rather than in a resume — which is the loud failure an author wants.
+function builtin_thread_callStart(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.i32;
+  if (
+    checkTypeAbsent(ctx) |
+    checkArgsRequired(ctx, 1)
+  ) return module.unreachable();
+  if (ctx.reportNode.range.source.internalPath != "~lib/thread") {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.range,
+      ctx.prototype.internalName + " is internal to the thread runtime (std/assembly/thread.ts)"
+    );
+    return module.unreachable();
+  }
+  if (!compiler.options.sharedMemory) {
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.range,
+      ctx.prototype.internalName + " requires --sharedMemory"
+    );
+    return module.unreachable();
+  }
+  let funcIndex = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
+  return module.call_indirect(STARTS_TABLE, funcIndex, null, createType([]), TypeRef.I32);
+}
+builtinFunctions.set(BuiltinNames.threadCallStart, builtin_thread_callStart);
 
 // __serveCont(funcIndex: i32) -> i32
 //
