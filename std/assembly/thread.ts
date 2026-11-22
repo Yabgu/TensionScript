@@ -1881,9 +1881,21 @@ export declare function __callStart(funcIndex: i32): i32;
  * - **one entry, then exit.** There is no "wait for more work" state that could
  *   ever be satisfied, and blocking on it would hang `__threadJoin`.
  *
- * The status is the entry's own answer, or `0` when the record carried `-1`
- * (a worker started with nothing to run). The exit codes the host and
- * `__threadJoin` understand are unchanged, so no new value is introduced.
+ * **The status is `0` on success — not the entry's answer (I39).** An entry's
+ * return value is its own: for an async entry it is the `Task` handle, a heap
+ * address (measured: 169888), and for a sync entry whatever the function
+ * returned. Nothing consumes it — the host's only reader is a Debug log line,
+ * and `__threadJoin` waits on the state word written below — so the success
+ * path answers `0`, which is what `0` means everywhere else in this ABI. The
+ * three refusals above keep their codes. (The served body answers
+ * `__lastStatus()`: a real status, because it drove resumes.)
+ *
+ * **Those refusals share a numeric channel with the host's `ERR_*` codes**
+ * (`tension-core/src/thread.rs`): both leave a negative `i32` in this export's
+ * return. `-1` agrees; `-2` (`thread.rs`'s `ERR_ALREADY_BORN`) and `-3`
+ * (`ERR_INSTANTIATE`) mean different things here. Renumbering touches the ABI,
+ * so it is filed as its own round; until then read a negative from here against
+ * *this* list, not against the host's.
  */
 // @ts-ignore: decorator
 @global @unsafe
@@ -1913,7 +1925,6 @@ export function __workerMainPlain(id: i32): i32 {
   if (heapBase <= arenaBase || heapBase >= arenaBase + arenaSize) return -3;
 
   let entry = atomicLoad<i32>(sig + 16);
-  let status: i32 = 0;
   if (entry >= 0) {
     // What `__serveOne` records before it resumes, so the entry reads its one
     // `i32` through `__serveArg()`. Key and origin are the request's, and a
@@ -1921,13 +1932,15 @@ export function __workerMainPlain(id: i32): i32 {
     servingArg = atomicLoad<i32>(sig + 20);
     servingKey = 0;
     servingOrigin = 0;
-    status = __callStart(entry);
+    // The answer is dropped on purpose: it is the entry's own word, and for an
+    // async entry that word is a heap address rather than a status (I39).
+    __callStart(entry);
   }
 
   atomicStore<i32>(sig + 12, 2);
   atomicNotify(sig + 12, -1);
   atomicNotify(sig, -1);
-  return status;
+  return 0;
 }
 
 /**
