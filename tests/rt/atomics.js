@@ -134,7 +134,16 @@ function validate(bytes, features = ["threads"]) {
 
 function instantiate(bytes) {
   return new WebAssembly.Instance(new WebAssembly.Module(bytes), {
-    env: { abort: () => { throw new Error("guest called abort"); }, trace: () => {} },
+    // A `--sharedMemory` build carries the thread surface's two imports even when
+    // it spawns nothing (`src/compiler.ts` emits the carving half for every shared
+    // build, not only a shelled one), so the host answers them with the "no pool"
+    // values: main alone, and no machine to start.
+    env: {
+      abort: () => { throw new Error("guest called abort"); },
+      trace: () => {},
+      __executorCount: () => 1,
+      __startThread: () => -1,
+    },
   }).exports;
 }
 
@@ -572,6 +581,10 @@ export function count(): i32 { return counter.n; }
             memory: workerData.memory,
             abort() { throw new Error("guest called abort"); },
             trace() {},
+            // The two thread imports a shared build always carries; nothing here
+            // spawns, so the pool answers "main alone" and "no machine".
+            __executorCount: () => 1,
+            __startThread: () => -1,
           },
         });
         parentPort.postMessage("ready");

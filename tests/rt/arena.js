@@ -153,9 +153,18 @@ function compile({ flags = BASE_FLAGS, source = FIXTURE, text = false } = {}) {
  * `0`, `__asyncStatus` stays `0`, and the host waits forever. So the helper
  * calls it whenever the export exists; a non-shared build has no such export
  * and keeps its start section.
+ *
+ * The two thread imports are stubbed with the "no pool" answers, because since
+ * the shared-memory thread surface is emitted regardless of the async shell
+ * (`src/compiler.ts`, the `sharedMemory && !gcActive` gate) a `--sharedMemory`
+ * module carries `env.__executorCount` and `env.__startThread` even when it only
+ * wants an arena. `1` is main alone and `-1` is "no machine": the same answers a
+ * host with no pool gives, and nothing in this file spawns.
  */
 function instantiate(bytes, memory = null) {
-  const imports = memory ? { env: { memory } } : {};
+  const env = { __executorCount: () => 1, __startThread: () => -1 };
+  if (memory) env.memory = memory;
+  const imports = { env };
   const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes), imports).exports;
   if (typeof exports.__start === "function") exports.__start();
   return exports;
@@ -397,8 +406,35 @@ console.log("\n# 6 the atomic count");
       .split("\n")
       .filter((line) => /func \$~lib\/rt\/tlsf\//.test(line));
     check("the TLSF allocator is in the module", allocator.length > 0, true);
-    check("atomic instructions in the whole module", (built.wat.match(/atomic/g) ?? []).length, 0);
+    // **The runtime, not the whole module.** This check used to count atomics in
+    // everything, and that was the same statement only while a `--sharedMemory`
+    // build carried no thread surface. It now does (`src/compiler.ts` emits the
+    // carving half for every shared build, not just a shelled one), and
+    // `~lib/thread`'s slot ring is atomics by nature — 106 of them, none of them
+    // the allocator's. The claim this section has always made is about the
+    // runtime's free lists, so it is asked of the runtime: each `atomic` counted
+    // against the function that encloses it, not the line it sits on.
+    const byOwner = new Map();
+    let owner = "<none>";
+    for (const line of built.wat.split("\n")) {
+      const declared = /^\s*\(func \$(\S+)/.exec(line);
+      if (declared) owner = declared[1];
+      const hits = (line.match(/atomic/g) ?? []).length;
+      if (hits) byOwner.set(owner, (byOwner.get(owner) ?? 0) + hits);
+    }
+    let runtimeAtomics = 0;
+    let threadAtomics = 0;
+    for (const [name, count] of byOwner) {
+      if (name.startsWith("~lib/rt/")) runtimeAtomics += count;
+      else if (name.startsWith("~lib/thread/")) threadAtomics += count;
+    }
+    check("atomic instructions in the runtime", runtimeAtomics, 0);
     check("atomic instructions in the allocator", (allocator.join("\n").match(/atomic/g) ?? []).length, 0);
+    // …and the module's atomics are all the thread surface's, which is the other
+    // half of the same statement: nothing the arena relies on is atomic.
+    check("every atomic in the module belongs to the thread surface",
+      (built.wat.match(/atomic/g) ?? []).length,
+      threadAtomics);
     check("…and the arena is what makes that correct",
       /ARENA/.test(built.wat) && /__arenaInit/.test(built.wat), true);
   }
