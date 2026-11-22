@@ -554,27 +554,50 @@ export const runtimeFunctions = [ "__new", "__pin", "__unpin", "__collect" ];
  */
 export const arenaFunctions = [ "__arenaInit", "__arenaHeapBase", "__arenaEnd" ];
 /**
- * The threading surface, exported under `--sharedMemory` and only there.
+ * The **boot half** of the threading surface, exported under `--sharedMemory`
+ * and only there.
  *
- * `env.__startThread` / `env.__executorCount` are the host imports a shared
- * build needs; `__threadInit`, `__workerMain`, `__spawnThread`, `__threadJoin`
- * and `__executorExit` are the exports its host drives. A program compiled
- * without `--sharedMemory` references none of them, so none of them — and
- * neither import — is emitted, which is what keeps every existing program
- * exactly as it was (`docs/thread-abi.md` §5).
+ * These names are what the host needs to *boot* a shared module at all. Its
+ * sequence is keyed on `__threadInit` (`tension-core/src/main.rs:575`): the
+ * host looks for that export, calls it to carve the control block, configures
+ * main's arena from `__mainArenaBase`/`__mainArenaSize`, and only then calls
+ * `__start` — which a shared build exports as `() -> i32`, so the ordinary
+ * `() -> ()` lookup at `main.rs:1629` does not match it. A shared module that
+ * exported no `__threadInit` would therefore get **no `__start` call** and run
+ * nothing at all.
  *
- * Looked up, not required: `~lib/thread` is pulled in by the async shell, so an
- * await-free program has no threading surface to export and simply exports
- * nothing here.
+ * So this half is unconditional, and what varies with the program is the body
+ * `__threadInit` is exported as: the real one when the program can spawn, and
+ * `__threadInitPlain` when its own code never reaches the surface. Only the
+ * latter links without `env.__executorCount`.
+ *
+ * Looked up, not required: a runtime without these names exports nothing here
+ * instead of failing to compile.
  */
-export const threadFunctions = [
+export const threadBootFunctions = [
   "__threadInit",
-  "__threadJoin",
-  "__workerMain",
-  "__spawnThread",
-  "__executorExit",
   "__mainArenaBase",
   "__mainArenaSize",
+];
+/**
+ * The **spawn half**: what a program that threads drives, and what its host
+ * drives in turn.
+ *
+ * Exported only when the program's own code reaches this surface
+ * ({@link Compiler#usesThreadSurface}) — a program that names no thread API has
+ * no `__spawnThread` for these to serve, and `env.__startThread` is only ever
+ * called from inside `__spawnThread`'s body, so dropping them drops that
+ * import too.
+ *
+ * `__workerMain` carries its own alias for the same reason it always did: with
+ * a suspending shell the served body is the worker, without one it cannot be
+ * compiled at all, so `__workerMainPlain` takes the name.
+ */
+export const threadSpawnFunctions = [
+  "__spawnThread",
+  "__workerMain",
+  "__threadJoin",
+  "__executorExit",
   "__workerArenaBase",
   "__workerArenaSize",
 ];
@@ -1537,6 +1560,85 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * Compiles every function the compilation has queued as `@lazy` so far.
+   *
+   * `compileFunction` only *enqueues* a function with the `@lazy` decorator —
+   * its body is compiled later, from this queue. Callers that need to know
+   * whether a function has been **reached** therefore have to drain it first:
+   * `CommonFlags.Compiled` means "its body was compiled", and an enqueued
+   * function has not been.
+   *
+   * Called from two places for two different reasons. The loop after the export
+   * blocks is the compiler's own pass, unchanged. The call above the thread
+   * surface is earlier and **only under `--sharedMemory`**, because that block
+   * asks a reachability question and would otherwise see a stale answer; the
+   * gate is what keeps every build that does not share memory byte-identical,
+   * since inserting the pass before the other work would reorder function
+   * indices for no benefit.
+   */
+  private drainLazyFunctions(): void {
+    let lazyFunctions = this.lazyFunctions;
+    do {
+      let functionsToCompile = new Array<Function>();
+      // TODO: for (let instance of lazyLibraryFunctions) {
+      for (let _values = Set_values(lazyFunctions), i = 0, k = _values.length; i < k; ++i) {
+        let instance = unchecked(_values[i]);
+        functionsToCompile.push(instance);
+      }
+      lazyFunctions.clear();
+      for (let i = 0, k = functionsToCompile.length; i < k; ++i) {
+        this.compileFunction(unchecked(functionsToCompile[i]), true);
+      }
+    } while (lazyFunctions.size);
+  }
+
+  /**
+   * Whether the program's own code reaches the thread surface — i.e. whether it
+   * could spawn.
+   *
+   * The answer is the compiler's, not a scan of the source: a name on the
+   * surface counts if it has been **compiled**, which means some body the
+   * program reaches named it. That is the only signal here that survives
+   * re-export, aliasing, a namespace import, or a call with no import at all —
+   * `~lib/thread` is a flat std file, so its exports are in the global scope and
+   * `__threadInit()` compiles without an import statement (`cli/index.js:539`
+   * parses every flat std file eagerly).
+   *
+   * **Not `program.lookup`**: that answers for the whole standard library, so
+   * every one of these names is looked up successfully in every build — measured
+   * with a program that called `__threadInit` from a non-shared build and
+   * compiled. Presence says nothing; reachability says everything.
+   *
+   * Must run after {@link drainLazyFunctions}, and before anything here is
+   * required: `compileFunction` would otherwise make its own question true.
+   */
+  private usesThreadSurface(): bool {
+    let program = this.program;
+    for (let i = 0, k = threadBootFunctions.length; i < k; ++i) {
+      if (this.isReached(program.lookup(threadBootFunctions[i]))) return true;
+    }
+    for (let i = 0, k = threadSpawnFunctions.length; i < k; ++i) {
+      if (this.isReached(program.lookup(threadSpawnFunctions[i]))) return true;
+    }
+    for (let i = 0, k = threadGlobals.length; i < k; ++i) {
+      if (this.isReached(program.lookup(threadGlobals[i]))) return true;
+    }
+    return false;
+  }
+
+  /** Whether an element's body was compiled, resolving a function prototype's instance. */
+  private isReached(element: Element | null): bool {
+    if (element == null) return false;
+    if (element.kind == ElementKind.FunctionPrototype) {
+      let prototype = <FunctionPrototype>element;
+      if (prototype.is(CommonFlags.Generic)) return false;
+      let instance = this.resolver.resolveFunction(prototype, null);
+      return instance != null && instance.is(CommonFlags.Compiled);
+    }
+    return element.is(CommonFlags.Compiled);
+  }
+
+  /**
    * `(table $starts N N funcref)` + its active element segment + the export.
    *
    * **The one place a `funcIndex` means the same thing in every store.** All
@@ -1748,32 +1850,71 @@ export class Compiler extends DiagnosticEmitter {
           module.addFunctionExport(instance.internalName, name);
         }
       }
-      // **Whatever shell the program has, or none at all** — with one measured
-      // exception. Threads are a build configuration: `--sharedMemory` says this
-      // module is instantiated more than once over one memory, and that is the
-      // condition for a host to drive the pool. Keying the whole surface on the
-      // async shell made a promise build — and any await-free program —
-      // invisible to the host, which then answered `__startThread` without
-      // carving anything, and the guest aborted at its first arena assertion
-      // (`itcms.ts:128`).
+      // **The surface follows the program, not the flag.** `--sharedMemory`
+      // says a module is instantiated more than once over one memory; it does
+      // not say the program threads. Emitting the whole surface on the flag
+      // alone made every shared build import `env.__executorCount` and
+      // `env.__startThread` — a one-line `main` included — which is I33: a host
+      // that defines only `env` cannot link the module at all.
       //
-      // `__workerMain` is the exception, and it is not a policy choice: its body
-      // is `__serveOne` / `__drainInbox` / `Executor.step` / `__lastStatus`, and
-      // the last three reach `__serveCont` and `__resumeTask` — the *served body*
-      // path, which is the suspending shell's by construction (a continuation
-      // cannot leave the store that made it). Emitting it without that shell is
-      // an AS100 compile error, measured, not a run-time shape. So the worker
-      // half is emitted where it can be compiled and a promise build gets the
-      // carveable half — which is what makes `__controlBase`, the globals and the
-      // arena bounds answerable, and makes the missing worker a host sentence
-      // ("the module exports no `__workerMain`") instead of a silent no-op.
+      // **The signal is reachability**, asked of the compiler rather than read
+      // off the source: did any of these names get compiled? That is exact, and
+      // it is available here because everything the program's own code reaches
+      // is already compiled by now — its exports at `compileModuleExports`
+      // above, and the `@lazy` callees those queued, drained just below, since
+      // `compileFunction` only *enqueues* a `@lazy` function. The order matters:
+      // requiring a thread function first and then asking whether it was
+      // reached would answer its own question.
       //
-      // `program.lookup` still decides each name, so a program that never pulls
-      // in `~lib/thread` exports nothing here and every existing artifact is
-      // unchanged (`docs/thread-abi.md` §5).
+      // A false positive costs two unused imports and is safe; a false negative
+      // costs a guest that cannot thread, so anything reached counts, including
+      // a reach through the async loop's `Executor`.
+      //
+      // `__workerMain` keeps its own alias, unchanged: its body is `__serveOne` /
+      // `__drainInbox` / `Executor.step` / `__lastStatus`, and the last three
+      // reach `__serveCont` and `__resumeTask` — the *served body* path, which is
+      // the suspending shell's by construction (a continuation cannot leave the
+      // store that made it). Emitting it without that shell is an AS100 compile
+      // error, measured, not a run-time shape; so the plain body takes the name
+      // where the served one cannot be compiled.
+      this.drainLazyFunctions();
+      let threads = this.usesThreadSurface();
       {
-        for (let i = 0, k = threadFunctions.length; i < k; ++i) {
-          let name = threadFunctions[i];
+        // The boot half. **Unconditional**, because the host boots by this name
+        // (`main.rs:575`) and a shared module it cannot boot runs nothing: its
+        // `__start` is `() -> i32` and the ordinary `() -> ()` lookup does not
+        // match it. What the program decides is which body answers it.
+        for (let i = 0, k = threadBootFunctions.length; i < k; ++i) {
+          let name = threadBootFunctions[i];
+          if (program.lookup(name) == null) continue; // runtime has no thread surface
+          // **Two boot bodies, one export name**, for the reason above: the
+          // plain one carves main alone and never calls `env.__executorCount`,
+          // so a program that cannot spawn does not import it.
+          let impl = name;
+          if (name == "__threadInit" && !threads) {
+            impl = "__threadInitPlain";
+            if (program.lookup(impl) == null) continue;
+          }
+          let instance = program.requireFunction(impl);
+          if (this.compileFunction(instance) && !module.hasExport(name)) {
+            module.addFunctionExport(instance.internalName, name);
+          }
+        }
+        for (let i = 0, k = threadGlobals.length; i < k; ++i) {
+          let name = threadGlobals[i];
+          if (program.lookup(name) == null) continue;
+          let instance = program.requireGlobal(name);
+          if (this.compileGlobal(instance) && !module.hasExport(name)) {
+            module.addGlobalExport(instance.internalName, name);
+          }
+        }
+      }
+      // The spawn half: only for a program whose own code reaches it. Skipping
+      // it is what keeps `env.__startThread` out of a module that cannot spawn —
+      // the only caller of that import is `__spawnThread`'s body.
+      if (threads) {
+        for (let i = 0, k = threadSpawnFunctions.length; i < k; ++i) {
+          let name = threadSpawnFunctions[i];
           if (program.lookup(name) == null) continue; // program has no thread surface
           // **Two worker bodies, one export name.** With a suspending shell the
           // served body is the worker; without one it cannot be compiled at all
@@ -1790,31 +1931,11 @@ export class Compiler extends DiagnosticEmitter {
           }
           if (name == "__workerMain") this.workerExported = true;
         }
-        for (let i = 0, k = threadGlobals.length; i < k; ++i) {
-          let name = threadGlobals[i];
-          if (program.lookup(name) == null) continue;
-          let instance = program.requireGlobal(name);
-          if (this.compileGlobal(instance) && !module.hasExport(name)) {
-            module.addGlobalExport(instance.internalName, name);
-          }
-        }
       }
     }
 
     // compile lazy functions
-    let lazyFunctions = this.lazyFunctions;
-    do {
-      let functionsToCompile = new Array<Function>();
-      // TODO: for (let instance of lazyLibraryFunctions) {
-      for (let _values = Set_values(lazyFunctions), i = 0, k = _values.length; i < k; ++i) {
-        let instance = unchecked(_values[i]);
-        functionsToCompile.push(instance);
-      }
-      lazyFunctions.clear();
-      for (let i = 0, k = functionsToCompile.length; i < k; ++i) {
-        this.compileFunction(unchecked(functionsToCompile[i]), true);
-      }
-    } while (lazyFunctions.size);
+    this.drainLazyFunctions();
 
     // set up override stubs
     let functionTable = this.functionTable;

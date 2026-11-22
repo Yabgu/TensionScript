@@ -1487,15 +1487,60 @@ function blockFreeRequest(index: i32): void {
  *   `arenaBase`, `arenaSize`, `state`, `entry`, `arg`
  * - **request table** — `requestCount` × 4 words, then its free-list ring
  * - **arenas** — one per worker, then main's, which is the memory's tail
+ *
+ * **Two bodies, one export name.** The host's boot sequence is keyed on this
+ * export (`main.rs:575`): a shared module that exports no `__threadInit` gets
+ * no `__arenaInit` and no `__start` call, so it would run nothing at all. So
+ * the export is unconditional under `--sharedMemory` and only the *body*
+ * varies — {@link __threadInit} when the program can spawn, and
+ * {@link __threadInitPlain} when its own code never reaches this surface (the
+ * compiler picks, `compiler.ts`'s `threadBootFunctions`). The same shape as
+ * `__workerMain` / `__workerMainPlain` below.
  */
 // @ts-ignore: decorator
 @global @unsafe
 export function __threadInit(capacity: i32): i32 {
   if (!SHARED) return -1;
   if (__controlBase != 0) return 0;
-  if (capacity <= 0) capacity = DEFAULT_CAPACITY;
+  // **The only reader of `__executorCount`.** A program that cannot spawn is
+  // served by `__threadInitPlain`, which does not call this, so the import does
+  // not reach a `--sharedMemory` module that does not thread.
   let total = __executorCount();
   if (total <= 0) return -1;
+  return __carveThreadLayout(capacity, total);
+}
+
+/**
+ * `__threadInit` for a program that cannot use the pool: main's carve, alone.
+ *
+ * Exported **as `__threadInit`** when the program's own code reaches no other
+ * name on this surface, because the host boots a shared module by that name
+ * and nothing else. `total = 1` is not a guess: with no reachable
+ * `__spawnThread` there is no worker record to lay out, so main is the whole
+ * executor set — which is also why `env.__executorCount` is not imported here.
+ *
+ * The layout is otherwise identical, so main's arena, the control block and
+ * `__executorTotal` answer exactly what they answered before.
+ */
+// @ts-ignore: decorator
+@global @unsafe
+export function __threadInitPlain(capacity: i32): i32 {
+  if (!SHARED) return -1;
+  if (__controlBase != 0) return 0;
+  return __carveThreadLayout(capacity, 1);
+}
+
+/**
+ * The layout both boot bodies carve: `total` executors, main as 0.
+ *
+ * Split out so the executor count is an argument rather than a host call: that
+ * is what makes the two bodies differ by one word of code and lets the plain
+ * one link without `env.__executorCount`.
+ */
+// @ts-ignore: decorator
+@unsafe
+function __carveThreadLayout(capacity: i32, total: i32): i32 {
+  if (capacity <= 0) capacity = DEFAULT_CAPACITY;
 
   // Two rings of `ringWords(capacity)` plus six record words, 16-byte aligned.
   let stride: usize = (<usize>(2 * ringWords(capacity) + 6) * 4 + 15) & ~<usize>15;
