@@ -1,9 +1,13 @@
 (module
- (type $0 (func (param i32 i32)))
+ (type $0 (func (param i32) (result i32)))
  (type $1 (func (result i32)))
- (type $2 (func))
- (type $3 (func (param i32 i32 i32 i32)))
+ (type $2 (func (param i32 i32)))
+ (type $3 (func))
+ (type $4 (func (param i32 i32 i32 i32)))
+ (type $5 (func (param i32 i32 i32) (result i32)))
  (import "env" "abort" (func $~lib/builtins/abort (param i32 i32 i32 i32)))
+ (import "env" "__startThread" (func $~lib/thread/__startThread (param i32) (result i32)))
+ (import "env" "__executorCount" (func $~lib/thread/__executorCount (result i32)))
  (global $~lib/rt/common/ARENA_END (mut i32) (i32.const 0))
  (global $~lib/rt/common/ARENA_BASE_CONFIGURED (mut i32) (i32.const 0))
  (global $~lib/rt/common/HEAP_BASE (mut i32) (i32.const 0))
@@ -13,12 +17,39 @@
  (global $~lib/rt/itcms/toSpace (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/ARENA_PIN_SPACE (mut i32) (i32.const 0))
  (global $~lib/rt/itcms/pinSpace (mut i32) (i32.const 0))
+ (global $~lib/thread/__heapBase (mut i32) (i32.const 0))
+ (global $~lib/thread/__controlBase (mut i32) (i32.const 0))
+ (global $~lib/thread/__controlStride (mut i32) (i32.const 0))
+ (global $~lib/thread/__ringCapacity (mut i32) (i32.const 0))
+ (global $~lib/thread/__executorTotal (mut i32) (i32.const 0))
+ (global $~lib/thread/requestBase (mut i32) (i32.const 0))
+ (global $~lib/thread/freeRingBase (mut i32) (i32.const 0))
+ (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33084))
  (memory $0 1 10 shared)
  (data $3 (i32.const 108) "<")
  (data $3.1 (i32.const 120) "\02\00\00\00\1e\00\00\00~\00l\00i\00b\00/\00r\00t\00/\00t\00l\00s\00f\00.\00t\00s")
+ (data $4 (i32.const 172) "\1c")
+ (data $4.1 (i32.const 184) "\04\00\00\00\08\00\00\00\01")
+ (data $5 (i32.const 204) "<")
+ (data $5.1 (i32.const 216) "\02\00\00\00$\00\00\00I\00n\00d\00e\00x\00 \00o\00u\00t\00 \00o\00f\00 \00r\00a\00n\00g\00e")
+ (data $6 (i32.const 268) ",")
+ (data $6.1 (i32.const 280) "\02\00\00\00\1a\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00.\00t\00s")
  (export "__arenaInit" (func $~lib/rt/tlsf/__arenaInit))
  (export "__arenaHeapBase" (func $~lib/rt/common/__arenaHeapBase))
  (export "__arenaEnd" (func $~lib/rt/common/__arenaEnd))
+ (export "__threadInit" (func $~lib/thread/__threadInit))
+ (export "__threadJoin" (func $~lib/thread/__threadJoin))
+ (export "__spawnThread" (func $~lib/thread/__spawnThread))
+ (export "__executorExit" (func $~lib/thread/__executorExit))
+ (export "__mainArenaBase" (func $~lib/thread/__mainArenaBase))
+ (export "__mainArenaSize" (func $~lib/thread/__mainArenaSize))
+ (export "__workerArenaBase" (func $~lib/thread/__workerArenaBase))
+ (export "__workerArenaSize" (func $~lib/thread/__workerArenaSize))
+ (export "__heapBase" (global $~lib/thread/__heapBase))
+ (export "__controlBase" (global $~lib/thread/__controlBase))
+ (export "__controlStride" (global $~lib/thread/__controlStride))
+ (export "__ringCapacity" (global $~lib/thread/__ringCapacity))
+ (export "__executorTotal" (global $~lib/thread/__executorTotal))
  (export "memory" (memory $0))
  (export "__start" (func $__start))
  (func $~lib/rt/tlsf/removeBlock (param $0 i32) (param $1 i32)
@@ -166,6 +197,725 @@
     end
    end
   end
+ )
+ (func $~lib/thread/__workerArenaSize (param $0 i32) (result i32)
+  (local $1 i32)
+  block $__inlined_func$~lib/thread/controlBlockBase$32
+   global.get $~lib/thread/__controlBase
+   local.tee $1
+   br_if $__inlined_func$~lib/thread/controlBlockBase$32
+   i32.const 0
+   local.set $1
+   i32.const 65536
+   i32.atomic.load
+   i32.const 1414025796
+   i32.ne
+   br_if $__inlined_func$~lib/thread/controlBlockBase$32
+   i32.const 65536
+   local.set $1
+  end
+  local.get $1
+  i32.eqz
+  if
+   i32.const 0
+   return
+  end
+  local.get $0
+  i32.const 0
+  i32.le_s
+  local.get $1
+  i32.const 4
+  i32.add
+  i32.atomic.load
+  local.get $0
+  i32.le_s
+  i32.or
+  if
+   i32.const 0
+   return
+  end
+  local.get $1
+  local.get $0
+  local.get $1
+  i32.const 8
+  i32.add
+  i32.atomic.load
+  i32.mul
+  i32.add
+  local.get $1
+  i32.const 12
+  i32.add
+  i32.atomic.load
+  i32.const 4
+  i32.shl
+  i32.add
+  i32.const 96
+  i32.add
+  i32.atomic.load
+ )
+ (func $~lib/thread/__workerArenaBase (param $0 i32) (result i32)
+  (local $1 i32)
+  block $__inlined_func$~lib/thread/controlBlockBase$31
+   global.get $~lib/thread/__controlBase
+   local.tee $1
+   br_if $__inlined_func$~lib/thread/controlBlockBase$31
+   i32.const 0
+   local.set $1
+   i32.const 65536
+   i32.atomic.load
+   i32.const 1414025796
+   i32.ne
+   br_if $__inlined_func$~lib/thread/controlBlockBase$31
+   i32.const 65536
+   local.set $1
+  end
+  local.get $1
+  i32.eqz
+  if
+   i32.const 0
+   return
+  end
+  local.get $0
+  i32.const 0
+  i32.le_s
+  local.get $1
+  i32.const 4
+  i32.add
+  i32.atomic.load
+  local.get $0
+  i32.le_s
+  i32.or
+  if
+   i32.const 0
+   return
+  end
+  local.get $1
+  local.get $0
+  local.get $1
+  i32.const 8
+  i32.add
+  i32.atomic.load
+  i32.mul
+  i32.add
+  local.get $1
+  i32.const 12
+  i32.add
+  i32.atomic.load
+  i32.const 4
+  i32.shl
+  i32.add
+  i32.const 92
+  i32.add
+  i32.atomic.load
+ )
+ (func $~lib/thread/__threadJoin (param $0 i32) (result i32)
+  (local $1 i32)
+  global.get $~lib/thread/__controlBase
+  i32.eqz
+  if
+   i32.const -1
+   return
+  end
+  local.get $0
+  i32.const 0
+  i32.lt_s
+  local.get $0
+  global.get $~lib/thread/__executorTotal
+  i32.ge_s
+  i32.or
+  if
+   i32.const -1
+   return
+  end
+  global.get $~lib/thread/__ringCapacity
+  i32.const 3
+  i32.shl
+  local.tee $1
+  global.get $~lib/thread/__controlBase
+  local.get $0
+  global.get $~lib/thread/__controlStride
+  i32.mul
+  i32.add
+  local.get $1
+  i32.add
+  i32.add
+  i32.const 100
+  i32.add
+  local.set $0
+  loop $while-continue|0
+   local.get $0
+   i32.atomic.load
+   local.tee $1
+   i32.const 2
+   i32.ne
+   if
+    local.get $0
+    local.get $1
+    i64.const -1
+    memory.atomic.wait32
+    drop
+    br $while-continue|0
+   end
+  end
+  i32.const 0
+ )
+ (func $~lib/thread/__threadInit (param $0 i32) (result i32)
+  (local $1 i32)
+  (local $2 i32)
+  (local $3 i32)
+  (local $4 i32)
+  (local $5 i32)
+  (local $6 i32)
+  (local $7 i32)
+  (local $8 i32)
+  (local $9 i32)
+  (local $10 i32)
+  global.get $~lib/thread/__controlBase
+  if
+   i32.const 0
+   return
+  end
+  call $~lib/thread/__executorCount
+  local.tee $6
+  i32.const 0
+  i32.le_s
+  if
+   i32.const -1
+   return
+  end
+  i32.const 1024
+  local.get $0
+  local.get $0
+  i32.const 0
+  i32.le_s
+  select
+  local.tee $5
+  i32.const 4
+  i32.shl
+  local.tee $0
+  i32.const 63
+  i32.add
+  i32.const -16
+  i32.and
+  local.tee $2
+  local.get $6
+  i32.mul
+  local.set $7
+  local.get $0
+  local.get $7
+  i32.add
+  local.get $5
+  i32.const 2
+  i32.shl
+  i32.add
+  i32.const 76
+  i32.add
+  local.tee $8
+  i32.const 65536
+  i32.add
+  local.tee $3
+  local.get $6
+  i32.const 1
+  i32.sub
+  local.tee $4
+  i32.const 20
+  i32.shl
+  i32.add
+  i32.const 4259839
+  i32.add
+  i32.const 16
+  i32.shr_u
+  local.tee $9
+  memory.size
+  local.tee $10
+  i32.gt_s
+  if (result i32)
+   local.get $9
+   local.get $10
+   i32.sub
+   memory.grow
+   i32.const 0
+   i32.lt_s
+  else
+   i32.const 0
+  end
+  if
+   i32.const -2
+   return
+  end
+  i32.const 65536
+  i32.const 0
+  local.get $8
+  memory.fill
+  i32.const 65536
+  global.set $~lib/thread/__controlBase
+  i32.const 65536
+  global.set $~lib/thread/__heapBase
+  local.get $2
+  global.set $~lib/thread/__controlStride
+  local.get $5
+  global.set $~lib/thread/__ringCapacity
+  local.get $6
+  global.set $~lib/thread/__executorTotal
+  local.get $7
+  i32.const 65600
+  i32.add
+  global.set $~lib/thread/requestBase
+  global.get $~lib/thread/requestBase
+  local.get $0
+  i32.add
+  global.set $~lib/thread/freeRingBase
+  i32.const 65536
+  i32.const 1414025796
+  i32.atomic.store
+  i32.const 65540
+  local.get $6
+  i32.atomic.store
+  i32.const 65544
+  local.get $2
+  i32.atomic.store
+  i32.const 65548
+  local.get $5
+  i32.atomic.store
+  i32.const 65552
+  local.get $5
+  i32.atomic.store
+  loop $for-loop|0
+   local.get $1
+   local.get $6
+   i32.lt_s
+   if
+    i32.const 0
+    local.set $0
+    local.get $1
+    local.get $2
+    i32.mul
+    i32.const 65600
+    i32.add
+    local.tee $7
+    i32.const 0
+    i32.atomic.store
+    local.get $7
+    i32.const 4
+    i32.add
+    i32.const 0
+    i32.atomic.store
+    local.get $7
+    i32.const 8
+    i32.add
+    local.get $5
+    i32.atomic.store
+    loop $for-loop|00
+     local.get $0
+     local.get $5
+     i32.lt_s
+     if
+      local.get $7
+      i32.const 12
+      i32.add
+      local.get $0
+      i32.const 3
+      i32.shl
+      i32.add
+      local.tee $8
+      i32.const 0
+      i32.atomic.store
+      local.get $8
+      i32.const 4
+      i32.add
+      local.get $0
+      i32.atomic.store
+      local.get $0
+      i32.const 1
+      i32.add
+      local.set $0
+      br $for-loop|00
+     end
+    end
+    i32.const 0
+    local.set $0
+    local.get $7
+    global.get $~lib/thread/__ringCapacity
+    i32.const 1
+    i32.shl
+    local.tee $8
+    i32.const 3
+    i32.add
+    i32.const 2
+    i32.shl
+    i32.add
+    local.tee $9
+    i32.const 0
+    i32.atomic.store
+    local.get $9
+    i32.const 4
+    i32.add
+    i32.const 0
+    i32.atomic.store
+    local.get $9
+    i32.const 8
+    i32.add
+    local.get $5
+    i32.atomic.store
+    loop $for-loop|01
+     local.get $0
+     local.get $5
+     i32.lt_s
+     if
+      local.get $9
+      i32.const 12
+      i32.add
+      local.get $0
+      i32.const 3
+      i32.shl
+      i32.add
+      local.tee $10
+      i32.const 0
+      i32.atomic.store
+      local.get $10
+      i32.const 4
+      i32.add
+      local.get $0
+      i32.atomic.store
+      local.get $0
+      i32.const 1
+      i32.add
+      local.set $0
+      br $for-loop|01
+     end
+    end
+    local.get $8
+    i32.const 2
+    i32.shl
+    local.tee $0
+    local.get $0
+    local.get $7
+    i32.add
+    i32.add
+    i32.const 24
+    i32.add
+    local.tee $0
+    i32.const 0
+    i32.atomic.store
+    local.get $0
+    i32.const 4
+    i32.add
+    local.get $1
+    if (result i32)
+     local.get $3
+     local.get $1
+     i32.const 1
+     i32.sub
+     i32.const 20
+     i32.shl
+     i32.add
+    else
+     i32.const 0
+    end
+    i32.atomic.store
+    local.get $0
+    i32.const 8
+    i32.add
+    i32.const 1048576
+    i32.const 0
+    local.get $1
+    select
+    i32.atomic.store
+    local.get $0
+    i32.const 12
+    i32.add
+    local.get $1
+    i32.eqz
+    i32.atomic.store
+    local.get $0
+    i32.const 16
+    i32.add
+    i32.const -1
+    i32.atomic.store
+    local.get $0
+    i32.const 20
+    i32.add
+    i32.const 0
+    i32.atomic.store
+    local.get $1
+    i32.const 1
+    i32.add
+    local.set $1
+    br $for-loop|0
+   end
+  end
+  global.get $~lib/thread/freeRingBase
+  local.tee $0
+  i32.const 0
+  i32.atomic.store
+  local.get $0
+  i32.const 4
+  i32.add
+  local.get $5
+  i32.atomic.store
+  local.get $0
+  i32.const 8
+  i32.add
+  local.get $5
+  i32.atomic.store
+  i32.const 0
+  local.set $1
+  loop $for-loop|1
+   local.get $1
+   local.get $5
+   i32.lt_s
+   if
+    local.get $0
+    i32.const 12
+    i32.add
+    local.get $1
+    i32.const 2
+    i32.shl
+    i32.add
+    local.get $1
+    i32.atomic.store
+    local.get $1
+    i32.const 1
+    i32.add
+    local.set $1
+    br $for-loop|1
+   end
+  end
+  memory.size
+  i32.const 16
+  i32.shl
+  local.set $0
+  global.get $~lib/thread/__ringCapacity
+  i32.const 3
+  i32.shl
+  local.tee $1
+  local.get $1
+  i32.const 65600
+  i32.add
+  i32.add
+  local.tee $1
+  i32.const 28
+  i32.add
+  local.get $3
+  local.get $4
+  i32.const 20
+  i32.shl
+  i32.add
+  local.tee $2
+  i32.atomic.store
+  local.get $1
+  i32.const 32
+  i32.add
+  local.get $0
+  local.get $2
+  i32.sub
+  i32.atomic.store
+  i32.const 0
+ )
+ (func $~lib/thread/__spawnThread (param $0 i32) (param $1 i32) (param $2 i32) (result i32)
+  (local $3 i32)
+  global.get $~lib/thread/__controlBase
+  i32.eqz
+  if
+   i32.const -1
+   return
+  end
+  local.get $0
+  i32.const 0
+  i32.le_s
+  local.get $0
+  global.get $~lib/thread/__executorTotal
+  i32.ge_s
+  i32.or
+  if
+   i32.const -1
+   return
+  end
+  global.get $~lib/thread/__ringCapacity
+  i32.const 3
+  i32.shl
+  local.tee $3
+  global.get $~lib/thread/__controlBase
+  local.get $0
+  global.get $~lib/thread/__controlStride
+  i32.mul
+  i32.add
+  local.get $3
+  i32.add
+  i32.add
+  i32.const 88
+  i32.add
+  local.tee $3
+  i32.const 12
+  i32.add
+  i32.atomic.load
+  if
+   i32.const -2
+   return
+  end
+  local.get $3
+  i32.const 16
+  i32.add
+  local.get $1
+  i32.atomic.store
+  local.get $3
+  i32.const 20
+  i32.add
+  local.get $2
+  i32.atomic.store
+  local.get $0
+  call $~lib/thread/__startThread
+  local.tee $0
+  if
+   local.get $3
+   i32.const 12
+   i32.add
+   i32.const 2
+   i32.atomic.store
+  end
+  local.get $0
+ )
+ (func $~lib/thread/__mainArenaSize (result i32)
+  (local $0 i32)
+  global.get $~lib/thread/__controlBase
+  i32.eqz
+  if
+   i32.const 0
+   return
+  end
+  global.get $~lib/thread/__ringCapacity
+  i32.const 3
+  i32.shl
+  local.tee $0
+  global.get $~lib/thread/__controlBase
+  local.get $0
+  i32.add
+  i32.add
+  i32.const 96
+  i32.add
+  i32.atomic.load
+ )
+ (func $~lib/thread/__mainArenaBase (result i32)
+  (local $0 i32)
+  global.get $~lib/thread/__controlBase
+  i32.eqz
+  if
+   i32.const 0
+   return
+  end
+  global.get $~lib/thread/__ringCapacity
+  i32.const 3
+  i32.shl
+  local.tee $0
+  global.get $~lib/thread/__controlBase
+  local.get $0
+  i32.add
+  i32.add
+  i32.const 92
+  i32.add
+  i32.atomic.load
+ )
+ (func $~lib/thread/__executorExit (param $0 i32) (result i32)
+  (local $1 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  block $folding-inner1
+   global.get $~lib/memory/__stack_pointer
+   i32.const 316
+   i32.lt_s
+   br_if $folding-inner1
+   global.get $~lib/memory/__stack_pointer
+   i64.const 0
+   i64.store
+   block $folding-inner0
+    global.get $~lib/thread/__controlBase
+    i32.eqz
+    br_if $folding-inner0
+    local.get $0
+    i32.const 0
+    i32.lt_s
+    local.get $0
+    global.get $~lib/thread/__executorTotal
+    i32.ge_s
+    i32.or
+    br_if $folding-inner0
+    global.get $~lib/thread/__ringCapacity
+    i32.const 3
+    i32.shl
+    local.tee $1
+    global.get $~lib/thread/__controlBase
+    local.get $0
+    global.get $~lib/thread/__controlStride
+    i32.mul
+    i32.add
+    local.get $1
+    i32.add
+    i32.add
+    i32.const 88
+    i32.add
+    local.set $0
+    global.get $~lib/memory/__stack_pointer
+    global.get $~lib/memory/__stack_pointer
+    i32.const 8
+    i32.sub
+    global.set $~lib/memory/__stack_pointer
+    block $__inlined_func$~lib/thread/__executorOf$3
+     global.get $~lib/memory/__stack_pointer
+     i32.const 316
+     i32.ge_s
+     if
+      global.get $~lib/memory/__stack_pointer
+      i64.const 0
+      i64.store
+      global.get $~lib/memory/__stack_pointer
+      i32.const 0
+      i32.store
+      global.get $~lib/memory/__stack_pointer
+      i32.const 8
+      i32.add
+      global.set $~lib/memory/__stack_pointer
+      br $__inlined_func$~lib/thread/__executorOf$3
+     end
+     br $folding-inner1
+    end
+    i32.const 0
+    i32.store
+    local.get $0
+    i32.const 12
+    i32.add
+    local.tee $1
+    i32.const 2
+    i32.atomic.store
+    local.get $1
+    i32.const -1
+    memory.atomic.notify
+    drop
+    local.get $0
+    i32.const -1
+    memory.atomic.notify
+    drop
+    global.get $~lib/memory/__stack_pointer
+    i32.const 8
+    i32.add
+    global.set $~lib/memory/__stack_pointer
+    i32.const 0
+    return
+   end
+   global.get $~lib/memory/__stack_pointer
+   i32.const 8
+   i32.add
+   global.set $~lib/memory/__stack_pointer
+   i32.const -1
+   return
+  end
+  i32.const 33104
+  i32.const 33152
+  i32.const 1
+  i32.const 1
+  call $~lib/builtins/abort
+  unreachable
  )
  (func $~lib/rt/tlsf/insertBlock (param $0 i32) (param $1 i32)
   (local $2 i32)
@@ -415,10 +1165,11 @@
  )
  (func $~lib/rt/tlsf/__arenaInit (param $0 i32) (param $1 i32)
   (local $2 i32)
-  (local $3 i64)
-  (local $4 i32)
+  (local $3 i32)
+  (local $4 i64)
   (local $5 i32)
   (local $6 i32)
+  (local $7 i32)
   local.get $0
   local.get $1
   i32.add
@@ -434,7 +1185,7 @@
   i32.add
   i32.const -16
   i32.and
-  local.tee $0
+  local.tee $2
   i32.const 1024
   i32.add
   i32.lt_u
@@ -443,39 +1194,39 @@
   end
   local.get $1
   global.set $~lib/rt/common/ARENA_END
-  local.get $0
+  local.get $2
   global.set $~lib/rt/common/HEAP_BASE
-  local.get $0
+  local.get $2
   global.set $~lib/rt/common/ARENA_BASE_CONFIGURED
-  local.get $0
-  local.get $0
+  local.get $2
+  local.get $2
   i32.store offset=4
-  local.get $0
-  local.get $0
+  local.get $2
+  local.get $2
   i32.store offset=8
-  local.get $0
+  local.get $2
   global.set $~lib/rt/itcms/fromSpace
-  local.get $0
+  local.get $2
   i32.const 20
   i32.add
-  local.tee $1
-  local.get $1
-  i32.store offset=4
-  local.get $1
-  local.get $1
-  i32.store offset=8
-  local.get $1
-  global.set $~lib/rt/itcms/toSpace
+  local.tee $0
   local.get $0
+  i32.store offset=4
+  local.get $0
+  local.get $0
+  i32.store offset=8
+  local.get $0
+  global.set $~lib/rt/itcms/toSpace
+  local.get $2
   i32.const 40
   i32.add
-  local.tee $1
-  local.get $1
+  local.tee $0
+  local.get $0
   i32.store offset=4
-  local.get $1
-  local.get $1
+  local.get $0
+  local.get $0
   i32.store offset=8
-  local.get $1
+  local.get $0
   global.set $~lib/rt/itcms/pinSpace
   global.get $~lib/rt/itcms/fromSpace
   global.set $~lib/rt/itcms/ARENA_FROM_SPACE
@@ -484,66 +1235,66 @@
   global.get $~lib/rt/itcms/pinSpace
   global.set $~lib/rt/itcms/ARENA_PIN_SPACE
   global.get $~lib/rt/common/ARENA_END
-  local.get $0
+  local.get $2
   i32.const 75
   i32.add
   i32.const -16
   i32.and
-  local.tee $5
+  local.tee $1
   i32.const 0
   i32.store
-  local.get $5
+  local.get $1
   i32.const 0
   i32.store offset=1568
   loop $for-loop|0
-   local.get $2
+   local.get $3
    i32.const 23
    i32.lt_u
    if
-    local.get $5
-    local.get $2
+    local.get $1
+    local.get $3
     i32.const 2
     i32.shl
     i32.add
     i32.const 0
     i32.store offset=4
     i32.const 0
-    local.set $4
+    local.set $5
     loop $for-loop|1
-     local.get $4
+     local.get $5
      i32.const 16
      i32.lt_u
      if
-      local.get $5
-      local.get $2
+      local.get $1
+      local.get $3
       i32.const 4
       i32.shl
-      local.get $4
+      local.get $5
       i32.add
       i32.const 2
       i32.shl
       i32.add
       i32.const 0
       i32.store offset=96
-      local.get $4
+      local.get $5
       i32.const 1
       i32.add
-      local.set $4
+      local.set $5
       br $for-loop|1
      end
     end
-    local.get $2
+    local.get $3
     i32.const 1
     i32.add
-    local.set $2
+    local.set $3
     br $for-loop|0
    end
   end
   i64.extend_i32_u
-  local.tee $3
+  local.tee $4
   i32.wrap_i64
-  local.get $3
-  local.get $5
+  local.get $4
+  local.get $1
   i32.const 1572
   i32.add
   local.tee $0
@@ -566,12 +1317,12 @@
   i32.sub
   local.set $0
   i32.const 0
-  local.set $4
-  local.get $5
+  local.set $5
+  local.get $1
   i32.load offset=1568
-  local.tee $1
+  local.tee $3
   if
-   local.get $1
+   local.get $3
    i32.const 4
    i32.add
    local.get $0
@@ -587,18 +1338,18 @@
    local.get $0
    i32.const 16
    i32.sub
-   local.tee $6
-   local.get $1
+   local.tee $7
+   local.get $3
    i32.eq
    if
-    local.get $1
+    local.get $3
     i32.load
-    local.set $4
-    local.get $6
+    local.set $5
+    local.get $7
     local.set $0
    end
   else
-   local.get $5
+   local.get $1
    i32.const 1572
    i32.add
    local.get $0
@@ -616,18 +1367,18 @@
   i32.and
   local.get $0
   i32.sub
-  local.tee $1
+  local.tee $3
   i32.const 20
   i32.ge_u
   if
    local.get $0
-   local.get $4
+   local.get $5
    i32.const 2
    i32.and
-   local.get $1
+   local.get $3
    i32.const 8
    i32.sub
-   local.tee $1
+   local.tee $3
    i32.const 1
    i32.or
    i32.or
@@ -641,18 +1392,20 @@
    local.get $0
    i32.const 4
    i32.add
-   local.get $1
+   local.get $3
    i32.add
-   local.tee $1
+   local.tee $3
    i32.const 2
    i32.store
-   local.get $5
    local.get $1
+   local.get $3
    i32.store offset=1568
-   local.get $5
+   local.get $1
    local.get $0
    call $~lib/rt/tlsf/insertBlock
   end
+  local.get $2
+  global.set $~lib/memory/__stack_pointer
  )
  (func $~lib/rt/common/__arenaHeapBase (result i32)
   global.get $~lib/rt/common/HEAP_BASE
@@ -1195,7 +1948,7 @@
   call $features/threads/testAtomicAsm
   global.get $~lib/rt/common/ARENA_BASE_CONFIGURED
   local.tee $0
-  i32.const 32940
+  i32.const 33084
   local.get $0
   select
   global.set $~lib/rt/common/HEAP_BASE
