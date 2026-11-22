@@ -82,6 +82,75 @@ const featuresConfig = require("./features.json");
 const basedir = path.join(dirname, "compiler");
 process.chdir(basedir);
 
+// ── runtime capability probes ─────────────────────────────────────────────────
+//
+// **Why this exists.** A fixture that declares a feature (its `.json`'s
+// `features`) is compiled with that feature's `asc_flags` and then instantiated
+// at the end of this file. Whether instantiation was even *attempted* used to be
+// decided by `ASC_FEATURES` alone — a list the operator sets — so a plain local
+// `npm run test:compiler` printed `instantiate SKIPPED: threads not enabled` and
+// never ran the case.
+//
+// On 2026-11-22 that stopped being academic: `main` went red in CI because
+// `features/threads` could no longer instantiate (every `--sharedMemory` build
+// now imports `env.__executorCount`, which the fake `env` below did not answer),
+// and the local three-suite gate could not have seen it. The case it would have
+// failed on was skipped every single time it ran locally. A gate that skips is
+// not a gate.
+//
+// So the gate is now the runtime. Each probe compiles one minimal module that
+// uses the feature and nothing else; `new WebAssembly.Module` throws when the
+// runtime cannot. `ASC_FEATURES`, when set, still wins — CI's environment sets
+// it to run every feature, and that behaviour must not change.
+//
+// Each entry is the same three-line module a fixture would be if it exercised
+// exactly one feature, kept as bytes so the probe needs no compiler and no
+// temporary file:
+const CAPABILITY_PROBES = {
+  // \(memory 1 1 shared\) + \(func (result i32)\) whose body is
+  // i32.const 0; i32.const 1; i32.atomic.rmw.add; drop; i32.const 0; end.
+  // Compiling it is what proves the runtime accepts a **shared memory** and an
+  // **atomic instruction** — the two halves a thread fixture needs.
+  threads: "AGFzbQEAAAABBQFgAAF/AwIBAAUEAQMBAQcQAgZtZW1vcnkCAANydW4AAAoPAQ0AQQBBAf4eAgAaQQAL",
+  // \(type (func (param externref)))\) + an empty function of it.
+  "reference-types": "AGFzbQEAAAABBQFgAW8AAwIBAAoEAQIACw==",
+  // \(func (result v128)\) whose body is v128.const 0.
+  simd: "AGFzbQEAAAABBQFgAAF7AwIBAAoWARQA/QwAAAAAAAAAAAAAAAAAAAAACw==",
+  // The same, with i32x4.relaxed_swizzle on two v128 constants.
+  "relaxed-simd": "AGFzbQEAAAABBQFgAAF7AwIBAAorASkA/QwAAAAAAAAAAAAAAAAAAAAA/QwAAAAAAAAAAAAAAAAAAAAA/YACCw==",
+  // \(type (struct (field i32)))\) — a GC type and nothing else.
+  gc: "AGFzbQEAAAABBQFfAX8A",
+  // \(type (func (param i32)))\) + \(tag (param i32))\), the exception-handling
+  // section a module must carry to define one.
+  "exception-handling": "AGFzbQEAAAABBQFgAX8ADQMBAAA=",
+};
+
+/** Probe results, keyed by feature. Cleared whenever a V8 flag is applied. */
+const capabilityCache = new Map();
+
+/**
+ * Can this runtime execute `feature` **right now**?
+ *
+ * A feature with no probe is reported unsupported rather than assumed: an
+ * unknown name is a fixture declaring something this harness cannot check, and
+ * claiming it works would be the same guessing this probe exists to remove.
+ */
+function runtimeSupports(feature) {
+  if (capabilityCache.has(feature)) return capabilityCache.get(feature);
+  const probe = CAPABILITY_PROBES[feature];
+  let supported = false;
+  if (probe) {
+    try {
+      new WebAssembly.Module(Buffer.from(probe, "base64"));
+      supported = true;
+    } catch {
+      supported = false;
+    }
+  }
+  capabilityCache.set(feature, supported);
+  return supported;
+}
+
 // Gets a list of all relevant tests
 function getTests() {
   let tests = globSync("**/!(_*).ts", { posix: true })
@@ -253,23 +322,52 @@ async function runTest(basename) {
   }  
 
   if (config.features) {
+    // Compile-time flags are unconditional: the fixture is built with its
+    // feature either way, so a skipped instantiation still compares its output.
     config.features.forEach(feature => {
-      if (!features.includes(feature) && !features.includes("*")) {
-        missing_features.push(feature);
-      }
       let featureConfig = featuresConfig[feature];
       if (featureConfig.asc_flags) {
         featureConfig.asc_flags.forEach(flag => {
           Array.prototype.push.apply(asc_flags, flag.split(" "));
         });
       }
-      if (featureConfig.v8_flags) {
-        featureConfig.v8_flags.forEach(flag => {
+    });
+
+    // **Ask the runtime before trying to persuade it.** A feature this Node can
+    // already run needs no V8 flag, and on Node 22+ every flag in `features.json`
+    // is obsolete — applying them printed `Error: unrecognized flag …` into the
+    // test output for no benefit. So: probe, and only reach for a flag where the
+    // probe said no. On an older Node that is exactly the old behaviour; on a
+    // current one it is silent.
+    const needsFlag = config.features.filter(feature => !runtimeSupports(feature));
+    if (needsFlag.length) {
+      let applied = false;
+      needsFlag.forEach(feature => {
+        (featuresConfig[feature].v8_flags || []).forEach(flag => {
           if (v8_flags) v8_flags += " ";
           v8_flags += flag;
           if (v8_no_flags) v8_no_flags += " ";
           v8_no_flags += "--no-" + flag.substring(2);
+          applied = true;
         });
+      });
+      // The flag may have changed what the runtime can do, so the earlier
+      // answers are stale by definition.
+      if (applied) capabilityCache.clear();
+    }
+
+    // **What is still missing, and why.** `ASC_FEATURES` is the operator's list
+    // and wins when present (CI sets it to run everything); with it unset the
+    // runtime decides. The two are reported differently on purpose: "not enabled"
+    // described a choice, and the case being skipped for four rounds was not a
+    // choice anybody had made.
+    config.features.forEach(feature => {
+      if (features.length) {
+        if (!features.includes(feature) && !features.includes("*")) {
+          missing_features.push(feature + " (not listed in ASC_FEATURES)");
+        }
+      } else if (!runtimeSupports(feature)) {
+        missing_features.push(feature + " (this runtime cannot run it)");
       }
     });
   }
@@ -368,7 +466,7 @@ async function runTest(basename) {
     if (afterCompileResult) return afterCompileResult;
 
     if (missing_features.length) {
-      console.log("- " + stdoutColors.yellow("instantiate SKIPPED") + ": " + missing_features.join(", ") + " not enabled\n");
+      console.log("- " + stdoutColors.yellow("instantiate SKIPPED") + ": " + missing_features.join(", ") + "\n");
       return prepareResult(SKIPPED, "feature not enabled: " + missing_features.join(", "));
     } else if (v8_flags) {
       v8.setFlagsFromString(v8_flags);
@@ -499,7 +597,25 @@ async function testInstantiate(binaryBuffer, glue, stderr) {
           return new Date().getTimezoneOffset();
         },
         ...toEnv("Date", Date),
-        ...toEnv("Math", Math)
+        ...toEnv("Math", Math),
+        // The thread ABI's host half, `env.__executorCount` and
+        // `env.__startThread` (`docs/threads.md` §1). A `--sharedMemory` build
+        // imports both **unconditionally** — even a program that spawns nothing —
+        // so instantiation needs them present. Linkability only: nothing here
+        // runs a thread, and these fixtures never call them.
+        //
+        // The answers are the ones `docs/threads.md` §1 fixes for a guest with no
+        // pool: `__executorCount` is 1 (main alone, no worker to count) and
+        // `__startThread` is non-zero (the worker never started). Returning 0
+        // from `__startThread` would claim a thread is running that is not.
+        //
+        // I33 is why this stub exists at all: since `dad86d13` the surface
+        // follows `--sharedMemory` rather than the async shell, so a fixture that
+        // only wanted a shared memory now carries the imports too. When the
+        // compiler emits the surface only for programs that name a thread API,
+        // these two become unnecessary and this block goes with them.
+        __executorCount: () => 1,
+        __startThread: () => -1,
       }),
       // The guest's scheduler seam: `scheduler::park(task_id, class, key)`
       // (`std/assembly/task-rt.ts:145-146`, `@external("scheduler", "park")`
@@ -512,7 +628,7 @@ async function testInstantiate(binaryBuffer, glue, stderr) {
         park(taskId, class_, key) {
           // no-op: linkability, not scheduling
         }
-      }
+      },
     });
 
     if (glue.preInstantiate) {
