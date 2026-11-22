@@ -97,12 +97,14 @@
  (data $5 (i32.const 204) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00$\00\00\00I\00n\00d\00e\00x\00 \00o\00u\00t\00 \00o\00f\00 \00r\00a\00n\00g\00e\00\00\00\00\00\00\00\00\00")
  (data $6 (i32.const 268) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1a\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00.\00t\00s\00\00\00")
  (table $0 2 2 funcref)
- (elem $0 (i32.const 1) $~lib/task/noopWake)
+ (table $$starts 0 0 funcref)
+ (elem $0 (table $0) (i32.const 1) func $~lib/task/noopWake)
  (export "__arenaInit" (func $~lib/rt/tlsf/__arenaInit))
  (export "__arenaHeapBase" (func $~lib/rt/common/__arenaHeapBase))
  (export "__arenaEnd" (func $~lib/rt/common/__arenaEnd))
  (export "__threadInit" (func $~lib/thread/__threadInit))
  (export "__threadJoin" (func $~lib/thread/__threadJoin))
+ (export "__workerMain" (func $~lib/thread/__workerMainPlain))
  (export "__spawnThread" (func $~lib/thread/__spawnThread))
  (export "__executorExit" (func $~lib/thread/__executorExit))
  (export "__mainArenaBase" (func $~lib/thread/__mainArenaBase))
@@ -115,6 +117,7 @@
  (export "__ringCapacity" (global $~lib/thread/__ringCapacity))
  (export "__executorTotal" (global $~lib/thread/__executorTotal))
  (export "memory" (memory $0))
+ (export "$starts" (table $$starts))
  (export "__start" (func $__start))
  (func $features/threads/testAtomic
   i32.const 0
@@ -2618,6 +2621,335 @@
   end
   unreachable
  )
+ (func $~lib/thread/controlBlockBase (result i32)
+  (local $b i32)
+  (local $here i32)
+  (local $ptr i32)
+  global.get $~lib/thread/__controlBase
+  local.set $b
+  local.get $b
+  i32.const 0
+  i32.ne
+  if
+   local.get $b
+   return
+  end
+  global.get $~lib/memory/__heap_base
+  global.get $~lib/thread/PAGE_SIZE
+  i32.const 1
+  i32.sub
+  i32.add
+  global.get $~lib/thread/PAGE_SIZE
+  i32.const 1
+  i32.sub
+  i32.const -1
+  i32.xor
+  i32.and
+  local.set $here
+  block $~lib/atomics/atomicLoad<i32>|inlined.1 (result i32)
+   local.get $here
+   global.get $~lib/thread/H_MAGIC
+   i32.const 2
+   i32.shl
+   i32.add
+   local.set $ptr
+   local.get $ptr
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.1
+  end
+  global.get $~lib/thread/CONTROL_MAGIC
+  i32.ne
+  if
+   i32.const 0
+   return
+  end
+  local.get $here
+  return
+ )
+ (func $~lib/thread/__workerMainPlain (param $id i32) (result i32)
+  (local $here i32)
+  (local $ptr i32)
+  (local $total i32)
+  (local $ptr|4 i32)
+  (local $ptr|5 i32)
+  (local $ptr|6 i32)
+  (local $id|7 i32)
+  (local $rec i32)
+  (local $rec|9 i32)
+  (local $rec|10 i32)
+  (local $capacity i32)
+  (local $capacity|12 i32)
+  (local $sig i32)
+  (local $ptr|14 i32)
+  (local $arenaBase i32)
+  (local $ptr|16 i32)
+  (local $arenaSize i32)
+  (local $heapBase i32)
+  (local $ptr|19 i32)
+  (local $entry i32)
+  (local $status i32)
+  (local $ptr|22 i32)
+  (local $ptr|23 i32)
+  (local $value i32)
+  (local $ptr|25 i32)
+  (local $count i32)
+  (local $ptr|27 i32)
+  (local $count|28 i32)
+  i32.const 1
+  i32.eqz
+  drop
+  call $~lib/thread/controlBlockBase
+  local.set $here
+  local.get $here
+  i32.const 0
+  i32.eq
+  if
+   i32.const -2
+   return
+  end
+  block $~lib/atomics/atomicLoad<i32>|inlined.2 (result i32)
+   local.get $here
+   global.get $~lib/thread/H_TOTAL
+   i32.const 2
+   i32.shl
+   i32.add
+   local.set $ptr
+   local.get $ptr
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.2
+  end
+  local.set $total
+  local.get $id
+  i32.const 0
+  i32.le_s
+  if (result i32)
+   i32.const 1
+  else
+   local.get $id
+   local.get $total
+   i32.ge_s
+  end
+  if
+   i32.const -1
+   return
+  end
+  local.get $here
+  global.set $~lib/thread/__controlBase
+  block $~lib/atomics/atomicLoad<i32>|inlined.3 (result i32)
+   local.get $here
+   global.get $~lib/thread/H_STRIDE
+   i32.const 2
+   i32.shl
+   i32.add
+   local.set $ptr|4
+   local.get $ptr|4
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.3
+  end
+  global.set $~lib/thread/__controlStride
+  block $~lib/atomics/atomicLoad<i32>|inlined.4 (result i32)
+   local.get $here
+   global.get $~lib/thread/H_CAPACITY
+   i32.const 2
+   i32.shl
+   i32.add
+   local.set $ptr|5
+   local.get $ptr|5
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.4
+  end
+  global.set $~lib/thread/__ringCapacity
+  local.get $total
+  global.set $~lib/thread/__executorTotal
+  block $~lib/atomics/atomicLoad<i32>|inlined.5 (result i32)
+   local.get $here
+   global.get $~lib/thread/H_REQUESTS
+   i32.const 2
+   i32.shl
+   i32.add
+   local.set $ptr|6
+   local.get $ptr|6
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.5
+  end
+  global.set $~lib/thread/requestCount
+  local.get $here
+  global.get $~lib/thread/HEADER_BYTES
+  i32.add
+  local.get $total
+  global.get $~lib/thread/__controlStride
+  i32.mul
+  i32.add
+  global.set $~lib/thread/requestBase
+  global.get $~lib/thread/requestBase
+  global.get $~lib/thread/requestCount
+  global.get $~lib/thread/REQUEST_WORDS
+  i32.mul
+  i32.const 4
+  i32.mul
+  i32.add
+  global.set $~lib/thread/freeRingBase
+  local.get $id
+  global.set $~lib/thread/selfExec
+  block $~lib/thread/recordBase|inlined.1 (result i32)
+   local.get $id
+   local.set $id|7
+   global.get $~lib/thread/__controlBase
+   global.get $~lib/thread/HEADER_BYTES
+   i32.add
+   local.get $id|7
+   global.get $~lib/thread/__controlStride
+   i32.mul
+   i32.add
+   br $~lib/thread/recordBase|inlined.1
+  end
+  local.set $rec
+  block $~lib/thread/signalBase|inlined.4 (result i32)
+   local.get $rec
+   local.set $rec|9
+   block $~lib/thread/inboxBase|inlined.5 (result i32)
+    local.get $rec|9
+    local.set $rec|10
+    local.get $rec|10
+    block $~lib/thread/ringWords|inlined.10 (result i32)
+     global.get $~lib/thread/__ringCapacity
+     local.set $capacity
+     i32.const 3
+     local.get $capacity
+     global.get $~lib/thread/CELL_WORDS
+     i32.mul
+     i32.add
+     br $~lib/thread/ringWords|inlined.10
+    end
+    i32.const 2
+    i32.shl
+    i32.add
+    br $~lib/thread/inboxBase|inlined.5
+   end
+   block $~lib/thread/ringWords|inlined.11 (result i32)
+    global.get $~lib/thread/__ringCapacity
+    local.set $capacity|12
+    i32.const 3
+    local.get $capacity|12
+    global.get $~lib/thread/CELL_WORDS
+    i32.mul
+    i32.add
+    br $~lib/thread/ringWords|inlined.11
+   end
+   i32.const 2
+   i32.shl
+   i32.add
+   br $~lib/thread/signalBase|inlined.4
+  end
+  local.set $sig
+  block $~lib/atomics/atomicLoad<i32>|inlined.6 (result i32)
+   local.get $sig
+   i32.const 4
+   i32.add
+   local.set $ptr|14
+   local.get $ptr|14
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.6
+  end
+  local.set $arenaBase
+  block $~lib/atomics/atomicLoad<i32>|inlined.7 (result i32)
+   local.get $sig
+   i32.const 8
+   i32.add
+   local.set $ptr|16
+   local.get $ptr|16
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.7
+  end
+  local.set $arenaSize
+  call $~lib/rt/common/__arenaHeapBase
+  local.set $heapBase
+  local.get $heapBase
+  local.get $arenaBase
+  i32.le_u
+  if (result i32)
+   i32.const 1
+  else
+   local.get $heapBase
+   local.get $arenaBase
+   local.get $arenaSize
+   i32.add
+   i32.ge_u
+  end
+  if
+   i32.const -3
+   return
+  end
+  block $~lib/atomics/atomicLoad<i32>|inlined.8 (result i32)
+   local.get $sig
+   i32.const 16
+   i32.add
+   local.set $ptr|19
+   local.get $ptr|19
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.8
+  end
+  local.set $entry
+  i32.const 0
+  local.set $status
+  local.get $entry
+  i32.const 0
+  i32.ge_s
+  if
+   block $~lib/atomics/atomicLoad<i32>|inlined.9 (result i32)
+    local.get $sig
+    i32.const 20
+    i32.add
+    local.set $ptr|22
+    local.get $ptr|22
+    i32.atomic.load
+    br $~lib/atomics/atomicLoad<i32>|inlined.9
+   end
+   global.set $~lib/thread/servingArg
+   i32.const 0
+   global.set $~lib/thread/servingKey
+   i32.const 0
+   global.set $~lib/thread/servingOrigin
+   local.get $entry
+   call_indirect $$starts (type $2)
+   local.set $status
+  end
+  local.get $sig
+  i32.const 12
+  i32.add
+  local.set $ptr|23
+  i32.const 2
+  local.set $value
+  local.get $ptr|23
+  local.get $value
+  i32.atomic.store
+  block $~lib/atomics/atomicNotify|inlined.0 (result i32)
+   local.get $sig
+   i32.const 12
+   i32.add
+   local.set $ptr|25
+   i32.const -1
+   local.set $count
+   local.get $ptr|25
+   local.get $count
+   memory.atomic.notify
+   br $~lib/atomics/atomicNotify|inlined.0
+  end
+  drop
+  block $~lib/atomics/atomicNotify|inlined.1 (result i32)
+   local.get $sig
+   local.set $ptr|27
+   i32.const -1
+   local.set $count|28
+   local.get $ptr|27
+   local.get $count|28
+   memory.atomic.notify
+   br $~lib/atomics/atomicNotify|inlined.1
+  end
+  drop
+  local.get $status
+  return
+ )
  (func $~lib/thread/__spawnThread (param $id i32) (param $entryIndex i32) (param $argSlot i32) (result i32)
   (local $id|3 i32)
   (local $rec i32)
@@ -2654,8 +2986,8 @@
    i32.const -1
    return
   end
-  block $~lib/thread/signalBase|inlined.4 (result i32)
-   block $~lib/thread/recordBase|inlined.1 (result i32)
+  block $~lib/thread/signalBase|inlined.5 (result i32)
+   block $~lib/thread/recordBase|inlined.2 (result i32)
     local.get $id
     local.set $id|3
     global.get $~lib/thread/__controlBase
@@ -2665,14 +2997,14 @@
     global.get $~lib/thread/__controlStride
     i32.mul
     i32.add
-    br $~lib/thread/recordBase|inlined.1
+    br $~lib/thread/recordBase|inlined.2
    end
    local.set $rec
-   block $~lib/thread/inboxBase|inlined.5 (result i32)
+   block $~lib/thread/inboxBase|inlined.6 (result i32)
     local.get $rec
     local.set $rec|5
     local.get $rec|5
-    block $~lib/thread/ringWords|inlined.10 (result i32)
+    block $~lib/thread/ringWords|inlined.12 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity
      i32.const 3
@@ -2680,14 +3012,14 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.10
+     br $~lib/thread/ringWords|inlined.12
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/inboxBase|inlined.5
+    br $~lib/thread/inboxBase|inlined.6
    end
-   block $~lib/thread/ringWords|inlined.11 (result i32)
+   block $~lib/thread/ringWords|inlined.13 (result i32)
     global.get $~lib/thread/__ringCapacity
     local.set $capacity|7
     i32.const 3
@@ -2695,22 +3027,22 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.11
+    br $~lib/thread/ringWords|inlined.13
    end
    i32.const 2
    i32.shl
    i32.add
-   br $~lib/thread/signalBase|inlined.4
+   br $~lib/thread/signalBase|inlined.5
   end
   local.set $sig
-  block $~lib/atomics/atomicLoad<i32>|inlined.1 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.10 (result i32)
    local.get $sig
    i32.const 12
    i32.add
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.1
+   br $~lib/atomics/atomicLoad<i32>|inlined.10
   end
   i32.const 0
   i32.ne
@@ -2782,69 +3114,7 @@
    i32.const 0
    return
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.2 (result i32)
-   block $~lib/thread/signalBase|inlined.6 (result i32)
-    global.get $~lib/thread/__controlBase
-    global.get $~lib/thread/HEADER_BYTES
-    i32.add
-    local.set $rec
-    block $~lib/thread/inboxBase|inlined.7 (result i32)
-     local.get $rec
-     local.set $rec|1
-     local.get $rec|1
-     block $~lib/thread/ringWords|inlined.14 (result i32)
-      global.get $~lib/thread/__ringCapacity
-      local.set $capacity
-      i32.const 3
-      local.get $capacity
-      global.get $~lib/thread/CELL_WORDS
-      i32.mul
-      i32.add
-      br $~lib/thread/ringWords|inlined.14
-     end
-     i32.const 2
-     i32.shl
-     i32.add
-     br $~lib/thread/inboxBase|inlined.7
-    end
-    block $~lib/thread/ringWords|inlined.15 (result i32)
-     global.get $~lib/thread/__ringCapacity
-     local.set $capacity|3
-     i32.const 3
-     local.get $capacity|3
-     global.get $~lib/thread/CELL_WORDS
-     i32.mul
-     i32.add
-     br $~lib/thread/ringWords|inlined.15
-    end
-    i32.const 2
-    i32.shl
-    i32.add
-    br $~lib/thread/signalBase|inlined.6
-   end
-   i32.const 4
-   i32.add
-   local.set $ptr
-   local.get $ptr
-   i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.2
-  end
-  return
- )
- (func $~lib/thread/__mainArenaSize (result i32)
-  (local $rec i32)
-  (local $rec|1 i32)
-  (local $capacity i32)
-  (local $capacity|3 i32)
-  (local $ptr i32)
-  global.get $~lib/thread/__controlBase
-  i32.const 0
-  i32.eq
-  if
-   i32.const 0
-   return
-  end
-  block $~lib/atomics/atomicLoad<i32>|inlined.3 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.11 (result i32)
    block $~lib/thread/signalBase|inlined.7 (result i32)
     global.get $~lib/thread/__controlBase
     global.get $~lib/thread/HEADER_BYTES
@@ -2884,58 +3154,75 @@
     i32.add
     br $~lib/thread/signalBase|inlined.7
    end
+   i32.const 4
+   i32.add
+   local.set $ptr
+   local.get $ptr
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.11
+  end
+  return
+ )
+ (func $~lib/thread/__mainArenaSize (result i32)
+  (local $rec i32)
+  (local $rec|1 i32)
+  (local $capacity i32)
+  (local $capacity|3 i32)
+  (local $ptr i32)
+  global.get $~lib/thread/__controlBase
+  i32.const 0
+  i32.eq
+  if
+   i32.const 0
+   return
+  end
+  block $~lib/atomics/atomicLoad<i32>|inlined.12 (result i32)
+   block $~lib/thread/signalBase|inlined.8 (result i32)
+    global.get $~lib/thread/__controlBase
+    global.get $~lib/thread/HEADER_BYTES
+    i32.add
+    local.set $rec
+    block $~lib/thread/inboxBase|inlined.9 (result i32)
+     local.get $rec
+     local.set $rec|1
+     local.get $rec|1
+     block $~lib/thread/ringWords|inlined.18 (result i32)
+      global.get $~lib/thread/__ringCapacity
+      local.set $capacity
+      i32.const 3
+      local.get $capacity
+      global.get $~lib/thread/CELL_WORDS
+      i32.mul
+      i32.add
+      br $~lib/thread/ringWords|inlined.18
+     end
+     i32.const 2
+     i32.shl
+     i32.add
+     br $~lib/thread/inboxBase|inlined.9
+    end
+    block $~lib/thread/ringWords|inlined.19 (result i32)
+     global.get $~lib/thread/__ringCapacity
+     local.set $capacity|3
+     i32.const 3
+     local.get $capacity|3
+     global.get $~lib/thread/CELL_WORDS
+     i32.mul
+     i32.add
+     br $~lib/thread/ringWords|inlined.19
+    end
+    i32.const 2
+    i32.shl
+    i32.add
+    br $~lib/thread/signalBase|inlined.8
+   end
    i32.const 8
    i32.add
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.3
+   br $~lib/atomics/atomicLoad<i32>|inlined.12
   end
-  return
- )
- (func $~lib/thread/controlBlockBase (result i32)
-  (local $b i32)
-  (local $here i32)
-  (local $ptr i32)
-  global.get $~lib/thread/__controlBase
-  local.set $b
-  local.get $b
-  i32.const 0
-  i32.ne
-  if
-   local.get $b
-   return
-  end
-  global.get $~lib/memory/__heap_base
-  global.get $~lib/thread/PAGE_SIZE
-  i32.const 1
-  i32.sub
-  i32.add
-  global.get $~lib/thread/PAGE_SIZE
-  i32.const 1
-  i32.sub
-  i32.const -1
-  i32.xor
-  i32.and
-  local.set $here
-  block $~lib/atomics/atomicLoad<i32>|inlined.4 (result i32)
-   local.get $here
-   global.get $~lib/thread/H_MAGIC
-   i32.const 2
-   i32.shl
-   i32.add
-   local.set $ptr
-   local.get $ptr
-   i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.4
-  end
-  global.get $~lib/thread/CONTROL_MAGIC
-  i32.ne
-  if
-   i32.const 0
-   return
-  end
-  local.get $here
   return
  )
  (func $~lib/thread/__workerArenaBase (param $id i32) (result i32)
@@ -2959,7 +3246,7 @@
    i32.const 0
    return
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.5 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.13 (result i32)
    local.get $here
    global.get $~lib/thread/H_TOTAL
    i32.const 2
@@ -2968,7 +3255,7 @@
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.5
+   br $~lib/atomics/atomicLoad<i32>|inlined.13
   end
   local.set $total
   local.get $id
@@ -2985,7 +3272,7 @@
    i32.const 0
    return
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.6 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.14 (result i32)
    local.get $here
    global.get $~lib/thread/H_STRIDE
    i32.const 2
@@ -2994,10 +3281,10 @@
    local.set $ptr|4
    local.get $ptr|4
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.6
+   br $~lib/atomics/atomicLoad<i32>|inlined.14
   end
   local.set $stride
-  block $~lib/atomics/atomicLoad<i32>|inlined.7 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.15 (result i32)
    local.get $here
    global.get $~lib/thread/H_CAPACITY
    i32.const 2
@@ -3006,7 +3293,7 @@
    local.set $ptr|6
    local.get $ptr|6
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.7
+   br $~lib/atomics/atomicLoad<i32>|inlined.15
   end
   local.set $capacity
   local.get $here
@@ -3019,7 +3306,7 @@
   local.set $rec
   local.get $rec
   i32.const 2
-  block $~lib/thread/ringWords|inlined.18 (result i32)
+  block $~lib/thread/ringWords|inlined.20 (result i32)
    local.get $capacity
    local.set $capacity|9
    i32.const 3
@@ -3027,21 +3314,21 @@
    global.get $~lib/thread/CELL_WORDS
    i32.mul
    i32.add
-   br $~lib/thread/ringWords|inlined.18
+   br $~lib/thread/ringWords|inlined.20
   end
   i32.mul
   i32.const 2
   i32.shl
   i32.add
   local.set $sig
-  block $~lib/atomics/atomicLoad<i32>|inlined.8 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.16 (result i32)
    local.get $sig
    i32.const 4
    i32.add
    local.set $ptr|11
    local.get $ptr|11
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.8
+   br $~lib/atomics/atomicLoad<i32>|inlined.16
   end
   return
  )
@@ -3066,7 +3353,7 @@
    i32.const 0
    return
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.9 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.17 (result i32)
    local.get $here
    global.get $~lib/thread/H_TOTAL
    i32.const 2
@@ -3075,7 +3362,7 @@
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.9
+   br $~lib/atomics/atomicLoad<i32>|inlined.17
   end
   local.set $total
   local.get $id
@@ -3092,7 +3379,7 @@
    i32.const 0
    return
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.10 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.18 (result i32)
    local.get $here
    global.get $~lib/thread/H_STRIDE
    i32.const 2
@@ -3101,10 +3388,10 @@
    local.set $ptr|4
    local.get $ptr|4
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.10
+   br $~lib/atomics/atomicLoad<i32>|inlined.18
   end
   local.set $stride
-  block $~lib/atomics/atomicLoad<i32>|inlined.11 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.19 (result i32)
    local.get $here
    global.get $~lib/thread/H_CAPACITY
    i32.const 2
@@ -3113,7 +3400,7 @@
    local.set $ptr|6
    local.get $ptr|6
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.11
+   br $~lib/atomics/atomicLoad<i32>|inlined.19
   end
   local.set $capacity
   local.get $here
@@ -3126,7 +3413,7 @@
   local.set $rec
   local.get $rec
   i32.const 2
-  block $~lib/thread/ringWords|inlined.19 (result i32)
+  block $~lib/thread/ringWords|inlined.21 (result i32)
    local.get $capacity
    local.set $capacity|9
    i32.const 3
@@ -3134,21 +3421,21 @@
    global.get $~lib/thread/CELL_WORDS
    i32.mul
    i32.add
-   br $~lib/thread/ringWords|inlined.19
+   br $~lib/thread/ringWords|inlined.21
   end
   i32.mul
   i32.const 2
   i32.shl
   i32.add
   local.set $sig
-  block $~lib/atomics/atomicLoad<i32>|inlined.12 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.20 (result i32)
    local.get $sig
    i32.const 8
    i32.add
    local.set $ptr|11
    local.get $ptr|11
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.12
+   br $~lib/atomics/atomicLoad<i32>|inlined.20
   end
   return
  )
@@ -3389,8 +3676,8 @@
    local.get $14
    return
   end
-  block $~lib/thread/signalBase|inlined.5 (result i32)
-   block $~lib/thread/recordBase|inlined.2 (result i32)
+  block $~lib/thread/signalBase|inlined.6 (result i32)
+   block $~lib/thread/recordBase|inlined.3 (result i32)
     local.get $id
     local.set $id|1
     global.get $~lib/thread/__controlBase
@@ -3400,14 +3687,14 @@
     global.get $~lib/thread/__controlStride
     i32.mul
     i32.add
-    br $~lib/thread/recordBase|inlined.2
+    br $~lib/thread/recordBase|inlined.3
    end
    local.set $rec
-   block $~lib/thread/inboxBase|inlined.6 (result i32)
+   block $~lib/thread/inboxBase|inlined.7 (result i32)
     local.get $rec
     local.set $rec|3
     local.get $rec|3
-    block $~lib/thread/ringWords|inlined.12 (result i32)
+    block $~lib/thread/ringWords|inlined.14 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity
      i32.const 3
@@ -3415,14 +3702,14 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.12
+     br $~lib/thread/ringWords|inlined.14
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/inboxBase|inlined.6
+    br $~lib/thread/inboxBase|inlined.7
    end
-   block $~lib/thread/ringWords|inlined.13 (result i32)
+   block $~lib/thread/ringWords|inlined.15 (result i32)
     global.get $~lib/thread/__ringCapacity
     local.set $capacity|5
     i32.const 3
@@ -3430,12 +3717,12 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.13
+    br $~lib/thread/ringWords|inlined.15
    end
    i32.const 2
    i32.shl
    i32.add
-   br $~lib/thread/signalBase|inlined.5
+   br $~lib/thread/signalBase|inlined.6
   end
   local.set $sig
   global.get $~lib/memory/__stack_pointer
@@ -3463,7 +3750,7 @@
   local.get $ptr
   local.get $value
   i32.atomic.store
-  block $~lib/atomics/atomicNotify|inlined.0 (result i32)
+  block $~lib/atomics/atomicNotify|inlined.2 (result i32)
    local.get $sig
    i32.const 12
    i32.add
@@ -3473,10 +3760,10 @@
    local.get $ptr|10
    local.get $count
    memory.atomic.notify
-   br $~lib/atomics/atomicNotify|inlined.0
+   br $~lib/atomics/atomicNotify|inlined.2
   end
   drop
-  block $~lib/atomics/atomicNotify|inlined.1 (result i32)
+  block $~lib/atomics/atomicNotify|inlined.3 (result i32)
    local.get $sig
    local.set $ptr|12
    i32.const -1
@@ -3484,7 +3771,7 @@
    local.get $ptr|12
    local.get $count|13
    memory.atomic.notify
-   br $~lib/atomics/atomicNotify|inlined.1
+   br $~lib/atomics/atomicNotify|inlined.3
   end
   drop
   i32.const 0

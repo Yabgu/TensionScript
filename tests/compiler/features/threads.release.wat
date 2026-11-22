@@ -24,6 +24,7 @@
  (global $~lib/thread/__executorTotal (mut i32) (i32.const 0))
  (global $~lib/thread/requestBase (mut i32) (i32.const 0))
  (global $~lib/thread/freeRingBase (mut i32) (i32.const 0))
+ (global $~lib/thread/requestCount (mut i32) (i32.const 0))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33084))
  (memory $0 1 10 shared)
  (data $3 (i32.const 108) "<")
@@ -34,11 +35,13 @@
  (data $5.1 (i32.const 216) "\02\00\00\00$\00\00\00I\00n\00d\00e\00x\00 \00o\00u\00t\00 \00o\00f\00 \00r\00a\00n\00g\00e")
  (data $6 (i32.const 268) ",")
  (data $6.1 (i32.const 280) "\02\00\00\00\1a\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00.\00t\00s")
+ (table $$starts 0 0 funcref)
  (export "__arenaInit" (func $~lib/rt/tlsf/__arenaInit))
  (export "__arenaHeapBase" (func $~lib/rt/common/__arenaHeapBase))
  (export "__arenaEnd" (func $~lib/rt/common/__arenaEnd))
  (export "__threadInit" (func $~lib/thread/__threadInit))
  (export "__threadJoin" (func $~lib/thread/__threadJoin))
+ (export "__workerMain" (func $~lib/thread/__workerMainPlain))
  (export "__spawnThread" (func $~lib/thread/__spawnThread))
  (export "__executorExit" (func $~lib/thread/__executorExit))
  (export "__mainArenaBase" (func $~lib/thread/__mainArenaBase))
@@ -51,6 +54,7 @@
  (export "__ringCapacity" (global $~lib/thread/__ringCapacity))
  (export "__executorTotal" (global $~lib/thread/__executorTotal))
  (export "memory" (memory $0))
+ (export "$starts" (table $$starts))
  (export "__start" (func $__start))
  (func $~lib/rt/tlsf/removeBlock (param $0 i32) (param $1 i32)
   (local $2 i32)
@@ -198,19 +202,158 @@
    end
   end
  )
- (func $~lib/thread/__workerArenaSize (param $0 i32) (result i32)
+ (func $~lib/thread/__workerMainPlain (param $0 i32) (result i32)
   (local $1 i32)
-  block $__inlined_func$~lib/thread/controlBlockBase$32
+  (local $2 i32)
+  block $__inlined_func$~lib/thread/controlBlockBase$31
    global.get $~lib/thread/__controlBase
    local.tee $1
-   br_if $__inlined_func$~lib/thread/controlBlockBase$32
+   br_if $__inlined_func$~lib/thread/controlBlockBase$31
    i32.const 0
    local.set $1
    i32.const 65536
    i32.atomic.load
    i32.const 1414025796
    i32.ne
-   br_if $__inlined_func$~lib/thread/controlBlockBase$32
+   br_if $__inlined_func$~lib/thread/controlBlockBase$31
+   i32.const 65536
+   local.set $1
+  end
+  local.get $1
+  i32.eqz
+  if
+   i32.const -2
+   return
+  end
+  local.get $0
+  i32.const 0
+  i32.le_s
+  local.get $1
+  i32.const 4
+  i32.add
+  i32.atomic.load
+  local.tee $2
+  local.get $0
+  i32.le_s
+  i32.or
+  if
+   i32.const -1
+   return
+  end
+  local.get $1
+  global.set $~lib/thread/__controlBase
+  local.get $1
+  i32.const 8
+  i32.add
+  i32.atomic.load
+  global.set $~lib/thread/__controlStride
+  local.get $1
+  i32.const 12
+  i32.add
+  i32.atomic.load
+  global.set $~lib/thread/__ringCapacity
+  local.get $2
+  global.set $~lib/thread/__executorTotal
+  local.get $1
+  i32.const 16
+  i32.add
+  i32.atomic.load
+  global.set $~lib/thread/requestCount
+  local.get $1
+  i32.const -64
+  i32.sub
+  local.get $2
+  global.get $~lib/thread/__controlStride
+  i32.mul
+  i32.add
+  global.set $~lib/thread/requestBase
+  global.get $~lib/thread/requestBase
+  global.get $~lib/thread/requestCount
+  i32.const 4
+  i32.shl
+  i32.add
+  global.set $~lib/thread/freeRingBase
+  global.get $~lib/rt/common/HEAP_BASE
+  local.tee $1
+  global.get $~lib/thread/__ringCapacity
+  i32.const 3
+  i32.shl
+  local.tee $2
+  global.get $~lib/thread/__controlBase
+  local.get $0
+  global.get $~lib/thread/__controlStride
+  i32.mul
+  i32.add
+  local.get $2
+  i32.add
+  i32.add
+  i32.const 88
+  i32.add
+  local.tee $0
+  i32.const 4
+  i32.add
+  i32.atomic.load
+  local.tee $2
+  local.get $0
+  i32.const 8
+  i32.add
+  i32.atomic.load
+  i32.add
+  i32.ge_u
+  local.get $1
+  local.get $2
+  i32.le_u
+  i32.or
+  if
+   i32.const -3
+   return
+  end
+  local.get $0
+  i32.const 16
+  i32.add
+  i32.atomic.load
+  local.tee $1
+  i32.const 0
+  i32.ge_s
+  if (result i32)
+   local.get $0
+   i32.const 20
+   i32.add
+   i32.atomic.load
+   drop
+   local.get $1
+   call_indirect $$starts (type $1)
+  else
+   i32.const 0
+  end
+  local.get $0
+  i32.const 12
+  i32.add
+  local.tee $2
+  i32.const 2
+  i32.atomic.store
+  local.get $2
+  i32.const -1
+  memory.atomic.notify
+  drop
+  local.get $0
+  i32.const -1
+  memory.atomic.notify
+  drop
+ )
+ (func $~lib/thread/__workerArenaSize (param $0 i32) (result i32)
+  (local $1 i32)
+  block $__inlined_func$~lib/thread/controlBlockBase$34
+   global.get $~lib/thread/__controlBase
+   local.tee $1
+   br_if $__inlined_func$~lib/thread/controlBlockBase$34
+   i32.const 0
+   local.set $1
+   i32.const 65536
+   i32.atomic.load
+   i32.const 1414025796
+   i32.ne
+   br_if $__inlined_func$~lib/thread/controlBlockBase$34
    i32.const 65536
    local.set $1
   end
@@ -255,17 +398,17 @@
  )
  (func $~lib/thread/__workerArenaBase (param $0 i32) (result i32)
   (local $1 i32)
-  block $__inlined_func$~lib/thread/controlBlockBase$31
+  block $__inlined_func$~lib/thread/controlBlockBase$33
    global.get $~lib/thread/__controlBase
    local.tee $1
-   br_if $__inlined_func$~lib/thread/controlBlockBase$31
+   br_if $__inlined_func$~lib/thread/controlBlockBase$33
    i32.const 0
    local.set $1
    i32.const 65536
    i32.atomic.load
    i32.const 1414025796
    i32.ne
-   br_if $__inlined_func$~lib/thread/controlBlockBase$31
+   br_if $__inlined_func$~lib/thread/controlBlockBase$33
    i32.const 65536
    local.set $1
   end
@@ -465,6 +608,8 @@
   local.get $0
   i32.add
   global.set $~lib/thread/freeRingBase
+  local.get $5
+  global.set $~lib/thread/requestCount
   i32.const 65536
   i32.const 1414025796
   i32.atomic.store
