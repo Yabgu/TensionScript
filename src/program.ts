@@ -577,6 +577,31 @@ export class Program extends DiagnosticEmitter {
    */
   asyncEntries: Set<DeclarationStatement> = new Set();
 
+  /**
+   * The synthesized spawn entry for each factory the stackful lowering
+   * transformed: the factory's declaration → the spawn entry's declaration.
+   *
+   * **Written** by `StackfulAsyncTransform` at the one place it creates the
+   * spawn entry (`src/async/stack.ts`, Gate 3d), which is where the
+   * relationship is *created*. **Read** by `builtin_async_spawnIndexOf`
+   * (`src/builtins.ts`), which must answer the spawn entry's `$starts` index
+   * rather than the factory's.
+   *
+   * **A declaration, not a name, and for exactly the reason
+   * {@link asyncSpawnStarts} gives:** the transform runs before any element
+   * exists, so the internal name does not exist yet. Recording the simple name
+   * here and handing it to `$starts` fails — measured, it crashes the compile,
+   * because `emitStartsTable` resolves names that no element owns. The
+   * declaration is the identity that survives parse → initialize, and
+   * `elementsByDeclaration` is the one map that cannot disagree with mangling.
+   *
+   * **A consumer must test membership, not the lookup's result.** No entry is
+   * the truthful "this function is its own spawn entry" answer the plain-worker
+   * path needs, and a lookup that fails for any other reason must not be able to
+   * masquerade as it.
+   */
+  spawnEntries: Map<DeclarationStatement,DeclarationStatement> = new Map<DeclarationStatement,DeclarationStatement>();
+
   // Lookup maps
 
   /** Files by unique internal name. */

@@ -12484,7 +12484,46 @@ function builtin_async_spawnIndexOf(ctx: BuiltinFunctionContext): ExpressionRef 
   }
   compiler.compileFunction(target);
   let helper = "~spawnIndex/" + target.internalName;
-  compiler.spawnIndexTargets.set(helper, target.internalName);
+  // **The entry the lowering recorded, not a name derived from this one.** A
+  // served continuation is resumed as `$starts[index]`, and for an async
+  // function the thing that must be served is its `f$spawnStart` — which
+  // creates the task and parks on it, answering the task's slot. The factory
+  // answers a task handle instead, and `__serveOne` reads that as a slot: the
+  // task is created, bound, and never driven (DL30).
+  //
+  // **Membership decides plain-versus-transformed, and nothing else does.** No
+  // entry means this function *is* its own spawn entry, which is the truthful
+  // answer for the plain-worker path (`__workerMainPlain` serves sync entries by
+  // index). A miss must not be able to stand in for that answer — so a recorded
+  // entry that fails to resolve is an error, not a silent fallback.
+  let declaration = target.prototype.declaration;
+  let entries = compiler.program.spawnEntries;
+  let spawnName = target.internalName;
+  if (entries.has(declaration)) {
+    // Resolved, not reconstructed: the same act `initialize` performs for the
+    // spawn starts it compiles (`src/compiler.ts`, the `asyncSpawnStarts` loop).
+    // The element may still be a prototype — an instance exists only once
+    // something resolves it.
+    let element = compiler.program.elementsByDeclaration.get(assert(entries.get(declaration)));
+    let spawnFunction: Function | null = null;
+    if (element) {
+      if (element.kind == ElementKind.Function) {
+        spawnFunction = <Function>element;
+      } else if (element.kind == ElementKind.FunctionPrototype) {
+        spawnFunction = compiler.resolver.resolveFunction(<FunctionPrototype>element, null);
+      }
+    }
+    if (!spawnFunction) {
+      compiler.error(
+        DiagnosticCode.Not_implemented_0,
+        ctx.reportNode.range,
+        "the spawn entry this async function's lowering recorded cannot be resolved (a compiler bug, not a program error)"
+      );
+      return module.unreachable();
+    }
+    spawnName = spawnFunction.internalName;
+  }
+  compiler.spawnIndexTargets.set(helper, spawnName);
   return module.call(helper, [], TypeRef.I32);
 }
 builtinFunctions.set(BuiltinNames.asyncSpawnIndexOf, builtin_async_spawnIndexOf);

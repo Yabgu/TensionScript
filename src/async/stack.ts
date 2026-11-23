@@ -798,6 +798,14 @@ export class StackfulAsyncTransform {
         range
       );
       artifacts.push(spawnFunction);
+      // The factory → its spawn entry, recorded **where the relationship is
+      // created**. The value is the declaration, not `spawnName`: no element —
+      // and so no internal name — exists yet, which is the same reason
+      // `asyncSpawnStarts` holds declarations. `__spawnIndexOf` resolves it
+      // through `elementsByDeclaration` at compile time, so the answer is the
+      // entry the lowering actually built rather than a name reconstructed from
+      // a convention at the point of use.
+      this.program.spawnEntries.set(declaration, spawnFunction);
       // The declaration, not the name: the compiler resolves it after
       // initialization, when the internal name exists. The simple name is still
       // what the collision check above used, because that is what a source
