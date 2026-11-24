@@ -167,6 +167,96 @@ export class StackfulAsyncTransform {
   /** The program being transformed. Assigned by `applyInTreeTransforms`. */
   program!: Program;
 
+  /**
+   * `drive(): void { if (!this.settled) { let $r = f$body(this.$p0, …);
+   *                                    this.value = $r; this.settle(0); } }`
+   *
+   * The fiber backend's task entry: the callee's body runs on the **caller's**
+   * stack. `f$body` is the function the entry already emitted (the original body,
+   * unchanged), so nothing is duplicated — `f$start` still exists and still calls
+   * it, and the two differ only in where the record comes from
+   * (`__currentTask()` for a resumed continuation, `this` for a fiber drive).
+   *
+   * `void` bodies settle without a value: `Task<void>` has no `value` field to
+   * write (`std/assembly/task.ts`), so emitting the assignment would not compile
+   * and there is nothing to carry.
+   */
+  private buildFiberDriveBody(
+    bodyName: string,
+    parameters: ParameterNode[],
+    returnType: TypeNode,
+    range: Range
+  ): BlockStatement {
+    let bodyArgs = new Array<Expression>(parameters.length);
+    for (let i = 0, k = parameters.length; i < k; ++i) {
+      unchecked(bodyArgs[i] = Node.createPropertyAccessExpression(
+        Node.createThisExpression(range),
+        Node.createIdentifierExpression(parameterFieldName(i), parameters[i].range),
+        parameters[i].range
+      ));
+    }
+    let bodyCall = Node.createCallExpression(
+      Node.createIdentifierExpression(bodyName, range),
+      null,
+      bodyArgs,
+      range
+    );
+    let guardStmts = new Array<Statement>();
+    if (isVoidTypeNode(returnType)) {
+      guardStmts.push(Node.createExpressionStatement(bodyCall));
+    } else {
+      guardStmts.push(Node.createVariableStatement(
+        null,
+        [
+          Node.createVariableDeclaration(
+            Node.createIdentifierExpression("$r", range),
+            null, CommonFlags.Let,
+            returnType,
+            bodyCall,
+            range
+          )
+        ],
+        range
+      ));
+      guardStmts.push(Node.createExpressionStatement(
+        assignField(
+          Node.createThisExpression(range),
+          VALUE_FIELD,
+          Node.createIdentifierExpression("$r", range),
+          range
+        )
+      ));
+    }
+    guardStmts.push(Node.createExpressionStatement(
+      Node.createCallExpression(
+        Node.createPropertyAccessExpression(
+          Node.createThisExpression(range),
+          Node.createIdentifierExpression(SETTLE_METHOD, range),
+          range
+        ),
+        null,
+        [ intLiteral(0, range) ],
+        range
+      )
+    ));
+    return Node.createBlockStatement([
+      Node.createIfStatement(
+        Node.createUnaryPrefixExpression(
+          Token.Exclamation,
+          Node.createPropertyAccessExpression(
+            Node.createThisExpression(range),
+            Node.createIdentifierExpression(SETTLED_FIELD, range),
+            range
+          ),
+          range
+        ),
+        Node.createBlockStatement(guardStmts, range),
+        null,
+        range
+      )
+    ], range);
+  }
+
   /** `Transform#afterParse` — runs after parsing, before initialization. */
   afterParse(parser: Parser): void {
     let sources = this.program.sources;
@@ -373,16 +463,27 @@ export class StackfulAsyncTransform {
         parameter.range
       ));
     }
-    // `drive(): void { if (!this.settled) { let $awaitSlot = this.slot;
-    //                                   __parkOn(this); __suspendAwait($awaitSlot); } }`
+    // **Two `drive` bodies, and the difference is the whole backend** (I90).
     //
-    // The guard matters: `await` never drives a settled task, but a ready entry
-    // can outlive a settlement (two waiters on one task), and driving a settled
-    // task would park the caller on something that will never complete again.
+    // Continuation mode parks the caller on the task and suspends; the executor
+    // resumes the *task*, which runs its continuation (`f$start`). That needs a
+    // continuation per task and a core loop to resume it — the machinery DL37
+    // removed from the fiber artifact.
     //
-    // The slot is read into a local **before** the suspend for the shadow
-    // stack's sake, not for ordering: see `AWAIT_SLOT_LOCAL`.
-    let driveBody = Node.createBlockStatement([
+    // A fiber has none of that, and does not need it: the callee's body can run
+    // **on the caller's own stack**. `drive` calls it, it settles, and the
+    // caller's `await` reads `value` — the same object, one frame deeper, no
+    // park and no resume for this path. A suspension *inside* the body (a
+    // `policy.await`, an external producer) still parks the fiber, and the
+    // resume continues right there because the whole stack is preserved.
+    //
+    // Emitting the park here instead would be a park nobody can answer: the
+    // callee is a guest task with no producer, so the host has no `(class, key)`
+    // to complete and no way to run the body — measured, before this branch
+    // existed: `suspensions: 0`, every awaited value 0, exit 0.
+    let driveBody = this.program.options.stackfulBackend == "fiber"
+      ? this.buildFiberDriveBody(bodyName, parameters, returnType, range)
+      : Node.createBlockStatement([
       Node.createIfStatement(
         Node.createUnaryPrefixExpression(
           Token.Exclamation,
