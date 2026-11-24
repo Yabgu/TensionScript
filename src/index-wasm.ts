@@ -90,6 +90,18 @@ export function setSharedMemory(options: Options, sharedMemory: bool): void {
   options.sharedMemory = sharedMemory;
 }
 
+/**
+ * Sets the `stackfulBackend` option.
+ *
+ * A string, because the value is one of two **named** choices and the compiler
+ * validates it (`Compiler#compile` refuses anything else, by name). The CLI
+ * spells it `--stackful-backend=fiber`; the tree's option keys are camelCase, so
+ * `util/options.js` accepts the kebab spelling and this is where the value lands.
+ */
+export function setStackfulBackend(options: Options, stackfulBackend: string): void {
+  options.stackfulBackend = stackfulBackend;
+}
+
 /** Sets the `importTable` option. */
 export function setImportTable(options: Options, importTable: bool): void {
   options.importTable = importTable;

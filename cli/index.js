@@ -318,6 +318,7 @@ export async function main(argv, options) {
   assemblyscript.setInitialMemory(compilerOptions, opts.initialMemory >>> 0);
   assemblyscript.setMaximumMemory(compilerOptions, opts.maximumMemory >>> 0);
   assemblyscript.setSharedMemory(compilerOptions, opts.sharedMemory);
+  assemblyscript.setStackfulBackend(compilerOptions, opts.stackfulBackend);
   assemblyscript.setImportTable(compilerOptions, opts.importTable);
   assemblyscript.setExportTable(compilerOptions, opts.exportTable);
   if (opts.exportStart != null) {

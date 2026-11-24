@@ -226,6 +226,25 @@
     "type": "b",
     "default": false
   },
+  "stackfulBackend": {
+    "category": "Features",
+    "description": [
+      "Chooses how a stackful (stack-switching) suspension is expressed.",
+      "",
+      " continuation  wasm `suspend`, resumed through the continuation table (default)",
+      " fiber         a call to the host park import; the executor suspends the guest",
+      "               on a fiber instead. The artifact carries no `suspend` at all.",
+      "",
+      "The choice is **recorded in the module**, as the custom section",
+      "`tension.stackful-backend`, so a host reads it rather than inferring it from",
+      "a flag, an import or an export — and can refuse a guest built for the other",
+      "backend by name.",
+      ""
+    ],
+    "type": "s",
+    "default": "continuation"
+  },
+
   "stackSize": {
     "category": "Features",
     "description": [

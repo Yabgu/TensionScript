@@ -278,6 +278,23 @@ export const ASYNC_IDLE_TAG = "idle";
 export const ASYNC_DONE_TAG = "done";
 /** The A2 suspension tag: its payload is the awaited task's continuation slot. */
 export const ASYNC_AWAIT_TAG = "await";
+/**
+ * The custom section that records which backend a stackful build chose.
+ *
+ * **The artifact carries the answer**, because the host must not infer it: a
+ * flag is gone by the time the guest is loaded, an import can be declared by a
+ * program that never suspends, and an export says what a module offers rather
+ * than how it suspends. One section, read once, and both sides can refuse each
+ * other by name (I60).
+ */
+export const STACKFUL_BACKEND_SECTION = "tension.stackful-backend";
+/**
+ * The values `--stackful-backend` accepts. `continuation` is the default and is
+ * **never written into a module** — its absence is how it is recorded, which is
+ * what keeps every existing artifact byte-identical (`emitStackfulBackendSection`).
+ */
+export const STACKFUL_BACKEND_CONTINUATION = "continuation";
+export const STACKFUL_BACKEND_FIBER = "fiber";
 export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
 export const ASYNC_STATUS = "~asyncStatus";
@@ -347,6 +364,15 @@ export class Options {
   maximumMemory: u32 = 0;
   /** If true, memory is declared as shared. */
   sharedMemory: bool = false;
+  /**
+   * How a stackful suspension is expressed: `"continuation"` (wasm `suspend`,
+   * the default) or `"fiber"` (a call to the host park import). The value is
+   * **recorded in the module** as `tension.stackful-backend`, so the host reads
+   * the artifact's own answer instead of inferring it. Validated by
+   * {@link validateStackfulBackend}; anything else is a diagnostic, never a
+   * silent default.
+   */
+  stackfulBackend: string = "continuation";
   /** If true, imported memory is zero filled. */
   zeroFilledMemory: bool = false;
   /** If true, imports the function table provided by the embedder. */
@@ -925,6 +951,20 @@ export class Compiler extends DiagnosticEmitter {
    */
   get gcActive(): bool {
     return this.options.wasmGc && gcUniform(this.program);
+  }
+
+  /**
+   * Whether a stackful suspension is expressed as a call to the host park
+   * import rather than as wasm `suspend`.
+   *
+   * One question, asked in three places that must agree: the async intrinsics
+   * that emit a suspension (`src/builtins.ts`), the transform that emits the
+   * drive body (`src/async/stack.ts`), and the record written into the module
+   * ({@link emitStackfulBackendSection}). Reading it from one accessor is what
+   * keeps the artifact's claim and its instructions from drifting apart.
+   */
+  get fiberBackendActive(): bool {
+    return this.options.stackfulBackend == STACKFUL_BACKEND_FIBER;
   }
 
   /**
@@ -1713,6 +1753,19 @@ export class Compiler extends DiagnosticEmitter {
     // happens *before* `prepareAsyncShell` (which needs `mainFunction` to be
     // recorded). An `await` in `main` therefore has to know which backend it
     // belongs to at its own compile time, not the shell's.
+    //
+    // A value that is neither is refused **here**, before anything is emitted,
+    // and names the mistake and both accepted values: a typo must not silently
+    // become the default and then be recorded as if it had been chosen.
+    let backend = options.stackfulBackend;
+    if (backend != STACKFUL_BACKEND_CONTINUATION && backend != STACKFUL_BACKEND_FIBER) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        Source.native.range,
+        `--stackful-backend=${backend} (expected ` + STACKFUL_BACKEND_CONTINUATION + " or " + STACKFUL_BACKEND_FIBER + ")"
+      );
+      return module;
+    }
     this.asyncShellSuspends = program.hasAwait && options.hasFeature(Feature.StackSwitching);
     if (this.asyncShellSuspends) this.prepareAsyncStackPrologue();
 
@@ -2170,7 +2223,40 @@ export class Compiler extends DiagnosticEmitter {
       new RtraceMemory(this).walkModule();
     }
 
+    this.emitStackfulBackendSection();
+
     return module;
+  }
+
+  /**
+   * Writes the chosen stackful backend into the module as
+   * `tension.stackful-backend`, carrying the bare word `fiber`.
+   *
+   * **Written only for the non-default choice, and that is the whole design of
+   * the record.** The default (`continuation`) must stay byte-identical — every
+   * existing guest is a continuation guest, and a section added to all 28 of them
+   * would be a change to artifacts nothing asked to change. So the encoding is:
+   *
+   *     section present, contents "fiber"  →  fiber backend
+   *     section absent                    →  continuation backend
+   *
+   * The absence is a **stated default**, not an inference: the host reads this
+   * one section and nothing else — not a flag (gone at load time), not an import
+   * (a program may declare `scheduler::park` and never suspend), not an export.
+   * `continuation` is never written as a value, because a section that can say
+   * both words would force every existing artifact to grow four bytes to say the
+   * same thing twice.
+   *
+   * Five bytes of ASCII, no trailing newline: the value is the whole content, so
+   * a reader compares it to a string literal without a parser and a hex dump of
+   * the section is the answer itself.
+   */
+  private emitStackfulBackendSection(): void {
+    if (!this.fiberBackendActive) return;
+    let value = STACKFUL_BACKEND_FIBER;
+    let contents = new Uint8Array(value.length);
+    for (let i = 0, k = value.length; i < k; ++i) contents[i] = value.charCodeAt(i) & 0xff;
+    this.module.addCustomSection(STACKFUL_BACKEND_SECTION, contents);
   }
 
   /** Validates and applies `--exportStart`, reporting a conflict by name. */

@@ -8625,7 +8625,7 @@
   else
    i32.const 688
    i32.const 1136
-   i32.const 309
+   i32.const 337
    i32.const 3
    call $~lib/builtins/abort
    unreachable

@@ -41,6 +41,17 @@ export function parse(argv, config, propagateDefaults = true) {
   for (var i = 0, k = (argv = argv.slice()).length; i < k; ++i) {
     let arg = argv[i];
     if (arg == "--") { ++i; break; }
+    // **A long option may be spelled kebab-case.** `--stackful-backend=fiber`
+    // names the same option as `--stackfulBackend=fiber`; the tree's keys are
+    // camelCase, and this is where the two meet. Additive by construction: the
+    // rewrite applies only to an argument whose kebab form differs from itself,
+    // and every key in the config is camelCase, so no argument that resolves
+    // today can resolve to something else. A kebab spelling no key owns is
+    // still unknown, exactly as before.
+    let kebab = /^--([a-z][a-z0-9]*(?:-[a-z0-9]+)+)(=[\s\S]*)?$/.exec(arg);
+    if (kebab) {
+      arg = "--" + kebab[1].replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase()) + (kebab[2] || "");
+    }
     let match = /^(?:(-\w)(?:=(.*))?|(--\w{2,})(?:=(.*))?)$/.exec(arg), option, key;
     if (match) {
       if (config[arg]) option = config[key = arg]; // exact

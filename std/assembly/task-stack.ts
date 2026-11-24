@@ -13,7 +13,7 @@
  * is no second record and no raw `i32.store` into one.
  */
 
-import { TaskBase, Waiter } from "./task";
+import { TaskBase, TaskRecord, Waiter } from "./task";
 import { MaskBase } from "./mask";
 
 // ── the stackful task object (one object per execution) ─────────────────────
@@ -74,6 +74,117 @@ export function __serveSlot(funcIndex: i32): i32 {
 @builtin
 export declare function __resumeTask(slot: i32): i32;
 
+/** `scheduler::park(task_id, class, key)` — the host park the fiber backend uses.
+ *  The same import `~lib/task-rt` declares for the Promise backend's push path;
+ *  identical module and name, so both shells name one wasm import. */
+@external("scheduler", "park")
+declare function hostPark(taskId: i64, class_: i32, key: i32): void;
+
+/**
+ * `scheduler::completion(task_id) -> i32` — **the payload the wake carried**, read
+ * by the task that was just resumed.
+ *
+ * The park import names a `(class, key)` and nothing else, and that is deliberate:
+ * it is the same `(task_id, class, key)` shape the Promise seam already uses, so a
+ * host has one park ABI rather than two. But a stackful await must *return a
+ * value*, and under this backend the host is the producer — so the value has to
+ * come back from the host, and this is the smallest question that fetches it:
+ * one `i64` in, one `i32` out, no pointers, nothing to allocate.
+ *
+ * Called exactly once, immediately after the park returns, by `__parkHost`. The
+ * host answers `0` for a task it has no completion for, which is why a keyless
+ * park (`__parkYield`) never calls it: no completion exists to ask about.
+ */
+@external("scheduler", "completion")
+declare function hostCompletion(taskId: i64): i32;
+
+/**
+ * The fiber backend's **keyed** park: the call a stackful suspension becomes when
+ * the host is the thing that suspends.
+ *
+ * `--stackful-backend=fiber` replaces the wasm `suspend` at a stackful await with
+ * a call here. It names the current task slot and the awaited record's
+ * `(class, key)` — the host's whole park ABI — then **returns**, and the host's
+ * `scheduler::park` is what does not return until the task is woken. The
+ * suspension therefore lives in the host, on a fiber, and the guest never sees a
+ * suspension instruction; that is what lets the artifact load on an engine with
+ * no stack switching (I16, I60).
+ *
+ * A record with **no producer stamp** (`class_ == 0`) is the one shape that has
+ * nothing to name — the same rule `~lib/task-rt`'s `parkState` applies — and the
+ * builtin sends those to {@link __parkYield} instead of here, so this function
+ * can state its contract without a caveat: it always names a real pair.
+ */
+export function __parkHost(awaited: TaskRecord): void {
+  let id = __currentSlot();
+  if (id < 0) return;
+  hostPark(<i64>id, awaited.class_, awaited.key);
+  // **The line after the suspension is the resume**, and the value is here — not
+  // in a continuation that was resumed somewhere else. Same record fields the
+  // Promise path's `__taskResume` writes, so `rt.classify` and this agree on
+  // what a settled record looks like.
+  awaited.payload = hostCompletion(<i64>id);
+  awaited.status = 0;
+  awaited.done = 1;
+}
+
+/**
+ * The fiber backend's **keyless** park: suspend this fiber and name nothing.
+ *
+ * `(class, key) = (0, 0)` is the host's "no producer will ever complete this"
+ * shape — the same `class_ == 0` rule `~lib/task-rt`'s `parkState` uses, reached
+ * from the other side: it is not a park with a *wrong* key, it is a park on the
+ * executor's own continuation. Two callers, both of which have nothing else to
+ * say:
+ *
+ * - the `drive` path (`__suspendAwait`), where a task waits on another **guest**
+ *   task and the waiter's slot is queued by `settle` in this store;
+ * - a policy `await` whose task carries no producer record.
+ *
+ * A keyless park is the one the host cannot complete on its own, so a task that
+ * makes one and is never resumed is exactly what the executor's strand refusal
+ * exists to name (DL25). Returning instead of parking would resume the task with
+ * a value that does not exist yet — the I70 defect this backend is for.
+ */
+export function __parkYield(): void {
+  let id = __currentSlot();
+  if (id < 0) return;
+  hostPark(<i64>id, 0, 0);
+}
+
+/**
+ * The fiber backend's suspension for a policy `await`: park on the awaited
+ * task's producer pair when it has one, and on nothing when it does not.
+ *
+ * **One function, so the rule lives in one place.** A record with a producer
+ * stamp (`class_ != 0`) names a `(class, key)` the host can be woken by; anything
+ * else — no record, or a record with no stamp — is a park nothing external will
+ * complete, which is `__parkYield`'s shape. A `class_ == 0` record still parks
+ * (keyless) rather than returning: returning would resume the task with a value
+ * that has not arrived yet, which is the I70 defect in its original form.
+ *
+ * **A resumed keyed park settles the handle**, because the value arrived with the
+ * wake: `__parkHost` puts it on the record, and `__settleFromRecord` moves it onto
+ * the task object the awaited expression reads. Without that second step the
+ * suspension would work and the value would still read 0 — which is exactly what
+ * the round's first probe measured before this line existed.
+ */
+export function __parkAwait(task: TaskBase | null): void {
+  let record = task ? task.__parkRecord() : null;
+  if (task && record) {
+    let stamp = record.class_;
+    if (stamp != 0) {
+      __parkHost(record);
+      // **Only the keyed path settles here.** A keyed park was resumed by the
+      // host with a value, so the handle now has one; a keyless park has no
+      // completion to copy, and its own executor settles it the usual way.
+      task.__settleFromRecord(record);
+      return;
+    }
+  }
+  __parkYield();
+}
+
 /**
  * Suspends the **current** task on something that is not a continuation slot.
  *
@@ -84,7 +195,7 @@ export declare function __resumeTask(slot: i32): i32;
  */
 // @ts-ignore: decorator
 @builtin
-export declare function __suspendParked(): void;
+export declare function __suspendParked(task: TaskBase | null): void;
 
 /**
  * The `$starts` index of the spawn entry `start` names, as a compile-time

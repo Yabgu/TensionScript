@@ -5,7 +5,9 @@
 // names the *transform* emits live, because a transform can only name top-level
 // std declarations (a submodule's members are not in the program's global
 // element index).
-//
+
+import { TaskRecord } from "./task";
+
 // **Nothing is emitted unless the shell is built.** The file is parsed with
 // every program, but its functions and globals are ordinary lazy elements: a
 // program that does not use the suspending shell compiles none of them, which
@@ -35,5 +37,5 @@ export declare function __installCont(start: () => i32): i32;
  */
 // @ts-ignore: decorator
 @builtin
-export declare function __suspendAwait(awaitedSlot: i32): void;
+export declare function __suspendAwait(awaitedSlot: i32, awaited: TaskRecord | null): void;
 

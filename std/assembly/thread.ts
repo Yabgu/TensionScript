@@ -570,7 +570,9 @@ export class PoolPolicy extends TaskPolicy {
    */
   await(task: TaskBase): void {
     __parkOn(task);
-    __suspendParked();
+    // The awaited task's producer record, which is what the fiber backend's park
+    // names. `null` for a task with none; the backend decides what that means.
+    __suspendParked(task);
   }
 }
 
@@ -767,8 +769,9 @@ export class ThreadPool {
  * **`await` parks and suspends without naming a slot.** The caller is the task
  * that is running here, so the suspended continuation is its own and
  * `__resumeTask` stores it back — but no slot in this table can make it
- * runnable, because the body belongs to the worker. `__suspendParked()` is the
- * payload that says exactly that (`-2`); the reply's `task.settle(0)`, served
+ * runnable, because the body belongs to the worker. `__suspendParked(record)` is
+ * the payload that says exactly that (`-2` under the continuation backend); the
+ * reply's `task.settle(0)`, served
  * by the origin executor, is what wakes the waiter through the wake sink.
  *
  * `reply` must be the `$starts` index of a continuation that runs **in the
@@ -806,7 +809,9 @@ export class RemotePolicy extends TaskPolicy {
    */
   await(task: TaskBase): void {
     __parkOn(task);
-    __suspendParked();
+    // The awaited task's producer record, which is what the fiber backend's park
+    // names. `null` for a task with none; the backend decides what that means.
+    __suspendParked(task);
   }
 }
 

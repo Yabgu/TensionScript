@@ -284,6 +284,34 @@ export abstract class TaskBase {
       list.length = 0;
     }
   }
+  /**
+   * The `TaskRecord` this task is a handle for, or `null` when it has none.
+   *
+   * **A method rather than a field**, because only `Task<T>` carries one and the
+   * policies that park take a `TaskBase` (`~lib/thread`'s `RemotePolicy.await`).
+   * A field here would move every subclass's layout for one virtual read; this
+   * adds a vtable slot and nothing else. The fiber backend's park needs exactly
+   * this: its host ABI is `(task_id, class, key)`, and the pair is the record's.
+   *
+   * A stackful task answers `null` — the stackful lowering never writes a record
+   * (`std/assembly/task.ts`'s `Task<T>._record` note) — and `null` is the honest
+   * answer rather than a zeroed record: there is no producer and no key.
+   */
+  __parkRecord(): TaskRecord | null { return null; }
+
+  /**
+   * Takes a delivered completion into this handle: `settled`, a status, and — in
+   * the subclass that has one — the value.
+   *
+   * The stackful path's counterpart of Backend A's `rt.classify`: same record,
+   * same fields, different reader. The base class has no `value` field to write
+   * (`Task<void>` instantiates none), so it settles without one; `Task<T>`
+   * overrides this to copy the payload.
+   */
+  __settleFromRecord(record: TaskRecord): void {
+    this.status = record.status;
+    this.settled = true;
+  }
 }
 
 /**
@@ -307,6 +335,28 @@ export abstract class TaskBase {
 export class Task<T> extends TaskBase {
   /** Backend A's record for this task. Unused by the stackful backend. */
   _record!: TaskRecord;
+
+  drive(): void {}
+
+  /** The record this handle is for — see `TaskBase#__parkRecord`. */
+  __parkRecord(): TaskRecord | null { return this._record; }
+
+  /**
+   * `this.value = <T>the delivered payload word`.
+   *
+   * **The scalar shapes, stated rather than assumed.** The record carries
+   * `payload` (i32/bool), `f0`/`f1` (f32 and the two halves of a 64-bit value) and
+   * `class_`/`key`; this copies the `payload` word, which is the i32-shaped
+   * completion the round's probe delivers (`Task<i32>`). A `Task<f32>` or a
+   * 64-bit payload would need the `f0`/`f1` rule `rt.classify` implements, and
+   * that is not written here: nothing in this round delivers one, and writing a
+   * decoder for fields no test exercises is how a wrong decoder ships.
+   */
+  __settleFromRecord(record: TaskRecord): void {
+    this.value = <T>record.payload;
+    this.status = record.status;
+    this.settled = true;
+  }
   /** The stackful backend's result. Valid once `settled` is true. */
   value!: T;
 
@@ -315,5 +365,4 @@ export class Task<T> extends TaskBase {
    * overrides this. Declared concretely so `Task<T>` stays instantiable for
    * Backend A's tests and user code.
    */
-  drive(): void {}
 }

@@ -776,6 +776,21 @@ export namespace BuiltinNames {
   export const threadCallStart = "~lib/thread/__callStart";
   export const asyncServeCont = "~lib/task-stack/__serveCont";
   export const asyncCurrentSlot = "~lib/task-stack/__currentSlot";
+  /**
+   * The fiber backend's park: the one place a stackful suspension becomes a
+   * call the host can see. Ordinary std code, not a builtin — the builtins
+   * below emit the *call* to it, and its body reads the awaited record and
+   * calls `scheduler::park`. Lazy like everything else in the file, so a
+   * continuation-backend build never emits it.
+   */
+  export const asyncParkAwait = "~lib/task-stack/__parkAwait";
+  /**
+   * The fiber backend's **keyless** park: suspend this fiber with nothing to be
+   * woken by except the executor's own resumption. Used by the `drive` path, a
+   * task parked on another **guest** task, whose waiter is queued by `settle` in
+   * this store. Same import, `class = key = 0`.
+   */
+  export const asyncParkYield = "~lib/task-stack/__parkYield";
 
   // std/number.ts
   export const NaN = "~lib/number/NaN";
@@ -12206,6 +12221,16 @@ function builtin_async_suspendDone(ctx: BuiltinFunctionContext): ExpressionRef {
     checkArgsRequired(ctx, 1) |
     checkAsyncIntrinsic(ctx)
   ) return module.unreachable();
+  // **The fiber backend has no "done" suspension to make.** Under continuations
+  // this hands the executor a status word and gives control back by suspending;
+  // a fiber gives control back by *returning* from the wasm call it is running,
+  // and the host sees the return. Both call sites (`~lib/async`'s `__coreloop`
+  // and `__coreloopAwait`) it is the last statement, so emitting nothing leaves
+  // the natural return in place — and the artifact then carries no `suspend` at
+  // all, which is what lets it load on an engine without stack switching.
+  if (compiler.fiberBackendActive) {
+    return module.nop();
+  }
   let status = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
   // Compiling the operand leaves `currentType` at the operand's type; the
   // call's own result is `void` (the expression statement would otherwise
@@ -12225,6 +12250,13 @@ function builtin_async_suspendIdle(ctx: BuiltinFunctionContext): ExpressionRef {
     checkArgsRequired(ctx, 0) |
     checkAsyncIntrinsic(ctx)
   ) return module.unreachable();
+  // The same answer as `__suspendDone`: a fiber executor's idle park is the
+  // host's loop, so the guest has nothing to suspend on. Unused by std today
+  // (declared for A1's shape), which is why this branch is symmetry rather than
+  // a measured path.
+  if (compiler.fiberBackendActive) {
+    return module.nop();
+  }
   return module.suspend(ASYNC_IDLE_TAG, []);
 }
 builtinFunctions.set(BuiltinNames.asyncSuspendIdle, builtin_async_suspendIdle);
@@ -12366,6 +12398,15 @@ builtinFunctions.set(BuiltinNames.asyncInstallCont, builtin_async_installCont);
 // the suspended continuation and stores it back at the current task's slot, so
 // the only value the tag carries is an i32 slot — the same shape in both class
 // representations, and a value a scheduler can move between threads.
+//
+// **One operand, on both backends.** The slot is all the *continuation* path
+// needs, and it is all the fiber path uses too: this is the `drive` suspension,
+// i.e. a task parked on another **guest** task, and a guest task is resumed by
+// its own executor's waiter list rather than by a producer's `(class, key)`. The
+// fiber path therefore parks with class 0 ("no producer key"), which is the
+// keyless park `__parkHost` describes. Reading the awaited record here was tried
+// and removed: a `f$Rec` is a `Task<R>` whose `_record` the stackful lowering
+// never writes (`std/assembly/task.ts`), so the operand would have been garbage.
 function builtin_async_suspendAwait(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
@@ -12375,6 +12416,9 @@ function builtin_async_suspendAwait(ctx: BuiltinFunctionContext): ExpressionRef 
     checkArgsRequired(ctx, 1) |
     checkStackIntrinsic(ctx, ctx.prototype.internalName)
   ) return module.unreachable();
+  if (compiler.fiberBackendActive) {
+    return emitHostPark(compiler, ctx, null, BuiltinNames.asyncParkYield);
+  }
   let slot = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
   // Compiling the operand leaves `currentType` at i32; the call's own result is
   // void, and without this the expression statement wraps `suspend` in a
@@ -12383,6 +12427,35 @@ function builtin_async_suspendAwait(ctx: BuiltinFunctionContext): ExpressionRef 
   return module.suspend(ASYNC_AWAIT_TAG, [ slot ]);
 }
 builtinFunctions.set(BuiltinNames.asyncSuspendAwait, builtin_async_suspendAwait);
+
+/**
+ * The fiber backend's suspension: a call into std, not into the import.
+ *
+ * The (class, key) pair the host's park takes lives on the awaited `TaskRecord`,
+ * and deciding whether there *is* one — and falling back to a keyless park when
+ * there is not — is std's business (`__parkAwait`). Compiled on demand like any
+ * other call, so a build that never suspends never carries it.
+ */
+function emitHostPark(
+  compiler: Compiler,
+  ctx: BuiltinFunctionContext,
+  record: Expression | null,
+  entry: string
+): ExpressionRef {
+  let module = compiler.module;
+  // **The caller names the entry**, because the choice is which park this is, not
+  // how to pass nothing: a keyed park forwards the awaited record and a keyless
+  // one takes no argument. That also keeps a null reference out of the
+  // compiler's own IR — a class reference's representation is not the same under
+  // both ABIs, and std already has `null` in its type system.
+  let instance = compiler.program.requireFunction(entry);
+  compiler.currentType = Type.void;
+  if (!compiler.compileFunction(instance, true)) return module.unreachable();
+  let args = new Array<Expression>();
+  if (record != null) args.push(record);
+  compiler.currentType = Type.void;
+  return compiler.compileCallDirect(instance, args, ctx.reportNode);
+}
 
 // __suspendParked() -> void
 //
@@ -12403,9 +12476,12 @@ function builtin_async_suspendParked(ctx: BuiltinFunctionContext): ExpressionRef
   compiler.currentType = Type.void;
   if (
     checkTypeAbsent(ctx) |
-    checkArgsRequired(ctx, 0) |
+    checkArgsRequired(ctx, 1) |
     checkStackIntrinsic(ctx, ctx.prototype.internalName)
   ) return module.unreachable();
+  if (compiler.fiberBackendActive) {
+    return emitHostPark(compiler, ctx, ctx.operands[0], BuiltinNames.asyncParkAwait);
+  }
   return module.suspend(ASYNC_AWAIT_TAG, [ module.i32(-2) ]);
 }
 builtinFunctions.set(BuiltinNames.asyncSuspendParked, builtin_async_suspendParked);
