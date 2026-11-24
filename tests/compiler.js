@@ -226,6 +226,21 @@ async function runTest(basename) {
   }
 
   function afterCompile(mode) {
+    // **A fixture may assert instead of compare.** `skipFixture` is for a test
+    // whose subject is not text: a custom section, say, which a `.wat` cannot even
+    // express (the text format has no syntax for one, so the disassembly drops it).
+    // The compile still has to succeed — that is this function's other job — and
+    // the `.js` beside the fixture is what asserts, at import time.
+    //
+    // Not a weakening: the test is not skipped (`prepareResult` is reached the
+    // same way), no `.wat` is invented, and the only thing removed is a comparison
+    // against a golden that could not have carried the claim.
+    if (config.skipFixture) {
+      for (const extension of ["wat", "js", "d.ts"]) {
+        fs.unlink(`${basename}.${mode}.${extension}`, err => { /* nop */ });
+      }
+      return null;
+    }
     // The ESM bindings test requires the .wasm file to be present. The file is
     // promptly deleted after the test has completed, unless --createBinary is
     // specified.

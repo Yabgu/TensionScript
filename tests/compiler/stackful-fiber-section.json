@@ -1,0 +1,13 @@
+{
+  "skipFixture": true,
+  "skipInstantiate": true,
+  "asc_flags": [
+    "--enable stack-switching",
+    "--enable threads",
+    "--sharedMemory",
+    "--importMemory",
+    "--initialMemory 2",
+    "--maximumMemory 256",
+    "--stackful-backend=fiber"
+  ]
+}
