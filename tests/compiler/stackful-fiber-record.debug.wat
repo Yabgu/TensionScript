@@ -2,8 +2,8 @@
  (type $0 (func (param i32 i32)))
  (type $1 (func (param i32) (result i32)))
  (type $2 (func (param i32 i32) (result i32)))
- (type $3 (func (result i32)))
- (type $4 (func (param i32)))
+ (type $3 (func (param i32)))
+ (type $4 (func (result i32)))
  (type $5 (func))
  (type $6 (func (param i32 i32 i32)))
  (type $7 (func (param i32 i32 i32 i32) (result i32)))
@@ -19,7 +19,7 @@
  (import "env" "abort" (func $~lib/builtins/abort (type $8) (param i32 i32 i32 i32)))
  (import "scheduler" "park" (func $~lib/task-stack/hostPark (type $12) (param i64 i32 i32)))
  (import "scheduler" "completion" (func $~lib/task-stack/hostCompletion (type $13) (param i64) (result i32)))
- (import "env" "__executorCount" (func $~lib/thread/__executorCount (type $3) (result i32)))
+ (import "env" "__executorCount" (func $~lib/thread/__executorCount (type $4) (result i32)))
  (import "env" "__startThread" (func $~lib/thread/__startThread (type $1) (param i32) (result i32)))
  (global $~asyncLastStatus (mut i32) (i32.const 0))
  (global $~asyncCurrentSlot (mut i32) (i32.const 0))
@@ -154,11 +154,11 @@
  (export "__start" (func $__start))
  (func $~lib/task/noopWake (type $0) (param $exec i32) (param $slot i32)
  )
- (func $stackful-fiber-record/leaf (type $3) (result i32)
+ (func $stackful-fiber-record/leaf (type $4) (result i32)
   i32.const 1
   return
  )
- (func $~lib/rt/common/initialHeapBase (type $3) (result i32)
+ (func $~lib/rt/common/initialHeapBase (type $4) (result i32)
   (local $heap i32)
   i32.const 1
   drop
@@ -194,7 +194,7 @@
   local.get $space
   return
  )
- (func $~lib/rt/itcms/initialPinSpace (type $3) (result i32)
+ (func $~lib/rt/itcms/initialPinSpace (type $4) (result i32)
   (local $s i32)
   i32.const 1
   drop
@@ -231,7 +231,7 @@
   i32.and
   return
  )
- (func $~lib/rt/itcms/visitRoots (type $4) (param $cookie i32)
+ (func $~lib/rt/itcms/visitRoots (type $3) (param $cookie i32)
   (local $pn i32)
   (local $iter i32)
   local.get $cookie
@@ -273,7 +273,7 @@
    end
   end
  )
- (func $~lib/rt/itcms/initialToSpace (type $3) (result i32)
+ (func $~lib/rt/itcms/initialToSpace (type $4) (result i32)
   (local $s i32)
   i32.const 1
   drop
@@ -339,7 +339,7 @@
   i32.or
   call $~lib/rt/itcms/Object#set:nextWithColor
  )
- (func $~lib/rt/itcms/Object#unlink (type $4) (param $this i32)
+ (func $~lib/rt/itcms/Object#unlink (type $3) (param $this i32)
   (local $next i32)
   (local $prev i32)
   local.get $this
@@ -469,7 +469,7 @@
   local.get $this
   call $~lib/rt/itcms/Object#set:prev
  )
- (func $~lib/rt/itcms/Object#makeGray (type $4) (param $this i32)
+ (func $~lib/rt/itcms/Object#makeGray (type $3) (param $this i32)
   (local $1 i32)
   local.get $this
   global.get $~lib/rt/itcms/iter
@@ -537,7 +537,7 @@
    global.set $~lib/rt/itcms/visitCount
   end
  )
- (func $~lib/rt/itcms/visitStack (type $4) (param $cookie i32)
+ (func $~lib/rt/itcms/visitStack (type $3) (param $cookie i32)
   (local $ptr i32)
   global.get $~lib/memory/__stack_pointer
   local.set $ptr
@@ -558,7 +558,7 @@
    end
   end
  )
- (func $~lib/rt/itcms/initialFromSpace (type $3) (result i32)
+ (func $~lib/rt/itcms/initialFromSpace (type $4) (result i32)
   (local $s i32)
   i32.const 1
   drop
@@ -1588,7 +1588,7 @@
   local.get $block
   call $~lib/rt/tlsf/insertBlock
  )
- (func $~lib/rt/tlsf/__free (type $4) (param $ptr i32)
+ (func $~lib/rt/tlsf/__free (type $3) (param $ptr i32)
   global.get $~lib/rt/common/HEAP_BASE
   local.get $ptr
   i32.gt_u
@@ -1605,7 +1605,7 @@
   call $~lib/rt/tlsf/checkUsedBlock
   call $~lib/rt/tlsf/freeBlock
  )
- (func $~lib/rt/itcms/free (type $4) (param $obj i32)
+ (func $~lib/rt/itcms/free (type $3) (param $obj i32)
   global.get $~lib/rt/common/HEAP_BASE
   local.get $obj
   i32.gt_u
@@ -1630,7 +1630,7 @@
    call $~lib/rt/tlsf/__free
   end
  )
- (func $~lib/rt/itcms/step (type $3) (result i32)
+ (func $~lib/rt/itcms/step (type $4) (result i32)
   (local $obj i32)
   (local $1 i32)
   (local $black i32)
@@ -2835,10 +2835,10 @@
   i32.const 0
   call $~lib/task-stack/hostPark
  )
- (func $~asyncMainStart (type $3) (result i32)
+ (func $~asyncMainStart (type $4) (result i32)
   call $stackful-fiber-record/main
  )
- (func $~lib/async/__asyncPump (type $3) (result i32)
+ (func $~lib/async/__asyncPump (type $4) (result i32)
   i32.const 0
   return
  )
@@ -3073,11 +3073,11 @@
   local.get $heap
   global.set $~lib/memory/__stack_pointer
  )
- (func $~lib/rt/common/__arenaHeapBase (type $3) (result i32)
+ (func $~lib/rt/common/__arenaHeapBase (type $4) (result i32)
   global.get $~lib/rt/common/HEAP_BASE
   return
  )
- (func $~lib/rt/common/__arenaEnd (type $3) (result i32)
+ (func $~lib/rt/common/__arenaEnd (type $4) (result i32)
   global.get $~lib/rt/common/ARENA_END
   return
  )
@@ -3800,7 +3800,7 @@
   call $~lib/thread/__carveThreadLayout
   return
  )
- (func $~lib/thread/__mainArenaBase (type $3) (result i32)
+ (func $~lib/thread/__mainArenaBase (type $4) (result i32)
   (local $rec i32)
   (local $rec|1 i32)
   (local $capacity i32)
@@ -3862,7 +3862,7 @@
   end
   return
  )
- (func $~lib/thread/__mainArenaSize (type $3) (result i32)
+ (func $~lib/thread/__mainArenaSize (type $4) (result i32)
   (local $rec i32)
   (local $rec|1 i32)
   (local $capacity i32)
@@ -4062,7 +4062,7 @@
   local.get $status
   return
  )
- (func $~lib/thread/controlBlockBase (type $3) (result i32)
+ (func $~lib/thread/controlBlockBase (type $4) (result i32)
   (local $b i32)
   (local $here i32)
   (local $ptr i32)
@@ -4107,7 +4107,7 @@
   local.get $here
   return
  )
- (func $~lib/task-stack/__setSelfExecutor (type $4) (param $id i32)
+ (func $~lib/task-stack/__setSelfExecutor (type $3) (param $id i32)
   local.get $id
   global.set $~lib/task-stack/selfExecutor
  )
@@ -4155,7 +4155,7 @@
   local.get $this
   i32.load
  )
- (func $~lib/thread/blockFreeRequest (type $4) (param $index i32)
+ (func $~lib/thread/blockFreeRequest (type $3) (param $index i32)
   (local $free i32)
   (local $capacity i32)
   (local $ptr i32)
@@ -4272,6 +4272,13 @@
   unreachable
  )
  (func $~lib/task-stack/__serveSlot (type $1) (param $funcIndex i32) (result i32)
+  local.get $funcIndex
+  call $$serveEntry
+  drop
+  i32.const -1
+  return
+ )
+ (func $~lib/task/TaskBase#drive (type $3) (param $this i32)
   unreachable
  )
  (func $~lib/thread/Executor#get:ready (type $1) (param $this i32) (result i32)
@@ -4605,7 +4612,7 @@
   end
   unreachable
  )
- (func $~lib/task/setWakeSink (type $4) (param $sink i32)
+ (func $~lib/task/setWakeSink (type $3) (param $sink i32)
   local.get $sink
   global.set $~lib/task/__wakeSink
  )
@@ -4956,6 +4963,8 @@
   local.get $this
   i32.load offset=8
  )
+ (func $~lib/task/Task<i32>#drive (type $3) (param $this i32)
+ )
  (func $~lib/mask/MaskBase#get:width@override (type $1) (param $0 i32) (result i32)
   (local $1 i32)
   local.get $0
@@ -5018,7 +5027,28 @@
   local.get $1
   call $~lib/task/TaskBase#__settleFromRecord
  )
- (func $~lib/rt/__visit_globals (type $4) (param $0 i32)
+ (func $~lib/task/TaskBase#drive@override (type $3) (param $0 i32)
+  (local $1 i32)
+  block $default
+   block $case0
+    local.get $0
+    i32.const 8
+    i32.sub
+    i32.load
+    local.set $1
+    local.get $1
+    i32.const 18
+    i32.eq
+    br_if $case0
+    br $default
+   end
+   local.get $0
+   call $~lib/task/Task<i32>#drive
+   return
+  end
+  unreachable
+ )
+ (func $~lib/rt/__visit_globals (type $3) (param $0 i32)
   (local $1 i32)
   global.get $~lib/task-stack/tasks
   local.tee $1
@@ -5344,6 +5374,17 @@
   end
   unreachable
  )
+ (func $$serveEntry (type $1) (param $0 i32) (result i32)
+  (local $1 i32)
+  local.get $0
+  i32.const 0
+  i32.eq
+  if (result i32)
+   call $~asyncMainStart
+  else
+   i32.const 0
+  end
+ )
  (func $~start (type $5)
   call $~lib/rt/common/initialHeapBase
   global.set $~lib/rt/common/HEAP_BASE
@@ -5364,7 +5405,7 @@
   call $~asyncMainStart
   global.set $~asyncStatus
  )
- (func $__start (type $3) (result i32)
+ (func $__start (type $4) (result i32)
   call $~start
   global.get $~asyncStatus
  )
@@ -5940,7 +5981,7 @@
   local.get $3
   return
  )
- (func $~lib/task-stack/__currentTask (type $3) (result i32)
+ (func $~lib/task-stack/__currentTask (type $4) (result i32)
   (local $table i32)
   (local $slot i32)
   (local $2 i32)
@@ -6388,7 +6429,7 @@
   local.get $4
   return
  )
- (func $~lib/task-stack/__parkOn (type $4) (param $task i32)
+ (func $~lib/task-stack/__parkOn (type $3) (param $task i32)
   (local $current i32)
   (local $mask i32)
   (local $policy i32)
@@ -6534,7 +6575,7 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
- (func $~lib/task-stack/__parkHost (type $4) (param $awaited i32)
+ (func $~lib/task-stack/__parkHost (type $3) (param $awaited i32)
   (local $id i32)
   (local $2 i32)
   global.get $~lib/memory/__stack_pointer
@@ -6642,7 +6683,7 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
- (func $~lib/task-stack/__parkAwait (type $4) (param $task i32)
+ (func $~lib/task-stack/__parkAwait (type $3) (param $task i32)
   (local $record i32)
   (local $stamp i32)
   (local $3 i32)
@@ -6753,7 +6794,7 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
- (func $stackful-fiber-record/main (type $3) (result i32)
+ (func $stackful-fiber-record/main (type $4) (result i32)
   (local $warm_up i32)
   (local $job i32)
   (local $policy i32)
@@ -7299,6 +7340,37 @@
   local.get $2
   return
  )
+ (func $~lib/task-stack/__driveSlot (type $3) (param $slot i32)
+  (local $taskOrNull i32)
+  (local $2 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  local.get $slot
+  call $~lib/task-stack/__taskAt
+  local.tee $taskOrNull
+  i32.store
+  local.get $taskOrNull
+  if
+   local.get $taskOrNull
+   local.set $2
+   global.get $~lib/memory/__stack_pointer
+   local.get $2
+   i32.store offset=4
+   local.get $2
+   call $~lib/task/TaskBase#drive@override
+  end
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
  (func $~lib/thread/SlotRing#push (type $2) (param $this i32) (param $slot i32) (result i32)
   (local $capacity i32)
   (local $base i32)
@@ -7681,7 +7753,74 @@
   local.get $funcIndex
   call $~lib/task-stack/__serveSlot
   local.set $slot
-  unreachable
+  local.get $slot
+  call $~lib/task-stack/__driveSlot
+  i32.const -1
+  local.set $awaited
+  local.get $awaited
+  i32.const 0
+  i32.ge_s
+  if
+   global.get $~lib/memory/__stack_pointer
+   local.get $awaited
+   call $~lib/task-stack/__taskAt
+   local.tee $taskOrNull
+   i32.store
+   local.get $taskOrNull
+   if
+    global.get $~lib/memory/__stack_pointer
+    local.get $taskOrNull
+    local.tee $task
+    i32.store offset=4
+    local.get $task
+    local.set $9
+    global.get $~lib/memory/__stack_pointer
+    local.get $9
+    i32.store offset=8
+    local.get $9
+    local.get $argSlot
+    call $~lib/task/TaskBase#set:serveArg
+    local.get $task
+    local.set $9
+    global.get $~lib/memory/__stack_pointer
+    local.get $9
+    i32.store offset=8
+    local.get $9
+    local.get $taskKey
+    call $~lib/task/TaskBase#set:serveKey
+    local.get $task
+    local.set $9
+    global.get $~lib/memory/__stack_pointer
+    local.get $9
+    i32.store offset=8
+    local.get $9
+    local.get $origin
+    call $~lib/task/TaskBase#set:serveOrigin
+   end
+   local.get $e
+   local.set $9
+   global.get $~lib/memory/__stack_pointer
+   local.get $9
+   i32.store offset=12
+   local.get $9
+   call $~lib/thread/Executor#get:ready
+   local.set $9
+   global.get $~lib/memory/__stack_pointer
+   local.get $9
+   i32.store offset=8
+   local.get $9
+   local.get $awaited
+   call $~lib/thread/SlotRing#push
+   drop
+  end
+  global.get $~asyncLastStatus
+  local.set $9
+  global.get $~lib/memory/__stack_pointer
+  i32.const 16
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $9
+  return
  )
  (func $~lib/array/Array<~lib/thread/Request|null>#get:length (type $1) (param $this i32) (result i32)
   (local $1 i32)
@@ -8288,7 +8427,7 @@
   local.get $25
   return
  )
- (func $~lib/thread/driveReady (type $4) (param $e i32)
+ (func $~lib/thread/driveReady (type $3) (param $e i32)
   (local $slot i32)
   (local $taskOrNull i32)
   (local $awaited i32)
@@ -8350,7 +8489,34 @@
     return
    end
   end
-  unreachable
+  local.get $slot
+  call $~lib/task-stack/__driveSlot
+  i32.const -1
+  local.set $awaited
+  local.get $awaited
+  i32.const 0
+  i32.ge_s
+  if
+   local.get $e
+   local.set $4
+   global.get $~lib/memory/__stack_pointer
+   local.get $4
+   i32.store offset=4
+   local.get $4
+   call $~lib/thread/Executor#get:ready
+   local.set $4
+   global.get $~lib/memory/__stack_pointer
+   local.get $4
+   i32.store
+   local.get $4
+   local.get $awaited
+   call $~lib/thread/SlotRing#push
+   drop
+  end
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
  )
  (func $~lib/thread/__mainStep__ (type $1) (param $e i32) (result i32)
   (local $1 i32)

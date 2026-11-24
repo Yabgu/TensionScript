@@ -146,6 +146,25 @@ export function __parkHost(awaited: TaskRecord): void {
  * exists to name (DL25). Returning instead of parking would resume the task with
  * a value that does not exist yet — the I70 defect this backend is for.
  */
+/**
+ * **Run the task at `slot` on this stack** — the fiber backend's `__resumeTask`
+ * (DL40).
+ *
+ * A slot reaching a ready queue is a task with work to do. The continuation
+ * backend resumes the continuation installed at that slot; a fiber build has no
+ * table, but it has the task object, and `drive()` on this backend runs the body
+ * inline (DL38). So the slot keeps its meaning — "run what is here" — while the
+ * mechanism behind it becomes an ordinary call.
+ *
+ * A slot with no task is a no-op, not a trap: the queue is guest bookkeeping and
+ * a stale index is a lost wake, which the executor's strand refusal reports by
+ * name rather than this function aborting the store.
+ */
+export function __driveSlot(slot: i32): void {
+  let taskOrNull = __taskAt(slot);
+  if (taskOrNull) changetype<TaskBase>(taskOrNull).drive();
+}
+
 export function __parkYield(): void {
   let id = __currentSlot();
   if (id < 0) return;

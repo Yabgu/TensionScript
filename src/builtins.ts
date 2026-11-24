@@ -36,7 +36,8 @@ import {
   ASYNC_LAST_STATUS,
   ASYNC_CURRENT_SLOT,
   ASYNC_NEXT_SLOT,
-  STARTS_TABLE
+  STARTS_TABLE,
+  SERVE_ENTRY
 } from "./compiler";
 
 import {
@@ -791,6 +792,14 @@ export namespace BuiltinNames {
    * this store. Same import, `class = key = 0`.
    */
   export const asyncParkYield = "~lib/task-stack/__parkYield";
+  /**
+   * `__driveSlot(slot)`: run the task at `slot` on the current stack (DL40).
+   *
+   * The fiber backend's `__resumeTask` (see the builtin): a slot is a task the
+   * ready queue or a serve put there, and running it is `drive()` — which on this
+   * backend is the body, not a continuation.
+   */
+  export const asyncDriveSlot = "~lib/task-stack/__driveSlot";
 
   // std/number.ts
   export const NaN = "~lib/number/NaN";
@@ -12676,11 +12685,23 @@ builtinFunctions.set(BuiltinNames.threadCallStart, builtin_thread_callStart);
 function builtin_async_serveCont(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
-  // Serving is installing a `$starts` function as a continuation; a fiber build has
-  // no continuation table to install it in.
+  // **The fiber backend serves by running the entry, not by installing it** (DL40).
+  //
+  // A continuation serve allocates a slot, `cont.new`s the entry into it, and
+  // answers the slot for `__resumeTask` to resume. There is no table here, so the
+  // entry is **called**: `$serveEntry(index)` is an index chain over the `$starts`
+  // entries, emitted once the table is final. Running it on the current stack is
+  // the same idiom DL38 gave `drive` — the callee's body is a frame here, not a
+  // continuation to be resumed later.
+  //
+  // `-1` is the honest answer for "there is no slot": `__serveOne` reads it as
+  // `awaited < 0` and queues nothing, because nothing is waiting to be run.
   if (compiler.fiberBackendActive) {
+    if (checkTypeAbsent(ctx) | checkArgsRequired(ctx, 1) |
+        checkStackIntrinsic(ctx, ctx.prototype.internalName)) return module.unreachable();
+    let index = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
     compiler.currentType = Type.i32;
-    return module.unreachable();
+    return module.block(null, [ module.drop(module.call(SERVE_ENTRY, [ index ], TypeRef.I32)), module.i32(-1) ], TypeRef.I32);
   }
   compiler.currentType = Type.i32;
   if (
@@ -12823,11 +12844,26 @@ builtinFunctions.set(BuiltinNames.asyncLastStatus, builtin_async_lastStatus);
 function builtin_async_resumeTask(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
-  // A fiber resumes by the host re-entering the fiber, not by resuming a
-  // continuation out of a table.
+  // **A fiber resumes a *slot* by running its task's body here** (DL40).
+  //
+  // The continuation backend resumes the continuation stored at the slot. A fiber
+  // build has no table, but it has the task object: `__driveSlot(slot)` looks it
+  // up with `__taskAt` and calls `drive()`, which on this backend runs the body on
+  // the caller's stack (DL38). So `__resumeTask` keeps its contract — "run what is
+  // at this slot" — and answers `-1` for "it ran; nothing else is waiting".
   if (compiler.fiberBackendActive) {
+    if (checkTypeAbsent(ctx) | checkArgsRequired(ctx, 1) |
+        checkStackIntrinsic(ctx, ctx.prototype.internalName)) return module.unreachable();
+    let slot = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
+    let instance = compiler.program.requireFunction(BuiltinNames.asyncDriveSlot);
+    if (!compiler.compileFunction(instance, true)) return module.unreachable();
+    compiler.currentType = Type.void;
+    let call: ExpressionRef = module.call(instance.internalName, [ slot ], TypeRef.None);
+    let stmts = new Array<ExpressionRef>();
+    stmts.push(call);
     compiler.currentType = Type.i32;
-    return module.unreachable();
+    stmts.push(module.i32(-1));
+    return module.block(null, stmts, TypeRef.I32);
   }
   compiler.currentType = Type.i32;
   if (

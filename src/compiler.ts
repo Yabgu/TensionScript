@@ -317,6 +317,19 @@ export const ASYNC_MAIN_START = "~asyncMainStart";
 export const ASYNC_NEXT_SLOT = "~asyncNextSlot";
 /** The shared start table: a `funcIndex` both stores resolve identically. */
 export const STARTS_TABLE = "$starts";
+/**
+ * The fiber backend's serve dispatch: `__serveEntry(index: i32) -> i32`, emitted
+ * by {@link Compiler#emitStartsTable} **in fiber mode only** (DL40).
+ *
+ * A `$starts` entry is a `funcref`, and on the continuation backend the entry is
+ * installed as a `cont.new` and resumed; on the fiber backend there is no
+ * continuation table, so the worker has to **call** the entry. `call_indirect`
+ * would need a heap type that all entries agree on, resolved before this table
+ * exists; an index chain over the names that are already in hand does not. It is
+ * emitted after the table so the indices are final, exactly like the
+ * `__spawnIndexOf` helpers beside it.
+ */
+export const SERVE_ENTRY = "$serveEntry";
 /** Its export name, which is the name the design and the host use. */
 export const STARTS_TABLE_EXPORT = "$starts";
 
@@ -1906,6 +1919,28 @@ export class Compiler extends DiagnosticEmitter {
         if (unchecked(list[j]) == target) { index = j; break; }
       }
       module.addFunction(helper, TypeRef.None, TypeRef.I32, null, module.i32(index));
+    }
+
+    // **The fiber backend's serve dispatch** (DL40). An index chain, not a
+    // `call_indirect`: every entry here is `() -> i32` by construction but their
+    // heap types are not guaranteed to be the *same* type index, and a mismatch is
+    // a validation error at the call. The chain names the functions that are
+    // already in `list`, so there is nothing left to resolve.
+    //
+    // Returns the entry's own status (or 0 when the index names no entry), not a
+    // slot: on this backend there is no slot to return — the body ran here.
+    if (this.fiberShell) {
+      // Built right to left, so every `if` has an `else` and the whole chain is a
+      // single i32 expression: an `if` without an `else` may not produce a value.
+      let body: ExpressionRef = this.module.i32(0);
+      for (let i = count - 1; i >= 0; --i) {
+        body = this.module.if(
+          this.module.binary(BinaryOp.EqI32, this.module.local_get(0, TypeRef.I32), this.module.i32(i)),
+          this.module.call(unchecked(list[i]), [], TypeRef.I32),
+          body
+        );
+      }
+      this.module.addFunction(SERVE_ENTRY, TypeRef.I32, TypeRef.I32, [ TypeRef.I32 ], body);
     }
   }
 
