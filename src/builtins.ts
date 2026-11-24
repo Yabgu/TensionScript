@@ -12188,6 +12188,11 @@ function builtin_async_resumeMain(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
   compiler.currentType = Type.i32;
+  // The fiber shell calls `main` directly; nothing resumes a root continuation.
+  if (compiler.fiberBackendActive) {
+    compiler.currentType = Type.i32;
+    return module.unreachable();
+  }
   if (
     checkTypeAbsent(ctx) |
     checkArgsRequired(ctx, 0) |
@@ -12343,49 +12348,63 @@ function builtin_async_installCont(ctx: BuiltinFunctionContext): ExpressionRef {
     module.i32(1)
   )));
 
-  // Grow the table when the slot is past the end. `table.grow` is a
-  // side-effecting call; the guard keeps the delta positive.
+  // **The fiber backend allocates an identity and no continuation** (DL37). A task
+  // still needs a slot — it is the handle `__bindTask` registers and the id a park
+  // names — but the *installation* is a `cont.new` stored in a `(ref null $ct)`
+  // table, and that is the single largest reason a fiber artifact used to demand
+  // `--enable stack-switching` (I85). Here the counter is the whole mechanism: ids
+  // come from `__nextSlot`, they are unique within the store, and nothing addresses
+  // them by index in a table.
   //
-  // **Both operands go through locals, because Binaryen's IR is a tree.** The
-  // comparison and the subtraction need the same two values; handing the same
-  // `ExpressionRef` to both makes one node a child of two parents, which the
-  // type checker tolerates and `local-cse` does not (`!(requests && original)`
-  // at -O2). Measured on a three-line async module.
-  let sizeLocal = compiler.currentFlow.getTempLocal(Type.i32);
-  stmts.push(module.local_set(sizeLocal.index, module.table_size(ASYNC_CONT_TABLE), false));
-  let needLocal = compiler.currentFlow.getTempLocal(Type.i32);
-  stmts.push(module.local_set(needLocal.index, module.binary(
-    BinaryOp.AddI32,
-    module.local_get(slotLocal.index, TypeRef.I32),
-    module.i32(1)
-  ), false));
-  stmts.push(module.if(
-    module.binary(
-      BinaryOp.GtI32,
-      module.local_get(needLocal.index, TypeRef.I32),
-      module.local_get(sizeLocal.index, TypeRef.I32)
-    ),
-    module.drop(module.table_grow(
-      ASYNC_CONT_TABLE,
+  // `compileFunction(target)` above still runs, and must: it is what compiles
+  // `f$start`, which is now reached by an ordinary call from `drive()` rather than
+  // by a resume.
+  if (!compiler.fiberBackendActive) {
+    // Grow the table when the slot is past the end. `table.grow` is a
+    // side-effecting call; the guard keeps the delta positive.
+    //
+    // **Both operands go through locals, because Binaryen's IR is a tree.** The
+    // comparison and the subtraction need the same two values; handing the same
+    // `ExpressionRef` to both makes one node a child of two parents, which the
+    // type checker tolerates and `local-cse` does not (`!(requests && original)`
+    // at -O2). Measured on a three-line async module.
+    let sizeLocal = compiler.currentFlow.getTempLocal(Type.i32);
+    stmts.push(module.local_set(sizeLocal.index, module.table_size(ASYNC_CONT_TABLE), false));
+    let needLocal = compiler.currentFlow.getTempLocal(Type.i32);
+    stmts.push(module.local_set(needLocal.index, module.binary(
+      BinaryOp.AddI32,
+      module.local_get(slotLocal.index, TypeRef.I32),
+      module.i32(1)
+    ), false));
+    stmts.push(module.if(
       module.binary(
-        BinaryOp.SubI32,
+        BinaryOp.GtI32,
         module.local_get(needLocal.index, TypeRef.I32),
         module.local_get(sizeLocal.index, TypeRef.I32)
       ),
-      module.ref_null(compiler.asyncCtMainRef)
-    )),
-    module.nop()
-  ));
+      module.drop(module.table_grow(
+        ASYNC_CONT_TABLE,
+        module.binary(
+          BinaryOp.SubI32,
+          module.local_get(needLocal.index, TypeRef.I32),
+          module.local_get(sizeLocal.index, TypeRef.I32)
+        ),
+        module.ref_null(compiler.asyncCtMainRef)
+      )),
+      module.nop()
+    ));
 
-  compiler.asyncStartFunctions.add(target.internalName);
-  stmts.push(module.table_set(
-    ASYNC_CONT_TABLE,
-    module.local_get(slotLocal.index, TypeRef.I32),
-    module.cont_new(
-      compiler.asyncCtMainHeap,
-      module.ref_func(target.internalName, typeFromHeapType(functionType, false))
-    )
-  ));
+    compiler.asyncStartFunctions.add(target.internalName);
+    stmts.push(module.table_set(
+      ASYNC_CONT_TABLE,
+      module.local_get(slotLocal.index, TypeRef.I32),
+      module.cont_new(
+        compiler.asyncCtMainHeap,
+        module.ref_func(target.internalName, typeFromHeapType(functionType, false))
+      )
+    ));
+  }
+
   stmts.push(module.local_get(slotLocal.index, TypeRef.I32));
   return module.block(null, stmts, TypeRef.I32);
 }
@@ -12657,6 +12676,12 @@ builtinFunctions.set(BuiltinNames.threadCallStart, builtin_thread_callStart);
 function builtin_async_serveCont(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
+  // Serving is installing a `$starts` function as a continuation; a fiber build has
+  // no continuation table to install it in.
+  if (compiler.fiberBackendActive) {
+    compiler.currentType = Type.i32;
+    return module.unreachable();
+  }
   compiler.currentType = Type.i32;
   if (
     checkTypeAbsent(ctx) |
@@ -12798,6 +12823,12 @@ builtinFunctions.set(BuiltinNames.asyncLastStatus, builtin_async_lastStatus);
 function builtin_async_resumeTask(ctx: BuiltinFunctionContext): ExpressionRef {
   let compiler = ctx.compiler;
   let module = compiler.module;
+  // A fiber resumes by the host re-entering the fiber, not by resuming a
+  // continuation out of a table.
+  if (compiler.fiberBackendActive) {
+    compiler.currentType = Type.i32;
+    return module.unreachable();
+  }
   compiler.currentType = Type.i32;
   if (
     checkTypeAbsent(ctx) |

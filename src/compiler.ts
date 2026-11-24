@@ -968,6 +968,24 @@ export class Compiler extends DiagnosticEmitter {
   }
 
   /**
+   * Whether the suspending shell this build emits is the **fiber** one.
+   *
+   * The two shells differ in exactly one thing that matters to the artifact: the
+   * continuation shell needs a `$ct` type, a table of `(ref null $ct)`, the
+   * `$idle`/`$done`/`$await` tags and a `resume` to drive the core loop — and
+   * `--enable stack-switching` to load. The fiber shell needs none of them,
+   * because the **host** suspends: a park is a call that returns to the fiber's
+   * creator and nothing in the module names a continuation. That is what makes a
+   * fiber artifact loadable on an engine with stack switching compiled out (I85).
+   *
+   * Read by the prologue, the shell preparation and the `__start` rewrite, so the
+   * four decisions cannot disagree about which shell is being built.
+   */
+  get fiberShell(): bool {
+    return this.asyncShellSuspends && this.fiberBackendActive;
+  }
+
+  /**
    * Whether this program gets the continuation shell.
    *
    * Three conditions, each deliberate:
@@ -1069,7 +1087,8 @@ export class Compiler extends DiagnosticEmitter {
    */
   private prepareAsyncShell(): void {
     if (this.asyncShellSuspends) {
-      this.prepareAsyncStackShell();
+      if (this.fiberBackendActive) this.prepareAsyncFiberShell();
+      else this.prepareAsyncStackShell();
       return;
     }
     // An `await` with no stack switching: the Promise backend's shell. There is
@@ -1340,6 +1359,155 @@ export class Compiler extends DiagnosticEmitter {
     // exhaustion trap are gone with the record it existed for.
 
     this.asyncShellPrepared = true;
+  }
+
+  /**
+   * The fiber shell's prologue: **the same globals, and none of the mechanism.**
+   *
+   * The continuation prologue exists to intern a `$ct`, declare the tags and build
+   * the table before any body is compiled, because a body's `cont.new` needs them.
+   * A fiber build emits no `cont.new`, so there is nothing to intern and nothing
+   * to declare: a `fiber` artifact that carried a `(cont …)` type would be asking
+   * the engine for a feature it never uses (I85), and one with a tag section would
+   * be declaring a suspension it never performs.
+   *
+   * The **globals** stay, because ordinary std code reads them: `__currentSlot` is
+   * the running task's id (0 for main, which is the fiber's own task), `__nextSlot`
+   * hands each task its identity, and `__asyncStatus` is what `__start` answers.
+   * Keeping their names and defaults is what lets a fiber build and a continuation
+   * build share every std source file.
+   */
+  private prepareFiberPrologue(): void {
+    let module = this.module;
+    // **The same feature set as the continuation prologue, minus `StackSwitching`
+    // — and minus `GC`.** Dropping `StackSwitching` is what makes the artifact stop
+    // asking for the proposal: the module's own feature section is what a loader
+    // reads, and it is the loader that refused the fiber build before (I85).
+    //
+    // `GC` goes with it. The continuation prologue sets it because a `cont` *type*
+    // is a GC type; nothing here declares one, and asking for GC would be the same
+    // defect one feature over. `Threads` is set for the executor's ring, exactly as
+    // above; bulk memory and the rest come from the program's own options through
+    // `module.getFeatures()`, which the compiler has already applied.
+    this.options.setFeature(Feature.Threads);
+    module.setFeatures(
+      module.getFeatures()
+      | FeatureFlags.ReferenceTypes
+      | FeatureFlags.ExceptionHandling
+      | FeatureFlags.MultiValue
+      | FeatureFlags.MutableGlobals
+      | FeatureFlags.Atomics
+    );
+
+    module.addGlobal(ASYNC_LAST_STATUS, TypeRef.I32, true, module.i32(0));
+    module.addGlobal(ASYNC_CURRENT_SLOT, TypeRef.I32, true, module.i32(0));
+    module.addGlobal(ASYNC_NEXT_SLOT, TypeRef.I32, true, module.i32(1));
+    module.addGlobal(ASYNC_STATUS, TypeRef.I32, true, module.i32(0));
+    module.addGlobalExport(ASYNC_STATUS, ASYNC_STATUS_EXPORT);
+
+    this.asyncShellPrepared = true;
+  }
+
+  /**
+   * The fiber shell: `main$start`, the spawn starts, the pump export — and nothing
+   * that needs a continuation.
+   *
+   * `main$start` is kept rather than inlined, because it is the function that turns
+   * any `main` signature into the `() -> i32` status word, and one place for that
+   * conversion is worth one function. It is **called directly** by `__start`
+   * (`emitAsyncFiberShellStart`) instead of being installed as a continuation.
+   *
+   * The core loop is deliberately **not** compiled: it is the resumer, and a fiber
+   * needs no resumer — the host's loop is the resumer, and the task it resumes is
+   * the wasm call it already has a frame for. Compiling it would pull `__resumeTask`
+   * and therefore `resume` and `(cont …)` straight back into the artifact.
+   */
+  private prepareAsyncFiberShell(): void {
+    let module = this.module;
+    let main = assert(this.mainFunction);
+    let signature = main.signature;
+    if (signature.parameterTypes.length != 0) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        main.declaration.name.range,
+        "an async program whose main takes parameters (the fiber entry calls it with none)"
+      );
+      return;
+    }
+
+    // `main$start` — identical to the continuation shell's, minus the check that
+    // its heap type equals `$ftMain`. There is no `$ct` here for it to have to
+    // agree with; the shape is checked by the call site in `__start`.
+    let returnType = signature.returnType;
+    let mainBody: ExpressionRef;
+    if (returnType == Type.void) {
+      mainBody = module.block(null, [
+        module.call(main.internalName, [], TypeRef.None),
+        module.i32(0)
+      ], TypeRef.I32);
+    } else if (!returnType.isReference && returnType.toRef() == TypeRef.I32) {
+      mainBody = module.call(main.internalName, [], TypeRef.I32);
+    } else {
+      mainBody = module.block(null, [
+        module.drop(module.call(main.internalName, [], returnType.toRef())),
+        module.i32(0)
+      ], TypeRef.I32);
+    }
+    module.addFunction(ASYNC_MAIN_START, TypeRef.None, TypeRef.I32, null, mainBody);
+    this.asyncStartFunctions.add(ASYNC_MAIN_START);
+
+    // `__asyncPump` — the host-facing "resume the core loop" entry. A fiber has no
+    // core loop to resume, so the A1 shape (answer 0) is the honest one, and it
+    // keeps a host that calls it working.
+    let program = this.program;
+    let pump = program.requireFunction(BuiltinNames.asyncPump);
+    this.compileFunction(pump);
+    if (!module.hasExport("__asyncPump")) {
+      module.addFunctionExport(pump.internalName, "__asyncPump");
+    }
+
+    // The spawn starts, for the same reason and in the same order as the
+    // continuation shell: nothing references them, they are named by **index** in
+    // `$starts`, so they are compiled explicitly.
+    let spawnStarts = program.asyncSpawnStarts;
+    let spawnElements = program.elementsByDeclaration;
+    for (let i = 0, k = spawnStarts.length; i < k; ++i) {
+      let element = spawnElements.get(unchecked(spawnStarts[i]));
+      if (!element) continue;
+      let instance: Function | null = null;
+      if (element.kind == ElementKind.Function) {
+        instance = <Function>element;
+      } else if (element.kind == ElementKind.FunctionPrototype) {
+        instance = this.resolver.resolveFunction(<FunctionPrototype>element, null);
+      }
+      if (!instance) continue;
+      this.compileFunction(instance);
+      this.asyncStartFunctions.add(instance.internalName);
+    }
+
+    this.asyncShellStartReady = true;
+  }
+
+  /**
+   * Rewrites `__start` for the fiber shell: **call `main`, on this fiber.**
+   *
+   * No continuation is installed and no core loop is resumed. The host called
+   * `__start` on a fiber it created (`tension-core`'s `fiber::run`), so when the
+   * guest parks — `scheduler::park` → `suspend_current` — control returns to the
+   * host's loop down this very call stack, and the host's resume continues right
+   * where the park stopped. That is the whole difference from the continuation
+   * shell, and it is why this function is three lines instead of a `resume` with
+   * two handlers.
+   *
+   * The status goes into `__asyncStatus`, which `__start` already answers with, so
+   * a host that reads the global after the call (`main.rs`) needs no new path.
+   */
+  private emitAsyncFiberShellStart(body: ExpressionRef[]): void {
+    let module = this.module;
+    body.push(module.global_set(
+      ASYNC_STATUS,
+      module.call(ASYNC_MAIN_START, null, TypeRef.I32)
+    ));
   }
 
   private prepareAsyncStackShell(): void {
@@ -1766,8 +1934,18 @@ export class Compiler extends DiagnosticEmitter {
       );
       return module;
     }
-    this.asyncShellSuspends = program.hasAwait && options.hasFeature(Feature.StackSwitching);
-    if (this.asyncShellSuspends) this.prepareAsyncStackPrologue();
+    // **`--stackful-backend=fiber` is a reason to build the shell on its own.**
+    // It used to require `--enable stack-switching` as well, which meant the flag
+    // had to be passed for a backend that never asks wasmtime for the feature —
+    // and the artifact then demanded it anyway, through the shell's types (I85).
+    // A fiber artifact's suspension is a call; nothing in it needs the proposal,
+    // so the shell is available without it, and passing it changes nothing.
+    this.asyncShellSuspends = program.hasAwait
+      && (options.hasFeature(Feature.StackSwitching) || options.stackfulBackend == STACKFUL_BACKEND_FIBER);
+    if (this.asyncShellSuspends) {
+      if (this.fiberBackendActive) this.prepareFiberPrologue();
+      else this.prepareAsyncStackPrologue();
+    }
 
     // Register a dummy memory so Binaryen's EffectAnalyzer can read
     // memory.shared on loads/stores emitted during compilation. The real
@@ -2149,7 +2327,13 @@ export class Compiler extends DiagnosticEmitter {
         if (this.asyncShellStartReady) {
           this.emitAsyncStartElements();
           this.emitStartsTable();
-          this.emitAsyncStackShellStart(startFunctionBody);
+          // **`$starts` in both shells** — `__spawnIndexOf` answers an index into
+          // it and the transform emits that call for every parameterless async
+          // function, so the table exists whatever drives the entry. What differs
+          // is the entry: the continuation shell resumes a core loop through a
+          // `resume`, the fiber shell calls `main` and lets the host suspend it.
+          if (this.fiberShell) this.emitAsyncFiberShellStart(startFunctionBody);
+          else this.emitAsyncStackShellStart(startFunctionBody);
         }
       } else {
         this.emitAsyncShellStart(startFunctionBody);

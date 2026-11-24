@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import * as asc from "../../dist/asc.js";
+import { customSectionsOf, importsOf } from "./stackful-wasm.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const sources = {
@@ -73,40 +74,6 @@ async function emit(backend, outPath) {
   return readFileSync(outPath);
 }
 
-// ── a minimal reader: the section list, and one section's payload ─────────────
-//
-// Twenty lines instead of a dependency, and it reads the *file*, which is the
-// point of the test.
-function leb(bytes, at) {
-  let value = 0, shift = 0, i = at;
-  for (;;) {
-    const byte = bytes[i++];
-    value |= (byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) return [value, i];
-    shift += 7;
-  }
-}
-
-/** The payload of every custom section named `name`, in file order. */
-function customSections(bytes, name) {
-  const found = [];
-  let i = 8; // magic + version
-  while (i < bytes.length) {
-    const id = bytes[i++];
-    let size;
-    [size, i] = leb(bytes, i);
-    const end = i + size;
-    if (id === 0) {
-      let len;
-      [len, i] = leb(bytes, i);
-      const sectionName = bytes.subarray(i, i + len).toString("utf8");
-      if (sectionName === name) found.push(bytes.subarray(i + len, end));
-    }
-    i = end;
-  }
-  return found;
-}
-
 const dir = mkdtempSync(join(tmpdir(), "dl36-fiber-"));
 try {
   // ── the claim ─────────────────────────────────────────────────────────────
@@ -114,7 +81,7 @@ try {
   const bytes = await emit("fiber", fiberWasm);
   if (bytes.length === 0) throw Error("the compiler emitted an empty .wasm");
 
-  const sections = customSections(bytes, "tension.stackful-backend");
+  const sections = customSectionsOf(bytes, "tension.stackful-backend");
   if (sections.length !== 1) {
     throw Error(
       `expected exactly one tension.stackful-backend section in the emitted .wasm, ` +
@@ -139,7 +106,7 @@ try {
   // claim the suite never checks.
   const plainWasm = join(dir, "continuation.wasm");
   const plain = await emit("continuation", plainWasm);
-  const plainSections = customSections(plain, "tension.stackful-backend");
+  const plainSections = customSectionsOf(plain, "tension.stackful-backend");
   if (plainSections.length !== 0) {
     throw Error(
       `the default build carries ${plainSections.length} tension.stackful-backend ` +

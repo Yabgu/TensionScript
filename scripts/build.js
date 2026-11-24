@@ -307,6 +307,7 @@ if (watch) {
     if (data == "\r\n" || data == "\n") {
       process.stdout.write("\u001b[1A");
       if (!buildingDefinitions) buildDefinitions();
+
     }
   });
 }
@@ -332,3 +333,18 @@ await Promise.all([ srcBuild, cliBuild ]);
 }
 
 buildDefinitions();
+
+// **What this build consumed, beside what it produced** (DL37, I86).
+//
+// The last step, because the record describes the artifact that now exists. A
+// content hash over `src/`, `cli/` and `std/`, never an mtime: the rebuild chain's
+// own history is the argument for that — a timestamp cannot say which sources
+// produced a bundle, and the guests' records learned the same lesson one layer
+// down (I82).
+{
+  const { writeCompilerRecord } = await import("./lib/build-record.mjs");
+  const root = path.resolve(dirname, "..");
+  const artifact = path.join(root, "dist", "assemblyscript.js");
+  const record = writeCompilerRecord(root, artifact);
+  console.log(`${stdoutColors.gray("record")} ${record.inputFiles} input files → dist/assemblyscript.js.build.json (${record.inputs.slice(0, 12)})`);
+}

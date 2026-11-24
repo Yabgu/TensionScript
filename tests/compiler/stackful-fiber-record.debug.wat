@@ -1,29 +1,25 @@
 (module
  (type $0 (func (param i32 i32)))
  (type $1 (func (param i32) (result i32)))
- (type $2 (func (result i32)))
- (type $3 (func (param i32 i32) (result i32)))
+ (type $2 (func (param i32 i32) (result i32)))
+ (type $3 (func (result i32)))
  (type $4 (func (param i32)))
  (type $5 (func))
- (type $6 (cont $2))
- (type $7 (func (param i32 i32 i32)))
- (type $8 (cont $5))
- (type $9 (func (param i32 i32 i32 i32) (result i32)))
- (type $10 (func (param i32 i32 i32 i32)))
- (type $11 (func (param i32 f32)))
- (type $12 (func (param i32 i32 i32) (result i32)))
- (type $13 (func (result i32 (ref null $6))))
- (type $14 (func (param i32 i32 i64) (result i32)))
- (type $15 (func (param i64 i32 i32)))
- (type $16 (func (param i64) (result i32)))
- (type $17 (func (param i32 i32 i32 i32 i32) (result i32)))
- (type $18 (func (param i32 i32 i32 i32 i32 i32) (result i32)))
- (type $19 (func (result i32 (ref null $8))))
+ (type $6 (func (param i32 i32 i32)))
+ (type $7 (func (param i32 i32 i32 i32) (result i32)))
+ (type $8 (func (param i32 i32 i32 i32)))
+ (type $9 (func (param i32 f32)))
+ (type $10 (func (param i32 i32 i32) (result i32)))
+ (type $11 (func (param i32 i32 i64) (result i32)))
+ (type $12 (func (param i64 i32 i32)))
+ (type $13 (func (param i64) (result i32)))
+ (type $14 (func (param i32 i32 i32 i32 i32) (result i32)))
+ (type $15 (func (param i32 i32 i32 i32 i32 i32) (result i32)))
  (import "env" "memory" (memory $0 2 256 shared))
- (import "env" "abort" (func $~lib/builtins/abort (type $10) (param i32 i32 i32 i32)))
- (import "scheduler" "park" (func $~lib/task-stack/hostPark (type $15) (param i64 i32 i32)))
- (import "scheduler" "completion" (func $~lib/task-stack/hostCompletion (type $16) (param i64) (result i32)))
- (import "env" "__executorCount" (func $~lib/thread/__executorCount (type $2) (result i32)))
+ (import "env" "abort" (func $~lib/builtins/abort (type $8) (param i32 i32 i32 i32)))
+ (import "scheduler" "park" (func $~lib/task-stack/hostPark (type $12) (param i64 i32 i32)))
+ (import "scheduler" "completion" (func $~lib/task-stack/hostCompletion (type $13) (param i64) (result i32)))
+ (import "env" "__executorCount" (func $~lib/thread/__executorCount (type $3) (result i32)))
  (import "env" "__startThread" (func $~lib/thread/__startThread (type $1) (param i32) (result i32)))
  (global $~asyncLastStatus (mut i32) (i32.const 0))
  (global $~asyncCurrentSlot (mut i32) (i32.const 0))
@@ -104,9 +100,9 @@
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
  (global $~lib/native/ASC_LOW_MEMORY_LIMIT i32 (i32.const 0))
  (global $~lib/native/ASC_RUNTIME i32 (i32.const 2))
- (global $~argumentsLength (mut i32) (i32.const 0))
- (global $~env (mut i32) (i32.const 0))
  (global $~lib/rt/common/ARENA_END_CONFIGURED (mut i32) (i32.const 0))
+ (global $~env (mut i32) (i32.const 0))
+ (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/rt/__rtti_base i32 (i32.const 848))
  (global $~lib/memory/__data_end i32 (i32.const 940))
  (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33708))
@@ -122,21 +118,17 @@
  (data $8 (i32.const 380) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1e\00\00\00~\00l\00i\00b\00/\00r\00t\00/\00t\00l\00s\00f\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (data $9 (i32.const 444) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1a\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00.\00t\00s\00\00\00")
  (data $10 (i32.const 492) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1c\00\00\00I\00n\00v\00a\00l\00i\00d\00 \00l\00e\00n\00g\00t\00h\00")
- (data $11 (i32.const 540) "\1c\00\00\00\00\00\00\00\00\00\00\00\04\00\00\00\08\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00")
- (data $12 (i32.const 572) "\1c\00\00\00\00\00\00\00\00\00\00\00\15\00\00\00\08\00\00\00\03\00\00\00\00\00\00\00\00\00\00\00")
- (data $13 (i32.const 604) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $11 (i32.const 540) "\1c\00\00\00\00\00\00\00\00\00\00\00\15\00\00\00\08\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00")
+ (data $12 (i32.const 572) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $13 (i32.const 636) "\1c\00\00\00\00\00\00\00\00\00\00\00\04\00\00\00\08\00\00\00\03\00\00\00\00\00\00\00\00\00\00\00")
  (data $14 (i32.const 668) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00U\00n\00e\00x\00p\00e\00c\00t\00e\00d\00 \00\'\00n\00u\00l\00l\00\'\00 \00(\00n\00o\00t\00 \00a\00s\00s\00i\00g\00n\00e\00d\00 \00o\00r\00 \00f\00a\00i\00l\00e\00d\00 \00c\00a\00s\00t\00)\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (data $15 (i32.const 796) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\18\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00.\00t\00s\00\00\00\00\00")
  (data $16 (i32.const 848) "\16\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00 \00\00\00\02A\00\00 \00\00\00\02a\00\00\00\00\00\00\00\00\00\00\01\t\00\00\02a\00\00 \00\00\00\02a\00\00\02\t\00\00\00\00\00\00 \00\00\00 \00\00\00\00\00\00\00")
- (table $~asyncCont 16 65536 (ref null $6))
  (table $0 4 4 funcref)
- (table $$starts 2 2 funcref)
- (elem $0 (table $0) (i32.const 1) func $~lib/task/noopWake $~lib/thread/installWakeSink~anonymous|0 $~lib/thread/__mainStep__)
- (elem $~asyncStart func $~asyncMainStart $~lib/async/__coreloopAwait)
- (elem $$starts$elem (table $$starts) (i32.const 0) func $~asyncMainStart $~lib/async/__coreloopAwait)
- (tag $idle (type $5))
- (tag $done (type $4) (param i32))
- (tag $await (type $4) (param i32))
+ (table $$starts 1 1 funcref)
+ (elem $0 (table $0) (i32.const 1) func $~lib/task/noopWake $~lib/thread/__mainStep__ $~lib/thread/installWakeSink~anonymous|0)
+ (elem $~asyncStart func $~asyncMainStart)
+ (elem $$starts$elem (table $$starts) (i32.const 0) func $~asyncMainStart)
  (export "__asyncStatus" (global $~asyncStatus))
  (export "main" (func $stackful-fiber-record/main))
  (export "__asyncPump" (func $~lib/async/__asyncPump))
@@ -162,11 +154,11 @@
  (export "__start" (func $__start))
  (func $~lib/task/noopWake (type $0) (param $exec i32) (param $slot i32)
  )
- (func $stackful-fiber-record/leaf (type $2) (result i32)
+ (func $stackful-fiber-record/leaf (type $3) (result i32)
   i32.const 1
   return
  )
- (func $~lib/rt/common/initialHeapBase (type $2) (result i32)
+ (func $~lib/rt/common/initialHeapBase (type $3) (result i32)
   (local $heap i32)
   i32.const 1
   drop
@@ -202,7 +194,7 @@
   local.get $space
   return
  )
- (func $~lib/rt/itcms/initialPinSpace (type $2) (result i32)
+ (func $~lib/rt/itcms/initialPinSpace (type $3) (result i32)
   (local $s i32)
   i32.const 1
   drop
@@ -281,7 +273,7 @@
    end
   end
  )
- (func $~lib/rt/itcms/initialToSpace (type $2) (result i32)
+ (func $~lib/rt/itcms/initialToSpace (type $3) (result i32)
   (local $s i32)
   i32.const 1
   drop
@@ -457,7 +449,7 @@
   end
   return
  )
- (func $~lib/rt/itcms/Object#linkTo (type $7) (param $this i32) (param $list i32) (param $withColor i32)
+ (func $~lib/rt/itcms/Object#linkTo (type $6) (param $this i32) (param $list i32) (param $withColor i32)
   (local $prev i32)
   local.get $list
   call $~lib/rt/itcms/Object#get:prev
@@ -566,7 +558,7 @@
    end
   end
  )
- (func $~lib/rt/itcms/initialFromSpace (type $2) (result i32)
+ (func $~lib/rt/itcms/initialFromSpace (type $3) (result i32)
   (local $s i32)
   i32.const 1
   drop
@@ -1230,7 +1222,7 @@
   local.get $slMap
   i32.store offset=4
  )
- (func $~lib/rt/tlsf/addMemory (type $14) (param $root i32) (param $start i32) (param $endU64 i64) (result i32)
+ (func $~lib/rt/tlsf/addMemory (type $11) (param $root i32) (param $start i32) (param $endU64 i64) (result i32)
   (local $end i32)
   (local $root|4 i32)
   (local $tail i32)
@@ -1638,7 +1630,7 @@
    call $~lib/rt/tlsf/__free
   end
  )
- (func $~lib/rt/itcms/step (type $2) (result i32)
+ (func $~lib/rt/itcms/step (type $3) (result i32)
   (local $obj i32)
   (local $1 i32)
   (local $black i32)
@@ -1936,7 +1928,7 @@
   end
   return
  )
- (func $~lib/rt/tlsf/searchBlock (type $3) (param $root i32) (param $size i32) (result i32)
+ (func $~lib/rt/tlsf/searchBlock (type $2) (param $root i32) (param $size i32) (result i32)
   (local $fl i32)
   (local $sl i32)
   (local $requestSize i32)
@@ -2225,7 +2217,7 @@
   local.get $size
   call $~lib/rt/tlsf/growMemory
  )
- (func $~lib/rt/tlsf/prepareBlock (type $7) (param $root i32) (param $block i32) (param $size i32)
+ (func $~lib/rt/tlsf/prepareBlock (type $6) (param $root i32) (param $block i32) (param $size i32)
   (local $blockInfo i32)
   (local $remaining i32)
   (local $spare i32)
@@ -2334,7 +2326,7 @@
    call $~lib/rt/common/BLOCK#set:mmInfo
   end
  )
- (func $~lib/rt/tlsf/allocateBlock (type $3) (param $root i32) (param $size i32) (result i32)
+ (func $~lib/rt/tlsf/allocateBlock (type $2) (param $root i32) (param $size i32) (result i32)
   (local $payloadSize i32)
   (local $block i32)
   local.get $size
@@ -2421,7 +2413,7 @@
   local.get $rtSize
   i32.store offset=16
  )
- (func $~lib/rt/itcms/__new (type $3) (param $size i32) (param $id i32) (result i32)
+ (func $~lib/rt/itcms/__new (type $2) (param $size i32) (param $id i32) (result i32)
   (local $obj i32)
   (local $ptr i32)
   local.get $size
@@ -2494,12 +2486,12 @@
   local.get $status
   i32.store offset=12
  )
- (func $~lib/task/TaskRecord#set:f0 (type $11) (param $this i32) (param $f0 f32)
+ (func $~lib/task/TaskRecord#set:f0 (type $9) (param $this i32) (param $f0 f32)
   local.get $this
   local.get $f0
   f32.store offset=16
  )
- (func $~lib/task/TaskRecord#set:f1 (type $11) (param $this i32) (param $f1 f32)
+ (func $~lib/task/TaskRecord#set:f1 (type $9) (param $this i32) (param $f1 f32)
   local.get $this
   local.get $f1
   f32.store offset=20
@@ -2534,7 +2526,7 @@
   local.get $status
   i32.store offset=12
  )
- (func $~lib/rt/itcms/__link (type $7) (param $parentPtr i32) (param $childPtr i32) (param $expectMultiple i32)
+ (func $~lib/rt/itcms/__link (type $6) (param $parentPtr i32) (param $childPtr i32) (param $expectMultiple i32)
   (local $child i32)
   (local $parent i32)
   (local $parentColor i32)
@@ -2704,7 +2696,7 @@
  (func $~lib/mask/MaskBase#get:width (type $1) (param $this i32) (result i32)
   unreachable
  )
- (func $~lib/mask/MaskBase#allows (type $3) (param $this i32) (param $id i32) (result i32)
+ (func $~lib/mask/MaskBase#allows (type $2) (param $this i32) (param $id i32) (result i32)
   unreachable
  )
  (func $~lib/task/Waiter#set:exec (type $0) (param $this i32) (param $exec i32)
@@ -2761,7 +2753,7 @@
   local.get $this
   i32.load offset=16
  )
- (func $~lib/rt/itcms/__renew (type $3) (param $oldPtr i32) (param $size i32) (result i32)
+ (func $~lib/rt/itcms/__renew (type $2) (param $oldPtr i32) (param $size i32) (result i32)
   (local $oldObj i32)
   (local $newPtr i32)
   (local $4 i32)
@@ -2843,555 +2835,10 @@
   i32.const 0
   call $~lib/task-stack/hostPark
  )
- (func $~asyncMainStart (type $2) (result i32)
+ (func $~asyncMainStart (type $3) (result i32)
   call $stackful-fiber-record/main
  )
- (func $~lib/thread/blockPush (type $9) (param $ring i32) (param $capacity i32) (param $value i32) (param $signal i32) (result i32)
-  (local $ptr i32)
-  (local $pos i32)
-  (local $ptr|6 i32)
-  (local $head i32)
-  (local $off i32)
-  (local $word i32)
-  (local $ptr|10 i32)
-  (local $seq i32)
-  (local $ptr|12 i32)
-  (local $expect i32)
-  (local $replace i32)
-  (local $word|15 i32)
-  (local $ptr|16 i32)
-  (local $value|17 i32)
-  (local $word|18 i32)
-  (local $ptr|19 i32)
-  (local $value|20 i32)
-  (local $ptr|21 i32)
-  (local $value|22 i32)
-  (local $ptr|23 i32)
-  (local $count i32)
-  loop $while-continue|0
-   i32.const 1
-   if
-    block $~lib/atomics/atomicLoad<i32>|inlined.0 (result i32)
-     local.get $ring
-     global.get $~lib/thread/TAIL_OFF
-     i32.add
-     local.set $ptr
-     local.get $ptr
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.0
-    end
-    local.set $pos
-    block $~lib/atomics/atomicLoad<i32>|inlined.1 (result i32)
-     local.get $ring
-     global.get $~lib/thread/HEAD_OFF
-     i32.add
-     local.set $ptr|6
-     local.get $ptr|6
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.1
-    end
-    local.set $head
-    local.get $pos
-    local.get $head
-    i32.sub
-    local.get $capacity
-    i32.ge_s
-    if
-     i32.const 0
-     return
-    end
-    local.get $ring
-    global.get $~lib/thread/SLOTS_OFF
-    i32.add
-    local.get $pos
-    local.get $capacity
-    i32.rem_s
-    i32.const 3
-    i32.shl
-    i32.add
-    local.set $off
-    block $~lib/atomics/atomicLoad<i32>|inlined.2 (result i32)
-     local.get $off
-     block $~lib/thread/wordOffset|inlined.0 (result i32)
-      global.get $~lib/thread/SEQ_WORD
-      local.set $word
-      local.get $word
-      i32.const 2
-      i32.shl
-      br $~lib/thread/wordOffset|inlined.0
-     end
-     i32.add
-     local.set $ptr|10
-     local.get $ptr|10
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.2
-    end
-    local.set $seq
-    local.get $seq
-    local.get $pos
-    i32.eq
-    if
-     block $~lib/atomics/atomicCompareExchange<i32>|inlined.0 (result i32)
-      local.get $ring
-      global.get $~lib/thread/TAIL_OFF
-      i32.add
-      local.set $ptr|12
-      local.get $pos
-      local.set $expect
-      local.get $pos
-      i32.const 1
-      i32.add
-      local.set $replace
-      local.get $ptr|12
-      local.get $expect
-      local.get $replace
-      i32.atomic.rmw.cmpxchg
-      br $~lib/atomics/atomicCompareExchange<i32>|inlined.0
-     end
-     local.get $pos
-     i32.eq
-     if
-      local.get $off
-      block $~lib/thread/wordOffset|inlined.1 (result i32)
-       global.get $~lib/thread/VALUE_WORD
-       local.set $word|15
-       local.get $word|15
-       i32.const 2
-       i32.shl
-       br $~lib/thread/wordOffset|inlined.1
-      end
-      i32.add
-      local.set $ptr|16
-      local.get $value
-      local.set $value|17
-      local.get $ptr|16
-      local.get $value|17
-      i32.atomic.store
-      local.get $off
-      block $~lib/thread/wordOffset|inlined.2 (result i32)
-       global.get $~lib/thread/SEQ_WORD
-       local.set $word|18
-       local.get $word|18
-       i32.const 2
-       i32.shl
-       br $~lib/thread/wordOffset|inlined.2
-      end
-      i32.add
-      local.set $ptr|19
-      local.get $pos
-      i32.const 1
-      i32.add
-      local.set $value|20
-      local.get $ptr|19
-      local.get $value|20
-      i32.atomic.store
-      local.get $signal
-      i32.const 0
-      i32.ne
-      if
-       block $~lib/atomics/atomicAdd<i32>|inlined.0 (result i32)
-        local.get $signal
-        local.set $ptr|21
-        i32.const 1
-        local.set $value|22
-        local.get $ptr|21
-        local.get $value|22
-        i32.atomic.rmw.add
-        br $~lib/atomics/atomicAdd<i32>|inlined.0
-       end
-       drop
-       block $~lib/atomics/atomicNotify|inlined.0 (result i32)
-        local.get $signal
-        local.set $ptr|23
-        i32.const 1
-        local.set $count
-        local.get $ptr|23
-        local.get $count
-        memory.atomic.notify
-        br $~lib/atomics/atomicNotify|inlined.0
-       end
-       drop
-      end
-      i32.const 1
-      return
-     end
-    else
-     local.get $seq
-     local.get $pos
-     i32.lt_s
-     if
-      i32.const 0
-      return
-     end
-    end
-    br $while-continue|0
-   end
-  end
-  unreachable
- )
- (func $~lib/array/Array<~lib/thread/Executor|null>#get:length_ (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=12
- )
- (func $~lib/array/Array<~lib/thread/Executor|null>#get:dataStart (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=4
- )
- (func $~lib/thread/Executor#get:ready (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=4
- )
- (func $~lib/thread/SlotRing#get:capacity (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=4
- )
- (func $~lib/thread/SlotRing#get:base (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load
- )
- (func $~lib/thread/SlotRing#get:signal (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=8
- )
- (func $~lib/task/setWakeSink (type $4) (param $sink i32)
-  local.get $sink
-  global.set $~lib/task/__wakeSink
- )
- (func $~lib/array/Array<~lib/thread/Executor|null>#set:buffer (type $0) (param $this i32) (param $buffer i32)
-  local.get $this
-  local.get $buffer
-  i32.store
-  local.get $this
-  local.get $buffer
-  i32.const 0
-  call $~lib/rt/itcms/__link
- )
- (func $~lib/array/Array<~lib/thread/Executor|null>#set:dataStart (type $0) (param $this i32) (param $dataStart i32)
-  local.get $this
-  local.get $dataStart
-  i32.store offset=4
- )
- (func $~lib/array/Array<~lib/thread/Executor|null>#set:byteLength (type $0) (param $this i32) (param $byteLength i32)
-  local.get $this
-  local.get $byteLength
-  i32.store offset=8
- )
- (func $~lib/array/Array<~lib/thread/Executor|null>#set:length_ (type $0) (param $this i32) (param $length_ i32)
-  local.get $this
-  local.get $length_
-  i32.store offset=12
- )
- (func $~lib/thread/Executor#get:inbox (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=8
- )
- (func $~lib/thread/blockFreeRequest (type $4) (param $index i32)
-  (local $free i32)
-  (local $capacity i32)
-  (local $ptr i32)
-  (local $tail i32)
-  (local $ptr|5 i32)
-  (local $head i32)
-  (local $ptr|7 i32)
-  (local $expect i32)
-  (local $replace i32)
-  (local $ptr|10 i32)
-  (local $value i32)
-  global.get $~lib/thread/freeRingBase
-  local.set $free
-  global.get $~lib/thread/requestCount
-  local.set $capacity
-  local.get $free
-  i32.const 0
-  i32.eq
-  if (result i32)
-   i32.const 1
-  else
-   local.get $capacity
-   i32.const 0
-   i32.le_s
-  end
-  if (result i32)
-   i32.const 1
-  else
-   local.get $index
-   i32.const 0
-   i32.lt_s
-  end
-  if (result i32)
-   i32.const 1
-  else
-   local.get $index
-   local.get $capacity
-   i32.ge_s
-  end
-  if
-   return
-  end
-  loop $while-continue|0
-   i32.const 1
-   if
-    block $~lib/atomics/atomicLoad<i32>|inlined.18 (result i32)
-     local.get $free
-     global.get $~lib/thread/TAIL_OFF
-     i32.add
-     local.set $ptr
-     local.get $ptr
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.18
-    end
-    local.set $tail
-    block $~lib/atomics/atomicLoad<i32>|inlined.19 (result i32)
-     local.get $free
-     global.get $~lib/thread/HEAD_OFF
-     i32.add
-     local.set $ptr|5
-     local.get $ptr|5
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.19
-    end
-    local.set $head
-    local.get $tail
-    local.get $head
-    i32.sub
-    local.get $capacity
-    i32.ge_s
-    if
-     return
-    end
-    block $~lib/atomics/atomicCompareExchange<i32>|inlined.3 (result i32)
-     local.get $free
-     global.get $~lib/thread/TAIL_OFF
-     i32.add
-     local.set $ptr|7
-     local.get $tail
-     local.set $expect
-     local.get $tail
-     i32.const 1
-     i32.add
-     local.set $replace
-     local.get $ptr|7
-     local.get $expect
-     local.get $replace
-     i32.atomic.rmw.cmpxchg
-     br $~lib/atomics/atomicCompareExchange<i32>|inlined.3
-    end
-    local.get $tail
-    i32.eq
-    if
-     local.get $free
-     global.get $~lib/thread/SLOTS_OFF
-     i32.add
-     local.get $tail
-     local.get $capacity
-     i32.rem_s
-     i32.const 2
-     i32.shl
-     i32.add
-     local.set $ptr|10
-     local.get $index
-     local.set $value
-     local.get $ptr|10
-     local.get $value
-     i32.atomic.store
-     return
-    end
-    br $while-continue|0
-   end
-  end
-  unreachable
- )
- (func $~lib/task-stack/__serveSlot (type $1) (param $funcIndex i32) (result i32)
-  (local $1 i32)
-  (local $2 i32)
-  (local $3 i32)
-  global.get $~asyncNextSlot
-  local.set $1
-  local.get $1
-  i32.const 1
-  i32.add
-  global.set $~asyncNextSlot
-  table.size $~asyncCont
-  local.set $2
-  local.get $1
-  i32.const 1
-  i32.add
-  local.set $3
-  local.get $3
-  local.get $2
-  i32.gt_s
-  if
-   ref.null nocont
-   local.get $3
-   local.get $2
-   i32.sub
-   table.grow $~asyncCont
-   drop
-  else
-  end
-  local.get $1
-  local.get $funcIndex
-  table.get $$starts
-  ref.cast (ref $2)
-  cont.new $6
-  table.set $~asyncCont
-  local.get $1
-  return
- )
- (func $~lib/array/Array<~lib/thread/Request|null>#get:length_ (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=12
- )
- (func $~lib/array/Array<~lib/thread/Request|null>#get:dataStart (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=4
- )
- (func $~lib/thread/Request#get:funcIndex (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load
- )
- (func $~lib/thread/Request#get:argSlot (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=4
- )
- (func $~lib/thread/Request#get:taskKey (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=8
- )
- (func $~lib/array/Array<i32>#set:buffer (type $0) (param $this i32) (param $buffer i32)
-  local.get $this
-  local.get $buffer
-  i32.store
-  local.get $this
-  local.get $buffer
-  i32.const 0
-  call $~lib/rt/itcms/__link
- )
- (func $~lib/array/Array<i32>#set:dataStart (type $0) (param $this i32) (param $dataStart i32)
-  local.get $this
-  local.get $dataStart
-  i32.store offset=4
- )
- (func $~lib/array/Array<i32>#set:byteLength (type $0) (param $this i32) (param $byteLength i32)
-  local.get $this
-  local.get $byteLength
-  i32.store offset=8
- )
- (func $~lib/array/Array<i32>#set:length_ (type $0) (param $this i32) (param $length_ i32)
-  local.get $this
-  local.get $length_
-  i32.store offset=12
- )
- (func $~lib/array/Array<i32>#get:length_ (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=12
- )
- (func $~lib/array/Array<i32>#get:dataStart (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=4
- )
- (func $~lib/task/TaskBase#get:settled (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load8_u offset=8
- )
- (func $~lib/thread/Executor#set:id (type $0) (param $this i32) (param $id i32)
-  local.get $this
-  local.get $id
-  i32.store
- )
- (func $~lib/thread/Executor#set:step (type $0) (param $this i32) (param $step i32)
-  local.get $this
-  local.get $step
-  i32.store offset=12
-  local.get $this
-  local.get $step
-  i32.const 0
-  call $~lib/rt/itcms/__link
- )
- (func $~lib/thread/SlotRing#set:capacity (type $0) (param $this i32) (param $capacity i32)
-  local.get $this
-  local.get $capacity
-  i32.store offset=4
- )
- (func $~lib/arraybuffer/ArrayBufferView#set:buffer (type $0) (param $this i32) (param $buffer i32)
-  local.get $this
-  local.get $buffer
-  i32.store
-  local.get $this
-  local.get $buffer
-  i32.const 0
-  call $~lib/rt/itcms/__link
- )
- (func $~lib/arraybuffer/ArrayBufferView#set:dataStart (type $0) (param $this i32) (param $dataStart i32)
-  local.get $this
-  local.get $dataStart
-  i32.store offset=4
- )
- (func $~lib/arraybuffer/ArrayBufferView#set:byteLength (type $0) (param $this i32) (param $byteLength i32)
-  local.get $this
-  local.get $byteLength
-  i32.store offset=8
- )
- (func $~lib/arraybuffer/ArrayBufferView#get:dataStart (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=4
- )
- (func $~lib/thread/SlotRing#set:anchor (type $0) (param $this i32) (param $anchor i32)
-  local.get $this
-  local.get $anchor
-  i32.store offset=12
-  local.get $this
-  local.get $anchor
-  i32.const 0
-  call $~lib/rt/itcms/__link
- )
- (func $~lib/thread/SlotRing#set:base (type $0) (param $this i32) (param $base i32)
-  local.get $this
-  local.get $base
-  i32.store
- )
- (func $~lib/thread/SlotRing#set:signal (type $0) (param $this i32) (param $signal i32)
-  local.get $this
-  local.get $signal
-  i32.store offset=8
- )
- (func $~lib/thread/Executor#set:ready (type $0) (param $this i32) (param $ready i32)
-  local.get $this
-  local.get $ready
-  i32.store offset=4
-  local.get $this
-  local.get $ready
-  i32.const 0
-  call $~lib/rt/itcms/__link
- )
- (func $~lib/thread/Executor#set:inbox (type $0) (param $this i32) (param $inbox i32)
-  local.get $this
-  local.get $inbox
-  i32.store offset=8
-  local.get $this
-  local.get $inbox
-  i32.const 0
-  call $~lib/rt/itcms/__link
- )
- (func $~lib/thread/Executor#set:stop (type $0) (param $this i32) (param $stop i32)
-  local.get $this
-  local.get $stop
-  i32.store8 offset=16
- )
- (func $~lib/thread/mainExecutor (type $2) (result i32)
-  call $~lib/thread/__executorInit
-  global.get $~lib/thread/mainExecutorInstance
-  return
- )
- (func $~lib/thread/Executor#get:stop (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load8_u offset=16
- )
- (func $~lib/thread/Executor#get:step (type $1) (param $this i32) (result i32)
-  local.get $this
-  i32.load offset=12
- )
- (func $~lib/async/__asyncPump (type $2) (result i32)
+ (func $~lib/async/__asyncPump (type $3) (result i32)
   i32.const 0
   return
  )
@@ -3401,7 +2848,7 @@
   local.get $heap
   global.set $~lib/rt/common/ARENA_BASE_CONFIGURED
  )
- (func $~lib/rt/common/enterArena (type $3) (param $base i32) (param $size i32) (result i32)
+ (func $~lib/rt/common/enterArena (type $2) (param $base i32) (param $size i32) (result i32)
   (local $start i32)
   (local $end i32)
   (local $reserve i32)
@@ -3462,7 +2909,7 @@
   global.get $~lib/rt/itcms/pinSpace
   global.set $~lib/rt/itcms/ARENA_PIN_SPACE
  )
- (func $~lib/rt/itcms/__arenaPlaceState (type $3) (param $heapBase i32) (param $arenaEnd i32) (result i32)
+ (func $~lib/rt/itcms/__arenaPlaceState (type $2) (param $heapBase i32) (param $arenaEnd i32) (result i32)
   (local $stride i32)
   i32.const 20
   local.set $stride
@@ -3626,11 +3073,11 @@
   local.get $heap
   global.set $~lib/memory/__stack_pointer
  )
- (func $~lib/rt/common/__arenaHeapBase (type $2) (result i32)
+ (func $~lib/rt/common/__arenaHeapBase (type $3) (result i32)
   global.get $~lib/rt/common/HEAP_BASE
   return
  )
- (func $~lib/rt/common/__arenaEnd (type $2) (result i32)
+ (func $~lib/rt/common/__arenaEnd (type $3) (result i32)
   global.get $~lib/rt/common/ARENA_END
   return
  )
@@ -3692,13 +3139,13 @@
     i32.add
     local.set $off
     local.get $off
-    block $~lib/thread/wordOffset|inlined.11 (result i32)
+    block $~lib/thread/wordOffset|inlined.0 (result i32)
      global.get $~lib/thread/VALUE_WORD
      local.set $word
      local.get $word
      i32.const 2
      i32.shl
-     br $~lib/thread/wordOffset|inlined.11
+     br $~lib/thread/wordOffset|inlined.0
     end
     i32.add
     local.set $ptr|11
@@ -3708,13 +3155,13 @@
     local.get $value|12
     i32.atomic.store
     local.get $off
-    block $~lib/thread/wordOffset|inlined.12 (result i32)
+    block $~lib/thread/wordOffset|inlined.1 (result i32)
      global.get $~lib/thread/SEQ_WORD
      local.set $word|13
      local.get $word|13
      i32.const 2
      i32.shl
-     br $~lib/thread/wordOffset|inlined.12
+     br $~lib/thread/wordOffset|inlined.1
     end
     i32.add
     local.set $ptr|14
@@ -3731,7 +3178,7 @@
    end
   end
  )
- (func $~lib/thread/__carveThreadLayout (type $3) (param $capacity i32) (param $total i32) (result i32)
+ (func $~lib/thread/__carveThreadLayout (type $2) (param $capacity i32) (param $total i32) (result i32)
   (local $capacity|2 i32)
   (local $stride i32)
   (local $requests i32)
@@ -3810,7 +3257,7 @@
    local.set $capacity
   end
   i32.const 2
-  block $~lib/thread/ringWords|inlined.6 (result i32)
+  block $~lib/thread/ringWords|inlined.0 (result i32)
    local.get $capacity
    local.set $capacity|2
    i32.const 3
@@ -3818,7 +3265,7 @@
    global.get $~lib/thread/CELL_WORDS
    i32.mul
    i32.add
-   br $~lib/thread/ringWords|inlined.6
+   br $~lib/thread/ringWords|inlined.0
   end
   i32.mul
   i32.const 6
@@ -4009,19 +3456,19 @@
     i32.mul
     i32.add
     local.set $rec
-    block $~lib/thread/readyBase|inlined.1 (result i32)
+    block $~lib/thread/readyBase|inlined.0 (result i32)
      local.get $rec
      local.set $rec|27
      local.get $rec|27
-     br $~lib/thread/readyBase|inlined.1
+     br $~lib/thread/readyBase|inlined.0
     end
     local.get $capacity
     call $~lib/thread/initRingWords
-    block $~lib/thread/inboxBase|inlined.3 (result i32)
+    block $~lib/thread/inboxBase|inlined.0 (result i32)
      local.get $rec
      local.set $rec|28
      local.get $rec|28
-     block $~lib/thread/ringWords|inlined.7 (result i32)
+     block $~lib/thread/ringWords|inlined.1 (result i32)
       global.get $~lib/thread/__ringCapacity
       local.set $capacity|29
       i32.const 3
@@ -4029,23 +3476,23 @@
       global.get $~lib/thread/CELL_WORDS
       i32.mul
       i32.add
-      br $~lib/thread/ringWords|inlined.7
+      br $~lib/thread/ringWords|inlined.1
      end
      i32.const 2
      i32.shl
      i32.add
-     br $~lib/thread/inboxBase|inlined.3
+     br $~lib/thread/inboxBase|inlined.0
     end
     local.get $capacity
     call $~lib/thread/initRingWords
-    block $~lib/thread/signalBase|inlined.2 (result i32)
+    block $~lib/thread/signalBase|inlined.0 (result i32)
      local.get $rec
      local.set $rec|30
-     block $~lib/thread/inboxBase|inlined.4 (result i32)
+     block $~lib/thread/inboxBase|inlined.1 (result i32)
       local.get $rec|30
       local.set $rec|31
       local.get $rec|31
-      block $~lib/thread/ringWords|inlined.8 (result i32)
+      block $~lib/thread/ringWords|inlined.2 (result i32)
        global.get $~lib/thread/__ringCapacity
        local.set $capacity|32
        i32.const 3
@@ -4053,14 +3500,14 @@
        global.get $~lib/thread/CELL_WORDS
        i32.mul
        i32.add
-       br $~lib/thread/ringWords|inlined.8
+       br $~lib/thread/ringWords|inlined.2
       end
       i32.const 2
       i32.shl
       i32.add
-      br $~lib/thread/inboxBase|inlined.4
+      br $~lib/thread/inboxBase|inlined.1
      end
-     block $~lib/thread/ringWords|inlined.9 (result i32)
+     block $~lib/thread/ringWords|inlined.3 (result i32)
       global.get $~lib/thread/__ringCapacity
       local.set $capacity|33
       i32.const 3
@@ -4068,12 +3515,12 @@
       global.get $~lib/thread/CELL_WORDS
       i32.mul
       i32.add
-      br $~lib/thread/ringWords|inlined.9
+      br $~lib/thread/ringWords|inlined.3
      end
      i32.const 2
      i32.shl
      i32.add
-     br $~lib/thread/signalBase|inlined.2
+     br $~lib/thread/signalBase|inlined.0
     end
     local.set $sig
     local.get $sig
@@ -4232,14 +3679,14 @@
   global.get $~lib/thread/HEADER_BYTES
   i32.add
   local.set $mainRec
-  block $~lib/thread/signalBase|inlined.3 (result i32)
+  block $~lib/thread/signalBase|inlined.1 (result i32)
    local.get $mainRec
    local.set $rec|60
-   block $~lib/thread/inboxBase|inlined.5 (result i32)
+   block $~lib/thread/inboxBase|inlined.2 (result i32)
     local.get $rec|60
     local.set $rec|61
     local.get $rec|61
-    block $~lib/thread/ringWords|inlined.10 (result i32)
+    block $~lib/thread/ringWords|inlined.4 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity|62
      i32.const 3
@@ -4247,14 +3694,14 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.10
+     br $~lib/thread/ringWords|inlined.4
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/inboxBase|inlined.5
+    br $~lib/thread/inboxBase|inlined.2
    end
-   block $~lib/thread/ringWords|inlined.11 (result i32)
+   block $~lib/thread/ringWords|inlined.5 (result i32)
     global.get $~lib/thread/__ringCapacity
     local.set $capacity|63
     i32.const 3
@@ -4262,12 +3709,12 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.11
+    br $~lib/thread/ringWords|inlined.5
    end
    i32.const 2
    i32.shl
    i32.add
-   br $~lib/thread/signalBase|inlined.3
+   br $~lib/thread/signalBase|inlined.1
   end
   i32.const 4
   i32.add
@@ -4277,14 +3724,14 @@
   local.get $ptr|64
   local.get $value|65
   i32.atomic.store
-  block $~lib/thread/signalBase|inlined.4 (result i32)
+  block $~lib/thread/signalBase|inlined.2 (result i32)
    local.get $mainRec
    local.set $rec|66
-   block $~lib/thread/inboxBase|inlined.6 (result i32)
+   block $~lib/thread/inboxBase|inlined.3 (result i32)
     local.get $rec|66
     local.set $rec|67
     local.get $rec|67
-    block $~lib/thread/ringWords|inlined.12 (result i32)
+    block $~lib/thread/ringWords|inlined.6 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity|68
      i32.const 3
@@ -4292,14 +3739,14 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.12
+     br $~lib/thread/ringWords|inlined.6
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/inboxBase|inlined.6
+    br $~lib/thread/inboxBase|inlined.3
    end
-   block $~lib/thread/ringWords|inlined.13 (result i32)
+   block $~lib/thread/ringWords|inlined.7 (result i32)
     global.get $~lib/thread/__ringCapacity
     local.set $capacity|69
     i32.const 3
@@ -4307,12 +3754,12 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.13
+    br $~lib/thread/ringWords|inlined.7
    end
    i32.const 2
    i32.shl
    i32.add
-   br $~lib/thread/signalBase|inlined.4
+   br $~lib/thread/signalBase|inlined.2
   end
   i32.const 8
   i32.add
@@ -4353,7 +3800,7 @@
   call $~lib/thread/__carveThreadLayout
   return
  )
- (func $~lib/thread/__mainArenaBase (type $2) (result i32)
+ (func $~lib/thread/__mainArenaBase (type $3) (result i32)
   (local $rec i32)
   (local $rec|1 i32)
   (local $capacity i32)
@@ -4366,17 +3813,17 @@
    i32.const 0
    return
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.22 (result i32)
-   block $~lib/thread/signalBase|inlined.5 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.0 (result i32)
+   block $~lib/thread/signalBase|inlined.3 (result i32)
     global.get $~lib/thread/__controlBase
     global.get $~lib/thread/HEADER_BYTES
     i32.add
     local.set $rec
-    block $~lib/thread/inboxBase|inlined.7 (result i32)
+    block $~lib/thread/inboxBase|inlined.4 (result i32)
      local.get $rec
      local.set $rec|1
      local.get $rec|1
-     block $~lib/thread/ringWords|inlined.14 (result i32)
+     block $~lib/thread/ringWords|inlined.8 (result i32)
       global.get $~lib/thread/__ringCapacity
       local.set $capacity
       i32.const 3
@@ -4384,14 +3831,14 @@
       global.get $~lib/thread/CELL_WORDS
       i32.mul
       i32.add
-      br $~lib/thread/ringWords|inlined.14
+      br $~lib/thread/ringWords|inlined.8
      end
      i32.const 2
      i32.shl
      i32.add
-     br $~lib/thread/inboxBase|inlined.7
+     br $~lib/thread/inboxBase|inlined.4
     end
-    block $~lib/thread/ringWords|inlined.15 (result i32)
+    block $~lib/thread/ringWords|inlined.9 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity|3
      i32.const 3
@@ -4399,23 +3846,23 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.15
+     br $~lib/thread/ringWords|inlined.9
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/signalBase|inlined.5
+    br $~lib/thread/signalBase|inlined.3
    end
    i32.const 4
    i32.add
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.22
+   br $~lib/atomics/atomicLoad<i32>|inlined.0
   end
   return
  )
- (func $~lib/thread/__mainArenaSize (type $2) (result i32)
+ (func $~lib/thread/__mainArenaSize (type $3) (result i32)
   (local $rec i32)
   (local $rec|1 i32)
   (local $capacity i32)
@@ -4428,17 +3875,17 @@
    i32.const 0
    return
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.23 (result i32)
-   block $~lib/thread/signalBase|inlined.6 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.1 (result i32)
+   block $~lib/thread/signalBase|inlined.4 (result i32)
     global.get $~lib/thread/__controlBase
     global.get $~lib/thread/HEADER_BYTES
     i32.add
     local.set $rec
-    block $~lib/thread/inboxBase|inlined.8 (result i32)
+    block $~lib/thread/inboxBase|inlined.5 (result i32)
      local.get $rec
      local.set $rec|1
      local.get $rec|1
-     block $~lib/thread/ringWords|inlined.16 (result i32)
+     block $~lib/thread/ringWords|inlined.10 (result i32)
       global.get $~lib/thread/__ringCapacity
       local.set $capacity
       i32.const 3
@@ -4446,14 +3893,14 @@
       global.get $~lib/thread/CELL_WORDS
       i32.mul
       i32.add
-      br $~lib/thread/ringWords|inlined.16
+      br $~lib/thread/ringWords|inlined.10
      end
      i32.const 2
      i32.shl
      i32.add
-     br $~lib/thread/inboxBase|inlined.8
+     br $~lib/thread/inboxBase|inlined.5
     end
-    block $~lib/thread/ringWords|inlined.17 (result i32)
+    block $~lib/thread/ringWords|inlined.11 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity|3
      i32.const 3
@@ -4461,23 +3908,23 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.17
+     br $~lib/thread/ringWords|inlined.11
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/signalBase|inlined.6
+    br $~lib/thread/signalBase|inlined.4
    end
    i32.const 8
    i32.add
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.23
+   br $~lib/atomics/atomicLoad<i32>|inlined.1
   end
   return
  )
- (func $~lib/thread/__spawnThread (type $12) (param $id i32) (param $entryIndex i32) (param $argSlot i32) (result i32)
+ (func $~lib/thread/__spawnThread (type $10) (param $id i32) (param $entryIndex i32) (param $argSlot i32) (result i32)
   (local $id|3 i32)
   (local $rec i32)
   (local $rec|5 i32)
@@ -4513,8 +3960,8 @@
    i32.const -1
    return
   end
-  block $~lib/thread/signalBase|inlined.7 (result i32)
-   block $~lib/thread/recordBase|inlined.2 (result i32)
+  block $~lib/thread/signalBase|inlined.5 (result i32)
+   block $~lib/thread/recordBase|inlined.0 (result i32)
     local.get $id
     local.set $id|3
     global.get $~lib/thread/__controlBase
@@ -4524,14 +3971,14 @@
     global.get $~lib/thread/__controlStride
     i32.mul
     i32.add
-    br $~lib/thread/recordBase|inlined.2
+    br $~lib/thread/recordBase|inlined.0
    end
    local.set $rec
-   block $~lib/thread/inboxBase|inlined.9 (result i32)
+   block $~lib/thread/inboxBase|inlined.6 (result i32)
     local.get $rec
     local.set $rec|5
     local.get $rec|5
-    block $~lib/thread/ringWords|inlined.18 (result i32)
+    block $~lib/thread/ringWords|inlined.12 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity
      i32.const 3
@@ -4539,14 +3986,14 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.18
+     br $~lib/thread/ringWords|inlined.12
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/inboxBase|inlined.9
+    br $~lib/thread/inboxBase|inlined.6
    end
-   block $~lib/thread/ringWords|inlined.19 (result i32)
+   block $~lib/thread/ringWords|inlined.13 (result i32)
     global.get $~lib/thread/__ringCapacity
     local.set $capacity|7
     i32.const 3
@@ -4554,22 +4001,22 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.19
+    br $~lib/thread/ringWords|inlined.13
    end
    i32.const 2
    i32.shl
    i32.add
-   br $~lib/thread/signalBase|inlined.7
+   br $~lib/thread/signalBase|inlined.5
   end
   local.set $sig
-  block $~lib/atomics/atomicLoad<i32>|inlined.24 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.2 (result i32)
    local.get $sig
    i32.const 12
    i32.add
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.24
+   br $~lib/atomics/atomicLoad<i32>|inlined.2
   end
   i32.const 0
   i32.ne
@@ -4615,7 +4062,7 @@
   local.get $status
   return
  )
- (func $~lib/thread/controlBlockBase (type $2) (result i32)
+ (func $~lib/thread/controlBlockBase (type $3) (result i32)
   (local $b i32)
   (local $here i32)
   (local $ptr i32)
@@ -4640,7 +4087,7 @@
   i32.xor
   i32.and
   local.set $here
-  block $~lib/atomics/atomicLoad<i32>|inlined.25 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.3 (result i32)
    local.get $here
    global.get $~lib/thread/H_MAGIC
    i32.const 2
@@ -4649,7 +4096,7 @@
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.25
+   br $~lib/atomics/atomicLoad<i32>|inlined.3
   end
   global.get $~lib/thread/CONTROL_MAGIC
   i32.ne
@@ -4663,6 +4110,512 @@
  (func $~lib/task-stack/__setSelfExecutor (type $4) (param $id i32)
   local.get $id
   global.set $~lib/task-stack/selfExecutor
+ )
+ (func $~lib/array/Array<~lib/thread/Executor|null>#set:buffer (type $0) (param $this i32) (param $buffer i32)
+  local.get $this
+  local.get $buffer
+  i32.store
+  local.get $this
+  local.get $buffer
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/array/Array<~lib/thread/Executor|null>#set:dataStart (type $0) (param $this i32) (param $dataStart i32)
+  local.get $this
+  local.get $dataStart
+  i32.store offset=4
+ )
+ (func $~lib/array/Array<~lib/thread/Executor|null>#set:byteLength (type $0) (param $this i32) (param $byteLength i32)
+  local.get $this
+  local.get $byteLength
+  i32.store offset=8
+ )
+ (func $~lib/array/Array<~lib/thread/Executor|null>#set:length_ (type $0) (param $this i32) (param $length_ i32)
+  local.get $this
+  local.get $length_
+  i32.store offset=12
+ )
+ (func $~lib/array/Array<~lib/thread/Executor|null>#get:length_ (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=12
+ )
+ (func $~lib/array/Array<~lib/thread/Executor|null>#get:dataStart (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/thread/Executor#get:inbox (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $~lib/thread/SlotRing#get:capacity (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/thread/SlotRing#get:base (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $~lib/thread/blockFreeRequest (type $4) (param $index i32)
+  (local $free i32)
+  (local $capacity i32)
+  (local $ptr i32)
+  (local $tail i32)
+  (local $ptr|5 i32)
+  (local $head i32)
+  (local $ptr|7 i32)
+  (local $expect i32)
+  (local $replace i32)
+  (local $ptr|10 i32)
+  (local $value i32)
+  global.get $~lib/thread/freeRingBase
+  local.set $free
+  global.get $~lib/thread/requestCount
+  local.set $capacity
+  local.get $free
+  i32.const 0
+  i32.eq
+  if (result i32)
+   i32.const 1
+  else
+   local.get $capacity
+   i32.const 0
+   i32.le_s
+  end
+  if (result i32)
+   i32.const 1
+  else
+   local.get $index
+   i32.const 0
+   i32.lt_s
+  end
+  if (result i32)
+   i32.const 1
+  else
+   local.get $index
+   local.get $capacity
+   i32.ge_s
+  end
+  if
+   return
+  end
+  loop $while-continue|0
+   i32.const 1
+   if
+    block $~lib/atomics/atomicLoad<i32>|inlined.18 (result i32)
+     local.get $free
+     global.get $~lib/thread/TAIL_OFF
+     i32.add
+     local.set $ptr
+     local.get $ptr
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.18
+    end
+    local.set $tail
+    block $~lib/atomics/atomicLoad<i32>|inlined.19 (result i32)
+     local.get $free
+     global.get $~lib/thread/HEAD_OFF
+     i32.add
+     local.set $ptr|5
+     local.get $ptr|5
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.19
+    end
+    local.set $head
+    local.get $tail
+    local.get $head
+    i32.sub
+    local.get $capacity
+    i32.ge_s
+    if
+     return
+    end
+    block $~lib/atomics/atomicCompareExchange<i32>|inlined.1 (result i32)
+     local.get $free
+     global.get $~lib/thread/TAIL_OFF
+     i32.add
+     local.set $ptr|7
+     local.get $tail
+     local.set $expect
+     local.get $tail
+     i32.const 1
+     i32.add
+     local.set $replace
+     local.get $ptr|7
+     local.get $expect
+     local.get $replace
+     i32.atomic.rmw.cmpxchg
+     br $~lib/atomics/atomicCompareExchange<i32>|inlined.1
+    end
+    local.get $tail
+    i32.eq
+    if
+     local.get $free
+     global.get $~lib/thread/SLOTS_OFF
+     i32.add
+     local.get $tail
+     local.get $capacity
+     i32.rem_s
+     i32.const 2
+     i32.shl
+     i32.add
+     local.set $ptr|10
+     local.get $index
+     local.set $value
+     local.get $ptr|10
+     local.get $value
+     i32.atomic.store
+     return
+    end
+    br $while-continue|0
+   end
+  end
+  unreachable
+ )
+ (func $~lib/task-stack/__serveSlot (type $1) (param $funcIndex i32) (result i32)
+  unreachable
+ )
+ (func $~lib/thread/Executor#get:ready (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/thread/SlotRing#get:signal (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $~lib/array/Array<~lib/thread/Request|null>#get:length_ (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=12
+ )
+ (func $~lib/array/Array<~lib/thread/Request|null>#get:dataStart (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/thread/Request#get:funcIndex (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load
+ )
+ (func $~lib/thread/Request#get:argSlot (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/thread/Request#get:taskKey (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=8
+ )
+ (func $~lib/array/Array<i32>#set:buffer (type $0) (param $this i32) (param $buffer i32)
+  local.get $this
+  local.get $buffer
+  i32.store
+  local.get $this
+  local.get $buffer
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/array/Array<i32>#set:dataStart (type $0) (param $this i32) (param $dataStart i32)
+  local.get $this
+  local.get $dataStart
+  i32.store offset=4
+ )
+ (func $~lib/array/Array<i32>#set:byteLength (type $0) (param $this i32) (param $byteLength i32)
+  local.get $this
+  local.get $byteLength
+  i32.store offset=8
+ )
+ (func $~lib/array/Array<i32>#set:length_ (type $0) (param $this i32) (param $length_ i32)
+  local.get $this
+  local.get $length_
+  i32.store offset=12
+ )
+ (func $~lib/array/Array<i32>#get:length_ (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=12
+ )
+ (func $~lib/array/Array<i32>#get:dataStart (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/task/TaskBase#get:settled (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load8_u offset=8
+ )
+ (func $~lib/thread/Executor#set:id (type $0) (param $this i32) (param $id i32)
+  local.get $this
+  local.get $id
+  i32.store
+ )
+ (func $~lib/thread/Executor#set:step (type $0) (param $this i32) (param $step i32)
+  local.get $this
+  local.get $step
+  i32.store offset=12
+  local.get $this
+  local.get $step
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/thread/SlotRing#set:capacity (type $0) (param $this i32) (param $capacity i32)
+  local.get $this
+  local.get $capacity
+  i32.store offset=4
+ )
+ (func $~lib/arraybuffer/ArrayBufferView#set:buffer (type $0) (param $this i32) (param $buffer i32)
+  local.get $this
+  local.get $buffer
+  i32.store
+  local.get $this
+  local.get $buffer
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/arraybuffer/ArrayBufferView#set:dataStart (type $0) (param $this i32) (param $dataStart i32)
+  local.get $this
+  local.get $dataStart
+  i32.store offset=4
+ )
+ (func $~lib/arraybuffer/ArrayBufferView#set:byteLength (type $0) (param $this i32) (param $byteLength i32)
+  local.get $this
+  local.get $byteLength
+  i32.store offset=8
+ )
+ (func $~lib/arraybuffer/ArrayBufferView#get:dataStart (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=4
+ )
+ (func $~lib/thread/SlotRing#set:anchor (type $0) (param $this i32) (param $anchor i32)
+  local.get $this
+  local.get $anchor
+  i32.store offset=12
+  local.get $this
+  local.get $anchor
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/thread/SlotRing#set:base (type $0) (param $this i32) (param $base i32)
+  local.get $this
+  local.get $base
+  i32.store
+ )
+ (func $~lib/thread/SlotRing#set:signal (type $0) (param $this i32) (param $signal i32)
+  local.get $this
+  local.get $signal
+  i32.store offset=8
+ )
+ (func $~lib/thread/Executor#set:ready (type $0) (param $this i32) (param $ready i32)
+  local.get $this
+  local.get $ready
+  i32.store offset=4
+  local.get $this
+  local.get $ready
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/thread/Executor#set:inbox (type $0) (param $this i32) (param $inbox i32)
+  local.get $this
+  local.get $inbox
+  i32.store offset=8
+  local.get $this
+  local.get $inbox
+  i32.const 0
+  call $~lib/rt/itcms/__link
+ )
+ (func $~lib/thread/Executor#set:stop (type $0) (param $this i32) (param $stop i32)
+  local.get $this
+  local.get $stop
+  i32.store8 offset=16
+ )
+ (func $~lib/thread/blockPush (type $7) (param $ring i32) (param $capacity i32) (param $value i32) (param $signal i32) (result i32)
+  (local $ptr i32)
+  (local $pos i32)
+  (local $ptr|6 i32)
+  (local $head i32)
+  (local $off i32)
+  (local $word i32)
+  (local $ptr|10 i32)
+  (local $seq i32)
+  (local $ptr|12 i32)
+  (local $expect i32)
+  (local $replace i32)
+  (local $word|15 i32)
+  (local $ptr|16 i32)
+  (local $value|17 i32)
+  (local $word|18 i32)
+  (local $ptr|19 i32)
+  (local $value|20 i32)
+  (local $ptr|21 i32)
+  (local $value|22 i32)
+  (local $ptr|23 i32)
+  (local $count i32)
+  loop $while-continue|0
+   i32.const 1
+   if
+    block $~lib/atomics/atomicLoad<i32>|inlined.27 (result i32)
+     local.get $ring
+     global.get $~lib/thread/TAIL_OFF
+     i32.add
+     local.set $ptr
+     local.get $ptr
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.27
+    end
+    local.set $pos
+    block $~lib/atomics/atomicLoad<i32>|inlined.28 (result i32)
+     local.get $ring
+     global.get $~lib/thread/HEAD_OFF
+     i32.add
+     local.set $ptr|6
+     local.get $ptr|6
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.28
+    end
+    local.set $head
+    local.get $pos
+    local.get $head
+    i32.sub
+    local.get $capacity
+    i32.ge_s
+    if
+     i32.const 0
+     return
+    end
+    local.get $ring
+    global.get $~lib/thread/SLOTS_OFF
+    i32.add
+    local.get $pos
+    local.get $capacity
+    i32.rem_s
+    i32.const 3
+    i32.shl
+    i32.add
+    local.set $off
+    block $~lib/atomics/atomicLoad<i32>|inlined.29 (result i32)
+     local.get $off
+     block $~lib/thread/wordOffset|inlined.10 (result i32)
+      global.get $~lib/thread/SEQ_WORD
+      local.set $word
+      local.get $word
+      i32.const 2
+      i32.shl
+      br $~lib/thread/wordOffset|inlined.10
+     end
+     i32.add
+     local.set $ptr|10
+     local.get $ptr|10
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.29
+    end
+    local.set $seq
+    local.get $seq
+    local.get $pos
+    i32.eq
+    if
+     block $~lib/atomics/atomicCompareExchange<i32>|inlined.3 (result i32)
+      local.get $ring
+      global.get $~lib/thread/TAIL_OFF
+      i32.add
+      local.set $ptr|12
+      local.get $pos
+      local.set $expect
+      local.get $pos
+      i32.const 1
+      i32.add
+      local.set $replace
+      local.get $ptr|12
+      local.get $expect
+      local.get $replace
+      i32.atomic.rmw.cmpxchg
+      br $~lib/atomics/atomicCompareExchange<i32>|inlined.3
+     end
+     local.get $pos
+     i32.eq
+     if
+      local.get $off
+      block $~lib/thread/wordOffset|inlined.11 (result i32)
+       global.get $~lib/thread/VALUE_WORD
+       local.set $word|15
+       local.get $word|15
+       i32.const 2
+       i32.shl
+       br $~lib/thread/wordOffset|inlined.11
+      end
+      i32.add
+      local.set $ptr|16
+      local.get $value
+      local.set $value|17
+      local.get $ptr|16
+      local.get $value|17
+      i32.atomic.store
+      local.get $off
+      block $~lib/thread/wordOffset|inlined.12 (result i32)
+       global.get $~lib/thread/SEQ_WORD
+       local.set $word|18
+       local.get $word|18
+       i32.const 2
+       i32.shl
+       br $~lib/thread/wordOffset|inlined.12
+      end
+      i32.add
+      local.set $ptr|19
+      local.get $pos
+      i32.const 1
+      i32.add
+      local.set $value|20
+      local.get $ptr|19
+      local.get $value|20
+      i32.atomic.store
+      local.get $signal
+      i32.const 0
+      i32.ne
+      if
+       block $~lib/atomics/atomicAdd<i32>|inlined.1 (result i32)
+        local.get $signal
+        local.set $ptr|21
+        i32.const 1
+        local.set $value|22
+        local.get $ptr|21
+        local.get $value|22
+        i32.atomic.rmw.add
+        br $~lib/atomics/atomicAdd<i32>|inlined.1
+       end
+       drop
+       block $~lib/atomics/atomicNotify|inlined.1 (result i32)
+        local.get $signal
+        local.set $ptr|23
+        i32.const 1
+        local.set $count
+        local.get $ptr|23
+        local.get $count
+        memory.atomic.notify
+        br $~lib/atomics/atomicNotify|inlined.1
+       end
+       drop
+      end
+      i32.const 1
+      return
+     end
+    else
+     local.get $seq
+     local.get $pos
+     i32.lt_s
+     if
+      i32.const 0
+      return
+     end
+    end
+    br $while-continue|0
+   end
+  end
+  unreachable
+ )
+ (func $~lib/task/setWakeSink (type $4) (param $sink i32)
+  local.get $sink
+  global.set $~lib/task/__wakeSink
+ )
+ (func $~lib/thread/Executor#get:stop (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load8_u offset=16
+ )
+ (func $~lib/thread/Executor#get:step (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=12
  )
  (func $~lib/thread/__threadJoin (type $1) (param $id i32) (result i32)
   (local $id|1 i32)
@@ -5011,7 +4964,7 @@
   i32.load
   unreachable
  )
- (func $~lib/mask/MaskBase#allows@override (type $3) (param $0 i32) (param $1 i32) (result i32)
+ (func $~lib/mask/MaskBase#allows@override (type $2) (param $0 i32) (param $1 i32) (result i32)
   (local $2 i32)
   local.get $0
   i32.const 8
@@ -5408,24 +5361,10 @@
   global.set $~lib/rt/itcms/toSpace
   call $~lib/rt/itcms/initialFromSpace
   global.set $~lib/rt/itcms/fromSpace
-  i32.const 0
-  ref.func $~asyncMainStart
-  cont.new $6
-  table.set $~asyncCont
-  block $on_idle (result (ref null $8))
-   block $on_done (type $19) (result i32 (ref null $8))
-    ref.func $~lib/async/__coreloopAwait
-    cont.new $8
-    resume $8 (on $idle $on_idle) (on $done $on_done)
-    return
-   end
-   tuple.extract 2 0
-   global.set $~asyncStatus
-   return
-  end
-  drop
+  call $~asyncMainStart
+  global.set $~asyncStatus
  )
- (func $__start (type $2) (result i32)
+ (func $__start (type $3) (result i32)
   call $~start
   global.get $~asyncStatus
  )
@@ -5833,7 +5772,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $1
  )
- (func $~lib/thread/RemotePolicy#constructor (type $9) (param $this i32) (param $target i32) (param $arg i32) (param $reply i32) (result i32)
+ (func $~lib/thread/RemotePolicy#constructor (type $7) (param $this i32) (param $target i32) (param $arg i32) (param $reply i32) (result i32)
   (local $4 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 8
@@ -5944,7 +5883,7 @@
   local.get $1
   return
  )
- (func $~lib/array/Array<~lib/task/TaskBase|null>#__get (type $3) (param $this i32) (param $index i32) (result i32)
+ (func $~lib/array/Array<~lib/task/TaskBase|null>#__get (type $2) (param $this i32) (param $index i32) (result i32)
   (local $value i32)
   (local $3 i32)
   global.get $~lib/memory/__stack_pointer
@@ -6001,7 +5940,7 @@
   local.get $3
   return
  )
- (func $~lib/task-stack/__currentTask (type $2) (result i32)
+ (func $~lib/task-stack/__currentTask (type $3) (result i32)
   (local $table i32)
   (local $slot i32)
   (local $2 i32)
@@ -6127,7 +6066,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $1
  )
- (func $~lib/array/Array<~lib/task/Waiter>#constructor (type $3) (param $this i32) (param $length i32) (result i32)
+ (func $~lib/array/Array<~lib/task/Waiter>#constructor (type $2) (param $this i32) (param $length i32) (result i32)
   (local $2 i32)
   (local $3 i32)
   (local $bufferSize i32)
@@ -6265,7 +6204,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $6
  )
- (func $~lib/array/ensureCapacity (type $10) (param $array i32) (param $newSize i32) (param $alignLog2 i32) (param $canGrow i32)
+ (func $~lib/array/ensureCapacity (type $8) (param $array i32) (param $newSize i32) (param $alignLog2 i32) (param $canGrow i32)
   (local $oldCapacity i32)
   (local $oldData i32)
   (local $6 i32)
@@ -6384,7 +6323,7 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
- (func $~lib/array/Array<~lib/task/Waiter>#push (type $3) (param $this i32) (param $value i32) (result i32)
+ (func $~lib/array/Array<~lib/task/Waiter>#push (type $2) (param $this i32) (param $value i32) (result i32)
   (local $oldLen i32)
   (local $len i32)
   (local $4 i32)
@@ -6814,7 +6753,7 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
- (func $stackful-fiber-record/main (type $2) (result i32)
+ (func $stackful-fiber-record/main (type $3) (result i32)
   (local $warm_up i32)
   (local $job i32)
   (local $policy i32)
@@ -6867,643 +6806,7 @@
   local.get $3
   return
  )
- (func $~lib/array/Array<~lib/thread/Executor|null>#get:length (type $1) (param $this i32) (result i32)
-  (local $1 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store
-  local.get $this
-  local.set $1
-  global.get $~lib/memory/__stack_pointer
-  local.get $1
-  i32.store
-  local.get $1
-  call $~lib/array/Array<~lib/thread/Executor|null>#get:length_
-  local.set $1
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.add
-  global.set $~lib/memory/__stack_pointer
-  local.get $1
-  return
- )
- (func $~lib/array/Array<~lib/thread/Executor|null>#__get (type $3) (param $this i32) (param $index i32) (result i32)
-  (local $value i32)
-  (local $3 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 8
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i64.const 0
-  i64.store
-  local.get $index
-  local.get $this
-  local.set $3
-  global.get $~lib/memory/__stack_pointer
-  local.get $3
-  i32.store
-  local.get $3
-  call $~lib/array/Array<~lib/thread/Executor|null>#get:length_
-  i32.ge_u
-  if
-   i32.const 256
-   i32.const 464
-   i32.const 114
-   i32.const 42
-   call $~lib/builtins/abort
-   unreachable
-  end
-  global.get $~lib/memory/__stack_pointer
-  local.get $this
-  local.set $3
-  global.get $~lib/memory/__stack_pointer
-  local.get $3
-  i32.store
-  local.get $3
-  call $~lib/array/Array<~lib/thread/Executor|null>#get:dataStart
-  local.get $index
-  i32.const 2
-  i32.shl
-  i32.add
-  i32.load
-  local.tee $value
-  i32.store offset=4
-  i32.const 1
-  drop
-  i32.const 1
-  i32.eqz
-  drop
-  local.get $value
-  local.set $3
-  global.get $~lib/memory/__stack_pointer
-  i32.const 8
-  i32.add
-  global.set $~lib/memory/__stack_pointer
-  local.get $3
-  return
- )
- (func $~lib/thread/__executorOf (type $1) (param $id i32) (result i32)
-  (local $table i32)
-  (local $2 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 8
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i64.const 0
-  i64.store
-  global.get $~lib/memory/__stack_pointer
-  global.get $~lib/thread/executors
-  local.tee $table
-  i32.store
-  local.get $table
-  i32.eqz
-  if (result i32)
-   i32.const 1
-  else
-   local.get $id
-   i32.const 0
-   i32.lt_s
-  end
-  if (result i32)
-   i32.const 1
-  else
-   local.get $id
-   local.get $table
-   local.set $2
-   global.get $~lib/memory/__stack_pointer
-   local.get $2
-   i32.store offset=4
-   local.get $2
-   call $~lib/array/Array<~lib/thread/Executor|null>#get:length
-   i32.ge_s
-  end
-  if
-   i32.const 0
-   local.set $2
-   global.get $~lib/memory/__stack_pointer
-   i32.const 8
-   i32.add
-   global.set $~lib/memory/__stack_pointer
-   local.get $2
-   return
-  end
-  local.get $table
-  local.set $2
-  global.get $~lib/memory/__stack_pointer
-  local.get $2
-  i32.store offset=4
-  local.get $2
-  local.get $id
-  call $~lib/array/Array<~lib/thread/Executor|null>#__get
-  local.set $2
-  global.get $~lib/memory/__stack_pointer
-  i32.const 8
-  i32.add
-  global.set $~lib/memory/__stack_pointer
-  local.get $2
-  return
- )
- (func $~lib/thread/SlotRing#push (type $3) (param $this i32) (param $slot i32) (result i32)
-  (local $capacity i32)
-  (local $base i32)
-  (local $ptr i32)
-  (local $headNow i32)
-  (local $ptr|6 i32)
-  (local $tailNow i32)
-  (local $i i32)
-  (local $off i32)
-  (local $word i32)
-  (local $ptr|11 i32)
-  (local $word|12 i32)
-  (local $ptr|13 i32)
-  (local $ptr|14 i32)
-  (local $pos i32)
-  (local $ptr|16 i32)
-  (local $head i32)
-  (local $off|18 i32)
-  (local $word|19 i32)
-  (local $ptr|20 i32)
-  (local $seq i32)
-  (local $ptr|22 i32)
-  (local $expect i32)
-  (local $replace i32)
-  (local $word|25 i32)
-  (local $ptr|26 i32)
-  (local $value i32)
-  (local $word|28 i32)
-  (local $ptr|29 i32)
-  (local $value|30 i32)
-  (local $signal i32)
-  (local $ptr|32 i32)
-  (local $value|33 i32)
-  (local $ptr|34 i32)
-  (local $count i32)
-  (local $36 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store
-  local.get $this
-  local.set $36
-  global.get $~lib/memory/__stack_pointer
-  local.get $36
-  i32.store
-  local.get $36
-  call $~lib/thread/SlotRing#get:capacity
-  local.set $capacity
-  local.get $capacity
-  i32.const 0
-  i32.le_s
-  if
-   i32.const 0
-   local.set $36
-   global.get $~lib/memory/__stack_pointer
-   i32.const 4
-   i32.add
-   global.set $~lib/memory/__stack_pointer
-   local.get $36
-   return
-  end
-  local.get $this
-  local.set $36
-  global.get $~lib/memory/__stack_pointer
-  local.get $36
-  i32.store
-  local.get $36
-  call $~lib/thread/SlotRing#get:base
-  local.set $base
-  block $~lib/atomics/atomicLoad<i32>|inlined.3 (result i32)
-   local.get $base
-   global.get $~lib/thread/HEAD_OFF
-   i32.add
-   local.set $ptr
-   local.get $ptr
-   i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.3
-  end
-  local.set $headNow
-  block $~lib/atomics/atomicLoad<i32>|inlined.4 (result i32)
-   local.get $base
-   global.get $~lib/thread/TAIL_OFF
-   i32.add
-   local.set $ptr|6
-   local.get $ptr|6
-   i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.4
-  end
-  local.set $tailNow
-  local.get $headNow
-  local.set $i
-  loop $for-loop|0
-   local.get $i
-   local.get $tailNow
-   i32.lt_s
-   if
-    local.get $base
-    global.get $~lib/thread/SLOTS_OFF
-    i32.add
-    local.get $i
-    local.get $capacity
-    i32.rem_s
-    i32.const 3
-    i32.shl
-    i32.add
-    local.set $off
-    block $~lib/atomics/atomicLoad<i32>|inlined.5 (result i32)
-     local.get $off
-     block $~lib/thread/wordOffset|inlined.3 (result i32)
-      global.get $~lib/thread/SEQ_WORD
-      local.set $word
-      local.get $word
-      i32.const 2
-      i32.shl
-      br $~lib/thread/wordOffset|inlined.3
-     end
-     i32.add
-     local.set $ptr|11
-     local.get $ptr|11
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.5
-    end
-    local.get $i
-    i32.const 1
-    i32.add
-    i32.eq
-    if (result i32)
-     block $~lib/atomics/atomicLoad<i32>|inlined.6 (result i32)
-      local.get $off
-      block $~lib/thread/wordOffset|inlined.4 (result i32)
-       global.get $~lib/thread/VALUE_WORD
-       local.set $word|12
-       local.get $word|12
-       i32.const 2
-       i32.shl
-       br $~lib/thread/wordOffset|inlined.4
-      end
-      i32.add
-      local.set $ptr|13
-      local.get $ptr|13
-      i32.atomic.load
-      br $~lib/atomics/atomicLoad<i32>|inlined.6
-     end
-     local.get $slot
-     i32.eq
-    else
-     i32.const 0
-    end
-    if
-     i32.const 0
-     local.set $36
-     global.get $~lib/memory/__stack_pointer
-     i32.const 4
-     i32.add
-     global.set $~lib/memory/__stack_pointer
-     local.get $36
-     return
-    end
-    local.get $i
-    i32.const 1
-    i32.add
-    local.set $i
-    br $for-loop|0
-   end
-  end
-  loop $while-continue|1
-   i32.const 1
-   if
-    block $~lib/atomics/atomicLoad<i32>|inlined.7 (result i32)
-     local.get $base
-     global.get $~lib/thread/TAIL_OFF
-     i32.add
-     local.set $ptr|14
-     local.get $ptr|14
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.7
-    end
-    local.set $pos
-    block $~lib/atomics/atomicLoad<i32>|inlined.8 (result i32)
-     local.get $base
-     global.get $~lib/thread/HEAD_OFF
-     i32.add
-     local.set $ptr|16
-     local.get $ptr|16
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.8
-    end
-    local.set $head
-    local.get $pos
-    local.get $head
-    i32.sub
-    local.get $capacity
-    i32.ge_s
-    if
-     i32.const 0
-     local.set $36
-     global.get $~lib/memory/__stack_pointer
-     i32.const 4
-     i32.add
-     global.set $~lib/memory/__stack_pointer
-     local.get $36
-     return
-    end
-    local.get $base
-    global.get $~lib/thread/SLOTS_OFF
-    i32.add
-    local.get $pos
-    local.get $capacity
-    i32.rem_s
-    i32.const 3
-    i32.shl
-    i32.add
-    local.set $off|18
-    block $~lib/atomics/atomicLoad<i32>|inlined.9 (result i32)
-     local.get $off|18
-     block $~lib/thread/wordOffset|inlined.5 (result i32)
-      global.get $~lib/thread/SEQ_WORD
-      local.set $word|19
-      local.get $word|19
-      i32.const 2
-      i32.shl
-      br $~lib/thread/wordOffset|inlined.5
-     end
-     i32.add
-     local.set $ptr|20
-     local.get $ptr|20
-     i32.atomic.load
-     br $~lib/atomics/atomicLoad<i32>|inlined.9
-    end
-    local.set $seq
-    local.get $seq
-    local.get $pos
-    i32.eq
-    if
-     block $~lib/atomics/atomicCompareExchange<i32>|inlined.1 (result i32)
-      local.get $base
-      global.get $~lib/thread/TAIL_OFF
-      i32.add
-      local.set $ptr|22
-      local.get $pos
-      local.set $expect
-      local.get $pos
-      i32.const 1
-      i32.add
-      local.set $replace
-      local.get $ptr|22
-      local.get $expect
-      local.get $replace
-      i32.atomic.rmw.cmpxchg
-      br $~lib/atomics/atomicCompareExchange<i32>|inlined.1
-     end
-     local.get $pos
-     i32.eq
-     if
-      local.get $off|18
-      block $~lib/thread/wordOffset|inlined.6 (result i32)
-       global.get $~lib/thread/VALUE_WORD
-       local.set $word|25
-       local.get $word|25
-       i32.const 2
-       i32.shl
-       br $~lib/thread/wordOffset|inlined.6
-      end
-      i32.add
-      local.set $ptr|26
-      local.get $slot
-      local.set $value
-      local.get $ptr|26
-      local.get $value
-      i32.atomic.store
-      local.get $off|18
-      block $~lib/thread/wordOffset|inlined.7 (result i32)
-       global.get $~lib/thread/SEQ_WORD
-       local.set $word|28
-       local.get $word|28
-       i32.const 2
-       i32.shl
-       br $~lib/thread/wordOffset|inlined.7
-      end
-      i32.add
-      local.set $ptr|29
-      local.get $pos
-      i32.const 1
-      i32.add
-      local.set $value|30
-      local.get $ptr|29
-      local.get $value|30
-      i32.atomic.store
-      local.get $this
-      local.set $36
-      global.get $~lib/memory/__stack_pointer
-      local.get $36
-      i32.store
-      local.get $36
-      call $~lib/thread/SlotRing#get:signal
-      local.set $signal
-      local.get $signal
-      i32.const 0
-      i32.ne
-      if
-       block $~lib/atomics/atomicAdd<i32>|inlined.1 (result i32)
-        local.get $signal
-        local.set $ptr|32
-        i32.const 1
-        local.set $value|33
-        local.get $ptr|32
-        local.get $value|33
-        i32.atomic.rmw.add
-        br $~lib/atomics/atomicAdd<i32>|inlined.1
-       end
-       drop
-       block $~lib/atomics/atomicNotify|inlined.1 (result i32)
-        local.get $signal
-        local.set $ptr|34
-        i32.const 1
-        local.set $count
-        local.get $ptr|34
-        local.get $count
-        memory.atomic.notify
-        br $~lib/atomics/atomicNotify|inlined.1
-       end
-       drop
-      end
-      i32.const 1
-      local.set $36
-      global.get $~lib/memory/__stack_pointer
-      i32.const 4
-      i32.add
-      global.set $~lib/memory/__stack_pointer
-      local.get $36
-      return
-     end
-    else
-     local.get $seq
-     local.get $pos
-     i32.lt_s
-     if
-      i32.const 0
-      local.set $36
-      global.get $~lib/memory/__stack_pointer
-      i32.const 4
-      i32.add
-      global.set $~lib/memory/__stack_pointer
-      local.get $36
-      return
-     end
-    end
-    br $while-continue|1
-   end
-  end
-  unreachable
- )
- (func $~lib/thread/installWakeSink~anonymous|0 (type $0) (param $exec i32) (param $slot i32)
-  (local $id i32)
-  (local $rec i32)
-  (local $rec|4 i32)
-  (local $rec|5 i32)
-  (local $capacity i32)
-  (local $capacity|7 i32)
-  (local $e i32)
-  (local $9 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 12
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i64.const 0
-  i64.store
-  global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store offset=8
-  global.get $~lib/thread/__controlBase
-  i32.const 0
-  i32.ne
-  if
-   block $~lib/thread/recordBase|inlined.0 (result i32)
-    local.get $exec
-    local.set $id
-    global.get $~lib/thread/__controlBase
-    global.get $~lib/thread/HEADER_BYTES
-    i32.add
-    local.get $id
-    global.get $~lib/thread/__controlStride
-    i32.mul
-    i32.add
-    br $~lib/thread/recordBase|inlined.0
-   end
-   local.set $rec
-   local.get $rec
-   global.get $~lib/thread/__ringCapacity
-   local.get $slot
-   block $~lib/thread/signalBase|inlined.0 (result i32)
-    local.get $rec
-    local.set $rec|4
-    block $~lib/thread/inboxBase|inlined.0 (result i32)
-     local.get $rec|4
-     local.set $rec|5
-     local.get $rec|5
-     block $~lib/thread/ringWords|inlined.0 (result i32)
-      global.get $~lib/thread/__ringCapacity
-      local.set $capacity
-      i32.const 3
-      local.get $capacity
-      global.get $~lib/thread/CELL_WORDS
-      i32.mul
-      i32.add
-      br $~lib/thread/ringWords|inlined.0
-     end
-     i32.const 2
-     i32.shl
-     i32.add
-     br $~lib/thread/inboxBase|inlined.0
-    end
-    block $~lib/thread/ringWords|inlined.1 (result i32)
-     global.get $~lib/thread/__ringCapacity
-     local.set $capacity|7
-     i32.const 3
-     local.get $capacity|7
-     global.get $~lib/thread/CELL_WORDS
-     i32.mul
-     i32.add
-     br $~lib/thread/ringWords|inlined.1
-    end
-    i32.const 2
-    i32.shl
-    i32.add
-    br $~lib/thread/signalBase|inlined.0
-   end
-   call $~lib/thread/blockPush
-   drop
-   global.get $~lib/memory/__stack_pointer
-   i32.const 12
-   i32.add
-   global.set $~lib/memory/__stack_pointer
-   return
-  end
-  global.get $~lib/memory/__stack_pointer
-  local.get $exec
-  call $~lib/thread/__executorOf
-  local.tee $e
-  i32.store
-  local.get $e
-  if
-   local.get $e
-   local.set $9
-   global.get $~lib/memory/__stack_pointer
-   local.get $9
-   i32.store offset=8
-   local.get $9
-   call $~lib/thread/Executor#get:ready
-   local.set $9
-   global.get $~lib/memory/__stack_pointer
-   local.get $9
-   i32.store offset=4
-   local.get $9
-   local.get $slot
-   call $~lib/thread/SlotRing#push
-   drop
-  end
-  global.get $~lib/memory/__stack_pointer
-  i32.const 12
-  i32.add
-  global.set $~lib/memory/__stack_pointer
- )
- (func $~lib/thread/installWakeSink (type $5)
-  (local $0 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store
-  i32.const 560
-  local.set $0
-  global.get $~lib/memory/__stack_pointer
-  local.get $0
-  i32.store
-  local.get $0
-  call $~lib/task/setWakeSink
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.add
-  global.set $~lib/memory/__stack_pointer
- )
- (func $~lib/array/Array<~lib/thread/Executor|null>#constructor (type $3) (param $this i32) (param $length i32) (result i32)
+ (func $~lib/array/Array<~lib/thread/Executor|null>#constructor (type $2) (param $this i32) (param $length i32) (result i32)
   (local $2 i32)
   (local $3 i32)
   (local $bufferSize i32)
@@ -7641,7 +6944,32 @@
   global.set $~lib/memory/__stack_pointer
   local.get $6
  )
- (func $~lib/array/Array<~lib/thread/Executor|null>#push (type $3) (param $this i32) (param $value i32) (result i32)
+ (func $~lib/array/Array<~lib/thread/Executor|null>#get:length (type $1) (param $this i32) (result i32)
+  (local $1 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  local.get $1
+  i32.store
+  local.get $1
+  call $~lib/array/Array<~lib/thread/Executor|null>#get:length_
+  local.set $1
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $1
+  return
+ )
+ (func $~lib/array/Array<~lib/thread/Executor|null>#push (type $2) (param $this i32) (param $value i32) (result i32)
   (local $oldLen i32)
   (local $len i32)
   (local $4 i32)
@@ -7811,13 +7139,13 @@
     local.set $off
     block $~lib/atomics/atomicLoad<i32>|inlined.12 (result i32)
      local.get $off
-     block $~lib/thread/wordOffset|inlined.8 (result i32)
+     block $~lib/thread/wordOffset|inlined.2 (result i32)
       global.get $~lib/thread/SEQ_WORD
       local.set $word
       local.get $word
       i32.const 2
       i32.shl
-      br $~lib/thread/wordOffset|inlined.8
+      br $~lib/thread/wordOffset|inlined.2
      end
      i32.add
      local.set $ptr|9
@@ -7839,7 +7167,7 @@
      local.get $19
      return
     end
-    block $~lib/atomics/atomicCompareExchange<i32>|inlined.2 (result i32)
+    block $~lib/atomics/atomicCompareExchange<i32>|inlined.0 (result i32)
      local.get $base
      global.get $~lib/thread/HEAD_OFF
      i32.add
@@ -7854,7 +7182,7 @@
      local.get $expect
      local.get $replace
      i32.atomic.rmw.cmpxchg
-     br $~lib/atomics/atomicCompareExchange<i32>|inlined.2
+     br $~lib/atomics/atomicCompareExchange<i32>|inlined.0
     end
     local.get $pos
     i32.ne
@@ -7863,13 +7191,13 @@
     end
     block $~lib/atomics/atomicLoad<i32>|inlined.13 (result i32)
      local.get $off
-     block $~lib/thread/wordOffset|inlined.9 (result i32)
+     block $~lib/thread/wordOffset|inlined.3 (result i32)
       global.get $~lib/thread/VALUE_WORD
       local.set $word|13
       local.get $word|13
       i32.const 2
       i32.shl
-      br $~lib/thread/wordOffset|inlined.9
+      br $~lib/thread/wordOffset|inlined.3
      end
      i32.add
      local.set $ptr|14
@@ -7879,13 +7207,13 @@
     end
     local.set $value
     local.get $off
-    block $~lib/thread/wordOffset|inlined.10 (result i32)
+    block $~lib/thread/wordOffset|inlined.4 (result i32)
      global.get $~lib/thread/SEQ_WORD
      local.set $word|16
      local.get $word|16
      i32.const 2
      i32.shl
-     br $~lib/thread/wordOffset|inlined.10
+     br $~lib/thread/wordOffset|inlined.4
     end
     i32.add
     local.set $ptr|17
@@ -7971,17 +7299,368 @@
   local.get $2
   return
  )
- (func $~lib/thread/__serveOne (type $17) (param $e i32) (param $funcIndex i32) (param $argSlot i32) (param $taskKey i32) (param $origin i32) (result i32)
+ (func $~lib/thread/SlotRing#push (type $2) (param $this i32) (param $slot i32) (result i32)
+  (local $capacity i32)
+  (local $base i32)
+  (local $ptr i32)
+  (local $headNow i32)
+  (local $ptr|6 i32)
+  (local $tailNow i32)
+  (local $i i32)
+  (local $off i32)
+  (local $word i32)
+  (local $ptr|11 i32)
+  (local $word|12 i32)
+  (local $ptr|13 i32)
+  (local $ptr|14 i32)
+  (local $pos i32)
+  (local $ptr|16 i32)
+  (local $head i32)
+  (local $off|18 i32)
+  (local $word|19 i32)
+  (local $ptr|20 i32)
+  (local $seq i32)
+  (local $ptr|22 i32)
+  (local $expect i32)
+  (local $replace i32)
+  (local $word|25 i32)
+  (local $ptr|26 i32)
+  (local $value i32)
+  (local $word|28 i32)
+  (local $ptr|29 i32)
+  (local $value|30 i32)
+  (local $signal i32)
+  (local $ptr|32 i32)
+  (local $value|33 i32)
+  (local $ptr|34 i32)
+  (local $count i32)
+  (local $36 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store
+  local.get $this
+  local.set $36
+  global.get $~lib/memory/__stack_pointer
+  local.get $36
+  i32.store
+  local.get $36
+  call $~lib/thread/SlotRing#get:capacity
+  local.set $capacity
+  local.get $capacity
+  i32.const 0
+  i32.le_s
+  if
+   i32.const 0
+   local.set $36
+   global.get $~lib/memory/__stack_pointer
+   i32.const 4
+   i32.add
+   global.set $~lib/memory/__stack_pointer
+   local.get $36
+   return
+  end
+  local.get $this
+  local.set $36
+  global.get $~lib/memory/__stack_pointer
+  local.get $36
+  i32.store
+  local.get $36
+  call $~lib/thread/SlotRing#get:base
+  local.set $base
+  block $~lib/atomics/atomicLoad<i32>|inlined.20 (result i32)
+   local.get $base
+   global.get $~lib/thread/HEAD_OFF
+   i32.add
+   local.set $ptr
+   local.get $ptr
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.20
+  end
+  local.set $headNow
+  block $~lib/atomics/atomicLoad<i32>|inlined.21 (result i32)
+   local.get $base
+   global.get $~lib/thread/TAIL_OFF
+   i32.add
+   local.set $ptr|6
+   local.get $ptr|6
+   i32.atomic.load
+   br $~lib/atomics/atomicLoad<i32>|inlined.21
+  end
+  local.set $tailNow
+  local.get $headNow
+  local.set $i
+  loop $for-loop|0
+   local.get $i
+   local.get $tailNow
+   i32.lt_s
+   if
+    local.get $base
+    global.get $~lib/thread/SLOTS_OFF
+    i32.add
+    local.get $i
+    local.get $capacity
+    i32.rem_s
+    i32.const 3
+    i32.shl
+    i32.add
+    local.set $off
+    block $~lib/atomics/atomicLoad<i32>|inlined.22 (result i32)
+     local.get $off
+     block $~lib/thread/wordOffset|inlined.5 (result i32)
+      global.get $~lib/thread/SEQ_WORD
+      local.set $word
+      local.get $word
+      i32.const 2
+      i32.shl
+      br $~lib/thread/wordOffset|inlined.5
+     end
+     i32.add
+     local.set $ptr|11
+     local.get $ptr|11
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.22
+    end
+    local.get $i
+    i32.const 1
+    i32.add
+    i32.eq
+    if (result i32)
+     block $~lib/atomics/atomicLoad<i32>|inlined.23 (result i32)
+      local.get $off
+      block $~lib/thread/wordOffset|inlined.6 (result i32)
+       global.get $~lib/thread/VALUE_WORD
+       local.set $word|12
+       local.get $word|12
+       i32.const 2
+       i32.shl
+       br $~lib/thread/wordOffset|inlined.6
+      end
+      i32.add
+      local.set $ptr|13
+      local.get $ptr|13
+      i32.atomic.load
+      br $~lib/atomics/atomicLoad<i32>|inlined.23
+     end
+     local.get $slot
+     i32.eq
+    else
+     i32.const 0
+    end
+    if
+     i32.const 0
+     local.set $36
+     global.get $~lib/memory/__stack_pointer
+     i32.const 4
+     i32.add
+     global.set $~lib/memory/__stack_pointer
+     local.get $36
+     return
+    end
+    local.get $i
+    i32.const 1
+    i32.add
+    local.set $i
+    br $for-loop|0
+   end
+  end
+  loop $while-continue|1
+   i32.const 1
+   if
+    block $~lib/atomics/atomicLoad<i32>|inlined.24 (result i32)
+     local.get $base
+     global.get $~lib/thread/TAIL_OFF
+     i32.add
+     local.set $ptr|14
+     local.get $ptr|14
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.24
+    end
+    local.set $pos
+    block $~lib/atomics/atomicLoad<i32>|inlined.25 (result i32)
+     local.get $base
+     global.get $~lib/thread/HEAD_OFF
+     i32.add
+     local.set $ptr|16
+     local.get $ptr|16
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.25
+    end
+    local.set $head
+    local.get $pos
+    local.get $head
+    i32.sub
+    local.get $capacity
+    i32.ge_s
+    if
+     i32.const 0
+     local.set $36
+     global.get $~lib/memory/__stack_pointer
+     i32.const 4
+     i32.add
+     global.set $~lib/memory/__stack_pointer
+     local.get $36
+     return
+    end
+    local.get $base
+    global.get $~lib/thread/SLOTS_OFF
+    i32.add
+    local.get $pos
+    local.get $capacity
+    i32.rem_s
+    i32.const 3
+    i32.shl
+    i32.add
+    local.set $off|18
+    block $~lib/atomics/atomicLoad<i32>|inlined.26 (result i32)
+     local.get $off|18
+     block $~lib/thread/wordOffset|inlined.7 (result i32)
+      global.get $~lib/thread/SEQ_WORD
+      local.set $word|19
+      local.get $word|19
+      i32.const 2
+      i32.shl
+      br $~lib/thread/wordOffset|inlined.7
+     end
+     i32.add
+     local.set $ptr|20
+     local.get $ptr|20
+     i32.atomic.load
+     br $~lib/atomics/atomicLoad<i32>|inlined.26
+    end
+    local.set $seq
+    local.get $seq
+    local.get $pos
+    i32.eq
+    if
+     block $~lib/atomics/atomicCompareExchange<i32>|inlined.2 (result i32)
+      local.get $base
+      global.get $~lib/thread/TAIL_OFF
+      i32.add
+      local.set $ptr|22
+      local.get $pos
+      local.set $expect
+      local.get $pos
+      i32.const 1
+      i32.add
+      local.set $replace
+      local.get $ptr|22
+      local.get $expect
+      local.get $replace
+      i32.atomic.rmw.cmpxchg
+      br $~lib/atomics/atomicCompareExchange<i32>|inlined.2
+     end
+     local.get $pos
+     i32.eq
+     if
+      local.get $off|18
+      block $~lib/thread/wordOffset|inlined.8 (result i32)
+       global.get $~lib/thread/VALUE_WORD
+       local.set $word|25
+       local.get $word|25
+       i32.const 2
+       i32.shl
+       br $~lib/thread/wordOffset|inlined.8
+      end
+      i32.add
+      local.set $ptr|26
+      local.get $slot
+      local.set $value
+      local.get $ptr|26
+      local.get $value
+      i32.atomic.store
+      local.get $off|18
+      block $~lib/thread/wordOffset|inlined.9 (result i32)
+       global.get $~lib/thread/SEQ_WORD
+       local.set $word|28
+       local.get $word|28
+       i32.const 2
+       i32.shl
+       br $~lib/thread/wordOffset|inlined.9
+      end
+      i32.add
+      local.set $ptr|29
+      local.get $pos
+      i32.const 1
+      i32.add
+      local.set $value|30
+      local.get $ptr|29
+      local.get $value|30
+      i32.atomic.store
+      local.get $this
+      local.set $36
+      global.get $~lib/memory/__stack_pointer
+      local.get $36
+      i32.store
+      local.get $36
+      call $~lib/thread/SlotRing#get:signal
+      local.set $signal
+      local.get $signal
+      i32.const 0
+      i32.ne
+      if
+       block $~lib/atomics/atomicAdd<i32>|inlined.0 (result i32)
+        local.get $signal
+        local.set $ptr|32
+        i32.const 1
+        local.set $value|33
+        local.get $ptr|32
+        local.get $value|33
+        i32.atomic.rmw.add
+        br $~lib/atomics/atomicAdd<i32>|inlined.0
+       end
+       drop
+       block $~lib/atomics/atomicNotify|inlined.0 (result i32)
+        local.get $signal
+        local.set $ptr|34
+        i32.const 1
+        local.set $count
+        local.get $ptr|34
+        local.get $count
+        memory.atomic.notify
+        br $~lib/atomics/atomicNotify|inlined.0
+       end
+       drop
+      end
+      i32.const 1
+      local.set $36
+      global.get $~lib/memory/__stack_pointer
+      i32.const 4
+      i32.add
+      global.set $~lib/memory/__stack_pointer
+      local.get $36
+      return
+     end
+    else
+     local.get $seq
+     local.get $pos
+     i32.lt_s
+     if
+      i32.const 0
+      local.set $36
+      global.get $~lib/memory/__stack_pointer
+      i32.const 4
+      i32.add
+      global.set $~lib/memory/__stack_pointer
+      local.get $36
+      return
+     end
+    end
+    br $while-continue|1
+   end
+  end
+  unreachable
+ )
+ (func $~lib/thread/__serveOne (type $14) (param $e i32) (param $funcIndex i32) (param $argSlot i32) (param $taskKey i32) (param $origin i32) (result i32)
   (local $slot i32)
-  (local $6 i32)
-  (local $7 i32)
-  (local $8 (tuple i32 (ref null $6)))
-  (local $9 i32)
-  (local $10 i32)
   (local $awaited i32)
   (local $taskOrNull i32)
   (local $task i32)
-  (local $14 i32)
+  (local $9 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 16
   i32.sub
@@ -8002,109 +7681,7 @@
   local.get $funcIndex
   call $~lib/task-stack/__serveSlot
   local.set $slot
-  local.get $slot
-  local.set $6
-  global.get $~asyncCurrentSlot
-  local.set $9
-  local.get $6
-  global.set $~asyncCurrentSlot
-  block $on_await1 (type $13) (result i32 (ref null $6))
-   local.get $6
-   table.get $~asyncCont
-   resume $6 (on $await $on_await1)
-   local.set $7
-   local.get $7
-   global.set $~asyncLastStatus
-   i32.const -1
-   ref.null nocont
-   tuple.make 2
-  end
-  local.set $8
-  local.get $9
-  global.set $~asyncCurrentSlot
-  local.get $8
-  tuple.extract 2 0
-  local.set $10
-  local.get $10
-  i32.const 0
-  i32.ge_s
-  local.get $10
-  i32.const -2
-  i32.eq
-  i32.or
-  if
-   local.get $6
-   local.get $8
-   tuple.extract 2 1
-   table.set $~asyncCont
-  else
-  end
-  local.get $10
-  local.set $awaited
-  local.get $awaited
-  i32.const 0
-  i32.ge_s
-  if
-   global.get $~lib/memory/__stack_pointer
-   local.get $awaited
-   call $~lib/task-stack/__taskAt
-   local.tee $taskOrNull
-   i32.store
-   local.get $taskOrNull
-   if
-    global.get $~lib/memory/__stack_pointer
-    local.get $taskOrNull
-    local.tee $task
-    i32.store offset=4
-    local.get $task
-    local.set $14
-    global.get $~lib/memory/__stack_pointer
-    local.get $14
-    i32.store offset=8
-    local.get $14
-    local.get $argSlot
-    call $~lib/task/TaskBase#set:serveArg
-    local.get $task
-    local.set $14
-    global.get $~lib/memory/__stack_pointer
-    local.get $14
-    i32.store offset=8
-    local.get $14
-    local.get $taskKey
-    call $~lib/task/TaskBase#set:serveKey
-    local.get $task
-    local.set $14
-    global.get $~lib/memory/__stack_pointer
-    local.get $14
-    i32.store offset=8
-    local.get $14
-    local.get $origin
-    call $~lib/task/TaskBase#set:serveOrigin
-   end
-   local.get $e
-   local.set $14
-   global.get $~lib/memory/__stack_pointer
-   local.get $14
-   i32.store offset=12
-   local.get $14
-   call $~lib/thread/Executor#get:ready
-   local.set $14
-   global.get $~lib/memory/__stack_pointer
-   local.get $14
-   i32.store offset=8
-   local.get $14
-   local.get $awaited
-   call $~lib/thread/SlotRing#push
-   drop
-  end
-  global.get $~asyncLastStatus
-  local.set $14
-  global.get $~lib/memory/__stack_pointer
-  i32.const 16
-  i32.add
-  global.set $~lib/memory/__stack_pointer
-  local.get $14
-  return
+  unreachable
  )
  (func $~lib/array/Array<~lib/thread/Request|null>#get:length (type $1) (param $this i32) (result i32)
   (local $1 i32)
@@ -8131,7 +7708,7 @@
   local.get $1
   return
  )
- (func $~lib/array/Array<~lib/thread/Request|null>#__get (type $3) (param $this i32) (param $index i32) (result i32)
+ (func $~lib/array/Array<~lib/thread/Request|null>#__get (type $2) (param $this i32) (param $index i32) (result i32)
   (local $value i32)
   (local $3 i32)
   global.get $~lib/memory/__stack_pointer
@@ -8251,7 +7828,7 @@
   local.get $2
   return
  )
- (func $~lib/array/Array<i32>#constructor (type $3) (param $this i32) (param $length i32) (result i32)
+ (func $~lib/array/Array<i32>#constructor (type $2) (param $this i32) (param $length i32) (result i32)
   (local $2 i32)
   (local $3 i32)
   (local $bufferSize i32)
@@ -8389,7 +7966,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $6
  )
- (func $~lib/array/Array<i32>#push (type $3) (param $this i32) (param $value i32) (result i32)
+ (func $~lib/array/Array<i32>#push (type $2) (param $this i32) (param $value i32) (result i32)
   (local $oldLen i32)
   (local $len i32)
   (local $4 i32)
@@ -8714,13 +8291,8 @@
  (func $~lib/thread/driveReady (type $4) (param $e i32)
   (local $slot i32)
   (local $taskOrNull i32)
-  (local $3 i32)
-  (local $4 i32)
-  (local $5 (tuple i32 (ref null $6)))
-  (local $6 i32)
-  (local $7 i32)
   (local $awaited i32)
-  (local $9 i32)
+  (local $4 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 12
   i32.sub
@@ -8733,17 +8305,17 @@
   i32.const 0
   i32.store offset=8
   local.get $e
-  local.set $9
+  local.set $4
   global.get $~lib/memory/__stack_pointer
-  local.get $9
+  local.get $4
   i32.store offset=4
-  local.get $9
+  local.get $4
   call $~lib/thread/Executor#get:ready
-  local.set $9
+  local.set $4
   global.get $~lib/memory/__stack_pointer
-  local.get $9
+  local.get $4
   i32.store
-  local.get $9
+  local.get $4
   call $~lib/thread/SlotRing#pop
   local.set $slot
   local.get $slot
@@ -8764,11 +8336,11 @@
   local.get $taskOrNull
   if
    local.get $taskOrNull
-   local.set $9
+   local.set $4
    global.get $~lib/memory/__stack_pointer
-   local.get $9
+   local.get $4
    i32.store
-   local.get $9
+   local.get $4
    call $~lib/task/TaskBase#get:settled
    if
     global.get $~lib/memory/__stack_pointer
@@ -8778,69 +8350,7 @@
     return
    end
   end
-  local.get $slot
-  local.set $3
-  global.get $~asyncCurrentSlot
-  local.set $6
-  local.get $3
-  global.set $~asyncCurrentSlot
-  block $on_await2 (type $13) (result i32 (ref null $6))
-   local.get $3
-   table.get $~asyncCont
-   resume $6 (on $await $on_await2)
-   local.set $4
-   local.get $4
-   global.set $~asyncLastStatus
-   i32.const -1
-   ref.null nocont
-   tuple.make 2
-  end
-  local.set $5
-  local.get $6
-  global.set $~asyncCurrentSlot
-  local.get $5
-  tuple.extract 2 0
-  local.set $7
-  local.get $7
-  i32.const 0
-  i32.ge_s
-  local.get $7
-  i32.const -2
-  i32.eq
-  i32.or
-  if
-   local.get $3
-   local.get $5
-   tuple.extract 2 1
-   table.set $~asyncCont
-  else
-  end
-  local.get $7
-  local.set $awaited
-  local.get $awaited
-  i32.const 0
-  i32.ge_s
-  if
-   local.get $e
-   local.set $9
-   global.get $~lib/memory/__stack_pointer
-   local.get $9
-   i32.store offset=4
-   local.get $9
-   call $~lib/thread/Executor#get:ready
-   local.set $9
-   global.get $~lib/memory/__stack_pointer
-   local.get $9
-   i32.store
-   local.get $9
-   local.get $awaited
-   call $~lib/thread/SlotRing#push
-   drop
-  end
-  global.get $~lib/memory/__stack_pointer
-  i32.const 12
-  i32.add
-  global.set $~lib/memory/__stack_pointer
+  unreachable
  )
  (func $~lib/thread/__mainStep__ (type $1) (param $e i32) (result i32)
   (local $1 i32)
@@ -8876,7 +8386,7 @@
   local.get $1
   return
  )
- (func $~lib/arraybuffer/ArrayBufferView#constructor (type $12) (param $this i32) (param $length i32) (param $alignLog2 i32) (result i32)
+ (func $~lib/arraybuffer/ArrayBufferView#constructor (type $10) (param $this i32) (param $length i32) (param $alignLog2 i32) (result i32)
   (local $buffer i32)
   (local $4 i32)
   global.get $~lib/memory/__stack_pointer
@@ -8931,7 +8441,7 @@
   i32.gt_u
   if
    i32.const 512
-   i32.const 624
+   i32.const 592
    i32.const 19
    i32.const 57
    call $~lib/builtins/abort
@@ -8987,7 +8497,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $4
  )
- (func $~lib/typedarray/Int32Array#constructor (type $3) (param $this i32) (param $length i32) (result i32)
+ (func $~lib/typedarray/Int32Array#constructor (type $2) (param $this i32) (param $length i32) (result i32)
   (local $2 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 8
@@ -9027,7 +8537,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $2
  )
- (func $~lib/typedarray/Int32Array#__uset (type $7) (param $this i32) (param $index i32) (param $value i32)
+ (func $~lib/typedarray/Int32Array#__uset (type $6) (param $this i32) (param $index i32) (param $value i32)
   (local $3 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 4
@@ -9055,7 +8565,7 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
- (func $~lib/thread/SlotRing#constructor (type $3) (param $this i32) (param $capacity i32) (result i32)
+ (func $~lib/thread/SlotRing#constructor (type $2) (param $this i32) (param $capacity i32) (result i32)
   (local $capacity|2 i32)
   (local $words i32)
   (local $i i32)
@@ -9127,7 +8637,7 @@
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 0
-   block $~lib/thread/ringWords|inlined.5 (result i32)
+   block $~lib/thread/ringWords|inlined.19 (result i32)
     local.get $capacity
     local.set $capacity|2
     i32.const 3
@@ -9135,7 +8645,7 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.5
+    br $~lib/thread/ringWords|inlined.19
    end
    call $~lib/typedarray/Int32Array#constructor
    local.tee $words
@@ -9247,7 +8757,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $5
  )
- (func $~lib/thread/Executor#constructor (type $9) (param $this i32) (param $id i32) (param $step i32) (param $capacity i32) (result i32)
+ (func $~lib/thread/Executor#constructor (type $7) (param $this i32) (param $id i32) (param $step i32) (param $capacity i32) (result i32)
   (local $4 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 12
@@ -9369,7 +8879,7 @@
   global.set $~lib/memory/__stack_pointer
   local.get $4
  )
- (func $~lib/thread/SlotRing.at (type $3) (param $base i32) (param $capacity i32) (result i32)
+ (func $~lib/thread/SlotRing.at (type $2) (param $base i32) (param $capacity i32) (result i32)
   (local $ring i32)
   (local $3 i32)
   global.get $~lib/memory/__stack_pointer
@@ -9411,7 +8921,7 @@
   local.get $3
   return
  )
- (func $~lib/thread/Executor.at (type $18) (param $id i32) (param $step i32) (param $readyBase i32) (param $inboxBase i32) (param $capacity i32) (param $signal i32) (result i32)
+ (func $~lib/thread/Executor.at (type $15) (param $id i32) (param $step i32) (param $readyBase i32) (param $inboxBase i32) (param $capacity i32) (param $signal i32) (result i32)
   (local $e i32)
   (local $ready i32)
   (local $inbox i32)
@@ -9501,7 +9011,7 @@
   local.get $9
   return
  )
- (func $~lib/array/Array<~lib/thread/Executor|null>#__set (type $7) (param $this i32) (param $index i32) (param $value i32)
+ (func $~lib/array/Array<~lib/thread/Executor|null>#__set (type $6) (param $this i32) (param $index i32) (param $value i32)
   (local $3 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 4
@@ -9636,7 +9146,7 @@
     br $while-continue|0
    end
   end
-  block $~lib/thread/recordBase|inlined.1 (result i32)
+  block $~lib/thread/recordBase|inlined.2 (result i32)
    local.get $id
    local.set $id|2
    global.get $~lib/thread/__controlBase
@@ -9646,11 +9156,11 @@
    global.get $~lib/thread/__controlStride
    i32.mul
    i32.add
-   br $~lib/thread/recordBase|inlined.1
+   br $~lib/thread/recordBase|inlined.2
   end
   local.set $rec
   global.get $~lib/memory/__stack_pointer
-  i32.const 592
+  i32.const 560
   local.tee $step
   i32.store offset=8
   global.get $~lib/thread/hasCustomStep
@@ -9668,17 +9178,17 @@
   local.get $13
   i32.store offset=4
   local.get $13
-  block $~lib/thread/readyBase|inlined.0 (result i32)
+  block $~lib/thread/readyBase|inlined.1 (result i32)
    local.get $rec
    local.set $rec|5
    local.get $rec|5
-   br $~lib/thread/readyBase|inlined.0
+   br $~lib/thread/readyBase|inlined.1
   end
-  block $~lib/thread/inboxBase|inlined.1 (result i32)
+  block $~lib/thread/inboxBase|inlined.8 (result i32)
    local.get $rec
    local.set $rec|6
    local.get $rec|6
-   block $~lib/thread/ringWords|inlined.2 (result i32)
+   block $~lib/thread/ringWords|inlined.16 (result i32)
     global.get $~lib/thread/__ringCapacity
     local.set $capacity
     i32.const 3
@@ -9686,22 +9196,22 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.2
+    br $~lib/thread/ringWords|inlined.16
    end
    i32.const 2
    i32.shl
    i32.add
-   br $~lib/thread/inboxBase|inlined.1
+   br $~lib/thread/inboxBase|inlined.8
   end
   global.get $~lib/thread/__ringCapacity
-  block $~lib/thread/signalBase|inlined.1 (result i32)
+  block $~lib/thread/signalBase|inlined.7 (result i32)
    local.get $rec
    local.set $rec|8
-   block $~lib/thread/inboxBase|inlined.2 (result i32)
+   block $~lib/thread/inboxBase|inlined.9 (result i32)
     local.get $rec|8
     local.set $rec|9
     local.get $rec|9
-    block $~lib/thread/ringWords|inlined.3 (result i32)
+    block $~lib/thread/ringWords|inlined.17 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity|10
      i32.const 3
@@ -9709,14 +9219,14 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.3
+     br $~lib/thread/ringWords|inlined.17
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/inboxBase|inlined.2
+    br $~lib/thread/inboxBase|inlined.9
    end
-   block $~lib/thread/ringWords|inlined.4 (result i32)
+   block $~lib/thread/ringWords|inlined.18 (result i32)
     global.get $~lib/thread/__ringCapacity
     local.set $capacity|11
     i32.const 3
@@ -9724,12 +9234,12 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.4
+    br $~lib/thread/ringWords|inlined.18
    end
    i32.const 2
    i32.shl
    i32.add
-   br $~lib/thread/signalBase|inlined.1
+   br $~lib/thread/signalBase|inlined.7
   end
   call $~lib/thread/Executor.at
   local.tee $e
@@ -9764,8 +9274,9 @@
   local.get $13
   return
  )
- (func $~lib/thread/Executor#constructor@varargs (type $9) (param $this i32) (param $id i32) (param $step i32) (param $capacity i32) (result i32)
-  (local $4 i32)
+ (func $~lib/array/Array<~lib/thread/Executor|null>#__get (type $2) (param $this i32) (param $index i32) (result i32)
+  (local $value i32)
+  (local $3 i32)
   global.get $~lib/memory/__stack_pointer
   i32.const 8
   i32.sub
@@ -9774,157 +9285,247 @@
   global.get $~lib/memory/__stack_pointer
   i64.const 0
   i64.store
-  block $1of1
-   block $0of1
-    block $outOfRange
-     global.get $~argumentsLength
-     i32.const 2
-     i32.sub
-     br_table $0of1 $1of1 $outOfRange
-    end
-    unreachable
-   end
-   global.get $~lib/thread/DEFAULT_CAPACITY
-   local.set $capacity
-  end
+  local.get $index
   local.get $this
-  local.set $4
+  local.set $3
   global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $3
   i32.store
-  local.get $4
-  local.get $id
-  local.get $step
-  local.set $4
+  local.get $3
+  call $~lib/array/Array<~lib/thread/Executor|null>#get:length_
+  i32.ge_u
+  if
+   i32.const 256
+   i32.const 464
+   i32.const 114
+   i32.const 42
+   call $~lib/builtins/abort
+   unreachable
+  end
   global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $this
+  local.set $3
+  global.get $~lib/memory/__stack_pointer
+  local.get $3
+  i32.store
+  local.get $3
+  call $~lib/array/Array<~lib/thread/Executor|null>#get:dataStart
+  local.get $index
+  i32.const 2
+  i32.shl
+  i32.add
+  i32.load
+  local.tee $value
   i32.store offset=4
-  local.get $4
-  local.get $capacity
-  call $~lib/thread/Executor#constructor
-  local.set $4
+  i32.const 1
+  drop
+  i32.const 1
+  i32.eqz
+  drop
+  local.get $value
+  local.set $3
   global.get $~lib/memory/__stack_pointer
   i32.const 8
   i32.add
   global.set $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $3
+  return
  )
- (func $~lib/thread/__executorInit (type $5)
+ (func $~lib/thread/__executorOf (type $1) (param $id i32) (result i32)
   (local $table i32)
-  (local $step i32)
-  (local $main i32)
-  (local $3 i32)
+  (local $2 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 20
+  i32.const 8
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.const 20
-  memory.fill
-  global.get $~lib/thread/sinkInstalled
-  i32.eqz
-  if
-   call $~lib/thread/installWakeSink
-   i32.const 1
-   global.set $~lib/thread/sinkInstalled
-  end
-  global.get $~lib/thread/mainExecutorInstance
-  if
-   global.get $~lib/memory/__stack_pointer
-   i32.const 20
-   i32.add
-   global.set $~lib/memory/__stack_pointer
-   return
-  end
-  global.get $~lib/thread/__controlBase
-  i32.const 0
-  i32.ne
-  if
-   global.get $~lib/thread/selfExec
-   i32.const 0
-   i32.eq
-   if
-    i32.const 0
-    call $~lib/thread/bindExecutor
-    drop
-   end
-   global.get $~lib/memory/__stack_pointer
-   i32.const 20
-   i32.add
-   global.set $~lib/memory/__stack_pointer
-   return
-  end
+  i64.const 0
+  i64.store
   global.get $~lib/memory/__stack_pointer
   global.get $~lib/thread/executors
   local.tee $table
   i32.store
   local.get $table
   i32.eqz
-  if
-   global.get $~lib/memory/__stack_pointer
+  if (result i32)
+   i32.const 1
+  else
+   local.get $id
    i32.const 0
-   i32.const 0
-   call $~lib/array/Array<~lib/thread/Executor|null>#constructor
-   local.tee $table
-   i32.store
+   i32.lt_s
+  end
+  if (result i32)
+   i32.const 1
+  else
+   local.get $id
    local.get $table
-   local.set $3
+   local.set $2
    global.get $~lib/memory/__stack_pointer
-   local.get $3
+   local.get $2
    i32.store offset=4
-   local.get $3
-   i32.const 0
-   call $~lib/array/Array<~lib/thread/Executor|null>#push
-   drop
-   local.get $table
-   global.set $~lib/thread/executors
+   local.get $2
+   call $~lib/array/Array<~lib/thread/Executor|null>#get:length
+   i32.ge_s
   end
-  global.get $~lib/memory/__stack_pointer
-  i32.const 592
-  local.tee $step
-  i32.store offset=8
-  global.get $~lib/thread/hasCustomStep
   if
+   i32.const 0
+   local.set $2
    global.get $~lib/memory/__stack_pointer
-   global.get $~lib/thread/customStep
-   local.tee $step
-   i32.store offset=8
+   i32.const 8
+   i32.add
+   global.set $~lib/memory/__stack_pointer
+   local.get $2
+   return
+  end
+  local.get $table
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store offset=4
+  local.get $2
+  local.get $id
+  call $~lib/array/Array<~lib/thread/Executor|null>#__get
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+  local.get $2
+  return
+ )
+ (func $~lib/thread/installWakeSink~anonymous|0 (type $0) (param $exec i32) (param $slot i32)
+  (local $id i32)
+  (local $rec i32)
+  (local $rec|4 i32)
+  (local $rec|5 i32)
+  (local $capacity i32)
+  (local $capacity|7 i32)
+  (local $e i32)
+  (local $9 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 12
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  global.get $~lib/memory/__stack_pointer
+  i32.const 0
+  i32.store offset=8
+  global.get $~lib/thread/__controlBase
+  i32.const 0
+  i32.ne
+  if
+   block $~lib/thread/recordBase|inlined.3 (result i32)
+    local.get $exec
+    local.set $id
+    global.get $~lib/thread/__controlBase
+    global.get $~lib/thread/HEADER_BYTES
+    i32.add
+    local.get $id
+    global.get $~lib/thread/__controlStride
+    i32.mul
+    i32.add
+    br $~lib/thread/recordBase|inlined.3
+   end
+   local.set $rec
+   local.get $rec
+   global.get $~lib/thread/__ringCapacity
+   local.get $slot
+   block $~lib/thread/signalBase|inlined.8 (result i32)
+    local.get $rec
+    local.set $rec|4
+    block $~lib/thread/inboxBase|inlined.10 (result i32)
+     local.get $rec|4
+     local.set $rec|5
+     local.get $rec|5
+     block $~lib/thread/ringWords|inlined.20 (result i32)
+      global.get $~lib/thread/__ringCapacity
+      local.set $capacity
+      i32.const 3
+      local.get $capacity
+      global.get $~lib/thread/CELL_WORDS
+      i32.mul
+      i32.add
+      br $~lib/thread/ringWords|inlined.20
+     end
+     i32.const 2
+     i32.shl
+     i32.add
+     br $~lib/thread/inboxBase|inlined.10
+    end
+    block $~lib/thread/ringWords|inlined.21 (result i32)
+     global.get $~lib/thread/__ringCapacity
+     local.set $capacity|7
+     i32.const 3
+     local.get $capacity|7
+     global.get $~lib/thread/CELL_WORDS
+     i32.mul
+     i32.add
+     br $~lib/thread/ringWords|inlined.21
+    end
+    i32.const 2
+    i32.shl
+    i32.add
+    br $~lib/thread/signalBase|inlined.8
+   end
+   call $~lib/thread/blockPush
+   drop
+   global.get $~lib/memory/__stack_pointer
+   i32.const 12
+   i32.add
+   global.set $~lib/memory/__stack_pointer
+   return
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.const 0
-  local.get $step
-  local.set $3
+  local.get $exec
+  call $~lib/thread/__executorOf
+  local.tee $e
+  i32.store
+  local.get $e
+  if
+   local.get $e
+   local.set $9
+   global.get $~lib/memory/__stack_pointer
+   local.get $9
+   i32.store offset=8
+   local.get $9
+   call $~lib/thread/Executor#get:ready
+   local.set $9
+   global.get $~lib/memory/__stack_pointer
+   local.get $9
+   i32.store offset=4
+   local.get $9
+   local.get $slot
+   call $~lib/thread/SlotRing#push
+   drop
+  end
   global.get $~lib/memory/__stack_pointer
-  local.get $3
-  i32.store offset=4
-  local.get $3
-  i32.const 2
-  global.set $~argumentsLength
+  i32.const 12
+  i32.add
+  global.set $~lib/memory/__stack_pointer
+ )
+ (func $~lib/thread/installWakeSink (type $5)
+  (local $0 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 4
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
   i32.const 0
-  call $~lib/thread/Executor#constructor@varargs
-  local.tee $main
-  i32.store offset=12
-  local.get $main
-  global.set $~lib/thread/mainExecutorInstance
-  local.get $table
-  local.set $3
+  i32.store
+  i32.const 656
+  local.set $0
   global.get $~lib/memory/__stack_pointer
-  local.get $3
-  i32.store offset=4
-  local.get $3
-  i32.const 0
-  local.get $main
-  local.set $3
+  local.get $0
+  i32.store
+  local.get $0
+  call $~lib/task/setWakeSink
   global.get $~lib/memory/__stack_pointer
-  local.get $3
-  i32.store offset=16
-  local.get $3
-  call $~lib/array/Array<~lib/thread/Executor|null>#__set
-  global.get $~lib/memory/__stack_pointer
-  i32.const 20
+  i32.const 4
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
@@ -9972,23 +9573,23 @@
   local.get $6
   call $~lib/thread/SlotRing#get:base
   local.set $base
-  block $~lib/atomics/atomicLoad<i32>|inlined.20 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.33 (result i32)
    local.get $base
    global.get $~lib/thread/TAIL_OFF
    i32.add
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.20
+   br $~lib/atomics/atomicLoad<i32>|inlined.33
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.21 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.34 (result i32)
    local.get $base
    global.get $~lib/thread/HEAD_OFF
    i32.add
    local.set $ptr|4
    local.get $ptr|4
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.21
+   br $~lib/atomics/atomicLoad<i32>|inlined.34
   end
   i32.sub
   local.set $depth
@@ -10007,133 +9608,6 @@
   global.set $~lib/memory/__stack_pointer
   local.get $6
   return
- )
- (func $~lib/async/__coreloopAwait (type $5)
-  (local $e i32)
-  (local $1 i32)
-  (local $2 i32)
-  (local $3 i32)
-  (local $4 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 16
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i64.const 0
-  i64.store
-  global.get $~lib/memory/__stack_pointer
-  i64.const 0
-  i64.store offset=8
-  global.get $~lib/memory/__stack_pointer
-  call $~lib/thread/mainExecutor
-  local.tee $e
-  i32.store
-  local.get $e
-  local.set $4
-  global.get $~lib/memory/__stack_pointer
-  local.get $4
-  i32.store offset=8
-  local.get $4
-  call $~lib/thread/Executor#get:ready
-  local.set $4
-  global.get $~lib/memory/__stack_pointer
-  local.get $4
-  i32.store offset=4
-  local.get $4
-  i32.const 0
-  call $~lib/thread/SlotRing#push
-  drop
-  block $while-break|0
-   loop $while-continue|0
-    local.get $e
-    local.set $4
-    global.get $~lib/memory/__stack_pointer
-    local.get $4
-    i32.store offset=4
-    local.get $4
-    call $~lib/thread/Executor#get:stop
-    i32.eqz
-    if (result i32)
-     local.get $e
-     local.set $4
-     global.get $~lib/memory/__stack_pointer
-     local.get $4
-     i32.store offset=8
-     local.get $4
-     call $~lib/thread/Executor#get:ready
-     local.set $4
-     global.get $~lib/memory/__stack_pointer
-     local.get $4
-     i32.store offset=4
-     local.get $4
-     call $~lib/thread/SlotRing#get:depth
-     i32.const 0
-     i32.gt_s
-     if (result i32)
-      i32.const 1
-     else
-      local.get $e
-      local.set $4
-      global.get $~lib/memory/__stack_pointer
-      local.get $4
-      i32.store offset=8
-      local.get $4
-      call $~lib/thread/Executor#get:inbox
-      local.set $4
-      global.get $~lib/memory/__stack_pointer
-      local.get $4
-      i32.store offset=4
-      local.get $4
-      call $~lib/thread/SlotRing#get:depth
-      i32.const 0
-      i32.gt_s
-     end
-    else
-     i32.const 0
-    end
-    if
-     global.get $~env
-     local.set $2
-     global.get $~lib/memory/__stack_pointer
-     local.get $e
-     local.set $4
-     global.get $~lib/memory/__stack_pointer
-     local.get $4
-     i32.store offset=4
-     local.get $4
-     call $~lib/thread/Executor#get:step
-     local.tee $1
-     i32.store offset=12
-     local.get $1
-     i32.load offset=4
-     global.set $~env
-     local.get $e
-     local.set $4
-     global.get $~lib/memory/__stack_pointer
-     local.get $4
-     i32.store offset=4
-     local.get $4
-     i32.const 1
-     global.set $~argumentsLength
-     local.get $1
-     i32.load
-     call_indirect $0 (type $1)
-     local.set $3
-     local.get $2
-     global.set $~env
-     local.get $3
-     if
-      br $while-break|0
-     end
-     br $while-continue|0
-    end
-   end
-  end
-  global.get $~lib/memory/__stack_pointer
-  i32.const 16
-  i32.add
-  global.set $~lib/memory/__stack_pointer
  )
  (func $~lib/thread/__workerMain (type $1) (param $id i32) (result i32)
   (local $here i32)
@@ -10203,7 +9677,7 @@
    local.get $38
    return
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.26 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.4 (result i32)
    local.get $here
    global.get $~lib/thread/H_TOTAL
    i32.const 2
@@ -10212,7 +9686,7 @@
    local.set $ptr
    local.get $ptr
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.26
+   br $~lib/atomics/atomicLoad<i32>|inlined.4
   end
   local.set $total
   local.get $id
@@ -10237,7 +9711,7 @@
   end
   local.get $here
   global.set $~lib/thread/__controlBase
-  block $~lib/atomics/atomicLoad<i32>|inlined.27 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.5 (result i32)
    local.get $here
    global.get $~lib/thread/H_STRIDE
    i32.const 2
@@ -10246,10 +9720,10 @@
    local.set $ptr|4
    local.get $ptr|4
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.27
+   br $~lib/atomics/atomicLoad<i32>|inlined.5
   end
   global.set $~lib/thread/__controlStride
-  block $~lib/atomics/atomicLoad<i32>|inlined.28 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.6 (result i32)
    local.get $here
    global.get $~lib/thread/H_CAPACITY
    i32.const 2
@@ -10258,12 +9732,12 @@
    local.set $ptr|5
    local.get $ptr|5
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.28
+   br $~lib/atomics/atomicLoad<i32>|inlined.6
   end
   global.set $~lib/thread/__ringCapacity
   local.get $total
   global.set $~lib/thread/__executorTotal
-  block $~lib/atomics/atomicLoad<i32>|inlined.29 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.7 (result i32)
    local.get $here
    global.get $~lib/thread/H_REQUESTS
    i32.const 2
@@ -10272,7 +9746,7 @@
    local.set $ptr|6
    local.get $ptr|6
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.29
+   br $~lib/atomics/atomicLoad<i32>|inlined.7
   end
   global.set $~lib/thread/requestCount
   local.get $here
@@ -10295,7 +9769,7 @@
   global.set $~lib/thread/selfExec
   local.get $id
   call $~lib/task-stack/__setSelfExecutor
-  block $~lib/thread/recordBase|inlined.3 (result i32)
+  block $~lib/thread/recordBase|inlined.1 (result i32)
    local.get $id
    local.set $id|7
    global.get $~lib/thread/__controlBase
@@ -10305,17 +9779,17 @@
    global.get $~lib/thread/__controlStride
    i32.mul
    i32.add
-   br $~lib/thread/recordBase|inlined.3
+   br $~lib/thread/recordBase|inlined.1
   end
   local.set $rec
-  block $~lib/thread/signalBase|inlined.8 (result i32)
+  block $~lib/thread/signalBase|inlined.6 (result i32)
    local.get $rec
    local.set $rec|9
-   block $~lib/thread/inboxBase|inlined.10 (result i32)
+   block $~lib/thread/inboxBase|inlined.7 (result i32)
     local.get $rec|9
     local.set $rec|10
     local.get $rec|10
-    block $~lib/thread/ringWords|inlined.20 (result i32)
+    block $~lib/thread/ringWords|inlined.14 (result i32)
      global.get $~lib/thread/__ringCapacity
      local.set $capacity
      i32.const 3
@@ -10323,14 +9797,14 @@
      global.get $~lib/thread/CELL_WORDS
      i32.mul
      i32.add
-     br $~lib/thread/ringWords|inlined.20
+     br $~lib/thread/ringWords|inlined.14
     end
     i32.const 2
     i32.shl
     i32.add
-    br $~lib/thread/inboxBase|inlined.10
+    br $~lib/thread/inboxBase|inlined.7
    end
-   block $~lib/thread/ringWords|inlined.21 (result i32)
+   block $~lib/thread/ringWords|inlined.15 (result i32)
     global.get $~lib/thread/__ringCapacity
     local.set $capacity|12
     i32.const 3
@@ -10338,32 +9812,32 @@
     global.get $~lib/thread/CELL_WORDS
     i32.mul
     i32.add
-    br $~lib/thread/ringWords|inlined.21
+    br $~lib/thread/ringWords|inlined.15
    end
    i32.const 2
    i32.shl
    i32.add
-   br $~lib/thread/signalBase|inlined.8
+   br $~lib/thread/signalBase|inlined.6
   end
   local.set $sig
-  block $~lib/atomics/atomicLoad<i32>|inlined.30 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.8 (result i32)
    local.get $sig
    i32.const 4
    i32.add
    local.set $ptr|14
    local.get $ptr|14
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.30
+   br $~lib/atomics/atomicLoad<i32>|inlined.8
   end
   local.set $arenaBase
-  block $~lib/atomics/atomicLoad<i32>|inlined.31 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.9 (result i32)
    local.get $sig
    i32.const 8
    i32.add
    local.set $ptr|16
    local.get $ptr|16
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.31
+   br $~lib/atomics/atomicLoad<i32>|inlined.9
   end
   local.set $arenaSize
   call $~lib/rt/common/__arenaHeapBase
@@ -10402,14 +9876,14 @@
    i32.const 1
    global.set $~lib/thread/sinkInstalled
   end
-  block $~lib/atomics/atomicLoad<i32>|inlined.32 (result i32)
+  block $~lib/atomics/atomicLoad<i32>|inlined.30 (result i32)
    local.get $sig
    i32.const 16
    i32.add
    local.set $ptr|20
    local.get $ptr|20
    i32.atomic.load
-   br $~lib/atomics/atomicLoad<i32>|inlined.32
+   br $~lib/atomics/atomicLoad<i32>|inlined.30
   end
   local.set $entry
   local.get $entry
@@ -10423,14 +9897,14 @@
    i32.store offset=4
    local.get $38
    local.get $entry
-   block $~lib/atomics/atomicLoad<i32>|inlined.33 (result i32)
+   block $~lib/atomics/atomicLoad<i32>|inlined.31 (result i32)
     local.get $sig
     i32.const 20
     i32.add
     local.set $ptr|22
     local.get $ptr|22
     i32.atomic.load
-    br $~lib/atomics/atomicLoad<i32>|inlined.33
+    br $~lib/atomics/atomicLoad<i32>|inlined.31
    end
    i32.const 0
    i32.const 0
@@ -10448,14 +9922,14 @@
     call $~lib/thread/Executor#get:stop
     i32.eqz
     if (result i32)
-     block $~lib/atomics/atomicLoad<i32>|inlined.34 (result i32)
+     block $~lib/atomics/atomicLoad<i32>|inlined.32 (result i32)
       local.get $sig
       i32.const 12
       i32.add
       local.set $ptr|23
       local.get $ptr|23
       i32.atomic.load
-      br $~lib/atomics/atomicLoad<i32>|inlined.34
+      br $~lib/atomics/atomicLoad<i32>|inlined.32
      end
      i32.const 2
      i32.ne

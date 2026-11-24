@@ -376,7 +376,17 @@ export function applyInTreeTransforms(program: Program): void {
   // stackful backend; every other program — including one with an `await`
   // today — keeps Backend A byte for byte. That is the whole compatibility
   // story of the round, and it is checked by comparing the two builds.
-  if (program.hasAwait && program.options.hasFeature(Feature.StackSwitching)) {
+  //
+  // **`--stackful-backend=fiber` selects the same lowering without the feature
+  // flag** (DL37). The flag used to be the only way in, so a fiber build had to
+  // pass `--enable stack-switching` as well — and then the artifact declared the
+  // shell's continuation types and demanded the feature it never used (I85). The
+  // lowering is a choice of *mechanism*; a fiber build takes the same transform
+  // and expresses its suspension as a call, so it needs no wasm proposal to be
+  // selected or to load.
+  let stackfulBackend = program.options.hasFeature(Feature.StackSwitching)
+    || program.options.stackfulBackend == "fiber";
+  if (program.hasAwait && stackfulBackend) {
     let stackful = new StackfulAsyncTransform();
     stackful.program = program;
     stackful.afterParse(program.parser);

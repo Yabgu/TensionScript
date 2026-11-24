@@ -20,6 +20,10 @@ dist/*.generated.d.ts
 dist/*.map
 dist/asc.js
 dist/assemblyscript.js
+# The build record beside it (DL37): provenance of a build artifact, so it is
+# written by `npm run build` and never committed — a stale record in git would be
+# a claim about a file git does not have.
+dist/*.build.json
 dist/binaryen.js
 dist/importmap.json
 dist/web.js

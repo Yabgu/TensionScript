@@ -1,8 +1,11 @@
 name: Test
 on:
+  # **Every push, not only `main`** (DL37). A branch's suite was green by absence:
+  # this workflow skipped a feature branch entirely, so a test added on one had
+  # never run in CI at all — which is how a compiler test can be "in the suite"
+  # and still never execute. `main` is included, unchanged; the filter is gone
+  # rather than widened to a list, because the next branch is not knowable here.
   push:
-    branches:
-    - main
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
