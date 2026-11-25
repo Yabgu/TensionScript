@@ -12524,6 +12524,15 @@ function builtin_async_suspendParked(ctx: BuiltinFunctionContext): ExpressionRef
   // registers the slot and record the wake needs, then the same `-2` suspension
   // follows unchanged. No new import, and the shell's protocol is untouched: what
   // was missing was the call before it, not a different suspend.
+  //
+  // **Only where there is a pool.** Without `--sharedMemory` there is no ledger, no
+  // producer and nothing that could ever complete the pair, so posting one would add
+  // an import (`scheduler::park`) to every non-shared build for a wake that cannot
+  // arrive — measured: the `Gate 4` harness could no longer instantiate a module that
+  // imports it. Such a build keeps the bare suspension it had before this round.
+  if (!compiler.options.sharedMemory) {
+    return module.suspend(ASYNC_AWAIT_TAG, [ module.i32(-2) ]);
+  }
   let park = emitHostPark(compiler, ctx, ctx.operands[0], BuiltinNames.asyncParkRemote);
   return module.block(null, [
     park,

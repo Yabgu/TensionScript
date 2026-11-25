@@ -29,6 +29,7 @@
  (global $~lib/rt/tlsf/ROOT (mut i32) (i32.const 0))
  (global $~lib/native/ASC_LOW_MEMORY_LIMIT i32 (i32.const 0))
  (global $~lib/task/__wakeSink (mut i32) (i32.const 432))
+ (global $~lib/task/__remoteParkSink (mut i32) (i32.const 0))
  (global $~lib/task/inlinePolicyInstance (mut i32) (i32.const 0))
  (global $~lib/task-rt/recordFactory (mut i32) (i32.const 0))
  (global $~lib/task-rt/families (mut i32) (i32.const 0))
@@ -8625,7 +8626,7 @@
   else
    i32.const 688
    i32.const 1136
-   i32.const 337
+   i32.const 362
    i32.const 3
    call $~lib/builtins/abort
    unreachable

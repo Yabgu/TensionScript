@@ -42,6 +42,27 @@
 // Run: node --experimental-wasm-wasmfx tests/rt/gate4.js
 
 import { execFileSync } from "node:child_process";
+
+/**
+ * **The `scheduler` namespace, stubbed, and loud** (DL43).
+ *
+ * A stackful build imports `scheduler::park` whether or not it parks, because
+ * `~lib/task-stack`'s `__parkRemote` is an *exported* std entry and so a
+ * dead-code-elimination root — the compiler cannot tell from the root set whether a
+ * program will call it. The host's worker linker documents the same situation for
+ * `parkState` (`thread.rs`, `link_worker`).
+ *
+ * Every fixture in this file is single-threaded and parks nothing, so the stub
+ * throws rather than swallowing a park: a fixture that starts parking needs a
+ * producer and a session loop, not a stub, and this is what makes that visible
+ * instead of silent.
+ */
+const schedulerImports = {
+  scheduler: {
+    park: () => { throw new Error("scheduler::park reached a Gate 4 fixture that never parks"); },
+  },
+};
+
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -209,7 +230,7 @@ export function popValue(base: usize, capacity: i32): i32 {
         __executorCount: () => 1,
         __startThread: () => -1,
       };
-      const consumer = new WebAssembly.Instance(module, { env }).exports;
+      const consumer = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
       consumer.__arenaInit(ARENA + PRODUCERS * ARENA_SIZE, ARENA_SIZE);
       consumer.carve(RING, CAPACITY);
 
@@ -375,7 +396,7 @@ export async function main(): i32 { await leaf(); return 0; }
           return 0;
         },
       };
-      const e = new WebAssembly.Instance(module, { env }).exports;
+      const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
 
       check("`__threadInit` carves the block", e.__threadInit(64), 0);
       check("the layout is published", {
@@ -532,7 +553,7 @@ export async function main(): i32 { await leaf(); return 0; }
           return 0;
         },
       };
-      const e = new WebAssembly.Instance(module, { env }).exports;
+      const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
       check("`__threadInit` carves the block", e.__threadInit(64), 0);
       e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
       check("`__start` runs the boot body", e.__start(), 0);
@@ -657,7 +678,7 @@ export async function main(): i32 { await leaf(); return 0; }
           return 0;
         },
       };
-      const e = new WebAssembly.Instance(module, { env }).exports;
+      const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
       check("`__threadInit` carves the block", e.__threadInit(64), 0);
       e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
       check("`__start` runs the boot body", e.__start(), 0);
@@ -782,7 +803,7 @@ export async function main(): i32 { await leaf(); return 0; }
           return 0;
         },
       };
-      const e = new WebAssembly.Instance(module, { env }).exports;
+      const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
       check("`__threadInit` carves the block", e.__threadInit(64), 0);
       e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
       check("`__start` runs the boot body", e.__start(), 0);
@@ -938,7 +959,7 @@ export async function main(): i32 { await leaf(); return 0; }
           return 0;
         },
       };
-      const e = new WebAssembly.Instance(module, { env }).exports;
+      const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
       check("`__threadInit` carves the block", e.__threadInit(64), 0);
       e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
       check("`__start` runs the boot body", e.__start(), 0);
@@ -1078,7 +1099,7 @@ export async function main(): i32 { await leaf(); return 0; }
           return 0;
         },
       };
-      const e = new WebAssembly.Instance(module, { env }).exports;
+      const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
       check("`__threadInit` carves the block", e.__threadInit(64), 0);
       e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
       check("`__start` runs the boot body", e.__start(), 0);
@@ -1371,7 +1392,7 @@ export async function main(): i32 { await leaf(); return 0; }
           return 0;
         },
       };
-      const e = new WebAssembly.Instance(module, { env }).exports;
+      const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
       check("`__threadInit` carves the block", e.__threadInit(64), 0);
       e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
       check("`__start` runs the boot body", e.__start(), 0);
@@ -1501,7 +1522,7 @@ export async function main(): i32 { await leaf(); return 0; }
           return 0;
         },
       };
-      const e = new WebAssembly.Instance(module, { env }).exports;
+      const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
       check("`__threadInit` carves the block", e.__threadInit(64), 0);
       e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
       check("`__start` runs the boot body", e.__start(), 0);
