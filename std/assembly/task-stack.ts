@@ -14,6 +14,7 @@
  */
 
 import { TaskBase, TaskRecord, Waiter } from "./task";
+
 import { MaskBase } from "./mask";
 
 // ── the stackful task object (one object per execution) ─────────────────────
@@ -202,6 +203,111 @@ export function __parkAwait(task: TaskBase | null): void {
     }
   }
   __parkYield();
+}
+
+/**
+ * The continuation backend's park on a **producer record**: register it with the
+ * host, then suspend (DL43, I99).
+ *
+ * **Why this is not `__parkAwait`.** The fiber backend parks a fiber, so
+ * `scheduler::park` does not return until the completion is in hand and
+ * `__parkAwait` reads it from `scheduler::completion` on the next line. The
+ * continuation backend suspends *in wasm*: `scheduler::park` records the park and
+ * returns, the `suspend` stores the continuation at this task's slot, and the
+ * shell's ready ring is what resumes it later.
+ *
+ * So the two facts a resume needs are split: the host keys on `(class, key)` and
+ * needs the slot it should queue, and the store needs the record to settle. This
+ * function supplies both before the suspension — the `(class, key)` through the
+ * existing `scheduler::park`, and the slot plus the record through
+ * `__registerRemotePark`, which is what `__taskWake` reads when the host hands the
+ * completion back.
+ *
+ * **No new import.** `scheduler::park` is already in this build's import list; the
+ * wake is the same `__taskWake` the plain backend uses.
+ */
+/**
+ * A park this shell is holding, in the shape the host's wake reaches (DL43, I99).
+ *
+ * The record is settled before the continuation resumes, and `task` is the handle
+ * whose `value` the awaited expression reads — `__settleFromRecord` is what moves one
+ * to the other, exactly as the fiber backend does from `scheduler::completion`.
+ */
+class RemotePark {
+  /** The executor whose ready ring owns this slot. */
+  exec: i32 = 0;
+  /** The record the task parked on. */
+  record: TaskRecord | null = null;
+  /** The handle the resumed body reads. */
+  task: TaskBase | null = null;
+}
+
+/**
+ * Slots this shell has parked on a host completion, by continuation slot.
+ *
+ * **Here, not in `~lib/task-rt`.** That module is parsed by every build and an
+ * exported function in it is a dead-code-elimination root, so a registry placed there
+ * landed 1.3 kB in every guest, `count.wasm` included. `~lib/task-stack` is parsed
+ * only by a stackful build, which is the only build that can make such a park.
+ */
+let remoteParks: Map<i32, RemotePark> | null = null;
+
+/**
+ * `__taskWake`'s hook: settle the record for `slot` and queue the continuation.
+ *
+ * **Queued, never resumed here.** The host makes this call from inside
+ * `scheduler::park`, i.e. on the parked task's own stack, so resuming the
+ * continuation now would run the task over its own frame. The shell's loop pops the
+ * slot once the `suspend` below it has stored the continuation.
+ */
+function resumeRemotePark(slot: i32, payload: i32): bool {
+  let map = remoteParks;
+  if (map == null || !map.has(slot)) return false;
+  let remote = map.get(slot);
+  map.delete(slot);
+  let awaited = remote.record;
+  if (awaited != null) {
+    awaited.payload = payload;
+    awaited.status = 0;
+    awaited.done = 1;
+    let task = remote.task;
+    if (task != null) task.__settleFromRecord(awaited);
+  }
+  unchecked(__wakeSink)(remote.exec, slot);
+  return true;
+}
+
+/** Installs the hook once, on the first park this store makes. */
+let remoteSinkInstalled: bool = false;
+
+export function __parkRemote(task: TaskBase | null): void {
+  let id = __currentSlot();
+  if (id < 0) return;
+  let record = task ? task.__parkRecord() : null;
+  if (record == null || record.class_ == 0) {
+    // Nothing to name: the keyless park, which no producer will complete. Same
+    // rule `__parkAwait` applies on the fiber backend, reached from the other side.
+    hostPark(<i64>id, 0, 0);
+    return;
+  }
+  // **Registered before the park**, because the host may hand the completion back
+  // from inside the `hostPark` call below — the continuation shell's park seam is
+  // the only moment the host holds this store.
+  if (!remoteSinkInstalled) {
+    __remoteParkSink = resumeRemotePark;
+    remoteSinkInstalled = true;
+  }
+  let map = remoteParks;
+  if (map == null) {
+    map = new Map<i32, RemotePark>();
+    remoteParks = map;
+  }
+  let entry = new RemotePark();
+  entry.exec = selfExecutor;
+  entry.record = record;
+  entry.task = changetype<TaskBase>(task);
+  map.set(id, entry);
+  hostPark(<i64>id, record.class_, record.key);
 }
 
 /**

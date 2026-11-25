@@ -1,6 +1,6 @@
 /// <reference path="./rt/index.d.ts" />
 
-import { TaskRecord } from "./task";
+import { TaskBase, TaskRecord } from "./task";
 
 /**
  * The guest async runtime's seam — and, since Phase 4, the machine behind it.
@@ -364,7 +364,17 @@ export function __taskWake(idsPtr: usize, count: i32): void {
     if (id < 0 || id >= table.length) continue;
     const slot = table[id];
     const state = slot.state;
-    if (state == null) continue;            // already resumed: a stale id
+    if (state == null) {
+      // **A stackful park, if this store made one** (DL43, I99). The host hands a
+      // completion back through this call, and on the continuation backend the slot
+      // it names is a *continuation*, not a Backend A state machine — there is no
+      // `state` to resume, so the shell's ready ring has to run it. The shell owns
+      // that machinery and installs the hook; a store that registered none falls
+      // through to the stale-id path unchanged.
+      let sink = __remoteParkSink;
+      if (sink != null && unchecked(sink)(id, payload)) continue;
+      continue;                             // already resumed: a stale id
+    }
     // **The record the task parked on, settled before it runs** (I98). The fiber
     // backend ends its park in exactly this state — `__parkHost` writes `payload`,
     // `status` and `done` from `scheduler::completion` — and this is the same three

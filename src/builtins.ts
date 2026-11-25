@@ -785,6 +785,8 @@ export namespace BuiltinNames {
    * continuation-backend build never emits it.
    */
   export const asyncParkAwait = "~lib/task-stack/__parkAwait";
+  /** The continuation backend's producer park (DL43, I99): register, then suspend. */
+  export const asyncParkRemote = "~lib/task-stack/__parkRemote";
   /**
    * The fiber backend's **keyless** park: suspend this fiber with nothing to be
    * woken by except the executor's own resumption. Used by the `drive` path, a
@@ -12510,7 +12512,23 @@ function builtin_async_suspendParked(ctx: BuiltinFunctionContext): ExpressionRef
   if (compiler.fiberBackendActive) {
     return emitHostPark(compiler, ctx, ctx.operands[0], BuiltinNames.asyncParkAwait);
   }
-  return module.suspend(ASYNC_AWAIT_TAG, [ module.i32(-2) ]);
+  // **The continuation park registers, then suspends** (DL43, I99).
+  //
+  // Before this the suspension was the whole story: `module.suspend(tag, [-2])`
+  // told the shell to store the continuation at this task's slot and told the host
+  // nothing, so a producer's completion for the awaited `(class, key)` had no park
+  // to match — measured, `suspend-serve` on this backend printed `worker: BEFORE the
+  // await` and stopped at exit 124 with no park in the log.
+  //
+  // `__parkRemote` posts the pair through `scheduler::park` (already imported) and
+  // registers the slot and record the wake needs, then the same `-2` suspension
+  // follows unchanged. No new import, and the shell's protocol is untouched: what
+  // was missing was the call before it, not a different suspend.
+  let park = emitHostPark(compiler, ctx, ctx.operands[0], BuiltinNames.asyncParkRemote);
+  return module.block(null, [
+    park,
+    module.suspend(ASYNC_AWAIT_TAG, [ module.i32(-2) ])
+  ]);
 }
 builtinFunctions.set(BuiltinNames.asyncSuspendParked, builtin_async_suspendParked);
 

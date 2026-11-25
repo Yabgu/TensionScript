@@ -74,6 +74,31 @@ export function setWakeSink(sink: (exec: i32, slot: i32) => void): void {
 }
 
 /**
+ * The **stackful** shell's park registry, reached through a function value so no
+ * build that does not use it carries its code (DL43, I99).
+ *
+ * A registry written directly in `~lib/task-rt` — which every build parses, where an
+ * exported function is a dead-code-elimination root — put 1.3 kB into *every* guest,
+ * including programs that never spawn (measured: `count.wasm` grew 1 336 bytes). The
+ * registry therefore lives in `~lib/task-stack`, parsed only by a stackful build, and
+ * this is the one hook `__taskWake` needs: `(slot, payload) -> bool`, answering
+ * whether the slot was a stackful park (and so was queued).
+ *
+ * `null` is the honest default: a store with no stackful park has nothing to hand
+ * back. Same shape as `__wakeSink` above, for the same reason and with the same
+ * measured history.
+ *
+ * **Assigned, not installed through a setter.** A setter would be one more exported
+ * function in this module, and an exported function here is compiled into every
+ * guest: the first version of this hook cost 306 bytes per artifact through exactly
+ * that. `let` is exported so `~lib/task-stack` can assign it directly, which costs
+ * the guests that never assign it nothing beyond a nullable global initialised to
+ * `null`.
+ */
+export let __remoteParkSink: ((id: i32, payload: i32) => bool) | null = null;
+
+
+/**
  * What a task's `await` does, and what happens the moment the task is created.
  *
  * `docs/policy-and-threads.md` §3. Two moments, two methods, and **no generic
