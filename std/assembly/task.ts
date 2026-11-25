@@ -359,35 +359,53 @@ export abstract class TaskBase {
  */
 export class Task<T> extends TaskBase {
   /**
-   * Backend A's record for this task — **and `null` on the stackful backend, which
-   * never creates one** (this class's own note says so).
+   * **The record this handle carries, as an accessor pair over a nullable store**
+   * (DL44, I106).
    *
-   * **Why this is `| null` and not `_record!: TaskRecord`** (DL44, I106). A field
-   * declared definitely-assigned with a non-nullable reference type gets a generated
-   * null check in its getter (`src/compiler.ts:4366`), so *reading* it while it holds
-   * zero **aborts** — `Unexpected 'null' (not assigned a value)` at this line, column
-   * 3. A stackful policy await does exactly that read: `__parkRecord()` answers
-   * `TaskRecord | null` because such a task has no record, and `__parkRemote` /
-   * `__parkAwait` branch on that answer. That abort was Gate 4's
-   * `abort 880 1008 362 3`.
+   * Backend A and guest programs read and write `_record` as a non-null field, and
+   * they keep doing so: the getter answers `TaskRecord`, the setter takes one, and
+   * `value`'s offset does not move (one word either way).
    *
-   * The alternative — dropping `!:` and writing an initialiser — does not compile:
-   * AS requires one or the other (`TS2564`), and `changetype<TaskRecord>(0)` lowers to
-   * `call set:_record(i32.const 0)` against a `(ref null …)` setter under
-   * `--wasmGc`, a validation error (measured).
+   * **Why it is not the field it used to be.** Declared `_record!: TaskRecord`, the
+   * generated getter carries a null check (`src/compiler.ts:4366`) that **aborts**
+   * — `Unexpected 'null' (not assigned a value)`, at the declaration's line and
+   * column. The stackful backend never creates a record (this class's own note says
+   * so), so `__parkRecord()` — whose declared answer is `TaskRecord | null` — was
+   * the one reader that could hit that null, and since DL43 the continuation policy
+   * park asks it. That abort was Gate 4's `abort 880 1008 362 3`.
    *
-   * So the type tells the truth and the two readers that know the record is present
-   * say so: Backend A's lowering reads it as `handle._record!` (it assigned the field
-   * in `__taskRegister` before any await could run), and the guests that build their
-   * own handle assert it too. `__parkRecord()` keeps its nullable answer, which is what
-   * the stackful paths consume.
+   * A nullable declaration is not the fix: AS rejects a non-nullable field with
+   * neither `!` nor an initialiser (`TS2564`), `changetype<TaskRecord>(0)` fails to
+   * validate under `--wasmGc` (`i32` into a `ref null` setter), and reading it as
+   * `handle._record!` at the await site moves the assertion into Backend A's
+   * generated code, where it stripped the file attribution from the line a
+   * conformance case breakpoints at (measured: `promise_backend_before_await`).
+   *
+   * So the store is nullable and private, the two halves keep their signatures, and
+   * the park path reads the store directly — no assertion, no trap, nothing for
+   * anyone else to change.
    */
-  _record: TaskRecord | null = null;
+  recordValue: TaskRecord | null = null;  // `offsetof`-visible; Backend A's store
+
+  /** Backend A's record for this task, or the zero reference when it has none. */
+  get _record(): TaskRecord {
+    return this.recordValue!;
+  }
+
+  /** Records the handle. Backend A calls this in `__taskRegister`. */
+  set _record(value: TaskRecord) {
+    this.recordValue = value;
+  }
 
   drive(): void {}
 
   /** The record this handle is for — see `TaskBase#__parkRecord`. */
-  __parkRecord(): TaskRecord | null { return this._record; }
+  /**
+   * The record this handle is for — **answered without asserting**, which is the
+   * whole point (see `recordValue`): a stackful task has none, and asking must be a
+   * question rather than a trap.
+   */
+  __parkRecord(): TaskRecord | null { return this.recordValue; }
 
   /**
    * `this.value = <T>the delivered payload word`.

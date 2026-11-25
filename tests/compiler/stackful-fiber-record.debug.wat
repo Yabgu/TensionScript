@@ -2648,12 +2648,12 @@
   local.get $serveOrigin
   i32.store offset=40
  )
- (func $~lib/task/Task<i32>#set:_record (type $0) (param $this i32) (param $_record i32)
+ (func $~lib/task/Task<i32>#set:recordValue (type $0) (param $this i32) (param $recordValue i32)
   local.get $this
-  local.get $_record
+  local.get $recordValue
   i32.store offset=44
   local.get $this
-  local.get $_record
+  local.get $recordValue
   i32.const 0
   call $~lib/rt/itcms/__link
  )
@@ -4960,7 +4960,7 @@
   end
   return
  )
- (func $~lib/task/Task<i32>#get:_record (type $1) (param $this i32) (result i32)
+ (func $~lib/task/Task<i32>#get:recordValue (type $1) (param $this i32) (result i32)
   local.get $this
   i32.load offset=44
  )
@@ -5753,7 +5753,7 @@
   i32.store offset=4
   local.get $1
   i32.const 0
-  call $~lib/task/Task<i32>#set:_record
+  call $~lib/task/Task<i32>#set:recordValue
   local.get $this
   local.set $1
   global.get $~lib/memory/__stack_pointer
@@ -5769,6 +5769,34 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
   local.get $1
+ )
+ (func $~lib/task/Task<i32>#set:_record (type $0) (param $this i32) (param $value i32)
+  (local $2 i32)
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.sub
+  global.set $~lib/memory/__stack_pointer
+  call $~stack_check
+  global.get $~lib/memory/__stack_pointer
+  i64.const 0
+  i64.store
+  local.get $this
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store
+  local.get $2
+  local.get $value
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store offset=4
+  local.get $2
+  call $~lib/task/Task<i32>#set:recordValue
+  global.get $~lib/memory/__stack_pointer
+  i32.const 8
+  i32.add
+  global.set $~lib/memory/__stack_pointer
  )
  (func $stackful-fiber-record/pendingJob (type $1) (param $key i32) (result i32)
   (local $record i32)
@@ -10530,7 +10558,7 @@
   local.get $1
   i32.store
   local.get $1
-  call $~lib/task/Task<i32>#get:_record
+  call $~lib/task/Task<i32>#get:recordValue
   local.set $1
   global.get $~lib/memory/__stack_pointer
   i32.const 4

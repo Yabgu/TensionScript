@@ -1200,7 +1200,11 @@ export function offsetMask(): i32 { return offsetof<Task<i32>>("mask"); }
 export function offsetServeArg(): i32 { return offsetof<Task<i32>>("serveArg"); }
 export function offsetServeKey(): i32 { return offsetof<Task<i32>>("serveKey"); }
 export function offsetServeOrigin(): i32 { return offsetof<Task<i32>>("serveOrigin"); }
-export function offsetAfterBase(): i32 { return offsetof<Task<i32>>("_record"); }
+// recordValue, not _record (DL44): the record is an accessor pair over a nullable
+// store now (a non-null field could not stay non-null without trapping a stackful
+// park inside its own getter), so the field a subclass's members start after is the
+// store. Same word, same offset: this row is what would move if it were not.
+export function offsetAfterBase(): i32 { return offsetof<Task<i32>>("recordValue"); }
 `, ["--runtime", "incremental"]);
     check("the width fixture compiles", built.ok, true);
     if (!built.ok) {
