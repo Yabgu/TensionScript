@@ -42,10 +42,10 @@
  (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/native/ASC_RUNTIME i32 (i32.const 2))
- (global $~lib/rt/__rtti_base i32 (i32.const 1264))
- (global $~lib/memory/__data_end i32 (i32.const 1376))
- (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34144))
- (global $~lib/memory/__heap_base i32 (i32.const 34144))
+ (global $~lib/rt/__rtti_base i32 (i32.const 1216))
+ (global $~lib/memory/__data_end i32 (i32.const 1328))
+ (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34096))
+ (global $~lib/memory/__heap_base i32 (i32.const 34096))
  (memory $0 1)
  (data $0 (i32.const 12) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00(\00\00\00A\00l\00l\00o\00c\00a\00t\00i\00o\00n\00 \00t\00o\00o\00 \00l\00a\00r\00g\00e\00\00\00\00\00")
  (data $1 (i32.const 76) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00 \00\00\00~\00l\00i\00b\00/\00r\00t\00/\00i\00t\00c\00m\00s\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00")
@@ -61,15 +61,14 @@
  (data $11 (i32.const 540) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00E\00l\00e\00m\00e\00n\00t\00 \00t\00y\00p\00e\00 \00m\00u\00s\00t\00 \00b\00e\00 \00n\00u\00l\00l\00a\00b\00l\00e\00 \00i\00f\00 \00a\00r\00r\00a\00y\00 \00i\00s\00 \00h\00o\00l\00e\00y\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (data $12 (i32.const 668) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00U\00n\00e\00x\00p\00e\00c\00t\00e\00d\00 \00\'\00n\00u\00l\00l\00\'\00 \00(\00n\00o\00t\00 \00a\00s\00s\00i\00g\00n\00e\00d\00 \00o\00r\00 \00f\00a\00i\00l\00e\00d\00 \00c\00a\00s\00t\00)\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (data $13 (i32.const 796) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00,\00\00\00a\00s\00y\00n\00c\00-\00c\00l\00o\00s\00u\00r\00e\00-\00v\00a\00l\00u\00e\00.\00t\00s\00")
- (data $14 (i32.const 860) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\18\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00.\00t\00s\00\00\00\00\00")
- (data $15 (i32.const 908) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1c\00\00\00I\00n\00v\00a\00l\00i\00d\00 \00l\00e\00n\00g\00t\00h\00")
- (data $16 (i32.const 956) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
- (data $17 (i32.const 1020) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00$\00\00\00K\00e\00y\00 \00d\00o\00e\00s\00 \00n\00o\00t\00 \00e\00x\00i\00s\00t\00\00\00\00\00\00\00\00\00")
- (data $18 (i32.const 1084) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\16\00\00\00~\00l\00i\00b\00/\00m\00a\00p\00.\00t\00s\00\00\00\00\00\00\00")
- (data $19 (i32.const 1132) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1e\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00-\00r\00t\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
- (data $20 (i32.const 1196) "\1c\00\00\00\00\00\00\00\00\00\00\00\18\00\00\00\08\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00")
- (data $21 (i32.const 1228) "\1c\00\00\00\00\00\00\00\00\00\00\00\1a\00\00\00\08\00\00\00\04\00\00\00\00\00\00\00\00\00\00\00")
- (data $22 (i32.const 1264) "\1b\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00\00\00\00\00 \00\00\00\02A\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00 \00\00\00\00\00\00\00\10\t\12\00\02A\00\00\10A\82\00\00\00\00\00\02A\00\00\02\t\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (data $14 (i32.const 860) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1c\00\00\00I\00n\00v\00a\00l\00i\00d\00 \00l\00e\00n\00g\00t\00h\00")
+ (data $15 (i32.const 908) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $16 (i32.const 972) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00$\00\00\00K\00e\00y\00 \00d\00o\00e\00s\00 \00n\00o\00t\00 \00e\00x\00i\00s\00t\00\00\00\00\00\00\00\00\00")
+ (data $17 (i32.const 1036) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\16\00\00\00~\00l\00i\00b\00/\00m\00a\00p\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $18 (i32.const 1084) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\1e\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00-\00r\00t\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (data $19 (i32.const 1148) "\1c\00\00\00\00\00\00\00\00\00\00\00\18\00\00\00\08\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00")
+ (data $20 (i32.const 1180) "\1c\00\00\00\00\00\00\00\00\00\00\00\1a\00\00\00\08\00\00\00\04\00\00\00\00\00\00\00\00\00\00\00")
+ (data $21 (i32.const 1216) "\1b\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00\00\00\00\00 \00\00\00\02A\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00 \00\00\00\00\00\00\00\10\t\12\00\02A\00\00\10A\82\00\00\00\00\00\02A\00\00\02\t\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (table $0 5 5 funcref)
  (elem $0 (i32.const 1) $~lib/task/noopWake $async-closure-value/inner$resume $async-closure-value/outer$resume~inner $async-closure-value/outer$resume)
  (export "main" (func $async-closure-value/main))
@@ -2663,6 +2662,10 @@
   local.get $this
   i32.load offset=20
  )
+ (func $~lib/task/Task<i32>#get:_record (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=44
+ )
  (func $~lib/task/TaskRecord#get:done (param $this i32) (result i32)
   local.get $this
   i32.load offset=28
@@ -2985,7 +2988,7 @@
   i32.const 224
   local.get $0
   call $~lib/rt/itcms/__visit
-  i32.const 928
+  i32.const 880
   local.get $0
   call $~lib/rt/itcms/__visit
   i32.const 464
@@ -2994,7 +2997,7 @@
   i32.const 560
   local.get $0
   call $~lib/rt/itcms/__visit
-  i32.const 1040
+  i32.const 992
   local.get $0
   call $~lib/rt/itcms/__visit
   i32.const 32
@@ -3426,8 +3429,8 @@
   global.get $~lib/memory/__data_end
   i32.lt_s
   if
+   i32.const 34128
    i32.const 34176
-   i32.const 34224
    i32.const 1
    i32.const 1
    call $~lib/builtins/abort
@@ -4764,8 +4767,8 @@
   local.get $entry
   i32.eqz
   if
-   i32.const 1040
-   i32.const 1104
+   i32.const 992
+   i32.const 1056
    i32.const 105
    i32.const 17
    call $~lib/builtins/abort
@@ -4846,7 +4849,7 @@
   i32.shr_u
   i32.gt_u
   if
-   i32.const 928
+   i32.const 880
    i32.const 512
    i32.const 70
    i32.const 60
@@ -5414,7 +5417,7 @@
    i32.shr_u
    i32.gt_u
    if
-    i32.const 928
+    i32.const 880
     i32.const 512
     i32.const 19
     i32.const 48
@@ -6712,7 +6715,7 @@
   local.get $3
   i32.store offset=4
   local.get $3
-  i32.const 1216
+  i32.const 1168
   local.set $3
   global.get $~lib/memory/__stack_pointer
   local.get $3
@@ -7099,7 +7102,7 @@
   local.get $2
   i32.store
   local.get $2
-  i32.const 1248
+  i32.const 1200
   local.set $2
   global.get $~lib/memory/__stack_pointer
   local.get $2
@@ -7722,40 +7725,6 @@
   global.set $~lib/memory/__stack_pointer
   local.get $2
  )
- (func $~lib/task/Task<i32>#get:_record (param $this i32) (result i32)
-  (local $1 i32)
-  (local $2 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store
-  global.get $~lib/memory/__stack_pointer
-  local.get $this
-  i32.load offset=44
-  local.tee $1
-  i32.store
-  local.get $1
-  if (result i32)
-   local.get $1
-  else
-   i32.const 688
-   i32.const 880
-   i32.const 362
-   i32.const 3
-   call $~lib/builtins/abort
-   unreachable
-  end
-  local.set $2
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.add
-  global.set $~lib/memory/__stack_pointer
-  local.get $2
- )
  (func $async-closure-value/inner$State#get:$awaited1 (param $this i32) (result i32)
   (local $1 i32)
   (local $2 i32)
@@ -7805,8 +7774,8 @@
   i32.const 1073741820
   i32.gt_u
   if
+   i32.const 880
    i32.const 928
-   i32.const 976
    i32.const 52
    i32.const 43
    call $~lib/builtins/abort
@@ -7852,7 +7821,7 @@
    local.get $1
   else
    i32.const 688
-   i32.const 1152
+   i32.const 1104
    i32.const 61
    i32.const 3
    call $~lib/builtins/abort

@@ -42,10 +42,10 @@
  (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
  (global $~lib/native/ASC_RUNTIME i32 (i32.const 2))
- (global $~lib/rt/__rtti_base i32 (i32.const 1360))
- (global $~lib/memory/__data_end i32 (i32.const 1488))
- (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34256))
- (global $~lib/memory/__heap_base i32 (i32.const 34256))
+ (global $~lib/rt/__rtti_base i32 (i32.const 1312))
+ (global $~lib/memory/__data_end i32 (i32.const 1440))
+ (global $~lib/memory/__stack_pointer (mut i32) (i32.const 34208))
+ (global $~lib/memory/__heap_base i32 (i32.const 34208))
  (memory $0 1)
  (data $0 (i32.const 12) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00(\00\00\00A\00l\00l\00o\00c\00a\00t\00i\00o\00n\00 \00t\00o\00o\00 \00l\00a\00r\00g\00e\00\00\00\00\00")
  (data $1 (i32.const 76) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00 \00\00\00~\00l\00i\00b\00/\00r\00t\00/\00i\00t\00c\00m\00s\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00")
@@ -66,13 +66,12 @@
  (data $16 (i32.const 972) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00$\00\00\00K\00e\00y\00 \00d\00o\00e\00s\00 \00n\00o\00t\00 \00e\00x\00i\00s\00t\00\00\00\00\00\00\00\00\00")
  (data $17 (i32.const 1036) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\16\00\00\00~\00l\00i\00b\00/\00m\00a\00p\00.\00t\00s\00\00\00\00\00\00\00")
  (data $18 (i32.const 1084) "\1c\00\00\00\00\00\00\00\00\00\00\00\17\00\00\00\08\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00")
- (data $19 (i32.const 1116) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\18\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00.\00t\00s\00\00\00\00\00")
- (data $20 (i32.const 1164) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
- (data $21 (i32.const 1228) "\1c\00\00\00\00\00\00\00\00\00\00\00\18\00\00\00\08\00\00\00\03\00\00\00\00\00\00\00\00\00\00\00")
- (data $22 (i32.const 1260) "\1c\00\00\00\00\00\00\00\00\00\00\00\1a\00\00\00\08\00\00\00\04\00\00\00\00\00\00\00\00\00\00\00")
- (data $23 (i32.const 1292) "\1c\00\00\00\00\00\00\00\00\00\00\00\1c\00\00\00\08\00\00\00\05\00\00\00\00\00\00\00\00\00\00\00")
- (data $24 (i32.const 1324) "\1c\00\00\00\00\00\00\00\00\00\00\00\1e\00\00\00\08\00\00\00\06\00\00\00\00\00\00\00\00\00\00\00")
- (data $25 (i32.const 1360) "\1f\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00\00\00\00\00 \00\00\00\02A\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\10\t\12\00\02A\00\00\10A\82\00\00\00\00\00\02A\00\00\02\t\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
+ (data $19 (i32.const 1116) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
+ (data $20 (i32.const 1180) "\1c\00\00\00\00\00\00\00\00\00\00\00\18\00\00\00\08\00\00\00\03\00\00\00\00\00\00\00\00\00\00\00")
+ (data $21 (i32.const 1212) "\1c\00\00\00\00\00\00\00\00\00\00\00\1a\00\00\00\08\00\00\00\04\00\00\00\00\00\00\00\00\00\00\00")
+ (data $22 (i32.const 1244) "\1c\00\00\00\00\00\00\00\00\00\00\00\1c\00\00\00\08\00\00\00\05\00\00\00\00\00\00\00\00\00\00\00")
+ (data $23 (i32.const 1276) "\1c\00\00\00\00\00\00\00\00\00\00\00\1e\00\00\00\08\00\00\00\06\00\00\00\00\00\00\00\00\00\00\00")
+ (data $24 (i32.const 1312) "\1f\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00\00\00\00\00 \00\00\00\02A\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\10\t\12\00\02A\00\00\10A\82\00\00\00\00\00\02A\00\00\02\t\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
  (table $0 7 7 funcref)
  (elem $0 (i32.const 1) $~lib/task/noopWake $lazy-expr-await/counted$resume $lazy-expr-await/twoReads$resume $lazy-expr-await/branchRead$resume $lazy-expr-await/neverRead$resume $lazy-expr-await/inExpression$resume)
  (export "twoReads" (func $lazy-expr-await/twoReads))
@@ -2828,6 +2827,10 @@
   local.get $this
   i32.load offset=4
  )
+ (func $~lib/task/Task<i32>#get:_record (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=44
+ )
  (func $~lib/task/TaskRecord#get:done (param $this i32) (result i32)
   local.get $this
   i32.load offset=28
@@ -3626,8 +3629,8 @@
   global.get $~lib/memory/__data_end
   i32.lt_s
   if
+   i32.const 34240
    i32.const 34288
-   i32.const 34336
    i32.const 1
    i32.const 1
    call $~lib/builtins/abort
@@ -7316,7 +7319,7 @@
   local.get $1
   i32.store offset=4
   local.get $1
-  i32.const 1248
+  i32.const 1200
   local.set $1
   global.get $~lib/memory/__stack_pointer
   local.get $1
@@ -7978,7 +7981,7 @@
   local.get $2
   i32.store offset=4
   local.get $2
-  i32.const 1280
+  i32.const 1232
   local.set $2
   global.get $~lib/memory/__stack_pointer
   local.get $2
@@ -8216,7 +8219,7 @@
   local.get $1
   i32.store offset=4
   local.get $1
-  i32.const 1312
+  i32.const 1264
   local.set $1
   global.get $~lib/memory/__stack_pointer
   local.get $1
@@ -8742,7 +8745,7 @@
   local.get $1
   i32.store offset=4
   local.get $1
-  i32.const 1344
+  i32.const 1296
   local.set $1
   global.get $~lib/memory/__stack_pointer
   local.get $1
@@ -9447,40 +9450,6 @@
   global.set $~lib/memory/__stack_pointer
   local.get $2
  )
- (func $~lib/task/Task<i32>#get:_record (param $this i32) (result i32)
-  (local $1 i32)
-  (local $2 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store
-  global.get $~lib/memory/__stack_pointer
-  local.get $this
-  i32.load offset=44
-  local.tee $1
-  i32.store
-  local.get $1
-  if (result i32)
-   local.get $1
-  else
-   i32.const 688
-   i32.const 1136
-   i32.const 362
-   i32.const 3
-   call $~lib/builtins/abort
-   unreachable
-  end
-  local.set $2
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.add
-  global.set $~lib/memory/__stack_pointer
-  local.get $2
- )
  (func $lazy-expr-await/twoReads$State#get:$awaited1 (param $this i32) (result i32)
   (local $1 i32)
   (local $2 i32)
@@ -9531,7 +9500,7 @@
   i32.gt_u
   if
    i32.const 944
-   i32.const 1184
+   i32.const 1136
    i32.const 52
    i32.const 43
    call $~lib/builtins/abort

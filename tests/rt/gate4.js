@@ -52,14 +52,33 @@ import { execFileSync } from "node:child_process";
  * program will call it. The host's worker linker documents the same situation for
  * `parkState` (`thread.rs`, `link_worker`).
  *
- * Every fixture in this file is single-threaded and parks nothing, so the stub
- * throws rather than swallowing a park: a fixture that starts parking needs a
- * producer and a session loop, not a stub, and this is what makes that visible
- * instead of silent.
+ * **What it must do, and the two cases are not the same** (DL44, I106).
+ *
+ * A **keyless** park — `(class, key) = (0, 0)` — is the contract's "nothing external
+ * will complete this": the waiter is a task in this store, and the store's own
+ * `settle` pushes it onto the ready ring. The host's job is to record it and return,
+ * which is exactly what the real linker does (`thread.rs`: "the park is recorded and
+ * the call returns"). So the stub records and returns; it does **not** throw. It used
+ * to throw, on the belief that no fixture here parks — true until DL43 taught the
+ * continuation policy await to register, at which point the cross-store fixture
+ * reaches this call for the first time and the throw became a false failure.
+ *
+ * A **keyed** park names a `(class, key)` producer, and no fixture in this file has
+ * one. That case stays loud: swallowing it would turn "this program now depends on a
+ * producer the harness does not have" into a silent strand.
  */
+const parks = [];
 const schedulerImports = {
   scheduler: {
-    park: () => { throw new Error("scheduler::park reached a Gate 4 fixture that never parks"); },
+    park: (taskId, class_, key) => {
+      parks.push({ taskId, class_, key });
+      if (class_ !== 0 || key !== 0) {
+        throw new Error(
+          `scheduler::park named a producer (class ${class_}, key ${key}) that no Gate 4 ` +
+            "fixture has — a keyed park here would strand silently, so it is refused",
+        );
+      }
+    },
   },
 };
 
@@ -99,6 +118,21 @@ if (!isMainThread) {
       abort: (a, b, c, d) => { throw new Error(`worker abort ${a} ${b} ${c} ${d}`); },
       __executorCount: () => total,
       __startThread: () => -1,
+    },
+    // **The worker's own `scheduler` stub** (DL44, I106). A worker instance imports
+    // exactly what main's does, and a stackful module imports `scheduler::park`
+    // whether or not it parks. Keyless parks are recorded and returned; a keyed one
+    // would name a producer this harness does not have, so it is refused loudly —
+    // the same rule the main-thread stub applies.
+    scheduler: {
+      park: (taskId, class_, key) => {
+        if (class_ !== 0 || key !== 0) {
+          throw new Error(
+            `worker: scheduler::park named a producer (class ${class_}, key ${key}) that ` +
+              "no Gate 4 fixture has",
+          );
+        }
+      },
     },
   });
   const e = instance.exports;

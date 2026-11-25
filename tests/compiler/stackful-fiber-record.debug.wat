@@ -106,10 +106,10 @@
  (global $~lib/rt/common/ARENA_END_CONFIGURED (mut i32) (i32.const 0))
  (global $~env (mut i32) (i32.const 0))
  (global $~argumentsLength (mut i32) (i32.const 0))
- (global $~lib/rt/__rtti_base i32 (i32.const 848))
- (global $~lib/memory/__data_end i32 (i32.const 948))
- (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33716))
- (global $~lib/memory/__heap_base i32 (i32.const 33716))
+ (global $~lib/rt/__rtti_base i32 (i32.const 672))
+ (global $~lib/memory/__data_end i32 (i32.const 772))
+ (global $~lib/memory/__stack_pointer (mut i32) (i32.const 33540))
+ (global $~lib/memory/__heap_base i32 (i32.const 33540))
  (data $0 (i32.const 12) "\1c\00\00\00\00\00\00\00\00\00\00\00\04\00\00\00\08\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00")
  (data $1 (i32.const 44) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00(\00\00\00A\00l\00l\00o\00c\00a\00t\00i\00o\00n\00 \00t\00o\00o\00 \00l\00a\00r\00g\00e\00\00\00\00\00")
  (data $2 (i32.const 108) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00 \00\00\00~\00l\00i\00b\00/\00r\00t\00/\00i\00t\00c\00m\00s\00.\00t\00s\00\00\00\00\00\00\00\00\00\00\00\00\00")
@@ -124,9 +124,7 @@
  (data $11 (i32.const 540) "\1c\00\00\00\00\00\00\00\00\00\00\00\17\00\00\00\08\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00")
  (data $12 (i32.const 572) "<\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00&\00\00\00~\00l\00i\00b\00/\00a\00r\00r\00a\00y\00b\00u\00f\00f\00e\00r\00.\00t\00s\00\00\00\00\00\00\00")
  (data $13 (i32.const 636) "\1c\00\00\00\00\00\00\00\00\00\00\00\04\00\00\00\08\00\00\00\03\00\00\00\00\00\00\00\00\00\00\00")
- (data $14 (i32.const 668) "|\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00^\00\00\00U\00n\00e\00x\00p\00e\00c\00t\00e\00d\00 \00\'\00n\00u\00l\00l\00\'\00 \00(\00n\00o\00t\00 \00a\00s\00s\00i\00g\00n\00e\00d\00 \00o\00r\00 \00f\00a\00i\00l\00e\00d\00 \00c\00a\00s\00t\00)\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00")
- (data $15 (i32.const 796) ",\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\18\00\00\00~\00l\00i\00b\00/\00t\00a\00s\00k\00.\00t\00s\00\00\00\00\00")
- (data $16 (i32.const 848) "\18\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00 \00\00\00\02A\00\00 \00\00\00\02a\00\00\00\00\00\00 \00\00\00\10A\12\00\00\00\00\00\00\00\00\00\01\t\00\00\02a\00\00 \00\00\00\02a\00\00\02\t\00\00\00\00\00\00 \00\00\00\00\00\00\00")
+ (data $14 (i32.const 672) "\18\00\00\00 \00\00\00 \00\00\00 \00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00 \00\00\00\02A\00\00 \00\00\00\02a\00\00\00\00\00\00 \00\00\00\10A\12\00\00\00\00\00\00\00\00\00\01\t\00\00\02a\00\00 \00\00\00\02a\00\00\02\t\00\00\00\00\00\00 \00\00\00\00\00\00\00")
  (table $0 4 4 funcref)
  (table $$starts 1 1 funcref)
  (elem $0 (table $0) (i32.const 1) func $~lib/task/noopWake $~lib/thread/__mainStep__ $~lib/thread/installWakeSink~anonymous|0)
@@ -4962,6 +4960,10 @@
   end
   return
  )
+ (func $~lib/task/Task<i32>#get:_record (type $1) (param $this i32) (result i32)
+  local.get $this
+  i32.load offset=44
+ )
  (func $~lib/task/TaskRecord#get:payload (type $1) (param $this i32) (result i32)
   local.get $this
   i32.load offset=8
@@ -5478,8 +5480,8 @@
   global.get $~lib/memory/__data_end
   i32.lt_s
   if
-   i32.const 33744
-   i32.const 33792
+   i32.const 33568
+   i32.const 33616
    i32.const 1
    i32.const 1
    call $~lib/builtins/abort
@@ -11064,40 +11066,6 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
   local.get $1
- )
- (func $~lib/task/Task<i32>#get:_record (type $1) (param $this i32) (result i32)
-  (local $1 i32)
-  (local $2 i32)
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.sub
-  global.set $~lib/memory/__stack_pointer
-  call $~stack_check
-  global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store
-  global.get $~lib/memory/__stack_pointer
-  local.get $this
-  i32.load offset=44
-  local.tee $1
-  i32.store
-  local.get $1
-  if (result i32)
-   local.get $1
-  else
-   i32.const 688
-   i32.const 816
-   i32.const 362
-   i32.const 3
-   call $~lib/builtins/abort
-   unreachable
-  end
-  local.set $2
-  global.get $~lib/memory/__stack_pointer
-  i32.const 4
-  i32.add
-  global.set $~lib/memory/__stack_pointer
-  local.get $2
  )
  ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
 )

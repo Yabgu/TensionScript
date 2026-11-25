@@ -358,8 +358,26 @@ export abstract class TaskBase {
  * record on the handle. The stackful backend does not create one.
  */
 export class Task<T> extends TaskBase {
-  /** Backend A's record for this task. Unused by the stackful backend. */
-  _record!: TaskRecord;
+  /**
+   * Backend A's record for this task — **and a zero reference on the stackful
+   * backend, which never creates one** (this class's own note says so).
+   *
+   * **Why this is not `_record!: TaskRecord` any more** (DL44, I106). A field
+   * declared definitely-assigned with a non-nullable reference type gets a generated
+   * null check in its getter (`src/compiler.ts:4366`), so *reading* it when it holds
+   * zero **aborts**: `Unexpected 'null' (not assigned a value)` at this line, column
+   * 3. A stackful policy await does exactly that read — `__parkRecord()` answers
+   * `TaskRecord | null` precisely because such a task has no record, and
+   * `__parkRemote`/`__parkAwait` branch on that answer.
+   *
+   * So the assertion moves off the declaration and onto the one path that depends on
+   * it: Backend A writes this field in `__taskRegister` at entry, before any await can
+   * run, and no other code needs it non-null. The type stays `TaskRecord` (a nullable
+   * declaration would push an assertion into every guest that reads it — `rt-guards.ts`
+   * does), the initialiser is the zero reference, and `__parkRecord()` still declares
+   * `TaskRecord | null` so callers must handle the absent case explicitly.
+   */
+  _record: TaskRecord = changetype<TaskRecord>(0);
 
   drive(): void {}
 
