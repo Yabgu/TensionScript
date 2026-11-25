@@ -489,11 +489,15 @@ export function __taskPark(state: TaskState, awaited: TaskRecord): void {
   // `waitingByKey` registration that fed `__taskDeliver`/`__taskTick`. Early
   // completions are the host's now (`scheduler::RecentCompletions`), delivered
   // through `__taskResume`; the pull delivery they existed for is gone.
-  let byRecord = waiters;
-  if (byRecord == null) {
-    byRecord = new Map();
-    waiters = byRecord;
+  let empty = waiters;
+  if (empty == null) {
+    empty = new Map();
+    waiters = empty;
   }
+  // The same explicit non-null copy `wake` needs, for the same `--wasmGc` reason: the
+  // null branch above assigns, and the narrowing does not survive into the calls
+  // below. Measured at DL44 alongside `wake`'s.
+  let byRecord = empty!;
   let list: Array<TaskState> | null = null;
   if (byRecord.has(awaited)) list = byRecord.get(awaited);
   if (list == null) {
@@ -519,8 +523,16 @@ export function __taskPark(state: TaskState, awaited: TaskRecord): void {
  * measured as `guest-chain` hanging.
  */
 function wake(record: TaskRecord): void {
-  let byRecord = waiters;
-  if (byRecord == null) return;
+  let map = waiters;
+  if (map == null) return;
+  // **The non-null copy is explicit, and it is not belt-and-braces** (DL44). Under
+  // `--wasmGc` the `== null` narrowing above does not survive into the calls below —
+  // the compiler's own `isLinearBufferField` note says a property read does not stay
+  // narrowed across `a != null && f(a)`, and this is the same shape on a local that
+  // crosses a call. Measured: `Map<…> | null` not assignable to `Map<…>` at this
+  // line, nine times, for a program that compiled clean before DL44 changed what gets
+  // instantiated here.
+  let byRecord = map!;
   let list: Array<TaskState> | null = null;
   if (byRecord.has(record)) list = byRecord.get(record);
   if (list != null && list.length != 0) {

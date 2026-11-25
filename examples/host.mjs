@@ -45,6 +45,27 @@ export function line(tagNames, tag, value) {
  * then `__start`. `__startThread` is the host's only job beyond that: make a
  * fresh instance over the same memory and run `__workerMain(id)` on it.
  */
+/**
+ * **The `scheduler` namespace, as the host the real linker is** (DL44). A shared
+ * stackful build imports `scheduler::park` whether or not it parks — the continuation
+ * policy await registers its pair there (DL43) — so an instance without the namespace
+ * does not load at all. A keyless park is the contract's "nothing external will
+ * complete this", resumed by the store's own settle; a keyed one names a producer
+ * these examples do not have, so it is refused loudly.
+ */
+const schedulerImports = {
+  scheduler: {
+    park: (taskId, class_, key) => {
+      if (class_ !== 0 || key !== 0) {
+        throw new Error(
+          `scheduler::park named a producer (class ${class_}, key ${key}) that this ` +
+            "example has no producer for",
+        );
+      }
+    },
+  },
+};
+
 export function bootShared({ bytes, total, tagNames }) {
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 256, shared: true });
   const workers = [];
@@ -71,7 +92,7 @@ export function bootShared({ bytes, total, tagNames }) {
     },
   };
 
-  const exports = new WebAssembly.Instance(module, { env }).exports;
+  const exports = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
   const carved = exports.__threadInit(64);
   if (carved !== 0) throw new Error(`__threadInit answered ${carved}`);
   exports.__arenaInit(exports.__mainArenaBase(), exports.__mainArenaSize());

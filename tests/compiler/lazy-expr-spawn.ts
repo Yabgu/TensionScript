@@ -54,5 +54,5 @@ export function go(): i32 {
   let d = deferred();
   let h = hoisted();
   let a = abandoned();
-  return d._record.payload * 100 + h._record.payload + a._record.payload;
+  return d._record!.payload * 100 + h._record!.payload + a._record!.payload;
 }

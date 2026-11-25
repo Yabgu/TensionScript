@@ -5430,78 +5430,83 @@
   global.set $~lib/memory/__stack_pointer
  )
  (func $~lib/task-rt/wake (param $record i32)
+  (local $map i32)
   (local $byRecord i32)
   (local $list i32)
   (local $queue i32)
   (local $i i32)
   (local $k i32)
-  (local $6 i32)
+  (local $7 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 24
+  i32.const 28
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
   i32.const 0
-  i32.const 24
+  i32.const 28
   memory.fill
   global.get $~lib/memory/__stack_pointer
   global.get $~lib/task-rt/waiters
-  local.tee $byRecord
+  local.tee $map
   i32.store
-  local.get $byRecord
+  local.get $map
   i32.const 0
   i32.eq
   if
    global.get $~lib/memory/__stack_pointer
-   i32.const 24
+   i32.const 28
    i32.add
    global.set $~lib/memory/__stack_pointer
    return
   end
+  global.get $~lib/memory/__stack_pointer
+  local.get $map
+  local.tee $byRecord
+  i32.store offset=4
   i32.const 0
   local.set $list
   local.get $byRecord
-  local.set $6
+  local.set $7
   global.get $~lib/memory/__stack_pointer
-  local.get $6
-  i32.store offset=4
-  local.get $6
-  local.get $record
-  local.set $6
-  global.get $~lib/memory/__stack_pointer
-  local.get $6
+  local.get $7
   i32.store offset=8
-  local.get $6
+  local.get $7
+  local.get $record
+  local.set $7
+  global.get $~lib/memory/__stack_pointer
+  local.get $7
+  i32.store offset=12
+  local.get $7
   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#has"
   if
    global.get $~lib/memory/__stack_pointer
    local.get $byRecord
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
-   i32.store offset=4
-   local.get $6
-   local.get $record
-   local.set $6
-   global.get $~lib/memory/__stack_pointer
-   local.get $6
+   local.get $7
    i32.store offset=8
-   local.get $6
+   local.get $7
+   local.get $record
+   local.set $7
+   global.get $~lib/memory/__stack_pointer
+   local.get $7
+   i32.store offset=12
+   local.get $7
    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get"
    local.tee $list
-   i32.store offset=12
+   i32.store offset=16
   end
   local.get $list
   i32.const 0
   i32.ne
   if (result i32)
    local.get $list
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
-   i32.store offset=4
-   local.get $6
+   local.get $7
+   i32.store offset=8
+   local.get $7
    call $~lib/array/Array<~lib/task-rt/TaskState>#get:length
    i32.const 0
    i32.ne
@@ -5512,7 +5517,7 @@
    global.get $~lib/memory/__stack_pointer
    global.get $~lib/task-rt/ready
    local.tee $queue
-   i32.store offset=16
+   i32.store offset=20
    local.get $queue
    i32.const 0
    i32.eq
@@ -5522,18 +5527,18 @@
     i32.const 0
     call $~lib/array/Array<~lib/task-rt/TaskState>#constructor
     local.tee $queue
-    i32.store offset=16
+    i32.store offset=20
     local.get $queue
     global.set $~lib/task-rt/ready
    end
    i32.const 0
    local.set $i
    local.get $list
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
-   i32.store offset=4
-   local.get $6
+   local.get $7
+   i32.store offset=8
+   local.get $7
    call $~lib/array/Array<~lib/task-rt/TaskState>#get:length
    local.set $k
    loop $for-loop|0
@@ -5542,24 +5547,24 @@
     i32.lt_s
     if
      local.get $queue
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
-     i32.store offset=4
-     local.get $6
+     local.get $7
+     i32.store offset=8
+     local.get $7
      local.get $list
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
-     i32.store offset=20
-     local.get $6
+     local.get $7
+     i32.store offset=24
+     local.get $7
      local.get $i
      call $~lib/array/Array<~lib/task-rt/TaskState>#__get
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
-     i32.store offset=8
-     local.get $6
+     local.get $7
+     i32.store offset=12
+     local.get $7
      call $~lib/array/Array<~lib/task-rt/TaskState>#push
      drop
      local.get $i
@@ -5570,16 +5575,16 @@
     end
    end
    local.get $list
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
-   i32.store offset=4
-   local.get $6
+   local.get $7
+   i32.store offset=8
+   local.get $7
    i32.const 0
    call $~lib/array/Array<~lib/task-rt/TaskState>#set:length
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 24
+  i32.const 28
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
@@ -6547,66 +6552,71 @@
   global.set $~lib/memory/__stack_pointer
  )
  (func $~lib/task-rt/__taskPark (param $state i32) (param $awaited i32)
+  (local $empty i32)
   (local $byRecord i32)
   (local $list i32)
-  (local $4 i32)
+  (local $5 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 20
+  i32.const 24
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
   i32.const 0
-  i32.const 20
+  i32.const 24
   memory.fill
   global.get $~lib/memory/__stack_pointer
   global.get $~lib/task-rt/waiters
-  local.tee $byRecord
+  local.tee $empty
   i32.store
-  local.get $byRecord
+  local.get $empty
   i32.const 0
   i32.eq
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 0
    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#constructor"
-   local.tee $byRecord
+   local.tee $empty
    i32.store
-   local.get $byRecord
+   local.get $empty
    global.set $~lib/task-rt/waiters
   end
+  global.get $~lib/memory/__stack_pointer
+  local.get $empty
+  local.tee $byRecord
+  i32.store offset=4
   i32.const 0
   local.set $list
   local.get $byRecord
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
-  i32.store offset=4
-  local.get $4
-  local.get $awaited
-  local.set $4
-  global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store offset=8
-  local.get $4
+  local.get $5
+  local.get $awaited
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=12
+  local.get $5
   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#has"
   if
    global.get $~lib/memory/__stack_pointer
    local.get $byRecord
-   local.set $4
+   local.set $5
    global.get $~lib/memory/__stack_pointer
-   local.get $4
-   i32.store offset=4
-   local.get $4
-   local.get $awaited
-   local.set $4
-   global.get $~lib/memory/__stack_pointer
-   local.get $4
+   local.get $5
    i32.store offset=8
-   local.get $4
+   local.get $5
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=12
+   local.get $5
    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get"
    local.tee $list
-   i32.store offset=12
+   i32.store offset=16
   end
   local.get $list
   i32.const 0
@@ -6617,57 +6627,57 @@
    i32.const 0
    call $~lib/array/Array<~lib/task-rt/TaskState>#constructor
    local.tee $list
-   i32.store offset=12
-   local.get $byRecord
-   local.set $4
-   global.get $~lib/memory/__stack_pointer
-   local.get $4
-   i32.store offset=4
-   local.get $4
-   local.get $awaited
-   local.set $4
-   global.get $~lib/memory/__stack_pointer
-   local.get $4
-   i32.store offset=8
-   local.get $4
-   local.get $list
-   local.set $4
-   global.get $~lib/memory/__stack_pointer
-   local.get $4
    i32.store offset=16
-   local.get $4
+   local.get $byRecord
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=8
+   local.get $5
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=12
+   local.get $5
+   local.get $list
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=20
+   local.get $5
    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set"
    drop
   end
   local.get $list
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
-  i32.store offset=4
-  local.get $4
-  local.get $state
-  local.set $4
-  global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store offset=8
-  local.get $4
+  local.get $5
+  local.get $state
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=12
+  local.get $5
   call $~lib/array/Array<~lib/task-rt/TaskState>#push
   drop
   local.get $state
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
-  i32.store offset=4
-  local.get $4
-  local.get $awaited
-  local.set $4
-  global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store offset=8
-  local.get $4
+  local.get $5
+  local.get $awaited
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=12
+  local.get $5
   call $~lib/task-rt/parkState
   global.get $~lib/memory/__stack_pointer
-  i32.const 20
+  i32.const 24
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
@@ -6676,50 +6686,50 @@
   (local $b i32)
   (local $first i32)
   (local $$cond i32)
+  (local $5 i32)
   (local $$cond1 i32)
-  (local $second i32)
   (local $7 i32)
+  (local $second i32)
+  (local $9 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 12
+  i32.const 20
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
-  i64.const 0
-  i64.store
-  global.get $~lib/memory/__stack_pointer
   i32.const 0
-  i32.store offset=8
+  i32.const 20
+  memory.fill
   local.get $state
-  local.set $7
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $7
+  local.get $9
   i32.store
-  local.get $7
+  local.get $9
   call $lazy-expr-await/twoReads$State#get:b$lazyDone
   local.set $b$lazyDone
   local.get $state
-  local.set $7
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $7
+  local.get $9
   i32.store
-  local.get $7
+  local.get $9
   call $lazy-expr-await/twoReads$State#get:b
   local.set $b
   local.get $state
-  local.set $7
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $7
+  local.get $9
   i32.store
-  local.get $7
+  local.get $9
   call $lazy-expr-await/twoReads$State#get:first
   local.set $first
   local.get $state
-  local.set $7
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $7
+  local.get $9
   i32.store
-  local.get $7
+  local.get $9
   call $lazy-expr-await/twoReads$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -6728,11 +6738,11 @@
    local.set $b$lazyDone
   end
   local.get $state
-  local.set $7
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $7
+  local.get $9
   i32.store
-  local.get $7
+  local.get $9
   call $lazy-expr-await/twoReads$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -6740,21 +6750,21 @@
    i32.const 1
   else
    local.get $state
-   local.set $7
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $7
+   local.get $9
    i32.store
-   local.get $7
+   local.get $9
    call $lazy-expr-await/twoReads$State#get:resumePoint
    i32.const 1
    i32.ge_s
    if (result i32)
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 1
     i32.le_s
@@ -6766,11 +6776,11 @@
    i32.const 0
    local.set $$cond
    local.get $state
-   local.set $7
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $7
+   local.get $9
    i32.store
-   local.get $7
+   local.get $9
    call $lazy-expr-await/twoReads$State#get:resumePoint
    i32.const 0
    i32.eq
@@ -6780,21 +6790,21 @@
     local.set $$cond
    else
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 1
     i32.ge_s
     if (result i32)
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      call $lazy-expr-await/twoReads$State#get:resumePoint
      i32.const 1
      i32.le_s
@@ -6806,141 +6816,155 @@
    local.get $$cond
    if
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 0
     i32.eq
     if
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
+     global.get $~lib/memory/__stack_pointer
      call $lazy-expr-await/counted
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store offset=8
-     local.get $7
+     local.get $9
      call $~lib/task/Task<i32>#get:_record
-     local.set $7
+     local.tee $5
+     i32.store offset=12
+     local.get $5
+     if (result i32)
+      local.get $5
+     else
+      i32.const 688
+      i32.const 816
+      i32.const 36
+      i32.const 3
+      call $~lib/builtins/abort
+      unreachable
+     end
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store offset=4
-     local.get $7
+     local.get $9
      call $lazy-expr-await/twoReads$State#set:$awaited1
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      i32.const 1
      call $lazy-expr-await/twoReads$State#set:resumePoint
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store offset=4
-     local.get $7
+     local.get $9
      call $lazy-expr-await/twoReads$State#get:$awaited1
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      call $~lib/task-rt/__taskSettled
      i32.eqz
      if
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store
-      local.get $7
+      local.get $9
       local.get $b$lazyDone
       call $lazy-expr-await/twoReads$State#set:b$lazyDone
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store
-      local.get $7
+      local.get $9
       local.get $b
       call $lazy-expr-await/twoReads$State#set:b
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store
-      local.get $7
+      local.get $9
       local.get $first
       call $lazy-expr-await/twoReads$State#set:first
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store
-      local.get $7
+      local.get $9
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store offset=8
-      local.get $7
+      local.get $9
       call $lazy-expr-await/twoReads$State#get:$awaited1
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store offset=4
-      local.get $7
+      local.get $9
       call $~lib/task-rt/__taskPark
       global.get $~lib/memory/__stack_pointer
-      i32.const 12
+      i32.const 20
       i32.add
       global.set $~lib/memory/__stack_pointer
       return
      end
     end
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 1
     i32.eq
     if
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      i32.const 0
      call $lazy-expr-await/twoReads$State#set:resumePoint
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      call $lazy-expr-await/twoReads$State#get:$awaited1
      i32.load offset=8
      local.set $b
     end
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 0
     i32.eq
@@ -6951,11 +6975,11 @@
    end
   end
   local.get $state
-  local.set $7
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $7
+  local.get $9
   i32.store
-  local.get $7
+  local.get $9
   call $lazy-expr-await/twoReads$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -6964,11 +6988,11 @@
    local.set $first
   end
   local.get $state
-  local.set $7
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $7
+  local.get $9
   i32.store
-  local.get $7
+  local.get $9
   call $lazy-expr-await/twoReads$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -6976,21 +7000,21 @@
    i32.const 1
   else
    local.get $state
-   local.set $7
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $7
+   local.get $9
    i32.store
-   local.get $7
+   local.get $9
    call $lazy-expr-await/twoReads$State#get:resumePoint
    i32.const 2
    i32.ge_s
    if (result i32)
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 2
     i32.le_s
@@ -7002,11 +7026,11 @@
    i32.const 0
    local.set $$cond1
    local.get $state
-   local.set $7
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $7
+   local.get $9
    i32.store
-   local.get $7
+   local.get $9
    call $lazy-expr-await/twoReads$State#get:resumePoint
    i32.const 0
    i32.eq
@@ -7016,21 +7040,21 @@
     local.set $$cond1
    else
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 2
     i32.ge_s
     if (result i32)
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      call $lazy-expr-await/twoReads$State#get:resumePoint
      i32.const 2
      i32.le_s
@@ -7042,141 +7066,155 @@
    local.get $$cond1
    if
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 0
     i32.eq
     if
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
+     global.get $~lib/memory/__stack_pointer
      call $lazy-expr-await/counted
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store offset=8
-     local.get $7
+     local.get $9
      call $~lib/task/Task<i32>#get:_record
-     local.set $7
+     local.tee $7
+     i32.store offset=16
+     local.get $7
+     if (result i32)
+      local.get $7
+     else
+      i32.const 688
+      i32.const 816
+      i32.const 37
+      i32.const 3
+      call $~lib/builtins/abort
+      unreachable
+     end
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store offset=4
-     local.get $7
+     local.get $9
      call $lazy-expr-await/twoReads$State#set:$awaited2
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      i32.const 2
      call $lazy-expr-await/twoReads$State#set:resumePoint
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store offset=4
-     local.get $7
+     local.get $9
      call $lazy-expr-await/twoReads$State#get:$awaited2
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      call $~lib/task-rt/__taskSettled
      i32.eqz
      if
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store
-      local.get $7
+      local.get $9
       local.get $b$lazyDone
       call $lazy-expr-await/twoReads$State#set:b$lazyDone
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store
-      local.get $7
+      local.get $9
       local.get $b
       call $lazy-expr-await/twoReads$State#set:b
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store
-      local.get $7
+      local.get $9
       local.get $first
       call $lazy-expr-await/twoReads$State#set:first
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store
-      local.get $7
+      local.get $9
       local.get $state
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store offset=8
-      local.get $7
+      local.get $9
       call $lazy-expr-await/twoReads$State#get:$awaited2
-      local.set $7
+      local.set $9
       global.get $~lib/memory/__stack_pointer
-      local.get $7
+      local.get $9
       i32.store offset=4
-      local.get $7
+      local.get $9
       call $~lib/task-rt/__taskPark
       global.get $~lib/memory/__stack_pointer
-      i32.const 12
+      i32.const 20
       i32.add
       global.set $~lib/memory/__stack_pointer
       return
      end
     end
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 2
     i32.eq
     if
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      i32.const 0
      call $lazy-expr-await/twoReads$State#set:resumePoint
      local.get $state
-     local.set $7
+     local.set $9
      global.get $~lib/memory/__stack_pointer
-     local.get $7
+     local.get $9
      i32.store
-     local.get $7
+     local.get $9
      call $lazy-expr-await/twoReads$State#get:$awaited2
      i32.load offset=8
      local.set $b
     end
     local.get $state
-    local.set $7
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $7
+    local.get $9
     i32.store
-    local.get $7
+    local.get $9
     call $lazy-expr-await/twoReads$State#get:resumePoint
     i32.const 0
     i32.eq
@@ -7187,11 +7225,11 @@
    end
   end
   local.get $state
-  local.set $7
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $7
+  local.get $9
   i32.store
-  local.get $7
+  local.get $9
   call $lazy-expr-await/twoReads$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -7199,11 +7237,11 @@
    local.get $b
    local.set $second
    local.get $state
-   local.set $7
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $7
+   local.get $9
    i32.store
-   local.get $7
+   local.get $9
    local.get $first
    local.get $second
    i32.add
@@ -7213,21 +7251,21 @@
    i32.add
    call $~lib/task-rt/__taskCompleteResult<i32>
    local.get $state
-   local.set $7
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $7
+   local.get $9
    i32.store
-   local.get $7
+   local.get $9
    i32.const 3
    call $lazy-expr-await/twoReads$State#set:resumePoint
    global.get $~lib/memory/__stack_pointer
-   i32.const 12
+   i32.const 20
    i32.add
    global.set $~lib/memory/__stack_pointer
    return
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 12
+  i32.const 20
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
@@ -7481,8 +7519,9 @@
   (local $$cond1 i32)
   (local $$cond i32)
   (local $6 i32)
+  (local $7 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 12
+  i32.const 16
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
@@ -7490,38 +7529,38 @@
   i64.const 0
   i64.store
   global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store offset=8
+  i64.const 0
+  i64.store offset=8
   local.get $state
-  local.set $6
+  local.set $7
   global.get $~lib/memory/__stack_pointer
-  local.get $6
+  local.get $7
   i32.store
-  local.get $6
+  local.get $7
   call $lazy-expr-await/branchRead$State#get:flag
   local.set $flag
   local.get $state
-  local.set $6
+  local.set $7
   global.get $~lib/memory/__stack_pointer
-  local.get $6
+  local.get $7
   i32.store
-  local.get $6
+  local.get $7
   call $lazy-expr-await/branchRead$State#get:b$lazyDone
   local.set $b$lazyDone
   local.get $state
-  local.set $6
+  local.set $7
   global.get $~lib/memory/__stack_pointer
-  local.get $6
+  local.get $7
   i32.store
-  local.get $6
+  local.get $7
   call $lazy-expr-await/branchRead$State#get:b
   local.set $b
   local.get $state
-  local.set $6
+  local.set $7
   global.get $~lib/memory/__stack_pointer
-  local.get $6
+  local.get $7
   i32.store
-  local.get $6
+  local.get $7
   call $lazy-expr-await/branchRead$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -7530,11 +7569,11 @@
    local.set $b$lazyDone
   end
   local.get $state
-  local.set $6
+  local.set $7
   global.get $~lib/memory/__stack_pointer
-  local.get $6
+  local.get $7
   i32.store
-  local.get $6
+  local.get $7
   call $lazy-expr-await/branchRead$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -7542,21 +7581,21 @@
    i32.const 1
   else
    local.get $state
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
+   local.get $7
    i32.store
-   local.get $6
+   local.get $7
    call $lazy-expr-await/branchRead$State#get:resumePoint
    i32.const 1
    i32.ge_s
    if (result i32)
     local.get $state
-    local.set $6
+    local.set $7
     global.get $~lib/memory/__stack_pointer
-    local.get $6
+    local.get $7
     i32.store
-    local.get $6
+    local.get $7
     call $lazy-expr-await/branchRead$State#get:resumePoint
     i32.const 1
     i32.le_s
@@ -7568,11 +7607,11 @@
    i32.const 0
    local.set $$cond1
    local.get $state
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
+   local.get $7
    i32.store
-   local.get $6
+   local.get $7
    call $lazy-expr-await/branchRead$State#get:resumePoint
    i32.const 0
    i32.eq
@@ -7581,21 +7620,21 @@
     local.set $$cond1
    else
     local.get $state
-    local.set $6
+    local.set $7
     global.get $~lib/memory/__stack_pointer
-    local.get $6
+    local.get $7
     i32.store
-    local.get $6
+    local.get $7
     call $lazy-expr-await/branchRead$State#get:resumePoint
     i32.const 1
     i32.ge_s
     if (result i32)
      local.get $state
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
+     local.get $7
      i32.store
-     local.get $6
+     local.get $7
      call $lazy-expr-await/branchRead$State#get:resumePoint
      i32.const 1
      i32.le_s
@@ -7607,11 +7646,11 @@
    local.get $$cond1
    if
     local.get $state
-    local.set $6
+    local.set $7
     global.get $~lib/memory/__stack_pointer
-    local.get $6
+    local.get $7
     i32.store
-    local.get $6
+    local.get $7
     call $lazy-expr-await/branchRead$State#get:resumePoint
     i32.const 0
     i32.eq
@@ -7619,21 +7658,21 @@
      i32.const 1
     else
      local.get $state
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
+     local.get $7
      i32.store
-     local.get $6
+     local.get $7
      call $lazy-expr-await/branchRead$State#get:resumePoint
      i32.const 1
      i32.ge_s
      if (result i32)
       local.get $state
-      local.set $6
+      local.set $7
       global.get $~lib/memory/__stack_pointer
-      local.get $6
+      local.get $7
       i32.store
-      local.get $6
+      local.get $7
       call $lazy-expr-await/branchRead$State#get:resumePoint
       i32.const 1
       i32.le_s
@@ -7645,11 +7684,11 @@
      i32.const 0
      local.set $$cond
      local.get $state
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
+     local.get $7
      i32.store
-     local.get $6
+     local.get $7
      call $lazy-expr-await/branchRead$State#get:resumePoint
      i32.const 0
      i32.eq
@@ -7659,21 +7698,21 @@
       local.set $$cond
      else
       local.get $state
-      local.set $6
+      local.set $7
       global.get $~lib/memory/__stack_pointer
-      local.get $6
+      local.get $7
       i32.store
-      local.get $6
+      local.get $7
       call $lazy-expr-await/branchRead$State#get:resumePoint
       i32.const 1
       i32.ge_s
       if (result i32)
        local.get $state
-       local.set $6
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store
-       local.get $6
+       local.get $7
        call $lazy-expr-await/branchRead$State#get:resumePoint
        i32.const 1
        i32.le_s
@@ -7685,133 +7724,147 @@
      local.get $$cond
      if
       local.get $state
-      local.set $6
+      local.set $7
       global.get $~lib/memory/__stack_pointer
-      local.get $6
+      local.get $7
       i32.store
-      local.get $6
+      local.get $7
       call $lazy-expr-await/branchRead$State#get:resumePoint
       i32.const 0
       i32.eq
       if
        local.get $state
-       local.set $6
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store
-       local.get $6
+       local.get $7
+       global.get $~lib/memory/__stack_pointer
        call $lazy-expr-await/counted
-       local.set $6
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store offset=8
-       local.get $6
+       local.get $7
        call $~lib/task/Task<i32>#get:_record
-       local.set $6
+       local.tee $6
+       i32.store offset=12
+       local.get $6
+       if (result i32)
+        local.get $6
+       else
+        i32.const 688
+        i32.const 816
+        i32.const 46
+        i32.const 5
+        call $~lib/builtins/abort
+        unreachable
+       end
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store offset=4
-       local.get $6
+       local.get $7
        call $lazy-expr-await/branchRead$State#set:$awaited1
        local.get $state
-       local.set $6
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store
-       local.get $6
+       local.get $7
        i32.const 1
        call $lazy-expr-await/branchRead$State#set:resumePoint
        local.get $state
-       local.set $6
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store offset=4
-       local.get $6
+       local.get $7
        call $lazy-expr-await/branchRead$State#get:$awaited1
-       local.set $6
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store
-       local.get $6
+       local.get $7
        call $~lib/task-rt/__taskSettled
        i32.eqz
        if
         local.get $state
-        local.set $6
+        local.set $7
         global.get $~lib/memory/__stack_pointer
-        local.get $6
+        local.get $7
         i32.store
-        local.get $6
+        local.get $7
         local.get $b$lazyDone
         call $lazy-expr-await/branchRead$State#set:b$lazyDone
         local.get $state
-        local.set $6
+        local.set $7
         global.get $~lib/memory/__stack_pointer
-        local.get $6
+        local.get $7
         i32.store
-        local.get $6
+        local.get $7
         local.get $b
         call $lazy-expr-await/branchRead$State#set:b
         local.get $state
-        local.set $6
+        local.set $7
         global.get $~lib/memory/__stack_pointer
-        local.get $6
+        local.get $7
         i32.store
-        local.get $6
+        local.get $7
         local.get $state
-        local.set $6
+        local.set $7
         global.get $~lib/memory/__stack_pointer
-        local.get $6
+        local.get $7
         i32.store offset=8
-        local.get $6
+        local.get $7
         call $lazy-expr-await/branchRead$State#get:$awaited1
-        local.set $6
+        local.set $7
         global.get $~lib/memory/__stack_pointer
-        local.get $6
+        local.get $7
         i32.store offset=4
-        local.get $6
+        local.get $7
         call $~lib/task-rt/__taskPark
         global.get $~lib/memory/__stack_pointer
-        i32.const 12
+        i32.const 16
         i32.add
         global.set $~lib/memory/__stack_pointer
         return
        end
       end
       local.get $state
-      local.set $6
+      local.set $7
       global.get $~lib/memory/__stack_pointer
-      local.get $6
+      local.get $7
       i32.store
-      local.get $6
+      local.get $7
       call $lazy-expr-await/branchRead$State#get:resumePoint
       i32.const 1
       i32.eq
       if
        local.get $state
-       local.set $6
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store
-       local.get $6
+       local.get $7
        i32.const 0
        call $lazy-expr-await/branchRead$State#set:resumePoint
        local.get $state
-       local.set $6
+       local.set $7
        global.get $~lib/memory/__stack_pointer
-       local.get $6
+       local.get $7
        i32.store
-       local.get $6
+       local.get $7
        call $lazy-expr-await/branchRead$State#get:$awaited1
        i32.load offset=8
        local.set $b
       end
       local.get $state
-      local.set $6
+      local.set $7
       global.get $~lib/memory/__stack_pointer
-      local.get $6
+      local.get $7
       i32.store
-      local.get $6
+      local.get $7
       call $lazy-expr-await/branchRead$State#get:resumePoint
       i32.const 0
       i32.eq
@@ -7822,33 +7875,33 @@
      end
     end
     local.get $state
-    local.set $6
+    local.set $7
     global.get $~lib/memory/__stack_pointer
-    local.get $6
+    local.get $7
     i32.store
-    local.get $6
+    local.get $7
     call $lazy-expr-await/branchRead$State#get:resumePoint
     i32.const 0
     i32.eq
     if
      local.get $state
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
+     local.get $7
      i32.store
-     local.get $6
+     local.get $7
      local.get $b
      call $~lib/task-rt/__taskCompleteResult<i32>
      local.get $state
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
+     local.get $7
      i32.store
-     local.get $6
+     local.get $7
      i32.const 2
      call $lazy-expr-await/branchRead$State#set:resumePoint
      global.get $~lib/memory/__stack_pointer
-     i32.const 12
+     i32.const 16
      i32.add
      global.set $~lib/memory/__stack_pointer
      return
@@ -7856,39 +7909,39 @@
    end
   end
   local.get $state
-  local.set $6
+  local.set $7
   global.get $~lib/memory/__stack_pointer
-  local.get $6
+  local.get $7
   i32.store
-  local.get $6
+  local.get $7
   call $lazy-expr-await/branchRead$State#get:resumePoint
   i32.const 0
   i32.eq
   if
    local.get $state
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
+   local.get $7
    i32.store
-   local.get $6
+   local.get $7
    i32.const 0
    call $~lib/task-rt/__taskCompleteResult<i32>
    local.get $state
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
+   local.get $7
    i32.store
-   local.get $6
+   local.get $7
    i32.const 2
    call $lazy-expr-await/branchRead$State#set:resumePoint
    global.get $~lib/memory/__stack_pointer
-   i32.const 12
+   i32.const 16
    i32.add
    global.set $~lib/memory/__stack_pointer
    return
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 12
+  i32.const 16
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
@@ -8363,8 +8416,9 @@
   (local $b i32)
   (local $$cond i32)
   (local $4 i32)
+  (local $5 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 12
+  i32.const 16
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
@@ -8372,30 +8426,30 @@
   i64.const 0
   i64.store
   global.get $~lib/memory/__stack_pointer
-  i32.const 0
-  i32.store offset=8
+  i64.const 0
+  i64.store offset=8
   local.get $state
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store
-  local.get $4
+  local.get $5
   call $lazy-expr-await/inExpression$State#get:b$lazyDone
   local.set $b$lazyDone
   local.get $state
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store
-  local.get $4
+  local.get $5
   call $lazy-expr-await/inExpression$State#get:b
   local.set $b
   local.get $state
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store
-  local.get $4
+  local.get $5
   call $lazy-expr-await/inExpression$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -8404,11 +8458,11 @@
    local.set $b$lazyDone
   end
   local.get $state
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store
-  local.get $4
+  local.get $5
   call $lazy-expr-await/inExpression$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -8416,21 +8470,21 @@
    i32.const 1
   else
    local.get $state
-   local.set $4
+   local.set $5
    global.get $~lib/memory/__stack_pointer
-   local.get $4
+   local.get $5
    i32.store
-   local.get $4
+   local.get $5
    call $lazy-expr-await/inExpression$State#get:resumePoint
    i32.const 1
    i32.ge_s
    if (result i32)
     local.get $state
-    local.set $4
+    local.set $5
     global.get $~lib/memory/__stack_pointer
-    local.get $4
+    local.get $5
     i32.store
-    local.get $4
+    local.get $5
     call $lazy-expr-await/inExpression$State#get:resumePoint
     i32.const 1
     i32.le_s
@@ -8442,11 +8496,11 @@
    i32.const 0
    local.set $$cond
    local.get $state
-   local.set $4
+   local.set $5
    global.get $~lib/memory/__stack_pointer
-   local.get $4
+   local.get $5
    i32.store
-   local.get $4
+   local.get $5
    call $lazy-expr-await/inExpression$State#get:resumePoint
    i32.const 0
    i32.eq
@@ -8456,21 +8510,21 @@
     local.set $$cond
    else
     local.get $state
-    local.set $4
+    local.set $5
     global.get $~lib/memory/__stack_pointer
-    local.get $4
+    local.get $5
     i32.store
-    local.get $4
+    local.get $5
     call $lazy-expr-await/inExpression$State#get:resumePoint
     i32.const 1
     i32.ge_s
     if (result i32)
      local.get $state
-     local.set $4
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store
-     local.get $4
+     local.get $5
      call $lazy-expr-await/inExpression$State#get:resumePoint
      i32.const 1
      i32.le_s
@@ -8482,133 +8536,147 @@
    local.get $$cond
    if
     local.get $state
-    local.set $4
+    local.set $5
     global.get $~lib/memory/__stack_pointer
-    local.get $4
+    local.get $5
     i32.store
-    local.get $4
+    local.get $5
     call $lazy-expr-await/inExpression$State#get:resumePoint
     i32.const 0
     i32.eq
     if
      local.get $state
-     local.set $4
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store
-     local.get $4
+     local.get $5
+     global.get $~lib/memory/__stack_pointer
      call $lazy-expr-await/counted
-     local.set $4
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store offset=8
-     local.get $4
+     local.get $5
      call $~lib/task/Task<i32>#get:_record
-     local.set $4
+     local.tee $4
+     i32.store offset=12
+     local.get $4
+     if (result i32)
+      local.get $4
+     else
+      i32.const 688
+      i32.const 816
+      i32.const 62
+      i32.const 3
+      call $~lib/builtins/abort
+      unreachable
+     end
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store offset=4
-     local.get $4
+     local.get $5
      call $lazy-expr-await/inExpression$State#set:$awaited1
      local.get $state
-     local.set $4
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store
-     local.get $4
+     local.get $5
      i32.const 1
      call $lazy-expr-await/inExpression$State#set:resumePoint
      local.get $state
-     local.set $4
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store offset=4
-     local.get $4
+     local.get $5
      call $lazy-expr-await/inExpression$State#get:$awaited1
-     local.set $4
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store
-     local.get $4
+     local.get $5
      call $~lib/task-rt/__taskSettled
      i32.eqz
      if
       local.get $state
-      local.set $4
+      local.set $5
       global.get $~lib/memory/__stack_pointer
-      local.get $4
+      local.get $5
       i32.store
-      local.get $4
+      local.get $5
       local.get $b$lazyDone
       call $lazy-expr-await/inExpression$State#set:b$lazyDone
       local.get $state
-      local.set $4
+      local.set $5
       global.get $~lib/memory/__stack_pointer
-      local.get $4
+      local.get $5
       i32.store
-      local.get $4
+      local.get $5
       local.get $b
       call $lazy-expr-await/inExpression$State#set:b
       local.get $state
-      local.set $4
+      local.set $5
       global.get $~lib/memory/__stack_pointer
-      local.get $4
+      local.get $5
       i32.store
-      local.get $4
+      local.get $5
       local.get $state
-      local.set $4
+      local.set $5
       global.get $~lib/memory/__stack_pointer
-      local.get $4
+      local.get $5
       i32.store offset=8
-      local.get $4
+      local.get $5
       call $lazy-expr-await/inExpression$State#get:$awaited1
-      local.set $4
+      local.set $5
       global.get $~lib/memory/__stack_pointer
-      local.get $4
+      local.get $5
       i32.store offset=4
-      local.get $4
+      local.get $5
       call $~lib/task-rt/__taskPark
       global.get $~lib/memory/__stack_pointer
-      i32.const 12
+      i32.const 16
       i32.add
       global.set $~lib/memory/__stack_pointer
       return
      end
     end
     local.get $state
-    local.set $4
+    local.set $5
     global.get $~lib/memory/__stack_pointer
-    local.get $4
+    local.get $5
     i32.store
-    local.get $4
+    local.get $5
     call $lazy-expr-await/inExpression$State#get:resumePoint
     i32.const 1
     i32.eq
     if
      local.get $state
-     local.set $4
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store
-     local.get $4
+     local.get $5
      i32.const 0
      call $lazy-expr-await/inExpression$State#set:resumePoint
      local.get $state
-     local.set $4
+     local.set $5
      global.get $~lib/memory/__stack_pointer
-     local.get $4
+     local.get $5
      i32.store
-     local.get $4
+     local.get $5
      call $lazy-expr-await/inExpression$State#get:$awaited1
      i32.load offset=8
      local.set $b
     end
     local.get $state
-    local.set $4
+    local.set $5
     global.get $~lib/memory/__stack_pointer
-    local.get $4
+    local.get $5
     i32.store
-    local.get $4
+    local.get $5
     call $lazy-expr-await/inExpression$State#get:resumePoint
     i32.const 0
     i32.eq
@@ -8619,41 +8687,41 @@
    end
   end
   local.get $state
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store
-  local.get $4
+  local.get $5
   call $lazy-expr-await/inExpression$State#get:resumePoint
   i32.const 0
   i32.eq
   if
    local.get $state
-   local.set $4
+   local.set $5
    global.get $~lib/memory/__stack_pointer
-   local.get $4
+   local.get $5
    i32.store
-   local.get $4
+   local.get $5
    local.get $b
    i32.const 2
    i32.mul
    call $~lib/task-rt/__taskCompleteResult<i32>
    local.get $state
-   local.set $4
+   local.set $5
    global.get $~lib/memory/__stack_pointer
-   local.get $4
+   local.get $5
    i32.store
-   local.get $4
+   local.get $5
    i32.const 2
    call $lazy-expr-await/inExpression$State#set:resumePoint
    global.get $~lib/memory/__stack_pointer
-   i32.const 12
+   i32.const 16
    i32.add
    global.set $~lib/memory/__stack_pointer
    return
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 12
+  i32.const 16
   i32.add
   global.set $~lib/memory/__stack_pointer
  )

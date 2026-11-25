@@ -5513,66 +5513,71 @@
   global.set $~lib/memory/__stack_pointer
  )
  (func $~lib/task-rt/__taskPark (param $state i32) (param $awaited i32)
+  (local $empty i32)
   (local $byRecord i32)
   (local $list i32)
-  (local $4 i32)
+  (local $5 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 20
+  i32.const 24
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
   i32.const 0
-  i32.const 20
+  i32.const 24
   memory.fill
   global.get $~lib/memory/__stack_pointer
   global.get $~lib/task-rt/waiters
-  local.tee $byRecord
+  local.tee $empty
   i32.store
-  local.get $byRecord
+  local.get $empty
   i32.const 0
   i32.eq
   if
    global.get $~lib/memory/__stack_pointer
    i32.const 0
    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#constructor"
-   local.tee $byRecord
+   local.tee $empty
    i32.store
-   local.get $byRecord
+   local.get $empty
    global.set $~lib/task-rt/waiters
   end
+  global.get $~lib/memory/__stack_pointer
+  local.get $empty
+  local.tee $byRecord
+  i32.store offset=4
   i32.const 0
   local.set $list
   local.get $byRecord
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
-  i32.store offset=4
-  local.get $4
-  local.get $awaited
-  local.set $4
-  global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store offset=8
-  local.get $4
+  local.get $5
+  local.get $awaited
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=12
+  local.get $5
   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#has"
   if
    global.get $~lib/memory/__stack_pointer
    local.get $byRecord
-   local.set $4
+   local.set $5
    global.get $~lib/memory/__stack_pointer
-   local.get $4
-   i32.store offset=4
-   local.get $4
-   local.get $awaited
-   local.set $4
-   global.get $~lib/memory/__stack_pointer
-   local.get $4
+   local.get $5
    i32.store offset=8
-   local.get $4
+   local.get $5
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=12
+   local.get $5
    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get"
    local.tee $list
-   i32.store offset=12
+   i32.store offset=16
   end
   local.get $list
   i32.const 0
@@ -5583,57 +5588,57 @@
    i32.const 0
    call $~lib/array/Array<~lib/task-rt/TaskState>#constructor
    local.tee $list
-   i32.store offset=12
-   local.get $byRecord
-   local.set $4
-   global.get $~lib/memory/__stack_pointer
-   local.get $4
-   i32.store offset=4
-   local.get $4
-   local.get $awaited
-   local.set $4
-   global.get $~lib/memory/__stack_pointer
-   local.get $4
-   i32.store offset=8
-   local.get $4
-   local.get $list
-   local.set $4
-   global.get $~lib/memory/__stack_pointer
-   local.get $4
    i32.store offset=16
-   local.get $4
+   local.get $byRecord
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=8
+   local.get $5
+   local.get $awaited
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=12
+   local.get $5
+   local.get $list
+   local.set $5
+   global.get $~lib/memory/__stack_pointer
+   local.get $5
+   i32.store offset=20
+   local.get $5
    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#set"
    drop
   end
   local.get $list
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
-  i32.store offset=4
-  local.get $4
-  local.get $state
-  local.set $4
-  global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store offset=8
-  local.get $4
+  local.get $5
+  local.get $state
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=12
+  local.get $5
   call $~lib/array/Array<~lib/task-rt/TaskState>#push
   drop
   local.get $state
-  local.set $4
+  local.set $5
   global.get $~lib/memory/__stack_pointer
-  local.get $4
-  i32.store offset=4
-  local.get $4
-  local.get $awaited
-  local.set $4
-  global.get $~lib/memory/__stack_pointer
-  local.get $4
+  local.get $5
   i32.store offset=8
-  local.get $4
+  local.get $5
+  local.get $awaited
+  local.set $5
+  global.get $~lib/memory/__stack_pointer
+  local.get $5
+  i32.store offset=12
+  local.get $5
   call $~lib/task-rt/parkState
   global.get $~lib/memory/__stack_pointer
-  i32.const 20
+  i32.const 24
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
@@ -5995,78 +6000,83 @@
   global.set $~lib/memory/__stack_pointer
  )
  (func $~lib/task-rt/wake (param $record i32)
+  (local $map i32)
   (local $byRecord i32)
   (local $list i32)
   (local $queue i32)
   (local $i i32)
   (local $k i32)
-  (local $6 i32)
+  (local $7 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 24
+  i32.const 28
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
   i32.const 0
-  i32.const 24
+  i32.const 28
   memory.fill
   global.get $~lib/memory/__stack_pointer
   global.get $~lib/task-rt/waiters
-  local.tee $byRecord
+  local.tee $map
   i32.store
-  local.get $byRecord
+  local.get $map
   i32.const 0
   i32.eq
   if
    global.get $~lib/memory/__stack_pointer
-   i32.const 24
+   i32.const 28
    i32.add
    global.set $~lib/memory/__stack_pointer
    return
   end
+  global.get $~lib/memory/__stack_pointer
+  local.get $map
+  local.tee $byRecord
+  i32.store offset=4
   i32.const 0
   local.set $list
   local.get $byRecord
-  local.set $6
+  local.set $7
   global.get $~lib/memory/__stack_pointer
-  local.get $6
-  i32.store offset=4
-  local.get $6
-  local.get $record
-  local.set $6
-  global.get $~lib/memory/__stack_pointer
-  local.get $6
+  local.get $7
   i32.store offset=8
-  local.get $6
+  local.get $7
+  local.get $record
+  local.set $7
+  global.get $~lib/memory/__stack_pointer
+  local.get $7
+  i32.store offset=12
+  local.get $7
   call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#has"
   if
    global.get $~lib/memory/__stack_pointer
    local.get $byRecord
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
-   i32.store offset=4
-   local.get $6
-   local.get $record
-   local.set $6
-   global.get $~lib/memory/__stack_pointer
-   local.get $6
+   local.get $7
    i32.store offset=8
-   local.get $6
+   local.get $7
+   local.get $record
+   local.set $7
+   global.get $~lib/memory/__stack_pointer
+   local.get $7
+   i32.store offset=12
+   local.get $7
    call $"~lib/map/Map<~lib/task/TaskRecord,~lib/array/Array<~lib/task-rt/TaskState>>#get"
    local.tee $list
-   i32.store offset=12
+   i32.store offset=16
   end
   local.get $list
   i32.const 0
   i32.ne
   if (result i32)
    local.get $list
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
-   i32.store offset=4
-   local.get $6
+   local.get $7
+   i32.store offset=8
+   local.get $7
    call $~lib/array/Array<~lib/task-rt/TaskState>#get:length
    i32.const 0
    i32.ne
@@ -6077,7 +6087,7 @@
    global.get $~lib/memory/__stack_pointer
    global.get $~lib/task-rt/ready
    local.tee $queue
-   i32.store offset=16
+   i32.store offset=20
    local.get $queue
    i32.const 0
    i32.eq
@@ -6087,18 +6097,18 @@
     i32.const 0
     call $~lib/array/Array<~lib/task-rt/TaskState>#constructor
     local.tee $queue
-    i32.store offset=16
+    i32.store offset=20
     local.get $queue
     global.set $~lib/task-rt/ready
    end
    i32.const 0
    local.set $i
    local.get $list
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
-   i32.store offset=4
-   local.get $6
+   local.get $7
+   i32.store offset=8
+   local.get $7
    call $~lib/array/Array<~lib/task-rt/TaskState>#get:length
    local.set $k
    loop $for-loop|0
@@ -6107,24 +6117,24 @@
     i32.lt_s
     if
      local.get $queue
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
-     i32.store offset=4
-     local.get $6
+     local.get $7
+     i32.store offset=8
+     local.get $7
      local.get $list
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
-     i32.store offset=20
-     local.get $6
+     local.get $7
+     i32.store offset=24
+     local.get $7
      local.get $i
      call $~lib/array/Array<~lib/task-rt/TaskState>#__get
-     local.set $6
+     local.set $7
      global.get $~lib/memory/__stack_pointer
-     local.get $6
-     i32.store offset=8
-     local.get $6
+     local.get $7
+     i32.store offset=12
+     local.get $7
      call $~lib/array/Array<~lib/task-rt/TaskState>#push
      drop
      local.get $i
@@ -6135,16 +6145,16 @@
     end
    end
    local.get $list
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
-   local.get $6
-   i32.store offset=4
-   local.get $6
+   local.get $7
+   i32.store offset=8
+   local.get $7
    i32.const 0
    call $~lib/array/Array<~lib/task-rt/TaskState>#set:length
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 24
+  i32.const 28
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
@@ -6260,41 +6270,42 @@
   (local $6 i32)
   (local $7 i32)
   (local $8 i32)
+  (local $9 i32)
   global.get $~lib/memory/__stack_pointer
-  i32.const 32
+  i32.const 36
   i32.sub
   global.set $~lib/memory/__stack_pointer
   call $~stack_check
   global.get $~lib/memory/__stack_pointer
   i32.const 0
-  i32.const 32
+  i32.const 36
   memory.fill
   global.get $~lib/memory/__stack_pointer
   local.get $state
-  local.set $8
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $8
+  local.get $9
   i32.store
-  local.get $8
+  local.get $9
   call $async-closures-case6/outer$State#get:h
   local.tee $h
   i32.store offset=4
   global.get $~lib/memory/__stack_pointer
   local.get $state
-  local.set $8
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $8
+  local.get $9
   i32.store
-  local.get $8
+  local.get $9
   call $async-closures-case6/outer$State#get:$closureEnv
   local.tee $$closureEnv
   i32.store offset=8
   local.get $state
-  local.set $8
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $8
+  local.get $9
   i32.store
-  local.get $8
+  local.get $9
   call $async-closures-case6/outer$State#get:resumePoint
   i32.const 0
   i32.eq
@@ -6305,11 +6316,11 @@
    local.tee $$closureEnv
    i32.store offset=8
    local.get $$closureEnv
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store
-   local.get $8
+   local.get $9
    i32.const 1
    call $async-closures-case6/outer$Env#set:x
   end
@@ -6332,183 +6343,197 @@
   local.get $inner
   drop
   local.get $state
-  local.set $8
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $8
+  local.get $9
   i32.store
-  local.get $8
+  local.get $9
   call $async-closures-case6/outer$State#get:resumePoint
   i32.const 0
   i32.eq
   if
    local.get $state
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store
-   local.get $8
+   local.get $9
+   global.get $~lib/memory/__stack_pointer
    local.get $h
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store offset=24
-   local.get $8
+   local.get $9
    call $~lib/task/Task<i32>#get:_record
-   local.set $8
+   local.tee $5
+   i32.store offset=28
+   local.get $5
+   if (result i32)
+    local.get $5
+   else
+    i32.const 688
+    i32.const 816
+    i32.const 20
+    i32.const 3
+    call $~lib/builtins/abort
+    unreachable
+   end
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store offset=20
-   local.get $8
+   local.get $9
    call $async-closures-case6/outer$State#set:$awaited1
    local.get $state
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store
-   local.get $8
+   local.get $9
    i32.const 1
    call $async-closures-case6/outer$State#set:resumePoint
    local.get $state
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store offset=20
-   local.get $8
+   local.get $9
    call $async-closures-case6/outer$State#get:$awaited1
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store
-   local.get $8
+   local.get $9
    call $~lib/task-rt/__taskSettled
    i32.eqz
    if
     local.get $state
-    local.set $8
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $8
+    local.get $9
     i32.store
-    local.get $8
+    local.get $9
     local.get $$closureEnv
-    local.set $8
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $8
+    local.get $9
     i32.store offset=20
-    local.get $8
+    local.get $9
     call $async-closures-case6/outer$State#set:$closureEnv
     local.get $state
-    local.set $8
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $8
+    local.get $9
     i32.store
-    local.get $8
+    local.get $9
     local.get $state
-    local.set $8
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $8
+    local.get $9
     i32.store offset=24
-    local.get $8
+    local.get $9
     call $async-closures-case6/outer$State#get:$awaited1
-    local.set $8
+    local.set $9
     global.get $~lib/memory/__stack_pointer
-    local.get $8
+    local.get $9
     i32.store offset=20
-    local.get $8
+    local.get $9
     call $~lib/task-rt/__taskPark
     global.get $~lib/memory/__stack_pointer
-    i32.const 32
+    i32.const 36
     i32.add
     global.set $~lib/memory/__stack_pointer
     return
    end
   end
   local.get $state
-  local.set $8
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $8
+  local.get $9
   i32.store
-  local.get $8
+  local.get $9
   call $async-closures-case6/outer$State#get:resumePoint
   i32.const 1
   i32.eq
   if
    local.get $state
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store
-   local.get $8
+   local.get $9
    i32.const 0
    call $async-closures-case6/outer$State#set:resumePoint
    local.get $state
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store
-   local.get $8
+   local.get $9
    call $async-closures-case6/outer$State#get:$awaited1
    i32.load offset=8
    drop
   end
   local.get $state
-  local.set $8
+  local.set $9
   global.get $~lib/memory/__stack_pointer
-  local.get $8
+  local.get $9
   i32.store
-  local.get $8
+  local.get $9
   call $async-closures-case6/outer$State#get:resumePoint
   i32.const 0
   i32.eq
   if
    local.get $state
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store
-   local.get $8
+   local.get $9
    global.get $~env
-   local.set $6
+   local.set $7
    global.get $~lib/memory/__stack_pointer
    local.get $inner
-   local.tee $5
-   i32.store offset=28
-   local.get $5
+   local.tee $6
+   i32.store offset=32
+   local.get $6
    i32.load offset=4
    global.set $~env
    i32.const 0
    global.set $~argumentsLength
-   local.get $5
+   local.get $6
    i32.load
    call_indirect (type $4)
-   local.set $7
-   local.get $6
-   global.set $~env
-   local.get $7
-   local.get $$closureEnv
    local.set $8
+   local.get $7
+   global.set $~env
+   local.get $8
+   local.get $$closureEnv
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store offset=20
-   local.get $8
+   local.get $9
    call $async-closures-case6/outer$Env#get:x
    i32.add
    call $~lib/task-rt/__taskCompleteResult<i32>
    local.get $state
-   local.set $8
+   local.set $9
    global.get $~lib/memory/__stack_pointer
-   local.get $8
+   local.get $9
    i32.store
-   local.get $8
+   local.get $9
    i32.const 2
    call $async-closures-case6/outer$State#set:resumePoint
    global.get $~lib/memory/__stack_pointer
-   i32.const 32
+   i32.const 36
    i32.add
    global.set $~lib/memory/__stack_pointer
    return
   end
   global.get $~lib/memory/__stack_pointer
-  i32.const 32
+  i32.const 36
   i32.add
   global.set $~lib/memory/__stack_pointer
  )

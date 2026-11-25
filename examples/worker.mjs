@@ -19,6 +19,19 @@ try {
       __executorCount: () => total,
       __startThread: () => -1,
     },
+    // **The `scheduler` namespace** (DL44): a shared stackful build imports
+    // `scheduler::park` whether or not it parks. Keyless parks are the store's own
+    // business; a keyed one would name a producer this example does not have.
+    scheduler: {
+      park: (taskId, class_, key) => {
+        if (class_ !== 0 || key !== 0) {
+          throw new Error(
+            `worker: scheduler::park named a producer (class ${class_}, key ${key}) ` +
+              "that this example has no producer for",
+          );
+        }
+      },
+    },
   });
   const e = instance.exports;
   e.__arenaInit(e.__workerArenaBase(id), e.__workerArenaSize(id));

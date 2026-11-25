@@ -1721,8 +1721,19 @@ export class AsyncLowerTransform {
             Node.createBinaryExpression(
               Token.Equals,
               awaitedFieldOf(ctx.stateName, info.fieldName, range),
-              Node.createPropertyAccessExpression(
-                info.operand, Node.createIdentifierExpression(RECORD_FIELD, range), range
+              // **`handle._record!`** (DL44). The field is `TaskRecord | null` in std
+              // because the stackful backend never creates one, so Backend A has to say
+              // what it knows: `__taskRegister` assigned it at entry, before any await
+              // can run. This is the same guarantee the old `_record!:` declaration
+              // made, moved to the one place that depends on it — so a stackful task,
+              // which never takes this path, no longer aborts inside the getter.
+              Node.createAssertionExpression(
+                AssertionKind.NonNull,
+                Node.createPropertyAccessExpression(
+                  info.operand, Node.createIdentifierExpression(RECORD_FIELD, range), range
+                ),
+                null,
+                range
               ),
               range
             )

@@ -359,25 +359,30 @@ export abstract class TaskBase {
  */
 export class Task<T> extends TaskBase {
   /**
-   * Backend A's record for this task — **and a zero reference on the stackful
-   * backend, which never creates one** (this class's own note says so).
+   * Backend A's record for this task — **and `null` on the stackful backend, which
+   * never creates one** (this class's own note says so).
    *
-   * **Why this is not `_record!: TaskRecord` any more** (DL44, I106). A field
+   * **Why this is `| null` and not `_record!: TaskRecord`** (DL44, I106). A field
    * declared definitely-assigned with a non-nullable reference type gets a generated
-   * null check in its getter (`src/compiler.ts:4366`), so *reading* it when it holds
-   * zero **aborts**: `Unexpected 'null' (not assigned a value)` at this line, column
-   * 3. A stackful policy await does exactly that read — `__parkRecord()` answers
-   * `TaskRecord | null` precisely because such a task has no record, and
-   * `__parkRemote`/`__parkAwait` branch on that answer.
+   * null check in its getter (`src/compiler.ts:4366`), so *reading* it while it holds
+   * zero **aborts** — `Unexpected 'null' (not assigned a value)` at this line, column
+   * 3. A stackful policy await does exactly that read: `__parkRecord()` answers
+   * `TaskRecord | null` because such a task has no record, and `__parkRemote` /
+   * `__parkAwait` branch on that answer. That abort was Gate 4's
+   * `abort 880 1008 362 3`.
    *
-   * So the assertion moves off the declaration and onto the one path that depends on
-   * it: Backend A writes this field in `__taskRegister` at entry, before any await can
-   * run, and no other code needs it non-null. The type stays `TaskRecord` (a nullable
-   * declaration would push an assertion into every guest that reads it — `rt-guards.ts`
-   * does), the initialiser is the zero reference, and `__parkRecord()` still declares
-   * `TaskRecord | null` so callers must handle the absent case explicitly.
+   * The alternative — dropping `!:` and writing an initialiser — does not compile:
+   * AS requires one or the other (`TS2564`), and `changetype<TaskRecord>(0)` lowers to
+   * `call set:_record(i32.const 0)` against a `(ref null …)` setter under
+   * `--wasmGc`, a validation error (measured).
+   *
+   * So the type tells the truth and the two readers that know the record is present
+   * say so: Backend A's lowering reads it as `handle._record!` (it assigned the field
+   * in `__taskRegister` before any await could run), and the guests that build their
+   * own handle assert it too. `__parkRecord()` keeps its nullable answer, which is what
+   * the stackful paths consume.
    */
-  _record: TaskRecord = changetype<TaskRecord>(0);
+  _record: TaskRecord | null = null;
 
   drive(): void {}
 
