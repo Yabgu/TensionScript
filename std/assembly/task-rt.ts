@@ -494,10 +494,14 @@ export function __taskPark(state: TaskState, awaited: TaskRecord): void {
     empty = new Map();
     waiters = empty;
   }
-  // The same explicit non-null copy `wake` needs, for the same `--wasmGc` reason: the
-  // null branch above assigns, and the narrowing does not survive into the calls
-  // below. Measured at DL44 alongside `wake`'s.
-  let byRecord = empty!;
+  // **`changetype`, not `!`** (DL44). The null branch above assigns, so there is no
+  // null left to assert — `!` here is a `TS210 Expression is never 'null'` information
+  // (and the async-method probes assert a clean diagnostic list). Under `--wasmGc` the
+  // narrowing nevertheless does not reach the calls below, which is why a copy is
+  // needed at all: `Map<…> | null` is not assignable to `Map<…>` there. A cast says
+  // exactly what is true — same reference, better-known type — and says nothing about
+  // null.
+  let byRecord = changetype<Map<TaskRecord, Array<TaskState>>>(empty);
   let list: Array<TaskState> | null = null;
   if (byRecord.has(awaited)) list = byRecord.get(awaited);
   if (list == null) {
@@ -525,14 +529,10 @@ export function __taskPark(state: TaskState, awaited: TaskRecord): void {
 function wake(record: TaskRecord): void {
   let map = waiters;
   if (map == null) return;
-  // **The non-null copy is explicit, and it is not belt-and-braces** (DL44). Under
-  // `--wasmGc` the `== null` narrowing above does not survive into the calls below —
-  // the compiler's own `isLinearBufferField` note says a property read does not stay
-  // narrowed across `a != null && f(a)`, and this is the same shape on a local that
-  // crosses a call. Measured: `Map<…> | null` not assignable to `Map<…>` at this
-  // line, nine times, for a program that compiled clean before DL44 changed what gets
-  // instantiated here.
-  let byRecord = map!;
+  // **A `changetype` copy, for the same reason the registration path needs one** (DL44):
+  // under `--wasmGc` the narrowing above does not reach the calls below, and `!` would
+  // be a redundant-null-assertion information on a value that is already non-null.
+  let byRecord = changetype<Map<TaskRecord, Array<TaskState>>>(map);
   let list: Array<TaskState> | null = null;
   if (byRecord.has(record)) list = byRecord.get(record);
   if (list != null && list.length != 0) {

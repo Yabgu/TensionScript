@@ -48,6 +48,26 @@ function check(name, actual, expected) {
   }
 }
 
+/**
+ * **The `scheduler` namespace** (DL44). A shared stackful build imports
+ * `scheduler::park` whether or not it parks — the continuation policy await registers
+ * its pair there (DL43) — so neither instance loads without it. Keyless parks are the
+ * store's own business (its `settle` resumes them); a keyed one names a producer this
+ * stress fixture does not have, so it is refused loudly rather than stranding.
+ */
+const schedulerImports = {
+  scheduler: {
+    park: (taskId, class_, key) => {
+      if (class_ !== 0 || key !== 0) {
+        throw new Error(
+          `scheduler::park named a producer (class ${class_}, key ${key}) that this ` +
+            "fixture has no producer for",
+        );
+      }
+    },
+  },
+};
+
 if (!isMainThread) {
   const { bytes, memory, id, total } = workerData;
   try {
@@ -58,6 +78,7 @@ if (!isMainThread) {
         __executorCount: () => total,
         __startThread: () => -1,
       },
+      ...schedulerImports,
     });
     const e = instance.exports;
     e.__arenaInit(e.__workerArenaBase(id), e.__workerArenaSize(id));
@@ -243,7 +264,7 @@ export async function main(): i32 {
       return 0;
     },
   };
-  const e = new WebAssembly.Instance(module, { env }).exports;
+  const e = new WebAssembly.Instance(module, { env, ...schedulerImports }).exports;
 
   check("`__threadInit` carves the block", e.__threadInit(CAPACITY), 0);
   e.__arenaInit(e.__mainArenaBase(), e.__mainArenaSize());
