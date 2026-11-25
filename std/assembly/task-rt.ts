@@ -350,15 +350,38 @@ export function __taskWake(idsPtr: usize, count: i32): void {
   const table = slots;
   if (table == null || count <= 0) return;
   for (let i = 0; i < count; ++i) {
-    const id = <i32>load<u64>(idsPtr + <usize>i * 8);
+    // **One cell per task: the id, then the producer's value** (DL42, I98). The
+    // cell is eight bytes either way; the second word used to be the high half of a
+    // `u64` id, which a slot index never reaches, so nothing read it. The host
+    // writes both halves (`thread.rs`, `service_wakes`).
+    //
+    // Reading the id as `i32` is the same value the `u64` load answered: the ids are
+    // store-local slot indices (`__taskRegister` pops them from `freeSlots`), so the
+    // truncation discarded zeroes, not information.
+    const cell = idsPtr + <usize>i * 8;
+    const id = <i32>load<i32>(cell);
+    const payload = <i32>load<i32>(cell + 4);
     if (id < 0 || id >= table.length) continue;
     const slot = table[id];
     const state = slot.state;
     if (state == null) continue;            // already resumed: a stale id
+    // **The record the task parked on, settled before it runs** (I98). The fiber
+    // backend ends its park in exactly this state — `__parkHost` writes `payload`,
+    // `status` and `done` from `scheduler::completion` — and this is the same three
+    // writes, so a resumed task reads the producer's word on either backend instead
+    // of the `0` a bare wake left behind. `class_` is deliberately untouched: the
+    // fiber path does not write it either, and the contract is the value, not the
+    // echo of the class the host already matched on.
+    const record = slot.record;
     // Clear the park, keep the slot (0.7.0d-pre): the task is live until its
     // body returns, and `__taskComplete*` frees the id then.
     slot.state = null;
     slot.record = null;
+    if (record != null) {
+      record.payload = payload;
+      record.status = 0;
+      record.done = 1;
+    }
     state.resume(state);
   }
   drainReady();
