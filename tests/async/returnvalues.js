@@ -83,7 +83,7 @@ function run(source, gc) {
   writeFileSync(tsPath, source);
   const flags = [
     "--runtime", "stub", "--noColors", "--use", "abort=",
-    "--enable", "stack-switching", "--textFile", "probe.wat",
+    "--enable", "stack-switching", "--stackful-backend", "continuation", "--textFile", "probe.wat",
   ];
   if (gc) flags.push("--wasmGc");
   try {
@@ -136,7 +136,7 @@ function refusal(source) {
   try {
     execFileSync(process.execPath, [
       CLI, "probe.ts", "-o", "probe.wasm",
-      "--runtime", "stub", "--noColors", "--enable", "stack-switching",
+      "--runtime", "stub", "--noColors", "--enable", "stack-switching", "--stackful-backend", "continuation",
     ], { stdio: "pipe", cwd: dir });
   } catch (error) {
     output = `${error.stderr ?? ""}${error.stdout ?? ""}`;

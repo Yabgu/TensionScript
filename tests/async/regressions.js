@@ -71,7 +71,7 @@ function run(source, gc) {
   const tsPath = join(dir, "probe.ts");
   const wasmPath = join(dir, "probe.wasm");
   writeFileSync(tsPath, source);
-  const flags = ["--runtime", "stub", "--noColors", "--enable", "stack-switching"];
+  const flags = ["--runtime", "stub", "--noColors", "--enable", "stack-switching", "--stackful-backend", "continuation"];
   if (gc) flags.push("--wasmGc");
   try {
     execFileSync(process.execPath, [CLI, "probe.ts", "-o", "probe.wasm", ...flags], {

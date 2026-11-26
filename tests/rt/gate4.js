@@ -214,7 +214,7 @@ async function main() {
     const probe = compile(`
 async function leaf(): i32 { await 1; return 0; }
 export async function main(): i32 { await leaf(); return 0; }
-`, ["--runtime", "stub", "--enable", "stack-switching"]);
+`, ["--runtime", "stub", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     if (probe.ok) {
       try {
         new WebAssembly.Module(probe.bytes);
@@ -398,7 +398,7 @@ export function report(): i32 { return workerSawMain; }
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the task fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -556,7 +556,7 @@ export function pump(): i32 {
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the cross-store fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -683,7 +683,7 @@ export function unionZero(): i32 { return new Mask<u32>(0).union(new Mask<u32>(2
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the identity fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -808,7 +808,7 @@ export function pump(): i32 {
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the admission fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -964,7 +964,7 @@ export function pump(): i32 {
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the masked-policy fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -1104,7 +1104,7 @@ export function pump(): i32 {
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the violation fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -1279,7 +1279,7 @@ export function refusals(): i32 { return __maskRefusals(); }
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads",
-      "--enable", "stack-switching"]);
+      "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the ceiling fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -1401,7 +1401,7 @@ export function pump(): i32 {
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the program-mask fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -1531,7 +1531,7 @@ export function pump(): i32 {
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the queued-request fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);
@@ -1659,7 +1659,7 @@ export function pump(): i32 {
 
 export async function main(): i32 { await leaf(); return 0; }
 `, ["--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching"]);
+      "--importMemory", "--maximumMemory", "128", "--enable", "stack-switching", "--stackful-backend", "continuation"]);
     check("the nested-serve fixture compiles", built.ok, true);
     if (!built.ok) {
       console.log(built.output);

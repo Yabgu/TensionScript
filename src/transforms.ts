@@ -384,8 +384,11 @@ export function applyInTreeTransforms(program: Program): void {
   // lowering is a choice of *mechanism*; a fiber build takes the same transform
   // and expresses its suspension as a call, so it needs no wasm proposal to be
   // selected or to load.
+  // `Options.fiberBackendSelected`, not a literal `"fiber"` comparison: DL51 made `auto`
+  // mean fiber, and a second spelling of "the fiber answer" here would have left the
+  // transform on the promise lowering while the artifact declared `backend=fiber`.
   let stackfulBackend = program.options.hasFeature(Feature.StackSwitching)
-    || program.options.stackfulBackend == "fiber";
+    || program.options.fiberBackendSelected;
   if (program.hasAwait && stackfulBackend) {
     let stackful = new StackfulAsyncTransform();
     stackful.program = program;

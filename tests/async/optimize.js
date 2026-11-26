@@ -67,7 +67,7 @@ try {
           CLI, src, "-o", out,
           "--runtime", "incremental",
           "--target", "release",
-          "--enable", "stack-switching",
+          "--enable", "stack-switching", "--stackful-backend", "continuation",
           "--exportStart", "__start",
           "--optimizeLevel", String(level),
         ],

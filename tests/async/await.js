@@ -59,7 +59,7 @@ function compile(source, extraArgs = []) {
   writeFileSync(tsPath, source);
   execFileSync(process.execPath, [
     CLI, "probe.ts", "-o", "probe.wasm", "--textFile", "probe.wat",
-    "--runtime", "stub", "--noColors", "--enable", "stack-switching",
+    "--runtime", "stub", "--noColors", "--enable", "stack-switching", "--stackful-backend", "continuation",
     ...extraArgs
   ], { stdio: "pipe", cwd: dir });
   const wat = readFileSync(watPath, "utf8");
@@ -81,7 +81,7 @@ function compileExpectFailure(source) {
   try {
     execFileSync(process.execPath, [
       CLI, "probe.ts", "-o", "probe.wasm",
-      "--runtime", "stub", "--noColors", "--enable", "stack-switching"
+      "--runtime", "stub", "--noColors", "--enable", "stack-switching", "--stackful-backend", "continuation"
     ], { stdio: "pipe", cwd: dir });
   } catch (e) {
     output = String(e.stderr || "") + String(e.stdout || "");

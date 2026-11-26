@@ -60,7 +60,7 @@ function compile(source, extraArgs = []) {
   try {
     execFileSync(process.execPath, [
       CLI, "probe.ts", "-o", "probe.wasm", "--textFile", "probe.wat",
-      "--runtime", "stub", "--noColors", "--enable", "stack-switching",
+      "--runtime", "stub", "--noColors", "--enable", "stack-switching", "--stackful-backend", "continuation",
       ...extraArgs,
     ], { stdio: "pipe", cwd: dir });
   } catch (error) {

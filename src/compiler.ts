@@ -289,11 +289,43 @@ export const ASYNC_AWAIT_TAG = "await";
  */
 export const STACKFUL_BACKEND_SECTION = "tension.stackful-backend";
 /**
- * The values `--stackful-backend` accepts. `continuation` is the default and is
- * **never written into a module** — its absence is how it is recorded, which is
- * what keeps every existing artifact byte-identical (`emitStackfulBackendSection`).
+ * The capability declaration: what an artifact **requires of a host**.
+ *
+ * Added in DL51 beside `tension.stackful-backend`, which it does not replace. That
+ * section answers one question (which backend) with the absence trick that keeps old
+ * artifacts byte-identical; this one answers three (backend, the wasm features the
+ * module declares, and the target class) in a form a host can refuse a module by name
+ * over. `tension.stackful-backend` stays because every reader that exists today reads it.
  */
+export const REQUIRES_SECTION = "tension.requires";
+/**
+ * The values `--stackful-backend` accepts.
+ *
+ * `auto` is the default (DL51, the user's decision): it resolves to **fiber**, the
+ * portable lowering, on every target. `continuation` is Linux-only by construction (I16 —
+ * the wasm feature declaration is module-wide, and wasmtime refuses such a module on
+ * Windows before it executes), so it is never chosen for a user; it is chosen *by* a user.
+ *
+ * `continuation` is **never written into `tension.stackful-backend`** — its absence is how
+ * it is recorded there, which is what keeps the pre-DL51 artifacts readable.
+ */
+export const STACKFUL_BACKEND_AUTO = "auto";
 export const STACKFUL_BACKEND_CONTINUATION = "continuation";
+/**
+ * The **promise** lowering: async functions become state machines driven by
+ * `__asyncPump`, and a suspension is a call to the host park import.
+ *
+ * It was what a build with no flags got before DL51, which made it an unstated default
+ * rather than a choice. It is **named** now because it is not the same thing as fiber and
+ * cannot be replaced by it: a *library* module — an `await` in a function, no exported
+ * `main` — has nothing for a stackful shell to resume, so fiber and continuation both
+ * refuse it (`"the stackful backend requires an exported main"`), and the promise
+ * lowering is the only one that compiles it. Measured before DL51 named it: making `auto`
+ * mean fiber broke `tests/async/runtime.js` exactly this way.
+ *
+ * `auto` never resolves to it. It is chosen by writing `--stackful-backend=promise`.
+ */
+export const STACKFUL_BACKEND_PROMISE = "promise";
 export const STACKFUL_BACKEND_FIBER = "fiber";
 export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
@@ -378,14 +410,17 @@ export class Options {
   /** If true, memory is declared as shared. */
   sharedMemory: bool = false;
   /**
-   * How a stackful suspension is expressed: `"continuation"` (wasm `suspend`,
-   * the default) or `"fiber"` (a call to the host park import). The value is
-   * **recorded in the module** as `tension.stackful-backend`, so the host reads
-   * the artifact's own answer instead of inferring it. Validated by
-   * {@link validateStackfulBackend}; anything else is a diagnostic, never a
-   * silent default.
+   * How a stackful suspension is expressed: `"auto"` (the default — resolves to
+   * **fiber** on every target), `"fiber"` (a call to the host park import), or
+   * `"continuation"` (wasm `suspend`; Linux-only, and choosing it enables its own
+   * wasm feature).
+   *
+   * The **resolved** value is what reaches the artifact, in `tension.stackful-backend`
+   * and `tension.requires`, so a host reads the answer rather than inferring it.
+   * Anything else is a diagnostic naming both accepted spellings, never a silent
+   * default — a typo must not become a backend. See {@link resolveStackfulBackend}.
    */
-  stackfulBackend: string = "continuation";
+  stackfulBackend: string = STACKFUL_BACKEND_AUTO;
   /** If true, imported memory is zero filled. */
   zeroFilledMemory: bool = false;
   /** If true, imports the function table provided by the embedder. */
@@ -466,6 +501,24 @@ export class Options {
   /** Gets the size type reference matching the target. */
   get sizeTypeRef(): TypeRef {
     return this.target == Target.Wasm64 ? TypeRef.I64 : TypeRef.I32;
+  }
+
+  /**
+   * Whether this build lowers for the **fiber** suspension — `fiber`, or `auto` which
+   * resolves to it.
+   *
+   * **One definition, because three places ask it** and they must agree: the shell
+   * prologue in this file, the transform that selects `StackfulAsyncTransform`
+   * (`src/transforms.ts`), and the drive body (`src/async/stack.ts`). Two of the three
+   * compared the literal `"fiber"` before DL51, which was correct while `fiber` was the
+   * only spelling that meant fiber — and became a silent divergence the moment `auto`
+   * existed: measured then, the same guest built from the default and from
+   * `--stackful-backend=fiber` produced **different artifacts that both declared
+   * `backend=fiber`**, 23,865 vs 14,437 bytes, because the shell was fiber and the drive
+   * body was the promise path.
+   */
+  get fiberBackendSelected(): bool {
+    return this.stackfulBackend == STACKFUL_BACKEND_FIBER || this.stackfulBackend == STACKFUL_BACKEND_AUTO;
   }
 
   /** Gets if any optimizations will be performed. */
@@ -977,7 +1030,14 @@ export class Compiler extends DiagnosticEmitter {
    * keeps the artifact's claim and its instructions from drifting apart.
    */
   get fiberBackendActive(): bool {
-    return this.options.stackfulBackend == STACKFUL_BACKEND_FIBER;
+    // Delegates to the one definition on `Options`, so the shell, the transform and the
+    // drive body cannot answer it differently. See `Options.fiberBackendSelected`.
+    return this.options.fiberBackendSelected;
+  }
+
+  /** Whether the build lowers for the continuation backend — what `requires` reports. */
+  get continuationBackendActive(): bool {
+    return this.options.stackfulBackend == STACKFUL_BACKEND_CONTINUATION;
   }
 
   /**
@@ -1961,22 +2021,37 @@ export class Compiler extends DiagnosticEmitter {
     // and names the mistake and both accepted values: a typo must not silently
     // become the default and then be recorded as if it had been chosen.
     let backend = options.stackfulBackend;
-    if (backend != STACKFUL_BACKEND_CONTINUATION && backend != STACKFUL_BACKEND_FIBER) {
+    if (
+      backend != STACKFUL_BACKEND_AUTO &&
+      backend != STACKFUL_BACKEND_CONTINUATION &&
+      backend != STACKFUL_BACKEND_FIBER &&
+      backend != STACKFUL_BACKEND_PROMISE
+    ) {
       this.error(
         DiagnosticCode.Not_implemented_0,
         Source.native.range,
-        `--stackful-backend=${backend} (expected ` + STACKFUL_BACKEND_CONTINUATION + " or " + STACKFUL_BACKEND_FIBER + ")"
+        `--stackful-backend=${backend} (expected ` + STACKFUL_BACKEND_AUTO + ", " +
+          STACKFUL_BACKEND_FIBER + ", " + STACKFUL_BACKEND_CONTINUATION + " or " +
+          STACKFUL_BACKEND_PROMISE + ")"
       );
       return module;
     }
-    // **`--stackful-backend=fiber` is a reason to build the shell on its own.**
-    // It used to require `--enable stack-switching` as well, which meant the flag
-    // had to be passed for a backend that never asks wasmtime for the feature —
-    // and the artifact then demanded it anyway, through the shell's types (I85).
-    // A fiber artifact's suspension is a call; nothing in it needs the proposal,
-    // so the shell is available without it, and passing it changes nothing.
+    // **`continuation` enables the feature it needs** (DL51 §1.3). A user who asked for
+    // the backend asked for everything it requires, so `--enable stack-switching` is no
+    // longer a second thing to remember — and, more importantly, no longer a thing to
+    // forget while the artifact still carries the `$ct` type and the tags (I85).
+    //
+    // Set here, before the shell is chosen, because `asyncShellSuspends` below reads the
+    // feature set: enabling it any later would be a build whose lowering and whose
+    // feature declaration disagree.
+    if (backend == STACKFUL_BACKEND_CONTINUATION) {
+      options.setFeature(Feature.StackSwitching, true);
+    }
+    // **`auto` and `fiber` are reasons to build the shell on their own.** A fiber
+    // artifact's suspension is a call; nothing in it needs the proposal, so the shell is
+    // available without `--enable stack-switching`, and passing it changes nothing.
     this.asyncShellSuspends = program.hasAwait
-      && (options.hasFeature(Feature.StackSwitching) || options.stackfulBackend == STACKFUL_BACKEND_FIBER);
+      && (options.hasFeature(Feature.StackSwitching) || this.fiberBackendActive);
     if (this.asyncShellSuspends) {
       if (this.fiberBackendActive) this.prepareFiberPrologue();
       else this.prepareAsyncStackPrologue();
@@ -2443,6 +2518,7 @@ export class Compiler extends DiagnosticEmitter {
     }
 
     this.emitStackfulBackendSection();
+    this.emitRequiresSection();
 
     return module;
   }
@@ -2470,9 +2546,57 @@ export class Compiler extends DiagnosticEmitter {
    * a reader compares it to a string literal without a parser and a hex dump of
    * the section is the answer itself.
    */
+  /**
+   * Writes `tension.requires`: what the artifact needs of a host, as three lines.
+   *
+   *     backend=fiber|continuation
+   *     target=portable|linux-only
+   *     features=stack-switching,shared-memory   (or empty)
+   *
+   * **The format is deliberately not JSON.** The reader is Rust with no serde
+   * dependency in the runtime, and the writer is this compiler; `key=value` lines split
+   * on `=` are twenty lines on each side and cannot drift over a parser. The whole
+   * section is ASCII with no trailing newline, so a hex dump answers it (the same
+   * reasoning as `tension.stackful-backend`).
+   *
+   * **Why these three and not the full feature set.** Only what a host must *configure*
+   * before it can load the module is a requirement: `stack-switching` (continuation
+   * only, and the reason that backend is Linux-only) and `shared-memory` (which needs
+   * threads enabled). Bulk memory and sign extension are universally on and are not
+   * things a host can refuse; listing them would be noise a reader has to filter.
+   *
+   * **Relationship to `tension.stackful-backend`.** That section stays, because readers
+   * exist and because its absence-means-continuation encoding is what keeps pre-DL51
+   * artifacts readable. Here the backend is always written, in both directions, because a
+   * `requires` block that had to be read as an absence would be the same trick twice.
+   * `src/compiler.ts`'s own test asserts the two never disagree.
+   */
+  private emitRequiresSection(): void {
+    let backend = this.continuationBackendActive
+      ? STACKFUL_BACKEND_CONTINUATION
+      : this.options.stackfulBackend == STACKFUL_BACKEND_PROMISE
+        ? STACKFUL_BACKEND_PROMISE
+        : STACKFUL_BACKEND_FIBER;
+    // `portable` is the claim fiber makes: a call to the host park import needs no wasm
+    // proposal, so one artifact serves Linux, Windows and macOS. Continuation needs
+    // `stack-switching`, whose feature declaration is module-wide, and wasmtime refuses
+    // such a module on Windows before it executes (I16).
+    let targetClass = backend == STACKFUL_BACKEND_CONTINUATION ? "linux-only" : "portable";
+    let features: string[] = [];
+    if (backend == STACKFUL_BACKEND_CONTINUATION) features.push("stack-switching");
+    if (this.options.sharedMemory) features.push("shared-memory");
+    let text = "backend=" + backend + "\n" + "target=" + targetClass + "\n" + "features=" + features.join(",");
+    let contents = new Uint8Array(text.length);
+    for (let i = 0, k = text.length; i < k; ++i) contents[i] = text.charCodeAt(i) & 0xff;
+    this.module.addCustomSection(REQUIRES_SECTION, contents);
+  }
+
   private emitStackfulBackendSection(): void {
-    if (!this.fiberBackendActive) return;
-    let value = STACKFUL_BACKEND_FIBER;
+    // Every non-continuation choice is written, because a host reads this section to pick
+    // an executor and absence means continuation: a promise artifact that wrote nothing
+    // would be read as a continuation one and paired with the wrong executor.
+    if (!this.fiberBackendActive && this.options.stackfulBackend != STACKFUL_BACKEND_PROMISE) return;
+    let value = this.fiberBackendActive ? STACKFUL_BACKEND_FIBER : STACKFUL_BACKEND_PROMISE;
     let contents = new Uint8Array(value.length);
     for (let i = 0, k = value.length; i < k; ++i) contents[i] = value.charCodeAt(i) & 0xff;
     this.module.addCustomSection(STACKFUL_BACKEND_SECTION, contents);

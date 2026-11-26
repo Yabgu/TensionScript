@@ -233,7 +233,7 @@ export async function main(): i32 {
     execFileSync(process.execPath, [
       CLI, "probe.ts", "-o", "probe.wasm", "--noColors",
       "--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-      "--importMemory", "--maximumMemory", "256", "--enable", "stack-switching",
+      "--importMemory", "--maximumMemory", "256", "--enable", "stack-switching", "--stackful-backend", "continuation",
     ], { stdio: "pipe", cwd: dir });
   } catch (error) {
     compiled = false;

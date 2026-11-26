@@ -113,7 +113,7 @@ const BASE_FLAGS = [
   "--enable", "threads",
   "--sharedMemory",
   "--maximumMemory", "8",
-  "--enable", "stack-switching",
+  "--enable", "stack-switching", "--stackful-backend", "continuation",
   "--noColors",
   "--use", "abort=",
   "--exportRuntime",

@@ -231,18 +231,27 @@
     "description": [
       "Chooses how a stackful (stack-switching) suspension is expressed.",
       "",
-      " continuation  wasm `suspend`, resumed through the continuation table (default)",
+      " auto          the portable choice for this target — **fiber**, on every target",
+      "               (default). One artifact for Linux, Windows and macOS.",
       " fiber         a call to the host park import; the executor suspends the guest",
       "               on a fiber instead. The artifact carries no `suspend` at all.",
+      " continuation  wasm `suspend`, resumed through the continuation table. **Linux",
+      "               only**: the wasm feature declaration is module-wide and wasmtime",
+      "               refuses the module elsewhere before it executes (I16). Choosing",
+      "               it enables `--enable stack-switching` for you.",
       "",
-      "The choice is **recorded in the module**, as the custom section",
-      "`tension.stackful-backend`, so a host reads it rather than inferring it from",
-      "a flag, an import or an export — and can refuse a guest built for the other",
-      "backend by name.",
+      "Precedence is **flag > config > default**: `--stackful-backend=` always wins, an",
+      "`asconfig.json` (`options.stackfulBackend`, or `targets.<name>.options`) fills it",
+      "when the flag is absent, and `auto` applies when neither says anything.",
+      "",
+      "The **resolved** choice is recorded in the module, in `tension.stackful-backend`",
+      "(fiber only; absence means continuation) and, with the feature set and target",
+      "class, in `tension.requires` — so a host reads the artifact's own answer and can",
+      "refuse a guest built for the other backend by name.",
       ""
     ],
     "type": "s",
-    "default": "continuation"
+    "default": "auto"
   },
 
   "warnDeprecatedExtension": {

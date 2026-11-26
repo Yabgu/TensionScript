@@ -481,7 +481,10 @@ export class StackfulAsyncTransform {
     // callee is a guest task with no producer, so the host has no `(class, key)`
     // to complete and no way to run the body — measured, before this branch
     // existed: `suspensions: 0`, every awaited value 0, exit 0.
-    let driveBody = this.program.options.stackfulBackend == "fiber"
+    // The same question as the shell and the transform, from the same accessor: a drive
+    // body chosen by a literal `"fiber"` comparison would take the promise path for an
+    // `auto` build whose artifact says `backend=fiber`.
+    let driveBody = this.program.options.fiberBackendSelected
       ? this.buildFiberDriveBody(bodyName, parameters, returnType, range)
       : Node.createBlockStatement([
       Node.createIfStatement(

@@ -105,7 +105,13 @@ function compile(source) {
   // where the repo sits). From here it is exactly `probe`.
   execFileSync(process.execPath, [
     CLI, "probe.ts", "-o", "probe.wasm", "--textFile", "probe.wat",
-    "--runtime", "incremental", "--exportRuntime", "--noColors"
+    "--runtime", "incremental", "--exportRuntime", "--noColors",
+    // **The promise lowering, named** (DL51). This probe is a library module: an `await`
+    // in an exported function, and no exported `async main` for a stackful shell to
+    // resume. Fiber and continuation both refuse it by name ("the stackful backend
+    // requires an exported main"), and before DL51 this test was relying on the *default*
+    // being the promise path — which is not a default any more, so it is a choice.
+    "--stackful-backend", "promise"
   ], { stdio: "pipe", cwd: dir });
   const wat = readFileSync(watPath, "utf8");
   const bytes = readFileSync(wasmPath);

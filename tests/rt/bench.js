@@ -219,11 +219,11 @@ async function benchLatency(bytes) {
 async function main() {
   const poolBytes = compile("pool", POOL_PROGRAM, [
     "--runtime", "incremental", "--enable", "threads", "--sharedMemory",
-    "--importMemory", "--maximumMemory", "256", "--enable", "stack-switching",
+    "--importMemory", "--maximumMemory", "256", "--enable", "stack-switching", "--stackful-backend", "continuation",
   ]);
   const mainN = 20000;
   const mainBytes = compile("main", MAIN_PROGRAM(mainN), [
-    "--runtime", "incremental", "--enable", "stack-switching",
+    "--runtime", "incremental", "--enable", "stack-switching", "--stackful-backend", "continuation",
   ]);
   const mainModule = new WebAssembly.Module(mainBytes);
 

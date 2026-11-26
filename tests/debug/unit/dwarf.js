@@ -344,7 +344,7 @@ function u32le(value) {
     const output = execFileSync(process.execPath, [
       path.resolve(here, "..", "..", "..", "bin", "tensionscript.js"),
       "game.ts", "-o", "game.wasm",
-      "--debug", "--sourceMap", "--enable", "stack-switching",
+      "--debug", "--sourceMap", "--enable", "stack-switching", "--stackful-backend", "continuation",
     ], { encoding: "utf8", cwd: dir, stdio: "pipe" });
     assert.ok(
       !/DWARF emission failed/.test(output),

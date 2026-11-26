@@ -56,7 +56,7 @@ function compile(source, gc) {
   writeFileSync(join(dir, "probe.ts"), source);
   const flags = [
     "--runtime", "stub", "--noColors", "--use", "abort=",
-    "--enable", "stack-switching"
+    "--enable", "stack-switching", "--stackful-backend", "continuation"
   ];
   if (gc) flags.push("--wasmGc");
   let stderr = "";
