@@ -55,7 +55,6 @@ const SEP = WIN ? "\\"   : "/";
 
 const extension = ".ts";
 const extension_d = `.d${extension}`;
-const extension_re = new RegExp("\\" + extension + "$");
 
 // **The guest-source extensions, declared once** (DL45, reordered by DL46).
 //
@@ -1120,7 +1119,12 @@ export async function main(argv, options) {
           let contents = [];
           for (let i = 0, k = map.sources.length; i < k; ++i) {
             let name = map.sources[i];
-            let text = assemblyscript.getSource(program, name.replace(extension_re, ""));
+            // **Any accepted extension, not only `.ts`** (DL47). `getSource` looks a file
+            // up by its *internal* path, which now drops `.ten`/`.tension` as well
+            // (`mangleInternalPath`), so stripping `.ts` alone asked for the unstripped
+            // name and failed with "Source of file '…ten' not found." the moment
+            // `--sourceMap` was used on a `.ten` guest.
+            let text = assemblyscript.getSource(program, stripEntryExtension(name));
             if (text == null) return prepareResult(Error(`Source of file '${name}' not found.`));
             contents[i] = text;
           }
