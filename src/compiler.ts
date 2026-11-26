@@ -326,6 +326,14 @@ export const STACKFUL_BACKEND_CONTINUATION = "continuation";
  * `auto` never resolves to it. It is chosen by writing `--stackful-backend=promise`.
  */
 export const STACKFUL_BACKEND_PROMISE = "promise";
+/**
+ * The entry export Tension's SDK uses for a game: `_start_game`.
+ *
+ * A stackful shell needs **a root to resume**, and `main` is only one name for one. 26 of
+ * 27 example guests export this instead, so a shell that looked only for `main` refused the
+ * entire example corpus while a root was right there (DL52).
+ */
+export const STACKFUL_ENTRY_EXPORT = "_start_game";
 export const STACKFUL_BACKEND_FIBER = "fiber";
 export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
@@ -2892,9 +2900,18 @@ export class Compiler extends DiagnosticEmitter {
           // for a file's own exports, so a re-export of some other module's
           // `main` cannot claim the slot.
           if (prefix.length == 0 && name == "main") this.mainFunction = functionInstance;
-          // The entry export this build was told to call (`--exportStart`), for a program
-          // written the SDK's way: `_start_game` rather than `main`.
-          else if (prefix.length == 0 && name == (this.options.exportStart || "_start_game")) {
+          // **A root is a function to resume, and the SDK's name for one is
+          // `_start_game`** — so that name is checked on its own, not only when
+          // `--exportStart` is absent (DL52). `exportStart` names the *export the compiler
+          // creates* for the shell start (`__start`), not a guest function: measured, a
+          // build that names `_start_game` there is refused `AS110: Start function name
+          // '_start_game' is invalid or conflicts with another export`, because the guest's
+          // own export already holds that name. So the two are different questions and both
+          // are asked.
+          else if (
+            prefix.length == 0 &&
+            (name == STACKFUL_ENTRY_EXPORT || name == this.options.exportStart)
+          ) {
             this.startGameFunction = functionInstance;
           }
           if (functionInstance.is(CommonFlags.Compiled)) {
