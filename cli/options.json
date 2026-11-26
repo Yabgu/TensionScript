@@ -245,6 +245,24 @@
     "default": "continuation"
   },
 
+  "warnDeprecatedExtension": {
+    "category": "General",
+    "description": [
+      "Warns, once per entry file, when a guest source is spelled `.ts`.",
+      "",
+      "A guest source may be `.tension` (canonical), `.ten`, or `.ts`. The last is",
+      "accepted during a deprecation window so a tree that has not renamed yet keeps",
+      "building, and it is silent by default: the compiler's own suites compile",
+      "`.ts` entries by construction and several assert the exact bytes of stdout, so",
+      "a notice that fired unconditionally would be noise in every one of them.",
+      "",
+      "Pass this to see the notice while renaming a tree. The notice goes to stderr.",
+      ""
+    ],
+    "type": "b",
+    "default": false
+  },
+
   "stackSize": {
     "category": "Features",
     "description": [

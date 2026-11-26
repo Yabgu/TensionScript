@@ -58,6 +58,32 @@ const extension_d = `.d${extension}`;
 const extension_re = new RegExp("\\" + extension + "$");
 const extension_re_except_d = new RegExp("^(?!.*\\.d\\" + extension + "$).*\\" + extension + "$");
 
+// **The guest-source extensions, declared once** (DL45).
+//
+// `.tension` is canonical, `.ten` is the short spelling, and `.ts` stays accepted
+// during a deprecation window so a tree that has not renamed yet still builds. The
+// list is exhaustive on purpose: a source spelled with any other extension is
+// refused **by name**, with this list in the message — the same shape as
+// `--stackful-backend`, where an unknown value is refused before anything is
+// emitted rather than silently defaulting.
+//
+// **Entry files only.** `extension` above is unchanged and still `.ts`, because it
+// governs *library* resolution — `~lib/…`, `rt/index-*`, `import … from "./x"`. Every
+// library the compiler ships is TypeScript written for a TypeScript toolchain, and
+// that stays true until self-host; a guest program is labelled differently from the
+// compiler that compiles it. Never one spelling for both.
+const ENTRY_EXTENSIONS = [".tension", ".ten", ".ts"];
+const ENTRY_EXTENSION_DEPRECATED = ".ts";
+
+/** The extension `path` is spelled with, if it is one this CLI accepts, else null. */
+function entryExtensionOf(path) {
+  for (let i = 0, k = ENTRY_EXTENSIONS.length; i < k; ++i) {
+    const ext = ENTRY_EXTENSIONS[i];
+    if (path.length > ext.length && path.endsWith(ext)) return ext;
+  }
+  return null;
+}
+
 function toUpperSnakeCase(str) {
   return str.replace(/-/g, "_").toUpperCase();
 }
@@ -729,20 +755,54 @@ export async function main(argv, options) {
       ? path.relative(baseDir, filename)
       : path.normalize(filename);
 
-    sourcePath = sourcePath
-      .replace(/\\/g, "/")
-      .replace(extension_re, "")
-      .replace(/\/$/, "");
+    sourcePath = sourcePath.replace(/\\/g, "/").replace(/\/$/, "");
 
-    // Try entryPath.ext, then entryPath/index.ext
-    let sourceText = await readFile(sourcePath + extension, baseDir);
+    // **A spelling outside the table is refused here, before anything is read.**
+    // The alternative — treating it as a stem and appending an accepted extension —
+    // is precisely the bug this replaced: `count.ten` became `count.ten.ts`, and the
+    // error named a file nobody had written.
+    const givenExtension = path.extname(sourcePath);
+    if (givenExtension.length > 0 && !ENTRY_EXTENSIONS.includes(givenExtension)) {
+      return prepareResult(Error(
+        `Guest source '${filename}' has the extension '${givenExtension}', which is not ` +
+        `one this compiler accepts. Accepted: ${ENTRY_EXTENSIONS.join(", ")} ` +
+        `(${ENTRY_EXTENSION_DEPRECATED} is deprecated).`
+      ));
+    }
+    const spelledExtension = entryExtensionOf(sourcePath);
+    const stem = spelledExtension != null
+      ? sourcePath.slice(0, sourcePath.length - spelledExtension.length)
+      : sourcePath;
+
+    // **The path as spelled is tried first**, so naming `foo.ts` still compiles
+    // `foo.ts` even when a `foo.tension` sits beside it. Then the table in declared
+    // order — `.tension` before `.ten` before `.ts` — then each of those as
+    // `stem/index.*`. One search order, and it is the table's.
+    const candidates = spelledExtension != null ? [sourcePath] : [];
+    for (let e = 0, ke = ENTRY_EXTENSIONS.length; e < ke; ++e) {
+      if (spelledExtension !== ENTRY_EXTENSIONS[e]) candidates.push(stem + ENTRY_EXTENSIONS[e]);
+    }
+    for (let e = 0, ke = ENTRY_EXTENSIONS.length; e < ke; ++e) {
+      candidates.push(`${stem}/index${ENTRY_EXTENSIONS[e]}`);
+    }
+
+    let sourceText = null;
+    for (let c = 0, kc = candidates.length; c < kc; ++c) {
+      sourceText = await readFile(candidates[c], baseDir);
+      if (sourceText != null) { sourcePath = candidates[c]; break; }
+    }
     if (sourceText == null) {
-      const path = `${sourcePath}/index${extension}`;
-      sourceText = await readFile(path, baseDir);
-      if (sourceText != null) sourcePath = path;
-      else sourcePath += extension;
-    } else {
-      sourcePath += extension;
+      // Report the spelling as given, not an appended one: the file the user named
+      // is the file that is missing.
+      sourcePath = candidates[0];
+    }
+
+    if (opts.warnDeprecatedExtension && spelledExtension === ENTRY_EXTENSION_DEPRECATED) {
+      console.error(
+        `WARNING: '${filename}' uses the deprecated guest extension ` +
+        `'${ENTRY_EXTENSION_DEPRECATED}'. Rename it to '${ENTRY_EXTENSIONS[0]}' — the ` +
+        `compiler accepts it now and will not forever.`
+      );
     }
 
     let begin = stats.begin();
