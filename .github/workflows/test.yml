@@ -304,7 +304,39 @@ jobs:
       run: npm ci --no-audit
     - name: Build
       run: npm run build
+    # **A named waiver, with its numbers** (DL50). `npm test` under c8 accumulates one
+    # coverage JSON per process that loads the compiler bundle, and **that corpus is the
+    # coverage**: measured over a full local run (820 files, 3.09 GB), compile children are
+    # 382 files and 3.02 GB — **97.7% of it** — and dropping them leaves the reporter with
+    # **307 statements out of 93,173** (0.3%), i.e. the test runners themselves. The
+    # compiler's coverage *is* what those compiles record, so the corpus cannot be shrunk
+    # without gutting the job, and the reporter's memory scales with it.
+    #
+    # The same corpus, same machine (Node 26), reporter only:
+    #   npx c8 report --temp-directory ./.coverage            -> exit 134, GC abort
+    #   NODE_OPTIONS=--max-old-space-size=8192 …              -> exit 0, summary printed
+    # CI died exactly that way at `184b5d6f` on Node 24: exit 134 *after* the last suite
+    # had passed. Nothing was failing; the reporter ran out of memory.
+    #
+    # **This is a knife-edge, not a regression.** Between the last green tip (`113fdd24`)
+    # and the red one (`184b5d6f`) **no test file changed** — the diff is `cli/index.js`
+    # and `src/ast.ts` — so the compile count and the corpus size are unchanged. DL45
+    # already measured this reporter needing 8 GB and made CI fit by shaving one test's
+    # contribution from 46 MB to 264 KB (still true: that test now adds 180 KB), i.e. by
+    # ~0.0016% of the corpus. A gate whose margin is that thin was never a property.
+    #
+    # What is waived: the reporter gets 8 GB instead of the default. **Nothing is
+    # bypassed** — every suite still runs and the summary is unchanged at any heap size.
+    # The corpus size is printed every run so the trend is visible rather than discovered
+    # as a red job. When 8 GB is no longer enough, the fix is per-suite reporting, not a
+    # larger number.
     - name: Collect coverage
-      run: npx c8 -r none -- npm test
+      env:
+        NODE_OPTIONS: --max-old-space-size=8192
+      run: |
+        npx c8 --temp-directory ./.coverage -r none -- npm test
+        echo "coverage corpus: $(du -sh ./.coverage | cut -f1) in $(ls ./.coverage | wc -l) files"
     - name: Output coverage summary
-      run: npx c8 report -r text-summary
+      env:
+        NODE_OPTIONS: --max-old-space-size=8192
+      run: npx c8 report --temp-directory ./.coverage -r text-summary
