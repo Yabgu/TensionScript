@@ -12,18 +12,21 @@ is the declaration surface this recipe points the editor at.
 
 ---
 
-## 1. Tell the editor that `.tension` and `.ten` are TypeScript
+## 1. Tell the editor that `.ten` and `.tension` are TypeScript
 
 VS Code, in `.vscode/settings.json` (workspace) or your user settings:
 
 ```json
 {
   "files.associations": {
-    "*.tension": "typescript",
-    "*.ten": "typescript"
+    "*.ten": "typescript",
+    "*.tension": "typescript"
   }
 }
 ```
+
+`.ten` is the canonical spelling (DL46); `.tension` — the longer spelling DL45 chose —
+stays accepted, so both associations are here and either opens with the server attached.
 
 Without this, VS Code shows the file as plain text and there is no server at all. With
 it, everything below applies.
@@ -48,7 +51,7 @@ The guest language's types (`i32`, `usize`, `bool`), the std intrinsics
   },
   "include": [
     "../TensionScript/types/tension-guest.d.ts",
-    "**/*.tension"
+    "**/*.ten"
   ]
 }
 ```
@@ -67,8 +70,8 @@ declaration.
 `.gitattributes`:
 
 ```gitattributes
-*.tension linguist-language=TypeScript
 *.ten linguist-language=TypeScript
+*.tension linguist-language=TypeScript
 ```
 
 This is for the web view only. It changes nothing about how the compiler reads a file,
@@ -105,6 +108,6 @@ Three things are **not** silenced, and cannot be, because TypeScript has no such
 
 **What has been verified:** the counts above, by running `tsc` on a guest copied to
 `.ts` in a temporary directory. **What has not been verified: no editor was opened.
-Whether VS Code renders a `.tension` file correctly today is not measured** — the
+Whether VS Code renders a `.ten` file correctly today is not measured** — the
 associations and the declaration program are what it needs, and this document does not
 claim a screenshot.

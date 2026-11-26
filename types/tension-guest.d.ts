@@ -1,9 +1,10 @@
 /**
  * **The guest language's declaration surface** (DL45).
  *
- * A TensionScript guest is read by TypeScript tooling — VS Code opens a `.tension`
- * file with the TypeScript language server attached, because that is what keeps
- * completion and hover — and then reports TypeScript errors about correct guest code:
+ * A TensionScript guest is read by TypeScript tooling — VS Code opens a `.ten` file
+ * (or a `.tension` one, the accepted longer spelling) with the TypeScript language
+ * server attached, because that is what keeps completion and hover — and then reports
+ * TypeScript errors about correct guest code:
  * `i32` and `usize` and `@unmanaged` are not TypeScript, `~lib/task` does not resolve,
  * and `print` is imported from a path the editor knows nothing about.
  *

@@ -1,7 +1,15 @@
 // `guest-extension`: **the entry-extension table, and what it refuses** (DL45).
 //
-// A guest source may be spelled `.tension` (canonical), `.ten`, or `.ts` during the
-// deprecation window. The table lives in `cli/index.js`, which is a *CLI* concern —
+// A guest source may be spelled `.ten`, `.tension`, or `.ts` during the deprecation
+// window. **The project's canonical spelling is `.ten` (DL46); this file asserts the
+// compiler's table, whose order is still `[".tension", ".ten", ".ts"]`** because DL46 may
+// not edit compiler sources. Two visible consequences, both asserted below by what the
+// compiler actually does rather than by what the project wishes: the refusal lists
+// `.tension` first, and `--warn-deprecated-extension` says "Rename it to '.tension'" —
+// a notice that now names the *accepted* spelling rather than the canonical one. That is
+// a follow-up for a round that may touch `cli/index.js`.
+//
+// The table lives in `cli/index.js`, which is a *CLI* concern —
 // the `asc.main` API takes a source string and never resolves a path — so this test
 // spawns the bin rather than importing it. That is also what a user does.
 //
