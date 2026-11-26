@@ -41,13 +41,37 @@ export function entry(): i32 {
 const dir = mkdtempSync(join(tmpdir(), "dl45-ext-"));
 const FLAGS = ["--runtime", "incremental", "--target", "release", "--optimizeLevel", "0"];
 
+/**
+ * **The children do not write coverage** (DL45). `npm run coverage` is
+ * `npx c8 -- npm test`, and c8 collects from every child that inherits
+ * `NODE_V8_COVERAGE`. A compile is the whole 20 MB compiler bundle, so **one child's
+ * coverage JSON is ~7.8 MB**: this test's six compiles were 46 MB of corpus on top of a
+ * run that was already near its heap bound, and the Coverage job died of exhaustion
+ * (`Ineffective mark-compacts near heap limit`, 4 084 MB, exit 134) after the last suite
+ * had passed.
+ *
+ * **`""`, not `delete`.** c8 re-injects the real temp directory into any child that has
+ * no `NODE_V8_COVERAGE` at all — measured: a grandchild of a child that deleted the
+ * variable still reported the path, while a child given the empty string kept `""`.
+ * `NODE_V8_COVERAGE=""` makes Node write no coverage file (measured: 0 files, against 1
+ * for a real directory), and it survives `bin/tensionscript.js`'s own re-spawn, which is
+ * what carries the setting to the process that would have been instrumented.
+ *
+ * Nothing here asserts a coverage number, and the compiler's CLI behaviour is what these
+ * checks are about — so the spawns run uninstrumented rather than putting the compiler
+ * into the corpus six more times.
+ */
+function childEnv() {
+  return { ...process.env, NODE_V8_COVERAGE: "" };
+}
+
 /** Compiles `name` in `dir` and returns `{ status, stdout, stderr, wasm }`. */
 function compile(name, extra = []) {
   const out = join(dir, `${name.replace(/\W/g, "_")}.wasm`);
   const run = spawnSync(
     process.execPath,
     [bin, join(dir, name), "-o", out, ...FLAGS, ...extra],
-    { encoding: "utf8" },
+    { encoding: "utf8", env: childEnv() },
   );
   let wasm = null;
   try {
@@ -61,6 +85,7 @@ function compile(name, extra = []) {
 try {
   // 1. Three spellings, one artifact.
   const bytes = {};
+  let silent = null;
   for (const ext of ["tension", "ten", "ts"]) {
     const name = `probe.${ext}`;
     writeFileSync(join(dir, name), SOURCE);
@@ -72,6 +97,7 @@ try {
     );
     assert.ok(result.wasm !== null && result.wasm.length > 0, `'${name}' produced no artifact`);
     bytes[ext] = result.wasm;
+    if (ext === "ts") silent = result;
   }
   assert.ok(
     bytes.tension.equals(bytes.ten) && bytes.tension.equals(bytes.ts),
@@ -90,9 +116,10 @@ try {
   );
   assert.strictEqual(refused.wasm, null, "a refused compile must not write an artifact");
 
-  // 3. `.ts` is silent unless asked.
-  const silent = compile("probe.ts");
-  assert.strictEqual(silent.status, 0);
+  // 3. `.ts` is silent unless asked — asserted on the build from step 1, which *is*
+  // a `.ts` compile without the flag. A second identical compile would say the same
+  // thing for another 10 MB of coverage corpus under `npm run coverage`.
+  assert.strictEqual(silent.status, 0, "'probe.ts' must compile");
   assert.doesNotMatch(
     silent.stdout + silent.stderr,
     /deprecated/i,
