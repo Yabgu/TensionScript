@@ -901,6 +901,21 @@ export class Compiler extends DiagnosticEmitter {
 
   /** The program's exported `main`, recorded when the module export is compiled. */
   private mainFunction: Function | null = null;
+  /**
+   * The program's own **entry export** — `--exportStart`'s name, `_start_game` by default —
+   * when it is not called `main`.
+   *
+   * **The stackful shell needs a root, not a name.** It resumes one function; Tension's
+   * convention for a game is `_start_game`, and a build that refused that name would have
+   * made the portable default unusable for the whole example tree. Measured while landing
+   * DL51: **0 of 17** example guests export `main`, and every one of them therefore failed
+   * with "the stackful backend requires an exported main" the moment `auto` meant fiber.
+   *
+   * Kept separate from {@link mainFunction} rather than assigned into it, so "the program
+   * exports `main`" stays answerable: `main` wins when both exist, and the fallback is
+   * chosen once, at the shell.
+   */
+  private startGameFunction: Function | null = null;
   /** Arguments length helper global. */
   builtinArgumentsLength: GlobalRef = 0;
   /** Environment global delivering a captured `this` into an arrow function. */
@@ -2132,11 +2147,18 @@ export class Compiler extends DiagnosticEmitter {
     // below exactly as it is for every other compiled function. Emitting here
     // also means `main` is known: it was recorded while its module export was
     // compiled above.
+    // **A root is a function to resume, and `main` is only one name for it.** A game
+    // built the SDK's way exports `_start_game`; the shell resumes it identically
+    // (`prepareAsyncFiberShell`/`prepareAsyncStackPrologue` already accept a `void` result),
+    // so the fallback is chosen here, once, before either shell is prepared.
+    if (this.mainFunction == null && this.startGameFunction != null) {
+      this.mainFunction = this.startGameFunction;
+    }
     if (this.asyncShellSuspends && this.mainFunction == null) {
       // The suspending shell has one root: the continuation `__start`
-      // installs. A library module with an `await` and no exported `main` has
-      // nothing to resume, and saying so beats a validator error about a
-      // `$await` nobody handles.
+      // installs. A library module with an `await` and neither an exported
+      // `main` nor the entry export has nothing to resume, and saying so beats a
+      // validator error about a `$await` nobody handles.
       this.error(
         DiagnosticCode.Not_implemented_0,
         null,
@@ -2870,6 +2892,11 @@ export class Compiler extends DiagnosticEmitter {
           // for a file's own exports, so a re-export of some other module's
           // `main` cannot claim the slot.
           if (prefix.length == 0 && name == "main") this.mainFunction = functionInstance;
+          // The entry export this build was told to call (`--exportStart`), for a program
+          // written the SDK's way: `_start_game` rather than `main`.
+          else if (prefix.length == 0 && name == (this.options.exportStart || "_start_game")) {
+            this.startGameFunction = functionInstance;
+          }
           if (functionInstance.is(CommonFlags.Compiled)) {
             let exportName = prefix + name;
             if (!module.hasExport(exportName)) {
