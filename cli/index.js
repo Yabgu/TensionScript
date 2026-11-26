@@ -58,21 +58,28 @@ const extension_d = `.d${extension}`;
 const extension_re = new RegExp("\\" + extension + "$");
 const extension_re_except_d = new RegExp("^(?!.*\\.d\\" + extension + "$).*\\" + extension + "$");
 
-// **The guest-source extensions, declared once** (DL45).
+// **The guest-source extensions, declared once** (DL45, reordered by DL46).
 //
-// `.tension` is canonical, `.ten` is the short spelling, and `.ts` stays accepted
-// during a deprecation window so a tree that has not renamed yet still builds. The
-// list is exhaustive on purpose: a source spelled with any other extension is
+// `.ten` is canonical, `.tension` is the long spelling kept accepted, and `.ts` stays
+// accepted during a deprecation window so a tree that has not renamed yet still builds.
+// The list is exhaustive on purpose: a source spelled with any other extension is
 // refused **by name**, with this list in the message — the same shape as
-// `--stackful-backend`, where an unknown value is refused before anything is
-// emitted rather than silently defaulting.
+// `--stackful-backend`, where an unknown value is refused before anything is emitted
+// rather than silently defaulting.
+//
+// **The order is the canonical declaration, not decoration.** Two readers depend on it:
+// `ENTRY_EXTENSIONS[0]` is the spelling `--warn-deprecated-extension` tells a user to
+// rename to, and the candidate search below tries the table in order, so the canonical
+// spelling wins when a stem exists under more than one. `.ten` was made canonical by
+// the project's decision (DL46); before that this comment said `.tension` was, and the
+// notice recommended a spelling that was accepted but no longer preferred.
 //
 // **Entry files only.** `extension` above is unchanged and still `.ts`, because it
 // governs *library* resolution — `~lib/…`, `rt/index-*`, `import … from "./x"`. Every
 // library the compiler ships is TypeScript written for a TypeScript toolchain, and
 // that stays true until self-host; a guest program is labelled differently from the
 // compiler that compiles it. Never one spelling for both.
-const ENTRY_EXTENSIONS = [".tension", ".ten", ".ts"];
+const ENTRY_EXTENSIONS = [".ten", ".tension", ".ts"];
 const ENTRY_EXTENSION_DEPRECATED = ".ts";
 
 /** The extension `path` is spelled with, if it is one this CLI accepts, else null. */

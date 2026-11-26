@@ -1,13 +1,11 @@
 // `guest-extension`: **the entry-extension table, and what it refuses** (DL45).
 //
 // A guest source may be spelled `.ten`, `.tension`, or `.ts` during the deprecation
-// window. **The project's canonical spelling is `.ten` (DL46); this file asserts the
-// compiler's table, whose order is still `[".tension", ".ten", ".ts"]`** because DL46 may
-// not edit compiler sources. Two visible consequences, both asserted below by what the
-// compiler actually does rather than by what the project wishes: the refusal lists
-// `.tension` first, and `--warn-deprecated-extension` says "Rename it to '.tension'" —
-// a notice that now names the *accepted* spelling rather than the canonical one. That is
-// a follow-up for a round that may touch `cli/index.js`.
+// window. **`.ten` is canonical (DL46), and the compiler's table now says so**: its order
+// is `[".ten", ".tension", ".ts"]` since EXT3-prep reordered it, so the refusal message
+// lists `.ten` first and `--warn-deprecated-extension` says "Rename it to '.ten'". Before
+// that fix the table's order was stale — `.tension` first — and the notice recommended a
+// spelling that was accepted but no longer preferred.
 //
 // The table lives in `cli/index.js`, which is a *CLI* concern —
 // the `asc.main` API takes a source string and never resolves a path — so this test
@@ -122,10 +120,15 @@ try {
   const refused = compile("probe.code");
   assert.notStrictEqual(refused.status, 0, "'.code' must not compile");
   assert.match(refused.stdout + refused.stderr, /\.code/, "the refusal must name the extension given");
+  // **The literal is pinned on purpose, and it moved with the table** (EXT3-prep). This
+  // assertion used to read `/\.tension, \.ten, \.ts/`; the table's order is now
+  // `.ten` first, so an exact literal is what keeps this a real assertion — a check for
+  // "all three appear somewhere" would pass on a message that listed them in any order,
+  // including an order that no longer says which spelling is canonical.
   assert.match(
     refused.stdout + refused.stderr,
-    /\.tension, \.ten, \.ts/,
-    "the refusal must list what is accepted",
+    /\.ten, \.tension, \.ts/,
+    "the refusal must list what is accepted, canonical spelling first",
   );
   assert.strictEqual(refused.wasm, null, "a refused compile must not write an artifact");
 
@@ -143,7 +146,16 @@ try {
   const warned = compile("probe.ts", ["--warn-deprecated-extension"]);
   assert.strictEqual(warned.status, 0, "the notice must not fail the compile");
   assert.match(warned.stderr, /deprecated guest extension '\.ts'/, "stderr must carry the notice");
-  assert.match(warned.stderr, /Rename it to '\.tension'/, "the notice must name the replacement");
+  assert.match(warned.stderr, /Rename it to '\.ten'/, "the notice must name the replacement");
+  // **And must not name the old canonical spelling** (EXT3-prep). `.tension` is still
+  // accepted, so a notice recommending it is not a false statement — it is simply no
+  // longer the spelling the project wants, and that is worth failing on, because the
+  // notice is the one place the compiler tells a user what to rename to.
+  assert.doesNotMatch(
+    warned.stderr,
+    /Rename it to '\.tension'/,
+    "the notice must recommend the canonical spelling, not the accepted long one",
+  );
   assert.doesNotMatch(warned.stdout, /deprecated/i, "the notice must not touch stdout");
 
   // 5. A missing file is reported as spelled, not with an extension appended.
