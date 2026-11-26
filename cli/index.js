@@ -56,7 +56,6 @@ const SEP = WIN ? "\\"   : "/";
 const extension = ".ts";
 const extension_d = `.d${extension}`;
 const extension_re = new RegExp("\\" + extension + "$");
-const extension_re_except_d = new RegExp("^(?!.*\\.d\\" + extension + "$).*\\" + extension + "$");
 
 // **The guest-source extensions, declared once** (DL45, reordered by DL46).
 //
@@ -74,13 +73,25 @@ const extension_re_except_d = new RegExp("^(?!.*\\.d\\" + extension + "$).*\\" +
 // the project's decision (DL46); before that this comment said `.tension` was, and the
 // notice recommended a spelling that was accepted but no longer preferred.
 //
-// **Entry files only.** `extension` above is unchanged and still `.ts`, because it
-// governs *library* resolution — `~lib/…`, `rt/index-*`, `import … from "./x"`. Every
-// library the compiler ships is TypeScript written for a TypeScript toolchain, and
-// that stays true until self-host; a guest program is labelled differently from the
-// compiler that compiles it. Never one spelling for both.
+// **Every TensionScript source, not only the entry file** (DL47). Until DL47 this list
+// governed entry files alone, because `extension` (`.ts`) governed everything the
+// compiler *resolved* — `~lib/…`, `rt/index-*` and `import … from "./x"`. That split
+// rested on a claim that stopped being true: that everything a guest imports is
+// TypeScript written for a TypeScript toolchain. Tension's own tree is the
+// counter-example — 175 guest and guest-library sources, zero `node:` imports, all of
+// them TensionScript. A `.ten` file that imports `./b` must find `b.ten`.
+//
+// So the table is consulted at every resolution site below, in declared order, and
+// `extension` remains only as (a) the suffix the compiler's own *std* is registered
+// under and (b) the fallback name for a `.d.ts` sibling.
 const ENTRY_EXTENSIONS = [".ten", ".tension", ".ts"];
 const ENTRY_EXTENSION_DEPRECATED = ".ts";
+
+/** Strips any accepted guest extension from `file`, leaving it alone otherwise. */
+const ENTRY_EXTENSION_RE = new RegExp("(?:\\" + ENTRY_EXTENSIONS.join("|\\") + ")$");
+function stripEntryExtension(file) {
+  return file.replace(ENTRY_EXTENSION_RE, "");
+}
 
 /** The extension `path` is spelled with, if it is one this CLI accepts, else null. */
 function entryExtensionOf(path) {
@@ -598,7 +609,7 @@ export async function main(argv, options) {
         if (libText == null) {
           return prepareResult(Error(`Library file '${libPath}' not found.`));
         }
-        libraryFiles[libPath.replace(extension_re, "")] = libText;
+        libraryFiles[stripEntryExtension(libPath)] = libText;
         let begin = stats.begin();
         stats.parseCount++;
         assemblyscript.parse(program, libText, libraryPrefix + libPath, false);
@@ -611,19 +622,48 @@ export async function main(argv, options) {
   // Maps package names to parent directory
   const packageBases = new Map();
 
+  /**
+ * The first `base{ext}` that reads, in the table's declared order — or `null`.
+ *
+ * Answers `{ sourceText, sourcePath }` so a caller keeps the reported path and the
+ * text together: the path a diagnostic names has to be the file that was actually
+ * read, which is why this cannot be a loop over `readFile` with the caller guessing
+ * afterwards which attempt won.
+ *
+ * **Order is the ambiguity rule.** When `b.ten` and `b.ts` both exist, `.ten` wins,
+ * because it is `ENTRY_EXTENSIONS[0]` — the same rule the entry search uses, one
+ * definition, so the two cannot disagree.
+ */
+  async function readFirstOf(base, baseDir) {
+    for (let i = 0, k = ENTRY_EXTENSIONS.length; i < k; ++i) {
+      const candidate = base + ENTRY_EXTENSIONS[i];
+      const sourceText = await readFile(candidate, baseDir);
+      if (sourceText != null) return { sourceText, sourcePath: candidate };
+    }
+    return null;
+  }
+
   // Gets the file matching the specified source path, imported at the given dependee path
   async function getFile(internalPath, dependeePath) {
     let sourceText = null; // text reported back to the compiler
     let sourcePath = null; // path reported back to the compiler
 
-    // Try file.ext, file/index.ext, file.d.ext
+    // Try file.{ten,tension,ts}, then file/index.{ten,tension,ts}, then file.d.ts.
+    //
+    // **Every file spelling is tried before any `index` spelling**, which is what keeps
+    // this additive: a tree with only `.ts` files resolves exactly as it did (the `b.ts`
+    // candidate is reached in the same position it always was, and `b/index.ts` still
+    // loses to `b.ts`). The new candidates only ever sit *before* an existing one.
     if (!internalPath.startsWith(libraryPrefix)) {
-      if ((sourceText = await readFile(sourcePath = internalPath + extension, baseDir)) == null) {
-        if ((sourceText = await readFile(sourcePath = internalPath + "/index" + extension, baseDir)) == null) {
-          // portable d.ext: uses the .js file next to it in JS or becomes an import in Wasm
-          sourcePath = internalPath + extension;
-          sourceText = await readFile(internalPath + extension_d, baseDir);
-        }
+      let found = await readFirstOf(internalPath, baseDir);
+      if (found == null) found = await readFirstOf(internalPath + "/index", baseDir);
+      if (found != null) {
+        sourceText = found.sourceText;
+        sourcePath = found.sourcePath;
+      } else {
+        // portable d.ext: uses the .js file next to it in JS or becomes an import in Wasm
+        sourcePath = internalPath + extension;
+        sourceText = await readFile(internalPath + extension_d, baseDir);
       }
 
     // Search library in this order: stdlib, custom lib dirs, paths
@@ -637,15 +677,15 @@ export async function main(argv, options) {
         sourceText = libraryFiles[indexName];
         sourcePath = libraryPrefix + indexName + extension;
       } else { // custom lib dirs
+        // A custom lib dir may hold `.ten` sources (DL47), so the same table applies.
         for (const libDir of customLibDirs) {
-          if ((sourceText = await readFile(plainName + extension, libDir)) != null) {
-            sourcePath = libraryPrefix + plainName + extension;
+          let found = await readFirstOf(plainName, libDir);
+          let virtual = libraryPrefix + plainName;
+          if (found == null) { found = await readFirstOf(indexName, libDir); virtual = libraryPrefix + indexName; }
+          if (found != null) {
+            sourceText = found.sourceText;
+            sourcePath = virtual + found.sourcePath.slice(found.sourcePath.lastIndexOf("."));
             break;
-          } else {
-            if ((sourceText = await readFile(indexName + extension, libDir)) != null) {
-              sourcePath = libraryPrefix + indexName + extension;
-              break;
-            }
           }
         }
         if (sourceText == null) { // paths
@@ -664,15 +704,19 @@ export async function main(argv, options) {
             paths.push(...opts.path);
             for (const currentDir of paths.map(p => path.relative(baseDir, p))) {
               const plainName = filePath;
-              if ((sourceText = await readFile(path.join(currentDir, packageName, plainName + extension), baseDir)) != null) {
-                sourcePath = `${libraryPrefix}${packageName}/${plainName}${extension}`;
-                packageBases.set(sourcePath.replace(extension_re, ""), path.join(currentDir, packageName));
-                break;
+              // A published package may ship `.ten` sources (DL47: Tension's own
+              // `tension-framework` does), so the table applies here too.
+              let found = await readFirstOf(path.join(currentDir, packageName, plainName), baseDir);
+              let virtual = `${libraryPrefix}${packageName}/${plainName}`;
+              if (found == null) {
+                const indexName = `${filePath}/index`;
+                found = await readFirstOf(path.join(currentDir, packageName, indexName), baseDir);
+                virtual = `${libraryPrefix}${packageName}/${indexName}`;
               }
-              const indexName = `${filePath}/index`;
-              if ((sourceText = await readFile(path.join(currentDir, packageName, indexName + extension), baseDir)) != null) {
-                sourcePath = `${libraryPrefix}${packageName}/${indexName}${extension}`;
-                packageBases.set(sourcePath.replace(extension_re, ""), path.join(currentDir, packageName));
+              if (found != null) {
+                sourceText = found.sourceText;
+                sourcePath = virtual + found.sourcePath.slice(found.sourcePath.lastIndexOf("."));
+                packageBases.set(stripEntryExtension(sourcePath), path.join(currentDir, packageName));
                 break;
               }
             }
@@ -1204,7 +1248,9 @@ export async function main(argv, options) {
     try {
       stats.readCount++;
       return (await fs.promises.readdir(path.join(baseDir, dirname)))
-        .filter(file => extension_re_except_d.test(file));
+        // A custom lib dir may hold `.ten` (DL47). `.d.ts` stays excluded, and this is
+        // still one predicate rather than two filters that could diverge.
+        .filter(file => !file.endsWith(extension_d) && ENTRY_EXTENSIONS.some(ext => file.endsWith(ext)));
     } catch {
       return null;
     }

@@ -2810,10 +2810,27 @@ export function findDecorator(kind: DecoratorKind, decorators: DecoratorNode[] |
   return null;
 }
 
-/** Mangles an external to an internal path. */
+/**
+ * Mangles an external to an internal path.
+ *
+ * **Every accepted guest extension is stripped, not only `.ts`** (DL47). This is the
+ * function that makes `import "./b"` and the file `b.<ext>` the *same* internal path, so
+ * the set of stripped spellings has to match the set of resolvable ones. Until DL47 it
+ * stripped `.ts` alone, which was right while every resolvable file was `.ts`; once a
+ * `.ten` file resolves, its internal path stayed `b.ten` while the import asked for `b`,
+ * and the lookup that follows — `Program#lookupForeignFile`, asserted non-null at
+ * `program.ts:1401` — aborts the compiler with a bare `AssertionError`.
+ *
+ * Longest first: `.tension` also ends in nothing else, but `.ten` and `.ts` share no
+ * suffix, so only the length ordering guards a hypothetical `.ten.ts`.
+ */
 export function mangleInternalPath(path: string): string {
   if (path.endsWith("/")) {
     path += "index";
+  } else if (path.endsWith(".tension")) {
+    path = path.substring(0, path.length - 8);
+  } else if (path.endsWith(".ten")) {
+    path = path.substring(0, path.length - 4);
   } else if (path.endsWith(".ts")) {
     path = path.substring(0, path.length - 3);
   }
