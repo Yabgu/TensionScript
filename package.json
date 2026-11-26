@@ -103,7 +103,7 @@
     "test:transform": "npm run test:transform:esm && npm run test:transform:cjs",
     "test:transform:esm": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/simple.js --noEmit",
     "test:transform:cjs": "node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/index.js --noEmit && node bin/tensionscript.js tests/compiler/empty --transform ./tests/transform/cjs/simple.js --noEmit",
-    "test:cli": "node tests/cli/options.js",
+    "test:cli": "node tests/cli/options.js && node tests/cli/guest-extension.js",
     "test:gc": "node tests/gc/wasm-gc.js",
     "test:holders": "node --enable-source-maps tests/interop/holders.js",
     "test:arena": "node --enable-source-maps tests/rt/arena.js",

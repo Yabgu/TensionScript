@@ -4,3 +4,9 @@ scripts/*.sh eol=lf
 tests/compiler/std/string-encoding.ts eol=lf
 src/bindings/js.ts eol=lf
 src/bindings/tsd.ts eol=lf
+
+# Guest sources read as TypeScript on the web view (docs/guest-editor.md).
+# This is a display hint only: the compiler does not read .gitattributes, and the
+# deprecation window means a `.ts` guest needs no line here at all.
+*.tension linguist-language=TypeScript
+*.ten linguist-language=TypeScript
