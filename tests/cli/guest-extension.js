@@ -18,7 +18,7 @@
 //   4. The notice appears with `--warn-deprecated-extension`, on stderr, so a tree
 //      that is renaming can see what is left.
 import assert from "assert";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
