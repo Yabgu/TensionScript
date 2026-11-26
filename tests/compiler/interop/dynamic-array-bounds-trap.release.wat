@@ -1230,4 +1230,6 @@
   f64.const 128
   f64.eq
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

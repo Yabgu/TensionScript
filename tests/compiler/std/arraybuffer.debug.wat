@@ -3975,4 +3975,6 @@
   local.get $7
   return
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

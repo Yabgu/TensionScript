@@ -1,0 +1,6 @@
+{
+  "asc_flags": [
+    "--stackful-backend=promise"
+  ],
+  "_note": "The promise lowering, named (DL51). This fixture pins the closure-environment shapes of that lowering \u2014 the state struct's `$closureEnv` fields \u2014 which the fiber shell does not emit. Under `auto` the golden shrank from 3,798 lines to 1,210, which is a different fixture, not a stale one. Named so the fixture is of the lowering it tests."
+}

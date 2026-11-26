@@ -18,4 +18,6 @@
  (func $interop/inline-nesting-deep/assign_deep (result f32)
   f32.const 1.5
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

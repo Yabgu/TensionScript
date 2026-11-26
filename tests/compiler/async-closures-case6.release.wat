@@ -4675,4 +4675,6 @@
   call $~lib/builtins/abort
   unreachable
  )
+ ;; custom section "tension.stackful-backend", size 7, contents: "promise"
+ ;; custom section "tension.requires", size 41
 )

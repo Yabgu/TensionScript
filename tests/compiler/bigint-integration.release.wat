@@ -47,4 +47,6 @@
  (func $bigint-integration/getInternalValue (result i64)
   i64.const 9007199254740991
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

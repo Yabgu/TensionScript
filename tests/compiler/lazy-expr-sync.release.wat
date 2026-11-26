@@ -1884,4 +1884,6 @@
   global.set $lazy-expr-sync/calls
   i32.const 41
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

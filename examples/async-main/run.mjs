@@ -17,6 +17,9 @@ const TAG_NAMES = {
 const program = compileProgram(join(here, "main.ts"), [
   "--runtime", "incremental",
   "--enable", "stack-switching",
+  // **Named since DL51.** These demos run on the continuation backend under
+  // `run-wasmfx`; the feature no longer selects it, because `auto` means fiber now.
+  "--stackful-backend", "continuation",
 ]);
 
 try {

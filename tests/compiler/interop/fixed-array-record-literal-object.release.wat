@@ -64,4 +64,6 @@
  (func $interop/fixed-array-record-literal-object/argument (result f64)
   f64.const 10
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

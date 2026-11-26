@@ -67,4 +67,6 @@
  (func $~start
   call $start:interop/fixed-array-record-element-size
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

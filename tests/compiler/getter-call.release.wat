@@ -1565,4 +1565,6 @@
  (func $getter-call/C#get:x~anonymous|0 (result i32)
   i32.const 42
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

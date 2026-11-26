@@ -107,4 +107,6 @@
  (func $interop/fixed-array-value-local/assignIndependence (result i32)
   i32.const 377
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

@@ -172,4 +172,6 @@
  (func $~start
   call $start:features/relaxed-simd
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

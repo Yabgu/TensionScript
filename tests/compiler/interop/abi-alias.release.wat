@@ -292,4 +292,6 @@
  (func $interop/abi-alias/run (result i32)
   i32.const 12
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

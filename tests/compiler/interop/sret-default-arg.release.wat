@@ -1853,4 +1853,6 @@
  (func $interop/sret-default-arg/flat_control (result f32)
   f32.const 3
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

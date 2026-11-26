@@ -1,0 +1,6 @@
+{
+  "asc_flags": [
+    "--stackful-backend=promise"
+  ],
+  "_note": "The promise lowering, named (DL51). This fixture pins a shape that belongs to that lowering: under `auto` (fiber) the memo cell's definite-assignment analysis differs and the program is refused (`TS2454`, measured), so the fixture says which lowering it is a fixture of rather than depending on what the default happened to be."
+}

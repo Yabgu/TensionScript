@@ -7359,4 +7359,6 @@
   global.set $~lib/memory/__stack_pointer
   local.get $2
  )
+ ;; custom section "tension.stackful-backend", size 7, contents: "promise"
+ ;; custom section "tension.requires", size 41
 )

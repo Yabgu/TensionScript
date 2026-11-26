@@ -100,4 +100,6 @@
   i32.const 2048
   f32.load
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

@@ -847,4 +847,6 @@
  (func $interop/inline-struct-sroa/constructAndRead (result i32)
   i32.const 57
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

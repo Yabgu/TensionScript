@@ -82,4 +82,6 @@
  (func $~start
   call $start:asc-constants
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

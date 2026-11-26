@@ -6,4 +6,6 @@
  (func $interop/struct-reserved/run (result i32)
   i32.const 8
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

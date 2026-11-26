@@ -25,4 +25,6 @@
   local.get $0
   f64.load offset=8
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

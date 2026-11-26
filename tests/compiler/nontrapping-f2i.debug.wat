@@ -160,4 +160,6 @@
   global.set $~started
   call $start:nontrapping-f2i
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

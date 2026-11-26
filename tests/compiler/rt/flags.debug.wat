@@ -1101,4 +1101,6 @@
  (func $~start
   call $start:rt/flags
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

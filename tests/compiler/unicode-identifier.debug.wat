@@ -9,4 +9,6 @@
  (export "\e5\8f\98\e9\87\8f" (global $"unicode-identifier/\e5\8f\98\e9\87\8f"))
  (export "\f0\a0\9c\8e\f0\a0\9c\b1" (global $"unicode-identifier/\f0\a0\9c\8e\f0\a0\9c\b1"))
  (export "memory" (memory $0))
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

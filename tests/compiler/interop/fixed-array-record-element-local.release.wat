@@ -91,4 +91,6 @@
  (func $interop/fixed-array-record-element-local/bodyState (result f64)
   f64.const 30
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

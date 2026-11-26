@@ -6,4 +6,6 @@
  (func $interop/fixed-array-record-element-size/sizes (result i32)
   i32.const 144
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

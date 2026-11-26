@@ -2967,4 +2967,6 @@
  (func $resolve-ternary/g1 (param $0 i32) (result i32)
   i32.const 4
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

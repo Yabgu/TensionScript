@@ -18,4 +18,6 @@
  (func $interop/inline-nesting-nested/copy_leaf (result f32)
   f32.const 38.400001525878906
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

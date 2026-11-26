@@ -206,4 +206,6 @@
  (func $interop/inline-struct-declared/run (result i32)
   i32.const 31
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

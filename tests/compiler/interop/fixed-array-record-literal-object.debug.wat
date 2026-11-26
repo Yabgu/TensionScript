@@ -279,4 +279,6 @@
   local.get $arr$3$y
   return
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

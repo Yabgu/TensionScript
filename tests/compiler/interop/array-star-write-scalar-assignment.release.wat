@@ -46,4 +46,6 @@
   local.get $2
   i32.store
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

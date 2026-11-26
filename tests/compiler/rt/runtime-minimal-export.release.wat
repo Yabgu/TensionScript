@@ -1472,4 +1472,6 @@
   local.get $3
   global.set $~lib/rt/tcms/white
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )

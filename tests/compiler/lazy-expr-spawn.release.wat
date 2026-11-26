@@ -5882,4 +5882,6 @@
   i32.add
   global.set $~lib/memory/__stack_pointer
  )
+ ;; custom section "tension.stackful-backend", size 7, contents: "promise"
+ ;; custom section "tension.requires", size 41
 )

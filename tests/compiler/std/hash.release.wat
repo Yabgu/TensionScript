@@ -249,4 +249,6 @@
   i32.const 1376
   call $~lib/util/hash/HASH<~lib/string/String|null>
  )
+ ;; custom section "tension.stackful-backend", size 5, contents: "fiber"
+ ;; custom section "tension.requires", size 39
 )
