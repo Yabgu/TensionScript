@@ -42,27 +42,32 @@ const dir = mkdtempSync(join(tmpdir(), "dl45-ext-"));
 const FLAGS = ["--runtime", "incremental", "--target", "release", "--optimizeLevel", "0"];
 
 /**
- * **The children do not write coverage** (DL45). `npm run coverage` is
- * `npx c8 -- npm test`, and c8 collects from every child that inherits
- * `NODE_V8_COVERAGE`. A compile is the whole 20 MB compiler bundle, so **one child's
- * coverage JSON is ~7.8 MB**: this test's six compiles were 46 MB of corpus on top of a
- * run that was already near its heap bound, and the Coverage job died of exhaustion
+ * **The children's coverage goes to a scratch directory, not into c8's** (DL45).
+ *
+ * `npm run coverage` is `npx c8 -- npm test`, and c8 collects from every child that
+ * inherits `NODE_V8_COVERAGE`. A compile loads the whole 20 MB compiler bundle, so one
+ * child's coverage JSON is **~7.8 MB**: this test's spawns were 46 MB of corpus added to
+ * a run that was already near its heap bound, and the Coverage job died of exhaustion
  * (`Ineffective mark-compacts near heap limit`, 4 084 MB, exit 134) after the last suite
  * had passed.
  *
- * **`""`, not `delete`.** c8 re-injects the real temp directory into any child that has
- * no `NODE_V8_COVERAGE` at all — measured: a grandchild of a child that deleted the
- * variable still reported the path, while a child given the empty string kept `""`.
- * `NODE_V8_COVERAGE=""` makes Node write no coverage file (measured: 0 files, against 1
- * for a real directory), and it survives `bin/tensionscript.js`'s own re-spawn, which is
- * what carries the setting to the process that would have been instrumented.
+ * **A scratch directory, not `delete` and not `""`.** Deleting it does not work: c8 (or
+ * npm) re-injects the real temp directory into any descendant that has no
+ * `NODE_V8_COVERAGE` at all — measured, a grandchild of a child that had deleted it
+ * reported the path again. The empty string happens to write nothing on Node 26
+ * (measured: 0 files) but that is a version's behaviour, not a contract, and CI runs
+ * Node 24. A directory we create and delete is the one form whose meaning does not
+ * depend on which Node reads it: the bytes land somewhere c8 does not read, and they are
+ * removed when the test exits.
  *
  * Nothing here asserts a coverage number, and the compiler's CLI behaviour is what these
- * checks are about — so the spawns run uninstrumented rather than putting the compiler
- * into the corpus six more times.
+ * checks are about.
  */
+const coverageScratch = mkdtempSync(join(tmpdir(), "dl45-nocov-"));
+process.on("exit", () => rmSync(coverageScratch, { recursive: true, force: true }));
+
 function childEnv() {
-  return { ...process.env, NODE_V8_COVERAGE: "" };
+  return { ...process.env, NODE_V8_COVERAGE: coverageScratch };
 }
 
 /** Compiles `name` in `dir` and returns `{ status, stdout, stderr, wasm }`. */
