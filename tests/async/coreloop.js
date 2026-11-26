@@ -60,7 +60,14 @@ function compile(source) {
   // derived from the path, and `probe/main` is what the assertions expect.
   execFileSync(process.execPath, [
     CLI, "probe.ts", "-o", "probe.wasm", "--textFile", "probe.wat",
-    "--runtime", "incremental", "--noColors"
+    "--runtime", "incremental", "--noColors",
+    // **Continuation, named** (DL51). This suite asserts the continuation shell's own
+    // shape — `__asyncStatus`, the `$idle`/`$done`/`$await` tags, the core loop — and it
+    // used to get that by saying nothing, because an `await` under the old default was
+    // continuation. `auto` means fiber now, so "nothing" produces a different artifact and
+    // every assertion here would be about the wrong one. Choosing the backend also enables
+    // its wasm feature, which is why no `--enable stack-switching` appears.
+    "--stackful-backend", "continuation"
   ], { stdio: "pipe", cwd: dir });
   const wat = readFileSync(watPath, "utf8");
   const bytes = readFileSync(wasmPath);
