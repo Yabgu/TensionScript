@@ -340,6 +340,19 @@ export abstract class TaskBase {
 }
 
 /**
+ * `task.value = <T>word`, in one place so the generic exists only where it is used.
+ *
+ * `Task<void>` instantiates no `value` field, so an assignment written directly in the
+ * class body is a type error for every build that instantiates `Task<void>` — even though
+ * no such build can reach it. As a generic function it is instantiated **at the call
+ * site**, and the call site is inside `if (!isVoid<T>())` (DL56).
+ */
+@inline
+function __copyPayload<T>(task: Task<T>, word: i32): void {
+  task.value = <T>word;
+}
+
+/**
  * A handle to an asynchronous operation's result.
  *
  * For the stackful backend a task is one object: the entry allocates a
@@ -419,7 +432,12 @@ export class Task<T> extends TaskBase {
    * decoder for fields no test exercises is how a wrong decoder ships.
    */
   __settleFromRecord(record: TaskRecord): void {
-    this.value = <T>record.payload;
+    // **`Task<void>` has no `value` field to write** (DL56), and instantiating the
+    // assignment for `void` is a type error because the field is elided. `isVoid<T>()` is
+    // a compile-time constant, so the helper is never instantiated for a void payload —
+    // the base class's own settle (status only) is then the whole of the work, exactly as
+    // it is for Backend A's tasks.
+    if (!isVoid<T>()) __copyPayload<T>(this, record.payload);
     this.status = record.status;
     this.settled = true;
   }
