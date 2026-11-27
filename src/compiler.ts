@@ -368,6 +368,12 @@ export const STARTS_TABLE = "$starts";
  */
 export const SERVE_ENTRY = "$serveEntry";
 /**
+ * `scheduler::ready(slot)` — the host ready queue's door (DL61, I95). Emitted by the
+ * compiler rather than declared in std, because the only thing that calls it is a builtin
+ * (`__readySubmit`), which has no std declaration to compile.
+ */
+export const HOST_READY = "~lib/task-stack/$hostReady";
+/**
  * `~lib/task-stack/__serveSlot` — the compiled body whose fiber arm calls `$serveEntry`.
  *
  * **Not `__serveCont`**: that is a *builtin*, inlined at its call site, so no function of
@@ -1073,6 +1079,20 @@ export class Compiler extends DiagnosticEmitter {
    * conditions that can disagree.
    */
   fiberServeEntryNeeded: bool = false;
+
+  /**
+   * Set when `__readySubmit` emitted its `scheduler::ready` call (DL61, I95). The import is
+   * added then, and only then, so an artifact that never hands a slot over carries neither
+   * the call nor the import.
+   */
+  fiberReadyNeeded: bool = false;
+
+  /**
+   * Set when a statement-position spawn was rewritten into a hand-over (DL61). `__submitTask`
+   * is compiled explicitly in that case: the rewrite is its only caller, so no ordinary call
+   * site would pull it in.
+   */
+  usesSubmitTaskCall: bool = false;
 
   get fiberBackendActive(): bool {
     // Delegates to the one definition on `Options`, so the shell, the transform and the
@@ -2346,6 +2366,44 @@ export class Compiler extends DiagnosticEmitter {
     // compile lazy functions
     this.drainLazyFunctions();
 
+    // **The fiber ABI surface the guest can reach** (DL61, I95), compiled *before the
+    // override stubs are finalized*. That ordering is the whole point: `__driveSlot` is what
+    // makes `TaskBase#drive` a live virtual call, and only once that call exists does the
+    // stub's resolution reach the record's own `drive` and compile it. Compiling this later
+    // — in the tail, which is where DL60 put it — left the stub finalized as a bare
+    // `unreachable` while the synthesized `work$Rec#drive` was never compiled at all:
+    //
+    //     Error: a spawned task at slot 1 trapped: … !~lib/task/TaskBase#drive@override
+    //
+    // It must also precede the runtime-feature finalization below, so a body compiled here
+    // still gets `__tostack` and friends emitted beside it (compiling `__driveSlot` at the
+    // very end of `compile()` fails validation with `call target must exist
+    // (call $~lib/rt/__tostack)`; measured).
+    if (this.fiberBackendActive) {
+      // A statement-position spawn is rewritten into a hand-over, so `__submitTask` is
+      // reached from no ordinary call site: compile it explicitly.
+      if (this.usesSubmitTaskCall) {
+        let submit = this.program.requireFunction(SUBMIT_TASK);
+        if (!module.hasFunction(submit.internalName)) this.compileFunction(submit);
+      }
+      // `scheduler::ready` — the door a handed-over slot goes through, emitted only when the
+      // builtin emitted the call. An artifact that never hands a slot over carries no host
+      // queue it could not use.
+      if (this.fiberReadyNeeded && !module.hasFunction(HOST_READY)) {
+        module.addFunctionImport(HOST_READY, "scheduler", "ready", TypeRef.I32, TypeRef.I32);
+      }
+      // `__driveSlot` is what the host's ready drain calls, exported when the guest can
+      // submit: a guest that cannot has nothing for the drain to resume, and the host
+      // already reads the export's absence as "nothing to drain".
+      if (module.hasFunction(SUBMIT_TASK)) {
+        let driveSlot = this.program.requireFunction(BuiltinNames.asyncDriveSlot);
+        if (!module.hasFunction(driveSlot.internalName)) this.compileFunction(driveSlot);
+        if (!module.hasExport("__driveSlot")) {
+          module.addFunctionExport(driveSlot.internalName, "__driveSlot");
+        }
+      }
+    }
+
     // set up override stubs
     let functionTable = this.functionTable;
     let overrideStubs = this.overrideStubs;
@@ -2556,53 +2614,6 @@ export class Compiler extends DiagnosticEmitter {
       this.emitStartsTable();
     }
 
-    // **A fiber build that can submit gets the serve entry and the drive export**
-    // (DL60, I140 + I95).
-    //
-    // The pair has to exist together and only where it can be reached, because both
-    // change an artifact's bytes and the default backend is fiber: emitting them on
-    // *every* fiber build moved 40-odd of this repo's own goldens — `interop/*`,
-    // `features/*`, `bindings/*` — none of which can submit anything (measured: five CI
-    // jobs red, all of them `[fixture mismatch]`).
-    //
-    // So the test is reachability, not the backend alone:
-    //
-    // - `$serveEntry` is called by exactly one body on this backend — `__serveCont`, whose
-    //   fiber arm is `call $serveEntry(index)`. If that function was compiled, the call
-    //   exists and the target must exist with it. `emitStartsTable` emitted it only when
-    //   `$starts` had an entry, and a **parameterised** async function gets no spawn start
-    //   (`Gate 3d`) — so the table was empty and the call had no target:
-    //
-    //       call target must exist, on (call $$serveEntry (local.get $0))
-    //
-    //   With nothing to serve this is an empty chain answering `0`, the same answer the
-    //   table version gives for an index that names no entry, which `__serveCont` reads as
-    //   "there is no slot" and answers `-1`.
-    // - `__driveSlot` is what the host's ready drain calls. It exists for a guest that can
-    //   hand a slot over, which is exactly a guest that linked `__submitTask`. A guest
-    //   that never submits needs no door, and the host already treats the export's absence
-    //   as "nothing to drain".
-    //
-    // Keyed on `fiberBackendActive`, **not** `fiberShell`: the shell gate is
-    // `asyncShellSuspends`, false precisely for the sync entry this exists for.
-    if (this.fiberBackendActive) {
-      // **Only where the call exists.** `fiberServeEntryNeeded` is set by the builtin that
-      // emits the call, so this is not a guess about reachability: it is the same event.
-      if (this.fiberServeEntryNeeded && !module.hasFunction(SERVE_ENTRY)) {
-        module.addFunction(SERVE_ENTRY, TypeRef.I32, TypeRef.I32, [ TypeRef.I32 ], module.i32(0));
-      }
-      if (module.hasFunction(SUBMIT_TASK)) {
-        // `compileFunction` on a function already in the module adds it twice, and Binaryen's
-        // exception surfaces as "the compiler has crashed" — measured on `schedule-order`,
-        // whose fiber build already had `__driveSlot` through std.
-        let driveSlot = this.program.requireFunction(BuiltinNames.asyncDriveSlot);
-        if (!module.hasFunction(driveSlot.internalName)) this.compileFunction(driveSlot);
-        if (!module.hasExport("__driveSlot")) {
-          module.addFunctionExport(driveSlot.internalName, "__driveSlot");
-        }
-      }
-    }
-
     // **A shared-memory module has no start section.** The host instantiates
     // this module again for every worker, and a start section runs on every
     // instantiation: every worker would run `main` a second time, on its own
@@ -2669,6 +2680,25 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (program.lookup("ASC_RTRACE") != null) {
       new RtraceMemory(this).walkModule();
+    }
+
+    // **`$serveEntry`, exactly where its call is emitted** (DL60 I140 / DL61).
+    //
+    // `__serveCont`'s fiber arm is the only thing on this backend that emits
+    // `call $serveEntry(index)` — a call, because there is no continuation table to install
+    // into — and `emitStartsTable` emitted the body only when `$starts` had an entry. A
+    // **parameterised** async function gets no spawn start (`Gate 3d`), so the table was
+    // empty while the call existed:
+    //
+    //     call target must exist, on (call $$serveEntry (local.get $0))
+    //
+    // The builtin sets `fiberServeEntryNeeded`, so this is the same event as the call rather
+    // than a guess about reachability. With nothing to serve it is an empty chain answering
+    // `0` for any index — the answer the table version gives for an index that names no
+    // entry, which `__serveCont` reads as "no slot" and answers `-1`. Emitted **after**
+    // `emitStartsTable`, so the real table version wins when there is one.
+    if (this.fiberBackendActive && this.fiberServeEntryNeeded && !module.hasFunction(SERVE_ENTRY)) {
+      module.addFunction(SERVE_ENTRY, TypeRef.I32, TypeRef.I32, [ TypeRef.I32 ], module.i32(0));
     }
 
     this.emitStackfulBackendSection();
@@ -6376,7 +6406,67 @@ export class Compiler extends DiagnosticEmitter {
   private compileExpressionStatement(
     statement: ExpressionStatement
   ): ExpressionRef {
-    return this.compileExpression(statement.expression, Type.void, Constraints.ConvImplicit);
+    let module = this.module;
+    // **A statement that drops a spawn is the spawn** (DL61, I95).
+    //
+    // `work(1);` — a call to an async function whose value nobody keeps — is a program
+    // saying "start this and do not wait". The lowering has already turned `work` into a
+    // factory returning a task, so the call *allocates* the work; what was missing is the
+    // hand-over that makes it run. On fiber nothing else could run it: the stack is a host
+    // object and the guest must not pump — that is why the same three lines printed
+    // `order 3` on continuation and `order 0` on fiber. **Both backends get it**: the
+    // hand-over is `__submitTask`, which the host owns on fiber and the guest's own
+    // executor ring owns on continuation, so "start this and do not wait" means one thing
+    // in the language and each backend runs it its own way.
+    //
+    // The rule is not name-shaped at the call site alone: a local of the same name would
+    // shadow the factory, so the name must resolve to a *function prototype*. And an
+    // `await work(1)` is an `AwaitExpression`, not a `Call`, so it is never a spawn.
+    let expression = statement.expression;
+    if (expression.kind == NodeKind.Call) {
+      let callee = (<CallExpression>expression).expression;
+      if (callee.kind == NodeKind.Identifier) {
+        let name = (<IdentifierExpression>callee).text;
+        let bound = this.currentFlow.lookup(name);
+        if (
+          this.program.loweredAsync.has(name) &&
+          bound != null &&
+          bound.kind == ElementKind.FunctionPrototype
+        ) {
+          // **A floating spawn the backend cannot start is refused by name** (DL61,
+          // decision 7). On continuation the task would land in the guest's own executor
+          // ring, and nothing drives that ring once the entry has returned — there is no
+          // guest-side "run the ring to empty" entry for the host to call, and the shell's
+          // core loop has already ended. Compiling it would be a silent zero: the program
+          // exits 0 having run none of the bodies it asked for. So it is an error, naming
+          // the backend, instead of a green line that lies.
+          if (!this.fiberBackendActive) {
+            this.error(
+              DiagnosticCode.Not_implemented_0,
+              statement.range,
+              "a spawned task on the continuation backend (nothing drives the executor ring "
+              + "after the entry returns, so the body would never run). Await the task, or "
+              + "build with `--stackful-backend fiber`"
+            );
+            return module.unreachable();
+          }
+          let instance = this.resolver.resolveFunction(<FunctionPrototype>bound, null);
+          if (instance != null) {
+            // The factory's own return type is the contextual type: `Type.auto` is not a
+            // valid context here (`Type 'Task<void>' is not assignable to type 'auto'`,
+            // measured), and the value goes straight into `__submitTask(TaskBase)`.
+            let value = this.compileExpression(
+              expression, instance.signature.returnType, Constraints.None
+            );
+            let submit = this.program.requireFunction("~lib/thread/__submitTask");
+            this.usesSubmitTaskCall = true;
+            this.currentType = Type.bool;
+            return module.drop(module.call(submit.internalName, [ value ], TypeRef.I32));
+          }
+        }
+      }
+    }
+    return this.compileExpression(expression, Type.void, Constraints.ConvImplicit);
   }
 
   private compileForStatement(

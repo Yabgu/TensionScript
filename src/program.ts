@@ -488,6 +488,19 @@ export class Program extends DiagnosticEmitter {
   sources: Source[] = [];
 
   /**
+   * **The async declarations the stackful backend lowered into task factories**
+   * (DL61, I95) — names, filled by `StackfulAsyncTransform` as it lowers each one.
+   *
+   * `compileExpressionStatement` reads it to answer the question the queue seam cannot
+   * answer for itself: *is this dropped expression a spawn?* A call to a lowered factory
+   * allocates a task and returns it; dropping that value is the program saying "start
+   * this and do not wait", which is what hands the slot to the host. Recorded by name
+   * because the lowering replaces the declaration's body before the compiler sees it, so
+   * there is nothing left in the AST to recognise.
+   */
+  loweredAsync: Set<string> = new Set();
+
+  /**
    * The sources the compiler's *own* standard library was parsed from.
    *
    * `Source.isLibrary` cannot answer this: `SourceKind` is derived from the

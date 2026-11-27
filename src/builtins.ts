@@ -37,7 +37,8 @@ import {
   ASYNC_CURRENT_SLOT,
   ASYNC_NEXT_SLOT,
   STARTS_TABLE,
-  SERVE_ENTRY
+  SERVE_ENTRY,
+  HOST_READY
 } from "./compiler";
 
 import {
@@ -776,6 +777,7 @@ export namespace BuiltinNames {
   // std/thread.ts — the plain worker's dispatch: `$starts[i]` as a plain call.
   export const threadCallStart = "~lib/thread/__callStart";
   export const asyncServeCont = "~lib/task-stack/__serveCont";
+  export const asyncReadySubmit = "~lib/task-stack/__readySubmit";
   export const asyncCurrentSlot = "~lib/task-stack/__currentSlot";
   /**
    * The fiber backend's park: the one place a stackful suspension becomes a
@@ -12739,6 +12741,32 @@ function builtin_thread_callStart(ctx: BuiltinFunctionContext): ExpressionRef {
 }
 builtinFunctions.set(BuiltinNames.threadCallStart, builtin_thread_callStart);
 
+// __readySubmit(slot: i32) -> i32
+//
+// **Hand a ready slot to the host's ready queue** (DL61, I95): `1` accepted, `0` refused
+// because the queue is full, `-1` when this backend has no host queue.
+//
+// A backend fact, decided here rather than at runtime. On fiber the guest cannot run a
+// spawned body — the stack is a host object and the guest must not pump — so the slot goes
+// to `scheduler::ready` and the host's drain resumes it through `__driveSlot` after the
+// entry returns. On continuation the guest's own executor ring is the queue and the answer
+// is the constant `-1`; the import is then never referenced and Binaryen drops it, so a
+// continuation artifact cannot call a host queue it does not have.
+function builtin_async_readySubmit(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  if (checkTypeAbsent(ctx) | checkArgsRequired(ctx, 1) |
+      checkStackIntrinsic(ctx, ctx.prototype.internalName)) return module.unreachable();
+  let slot = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
+  compiler.currentType = Type.i32;
+  if (!compiler.fiberBackendActive) return module.i32(-1);
+  // The import is emitted by the compiler's tail (`HOST_READY`) in the same place as
+  // `$serveEntry`: a builtin has no std declaration to compile, so it names the import
+  // that tail adds. This flag is what tells the tail the call exists.
+  compiler.fiberReadyNeeded = true;
+  return module.call(HOST_READY, [ slot ], TypeRef.I32);
+}
+
 // __serveCont(funcIndex: i32) -> i32
 //
 // Turn `$starts[funcIndex]` into a continuation and install it at a fresh slot,
@@ -12839,6 +12867,7 @@ function builtin_async_serveCont(ctx: BuiltinFunctionContext): ExpressionRef {
   stmts.push(module.local_get(slotLocal.index, TypeRef.I32));
   return module.block(null, stmts, TypeRef.I32);
 }
+builtinFunctions.set(BuiltinNames.asyncReadySubmit, builtin_async_readySubmit);
 builtinFunctions.set(BuiltinNames.asyncServeCont, builtin_async_serveCont);
 
 // __currentSlot() -> i32

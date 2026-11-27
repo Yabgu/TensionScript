@@ -317,6 +317,11 @@ export class StackfulAsyncTransform {
           }
           let artifacts = this.transformFunction(declaration, declared, parser);
           if (artifacts != null) {
+            // **A lowered factory is a spawn when its result is dropped** (DL61). The
+            // compiler cannot see this in the AST afterwards — the body became a
+            // `new f$Rec(...)` allocation — so the name is recorded here, once, where the
+            // lowering is decided.
+            this.program.loweredAsync.add(declaration.name.text);
             for (let j = 0, l = artifacts.length; j < l; ++j) out.push(artifacts[j]);
           } else {
             out.push(statement);

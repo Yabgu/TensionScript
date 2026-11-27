@@ -42,6 +42,21 @@ declare function __currentSlot(): i32;
 export declare function __lastStatus(): i32;
 
 /**
+ * **Hand a ready slot to the host's ready queue** (DL61, I95) — `1` accepted, `0` refused
+ * because the queue is full, `-1` when this backend has no host queue.
+ *
+ * The guest's half of the seam. On fiber the guest cannot run a spawned body (its stack is
+ * a host object), so it names the slot and the host's drain resumes it. On continuation the
+ * guest still drives its own executor ring and this answers `-1`, which is the caller's
+ * signal to do exactly that. A builtin because the answer is a *backend* fact known at
+ * compile time: on continuation the call is the constant `-1` and the import is never
+ * referenced.
+ */
+// @ts-ignore: decorator
+@builtin
+export declare function __readySubmit(slot: i32): i32;
+
+/**
  * Turns `$starts[funcIndex]` into a continuation installed at a fresh slot
  * (`docs/task-design.md` §8.5). The index crossed; the reference is made here.
  */

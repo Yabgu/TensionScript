@@ -319,6 +319,7 @@ import { setWakeSink, TaskBase, TaskPolicy } from "./task";
 export { MaskBase, Mask } from "./mask";
 import {
   __taskAt, __currentTask, __resumeTask, __serveSlot, __lastStatus, __parkOn,
+  __readySubmit,
   __suspendParked,
   __setSelfExecutor,
   __maskRefusalCount, __maskViolationCount,
@@ -1007,6 +1008,13 @@ export function __submitTask(task: TaskBase): bool {
   // A settled task's continuation has already returned; its table entry is a
   // spent handle and resuming it is `resuming an invalid continuation`.
   if (task.settled) return false;
+  // **On fiber the host owns the queue** (DL61, I95). The guest cannot run a spawned
+  // body — the stack is a host object — so it hands the slot over and `drain_ready`
+  // resumes it after the entry returns. `-1` says this backend has no host queue, and the
+  // executor ring below is the continuation path unchanged: that backend drives itself,
+  // and this round does not make it worse to make fiber match.
+  let handed = __readySubmit(slot);
+  if (handed >= 0) return handed != 0;
   let id = __selfExecutor();
   let executorOrNull = __executorOf(id);
   if (!executorOrNull) {
