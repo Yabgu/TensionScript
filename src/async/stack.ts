@@ -556,6 +556,14 @@ export class StackfulAsyncTransform {
     ], range);
     unchecked(recordFields[parameters.length] = Node.createMethodDeclaration(
       Node.createIdentifierExpression(DRIVE_METHOD, range),
+      // **This member does not reach the artifact** (DL60, I95). `work$Rec` is emitted
+      // with its constructor and its field accessors and no `drive`, so
+      // `TaskBase#drive@override` is a bare `unreachable` and anything that reaches a
+      // synthesized task through virtual `drive` traps. Measured, not inferred: a
+      // sibling method added at the same index for the experiment did not appear
+      // either, and neither `CommonFlags.Override` nor a `this` type in the signature
+      // changed the output — so the cause is in how the compiler emits members of a
+      // class the transform added after parsing, not in this declaration.
       null, CommonFlags.Instance,
       null,
       Node.createFunctionType(

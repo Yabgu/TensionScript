@@ -2538,6 +2538,44 @@ export class Compiler extends DiagnosticEmitter {
       this.emitStartsTable();
     }
 
+    // **Every fiber build gets the serve entry and the drive export** (DL60, I140 + I95).
+    //
+    // The host's ready drain resumes a spawned task by calling `__driveSlot(slot)`, so that
+    // export has to exist on any build that can have something to drain — including a guest
+    // whose root is a **sync** `_start_game`, which prepares no shell (DL54's residue) and is
+    // exactly the shape whose only work is spawned work.
+    //
+    // And `$serveEntry` has to exist on every fiber build because it is reachable whether or
+    // not anything is in the table: `__submitTask` → `__executorInit` takes a reference to
+    // `__mainStep__` → `__drainInbox` → `__serveOne` → `__serveSlot` → `__serveCont`, and on
+    // this backend `__serveCont` is `call $serveEntry(index)`. `emitStartsTable` emits it only
+    // when the table has an entry — a **parameterised** async function gets no spawn start
+    // (`Gate 3d`), so the table was empty and the call had no target:
+    //
+    //   call target must exist, on (call $$serveEntry (local.get $0))
+    //
+    // Emitted **after** `emitStartsTable` so the idempotent table version wins when there is
+    // one. With nothing to serve, this is an empty chain answering `0` for any index — the
+    // same answer the table version gives for an index that names no entry, and `__serveCont`
+    // reads it as "there is no slot" and answers `-1`.
+    // Keyed on `fiberBackendActive`, **not** `fiberShell`: the shell gate is
+    // `asyncShellSuspends`, which is false precisely for the sync entry this exists for.
+    if (this.fiberBackendActive) {
+      if (!module.hasFunction(SERVE_ENTRY)) {
+        // No table at all: the serve entry can only decline.
+        module.addFunction(SERVE_ENTRY, TypeRef.I32, TypeRef.I32, [ TypeRef.I32 ], module.i32(0));
+      }
+      // **Compile only what is not already emitted.** `compileFunction` on a function that
+      // is in the module adds it twice, and Binaryen answers with an exception that surfaces
+      // as "the compiler has crashed" — measured on `schedule-order`, whose fiber build had
+      // already emitted `__driveSlot` through std.
+      let driveSlot = this.program.requireFunction(BuiltinNames.asyncDriveSlot);
+      if (!module.hasFunction(driveSlot.internalName)) this.compileFunction(driveSlot);
+      if (!module.hasExport("__driveSlot")) {
+        module.addFunctionExport(driveSlot.internalName, "__driveSlot");
+      }
+    }
+
     // **A shared-memory module has no start section.** The host instantiates
     // this module again for every worker, and a start section runs on every
     // instantiation: every worker would run `main` a second time, on its own
