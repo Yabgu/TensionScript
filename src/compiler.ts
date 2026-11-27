@@ -367,6 +367,16 @@ export const STARTS_TABLE = "$starts";
  * `__spawnIndexOf` helpers beside it.
  */
 export const SERVE_ENTRY = "$serveEntry";
+/**
+ * `~lib/task-stack/__serveSlot` — the compiled body whose fiber arm calls `$serveEntry`.
+ *
+ * **Not `__serveCont`**: that is a *builtin*, inlined at its call site, so no function of
+ * that name exists in the module and `hasFunction` on it is always false (measured — the
+ * narrowed gate then let the dangling call through again).
+ */
+export const SERVE_CONT = "~lib/task-stack/__serveSlot";
+/** `~lib/thread/__submitTask` — present exactly when a guest can hand a slot to the host. */
+export const SUBMIT_TASK = "~lib/thread/__submitTask";
 /** Its export name, which is the name the design and the host use. */
 export const STARTS_TABLE_EXPORT = "$starts";
 
@@ -1056,6 +1066,14 @@ export class Compiler extends DiagnosticEmitter {
    * ({@link emitStackfulBackendSection}). Reading it from one accessor is what
    * keeps the artifact's claim and its instructions from drifting apart.
    */
+  /**
+   * Set when the fiber arm of `__serveCont` was compiled — that arm is the only thing on
+   * this backend that calls `$serveEntry` (DL60, I140). The tail emits the body when it is
+   * true, so the call and its target are decided together rather than by two independent
+   * conditions that can disagree.
+   */
+  fiberServeEntryNeeded: bool = false;
+
   get fiberBackendActive(): bool {
     // Delegates to the one definition on `Options`, so the shell, the transform and the
     // drive body cannot answer it differently. See `Options.fiberBackendSelected`.
@@ -2538,41 +2556,50 @@ export class Compiler extends DiagnosticEmitter {
       this.emitStartsTable();
     }
 
-    // **Every fiber build gets the serve entry and the drive export** (DL60, I140 + I95).
+    // **A fiber build that can submit gets the serve entry and the drive export**
+    // (DL60, I140 + I95).
     //
-    // The host's ready drain resumes a spawned task by calling `__driveSlot(slot)`, so that
-    // export has to exist on any build that can have something to drain — including a guest
-    // whose root is a **sync** `_start_game`, which prepares no shell (DL54's residue) and is
-    // exactly the shape whose only work is spawned work.
+    // The pair has to exist together and only where it can be reached, because both
+    // change an artifact's bytes and the default backend is fiber: emitting them on
+    // *every* fiber build moved 40-odd of this repo's own goldens — `interop/*`,
+    // `features/*`, `bindings/*` — none of which can submit anything (measured: five CI
+    // jobs red, all of them `[fixture mismatch]`).
     //
-    // And `$serveEntry` has to exist on every fiber build because it is reachable whether or
-    // not anything is in the table: `__submitTask` → `__executorInit` takes a reference to
-    // `__mainStep__` → `__drainInbox` → `__serveOne` → `__serveSlot` → `__serveCont`, and on
-    // this backend `__serveCont` is `call $serveEntry(index)`. `emitStartsTable` emits it only
-    // when the table has an entry — a **parameterised** async function gets no spawn start
-    // (`Gate 3d`), so the table was empty and the call had no target:
+    // So the test is reachability, not the backend alone:
     //
-    //   call target must exist, on (call $$serveEntry (local.get $0))
+    // - `$serveEntry` is called by exactly one body on this backend — `__serveCont`, whose
+    //   fiber arm is `call $serveEntry(index)`. If that function was compiled, the call
+    //   exists and the target must exist with it. `emitStartsTable` emitted it only when
+    //   `$starts` had an entry, and a **parameterised** async function gets no spawn start
+    //   (`Gate 3d`) — so the table was empty and the call had no target:
     //
-    // Emitted **after** `emitStartsTable` so the idempotent table version wins when there is
-    // one. With nothing to serve, this is an empty chain answering `0` for any index — the
-    // same answer the table version gives for an index that names no entry, and `__serveCont`
-    // reads it as "there is no slot" and answers `-1`.
+    //       call target must exist, on (call $$serveEntry (local.get $0))
+    //
+    //   With nothing to serve this is an empty chain answering `0`, the same answer the
+    //   table version gives for an index that names no entry, which `__serveCont` reads as
+    //   "there is no slot" and answers `-1`.
+    // - `__driveSlot` is what the host's ready drain calls. It exists for a guest that can
+    //   hand a slot over, which is exactly a guest that linked `__submitTask`. A guest
+    //   that never submits needs no door, and the host already treats the export's absence
+    //   as "nothing to drain".
+    //
     // Keyed on `fiberBackendActive`, **not** `fiberShell`: the shell gate is
-    // `asyncShellSuspends`, which is false precisely for the sync entry this exists for.
+    // `asyncShellSuspends`, false precisely for the sync entry this exists for.
     if (this.fiberBackendActive) {
-      if (!module.hasFunction(SERVE_ENTRY)) {
-        // No table at all: the serve entry can only decline.
+      // **Only where the call exists.** `fiberServeEntryNeeded` is set by the builtin that
+      // emits the call, so this is not a guess about reachability: it is the same event.
+      if (this.fiberServeEntryNeeded && !module.hasFunction(SERVE_ENTRY)) {
         module.addFunction(SERVE_ENTRY, TypeRef.I32, TypeRef.I32, [ TypeRef.I32 ], module.i32(0));
       }
-      // **Compile only what is not already emitted.** `compileFunction` on a function that
-      // is in the module adds it twice, and Binaryen answers with an exception that surfaces
-      // as "the compiler has crashed" — measured on `schedule-order`, whose fiber build had
-      // already emitted `__driveSlot` through std.
-      let driveSlot = this.program.requireFunction(BuiltinNames.asyncDriveSlot);
-      if (!module.hasFunction(driveSlot.internalName)) this.compileFunction(driveSlot);
-      if (!module.hasExport("__driveSlot")) {
-        module.addFunctionExport(driveSlot.internalName, "__driveSlot");
+      if (module.hasFunction(SUBMIT_TASK)) {
+        // `compileFunction` on a function already in the module adds it twice, and Binaryen's
+        // exception surfaces as "the compiler has crashed" — measured on `schedule-order`,
+        // whose fiber build already had `__driveSlot` through std.
+        let driveSlot = this.program.requireFunction(BuiltinNames.asyncDriveSlot);
+        if (!module.hasFunction(driveSlot.internalName)) this.compileFunction(driveSlot);
+        if (!module.hasExport("__driveSlot")) {
+          module.addFunctionExport(driveSlot.internalName, "__driveSlot");
+        }
       }
     }
 

@@ -12767,6 +12767,10 @@ function builtin_async_serveCont(ctx: BuiltinFunctionContext): ExpressionRef {
   if (compiler.fiberBackendActive) {
     if (checkTypeAbsent(ctx) | checkArgsRequired(ctx, 1) |
         checkStackIntrinsic(ctx, ctx.prototype.internalName)) return module.unreachable();
+    // **The call and its target are one decision** (DL60, I140): the compiler's tail emits
+    // `$serveEntry` exactly when this line ran, so a program that never reaches the serve
+    // path carries neither the call nor the extra function.
+    compiler.fiberServeEntryNeeded = true;
     let index = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
     compiler.currentType = Type.i32;
     return module.block(null, [ module.drop(module.call(SERVE_ENTRY, [ index ], TypeRef.I32)), module.i32(-1) ], TypeRef.I32);
