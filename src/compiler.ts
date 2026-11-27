@@ -14183,6 +14183,13 @@ export class Compiler extends DiagnosticEmitter {
       Type.bool,
       Constraints.None
     );
+    // **The condition needs the same conversion the statement path applies.** An `if`
+    // whose condition is a class reference is `ref.is_null`'s complement under the GC ABI,
+    // not a bare reference — and a bare reference in an `if` is "if condition must be valid"
+    // at validation (measured: `tests/async/policy.js`, "and on the GC ABI"). The original
+    // code built an `IfStatement` precisely so this conversion ran; building the IR by hand
+    // means asking for it (`DL56`).
+    policyCond = this.makeIsTrueish(policyCond, this.currentType, expression);
     let policyArm = this.compileStatement(Node.createExpressionStatement(policyAwaitExpr));
     // **Fiber only.** `__awaitShellTask` parks through `__parkHost`, which is the fiber
     // backend's suspension (a host call that returns). The continuation backend suspends
