@@ -206,6 +206,39 @@ export function __parkAwait(task: TaskBase | null): void {
 }
 
 /**
+ * `await t` on a shell'd program, for a task whose result comes from **outside**.
+ *
+ * `__inlineAwait` is `t.drive()`, and that is right for a task the lowering built: its
+ * `drive` **is** its body, so running it inline is the whole job. A *handle* — the thing
+ * `rt.frame()`, `rt.job(id)` and `rt.ai…` hand back — is a bare `Task<T>` carrying a
+ * stamped record and no body at all, so its `drive()` is empty and `await` on it returns
+ * the field's default with nothing having happened.
+ *
+ * Measured (DL55), on the fiber backend, with `TENSION_ITERATIONS=1`:
+ *
+ *   probe: park     frame=0 resumes=0
+ *   probe: resume   frame=0 resumes=1     ← same host iteration; no park occurred
+ *   ...
+ *   iteration=1                            ← the whole program, one pass
+ *
+ * and the artifact imported no `scheduler::park` at all. That is the "await behaves like
+ * a yield, not like awaiting" report, in numbers: the guest looped, the host never saw a
+ * park, and `rt.frame()`'s payload was never delivered.
+ *
+ * So the choice is made where the fact lives — on the object, at runtime. Both shapes have
+ * the same **declared** type (`Task<i32>`), so the compiler cannot tell them apart; only
+ * `__parkRecord()` can, because the lowering's tasks have no record and a handle has one.
+ */
+export function __awaitShellTask(task: TaskBase): void {
+  let record = task.__parkRecord();
+  if (record != null && record.class_ != 0) {
+    __parkAwait(task);
+    return;
+  }
+  task.drive();
+}
+
+/**
  * The continuation backend's park on a **producer record**: register it with the
  * host, then suspend (DL43, I99).
  *

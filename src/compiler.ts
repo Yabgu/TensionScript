@@ -14082,6 +14082,7 @@ export class Compiler extends DiagnosticEmitter {
     let typeArguments = taskClass != null && taskProto != null
       ? taskClass.getTypeArgumentsTo(taskProto)
       : null;
+
     if (typeArguments == null || typeArguments.length != 1) {
       // Not a task: the operand is its own value.
       return this.compileExpression(expression.operand, contextualType, constraints);
@@ -14150,7 +14151,7 @@ export class Compiler extends DiagnosticEmitter {
       null, [ policyDecl ], expression.range
     );
 
-    let policyAwaitCall = Node.createCallExpression(
+    let policyAwaitExpr = Node.createCallExpression(
       Node.createPropertyAccessExpression(
         Node.createCallExpression(
           Node.createIdentifierExpression("changetype", expression.range),
@@ -14165,23 +14166,44 @@ export class Compiler extends DiagnosticEmitter {
       [ Node.createIdentifierExpression(taskName, expression.range) ],
       expression.range
     );
-    let inlineAwaitCall = Node.createCallExpression(
-      Node.createIdentifierExpression("__inlineAwait", expression.range),
-      null,
-      [ Node.createIdentifierExpression(taskName, expression.range) ],
-      expression.range
-    );
-    // `if (policy) policy.await(t); else __inlineAwait(t)`
-    let awaiterStmt = Node.createIfStatement(
+    // **The default arm is std's, and it is chosen at runtime** (DL55). `__inlineAwait`
+    // is `t.drive()`, which is the whole job for a task the lowering built (its `drive`
+    // *is* its body). A handle — `rt.frame()`, `rt.job()`, the AI verbs — is a bare
+    // `Task<T>` with a stamped record and no body, so its `drive()` is empty and `await`
+    // returned a default with nothing having happened. Both shapes have the same declared
+    // type, so only `__parkRecord()` can tell them apart, and that is a runtime question.
+    // `__awaitShellTask` asks it: stamped record → park, otherwise → `drive()`.
+    // `if (policy) policy.await(t); else __awaitShellTask(t)`, as IR, because the default
+    // arm is a direct call to a std function by its fully-qualified name rather than a
+    // source identifier the guest would have to have in scope.
+    // Compiled **before** the condition: the declaration is what puts the name in scope.
+    let policyDeclRef = this.compileStatement(policyStmt);
+    let policyCond = this.compileExpression(
       Node.createIdentifierExpression(policyName, expression.range),
-      Node.createExpressionStatement(policyAwaitCall),
-      Node.createExpressionStatement(inlineAwaitCall),
-      expression.range
+      Type.bool,
+      Constraints.None
     );
-
+    let policyArm = this.compileStatement(Node.createExpressionStatement(policyAwaitExpr));
+    // **Fiber only.** `__awaitShellTask` parks through `__parkHost`, which is the fiber
+    // backend's suspension (a host call that returns). The continuation backend suspends
+    // in wasm instead, and reaching for the fiber park there would compile a path that
+    // backend does not have — measured: `Property 'value' does not exist on type
+    // Task<void>` from `__settleFromRecord`, pulled in by a park the backend never uses.
+    // The continuation backend's own `await` defect is measured and named in the DL55
+    // report; it is a different one and it is not this round's.
+    let awaitEntry = this.fiberBackendActive ? "__awaitShellTask" : "__inlineAwait";
+    let defaultArm = this.compileStatement(Node.createExpressionStatement(
+      Node.createCallExpression(
+        Node.createIdentifierExpression(awaitEntry, expression.range),
+        null,
+        [ Node.createIdentifierExpression(taskName, expression.range) ],
+        expression.range
+      )
+    ));
+    this.currentType = Type.void;
     let parkExpr = module.block(null, [
-      this.compileStatement(policyStmt),
-      this.compileStatement(awaiterStmt)
+      policyDeclRef,
+      module.if(policyCond, policyArm, defaultArm)
     ], TypeRef.None);
     stmts.push(module.if(settledExpr, module.nop(), parkExpr));
 

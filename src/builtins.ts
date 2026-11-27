@@ -794,6 +794,8 @@ export namespace BuiltinNames {
    * this store. Same import, `class = key = 0`.
    */
   export const asyncParkYield = "~lib/task-stack/__parkYield";
+  /** The shell's `await` for a task that may be a producer-backed handle (DL55). */
+  export const asyncAwaitShellTask = "~lib/task-stack/__awaitShellTask";
   /**
    * `__driveSlot(slot)`: run the task at `slot` on the current stack (DL40).
    *
