@@ -22,7 +22,7 @@
  */
 
 import { Program } from "./program";
-import { CommonFlags, Feature } from "./common";
+import { CommonFlags, Feature, STACKFUL_ENTRY_EXPORT } from "./common";
 import { ClosureLowerTransform } from "./closure/lower";
 import { LazyAwaitTransform } from "./lazy/lower";
 import { AsyncLowerTransform } from "./async/lower";
@@ -104,13 +104,29 @@ function latchAsyncUsage(program: Program): void {
   }
 }
 
+/** The two names a stackful shell can resume: `main`, and the SDK's entry export. */
+function isAsyncEntryName(name: string): bool {
+  return name == "main" || name == STACKFUL_ENTRY_EXPORT;
+}
+
 /**
- * Top-level declarations only: `export async function main` is the entry a
- * shell can start.
+ * Top-level declarations only: `export async function main` — or the SDK's
+ * `export async function _start_game` — is an entry a shell can start.
  *
  * Exported is part of the test because `mainFunction` is set from the *export*
- * table (`compiler.ts:2247`) — a nested or unexported `async function main` is
- * not an entry and must not make a sync `main` look startable.
+ * table (`compiler.ts`, the module-exports walk) — a nested or unexported
+ * `async function main` is not an entry and must not make a sync `main` look
+ * startable.
+ *
+ * **Why `_start_game` is here too (DL54).** This latch was keyed on the spelling
+ * `main` while 26 of 27 example guests export `_start_game`, so an exported async
+ * `_start_game` recorded no shell: the artifact carried a task **factory** under
+ * that name, the host's `() -> ()` lookup refused it (`did not export _start_game
+ * or _start`), and there was no `__start` to fall back on. The name is not the
+ * fact the shell needs — "the root is async" is — and once DL52 made `_start_game`
+ * a root, the two names are both roots. Asked of the two entry names, which is
+ * what `STACKFUL_ENTRY_EXPORT` is for; `hasAsyncMain` is read in exactly one place
+ * (`shouldEmitAsyncShell`), so widening it here cannot reach anything else.
  */
 function latchAsyncEntry(statements: Statement[], program: Program): void {
   for (let i = 0, k = statements.length; i < k; ++i) {
@@ -119,7 +135,7 @@ function latchAsyncEntry(statements: Statement[], program: Program): void {
     let declaration = <FunctionDeclaration>statement;
     if (!declaration.isAsync) continue;
     if (!declaration.is(CommonFlags.Export)) continue;
-    if (declaration.name.text != "main") continue;
+    if (!isAsyncEntryName(declaration.name.text)) continue;
     program.hasAsyncMain = true;
   }
 }

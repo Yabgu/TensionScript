@@ -77,8 +77,13 @@ import {
   CommonNames,
   Feature,
   Target,
-  Runtime
+  Runtime,
+  STACKFUL_ENTRY_EXPORT
 } from "./common";
+
+// Re-exported where it used to be declared, so anything importing it from this module keeps
+// working; `common.ts` is the home (DL54).
+export { STACKFUL_ENTRY_EXPORT };
 
 import {
   Program,
@@ -326,14 +331,6 @@ export const STACKFUL_BACKEND_CONTINUATION = "continuation";
  * `auto` never resolves to it. It is chosen by writing `--stackful-backend=promise`.
  */
 export const STACKFUL_BACKEND_PROMISE = "promise";
-/**
- * The entry export Tension's SDK uses for a game: `_start_game`.
- *
- * A stackful shell needs **a root to resume**, and `main` is only one name for one. 26 of
- * 27 example guests export this instead, so a shell that looked only for `main` refused the
- * entire example corpus while a root was right there (DL52).
- */
-export const STACKFUL_ENTRY_EXPORT = "_start_game";
 export const STACKFUL_BACKEND_FIBER = "fiber";
 export const ASYNC_CONT_TABLE = "~asyncCont";
 export const ASYNC_MAIN_SLOT = "~asyncMainSlot";
@@ -1124,6 +1121,20 @@ export class Compiler extends DiagnosticEmitter {
     }
     if (!program.hasAsync) return false;
     return true;
+  }
+
+  /**
+   * Whether the shell's root is the guest's own `_start_game` export.
+   *
+   * The two DL54 rules — publish the boot body as `__start`, drop the `_start_game` export —
+   * are scoped to this case on purpose. A program with an async `main` **and** a sync
+   * `_start_game` (the corpus has two: `conformance/start-game-entry`, `fiber/i70-fiber`)
+   * keeps both exactly as they were: its root is `main`, the host's `runtime_initialised`
+   * arm already covers it, and moving its bytes would be a change nothing asked for.
+   */
+  private rootIsStartGameExport(): bool {
+    let main = this.mainFunction;
+    return main != null && main.declaration.name.text == STACKFUL_ENTRY_EXPORT;
   }
 
   /**
@@ -2491,6 +2502,19 @@ export class Compiler extends DiagnosticEmitter {
       this.emitPromiseShellStart(startFunctionBody);
     }
 
+    // **The shell ran the entry; the host must not run it again** (DL54). With the boot
+    // body exported as `__start`, a host calls it on a fiber and marks the module
+    // initialised — and a host that *also* finds `_start_game` in the export table calls it
+    // a second time. Measured: the whole guest transcript, twice. `async main` never had
+    // this because the host looks for `_start_game` and `_start`, and `main` is neither;
+    // `_start_game` is exactly a name it looks for.
+    //
+    // The guest's declaration is untouched — it is the shell's root, resumed through
+    // `main$start`, and a caller that has no `__start` cannot drive a shell anyway.
+    if (this.fiberShell && this.asyncShellStartReady && this.rootIsStartGameExport()) {
+      if (module.hasExport(STACKFUL_ENTRY_EXPORT)) module.removeExport(STACKFUL_ENTRY_EXPORT);
+    }
+
     // **The spawn table, for a build with no continuation shell.** The plain
     // worker dispatches through `$starts` with `call_indirect`, so the table must
     // exist whenever a worker body was exported — even one built from a program
@@ -2527,6 +2551,19 @@ export class Compiler extends DiagnosticEmitter {
     let startIsEmpty = !startFunctionBody.length;
     let exportStart = options.exportStart;
     let shared = this.options.sharedMemory;
+    // **A fiber shell that owns the entry publishes it as `__start`** (DL54). The shell
+    // has already run the entry — on the fiber the host created, through this very body —
+    // so the boot body has to be reachable as an *export* the host calls, not as a start
+    // section (which would run at instantiation, and which the loader refuses outright for
+    // a session guest). It also has to answer `() -> ()`, which is the one shape
+    // `main.rs` looks up. The name is `--exportStart` when the build asked for one and
+    // `__start` otherwise, because that is the name the host already knows.
+    // A **shared** build already publishes its boot body: `emitStartEntry` exports
+    // `__start() -> i32` for the worker path, and the host calls it on a fiber. Naming it
+    // again here would be `AS110: Start function name '__start' is invalid or conflicts with
+    // another export` — measured on the three `stackful-fiber-*` fixtures.
+    let shellOwnsEntry = this.fiberShell && this.asyncShellStartReady && this.rootIsStartGameExport();
+    if (shellOwnsEntry && exportStart == null && !shared) exportStart = StartEntryName;
     if (!startIsEmpty) {
       let signature = startFunctionInstance.signature;
       if (exportStart != null) {

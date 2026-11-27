@@ -87,6 +87,20 @@ export const enum CommonFlags {
 }
 
 /** Path delimiter inserted between file system levels. */
+/**
+ * The entry export Tension's SDK uses for a game: `_start_game`.
+ *
+ * A stackful shell needs **a root to resume**, and `main` is only one name for one. 26 of
+ * 27 example guests export this instead, so a shell that looked only for `main` refused the
+ * entire example corpus while a root was right there (DL52).
+ *
+ * Lives here rather than in `compiler.ts` because the *latch* that records "this program is
+ * started by an async function" runs in `transforms.ts`, before any element or export table
+ * exists — and `compiler.ts` imports `transforms.ts`, so a shared home is the only way both
+ * can name the same string without a cycle (DL54, I24: one spelling, one home).
+ */
+export const STACKFUL_ENTRY_EXPORT = "_start_game";
+
 export const PATH_DELIMITER = "/";
 /** Substitution used to indicate the parent directory. */
 export const PARENT_SUBST = "..";

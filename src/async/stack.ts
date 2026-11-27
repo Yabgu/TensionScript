@@ -69,7 +69,7 @@ import { Parser } from "../parser";
 import { Program } from "../program";
 import { DiagnosticCode, Range } from "../diagnostics";
 import { Token } from "../tokenizer";
-import { CommonFlags } from "../common";
+import { CommonFlags, STACKFUL_ENTRY_EXPORT } from "../common";
 import {
   ArrowKind,
   ArrayLiteralExpression,
@@ -286,7 +286,23 @@ export class StackfulAsyncTransform {
           // `main` is the root task. Its continuation is the compiled function
           // itself, wrapped by `main$start` in the compiler; transforming it
           // would create a second body that nothing resumes.
-          if (declaration.name.text == "main") {
+          //
+          // **`_start_game` is the other root, and it needs the same answer** (DL54).
+          // The shell resumes whichever function the compiler installed as the entry —
+          // that is what `mainFunction` *is* — so lowering `_start_game` into a task
+          // factory hands the shell a function that only *creates* a task while its body
+          // moves into `f$spawnStart`, which nothing dispatches: the guest ran, printed
+          // nothing, and exited 0. Widening the latch alone (`hasAsyncMain`) fixed the
+          // shell's existence and left this, which is why the two are one change.
+          //
+          // Asked of exported-or-not as well, because a nested `_start_game` is not an
+          // entry: `main` has always been matched by name here and the compiler drops a
+          // nested `main` from the entry slot, so the export test is what keeps the two
+          // in step.
+          if (
+            declaration.name.text == "main" ||
+            (declaration.name.text == STACKFUL_ENTRY_EXPORT && declaration.is(CommonFlags.Export))
+          ) {
             // `main` is the root task: its body stays where it is, and its
             // `await`s are compiled by the shell's await path. A `try` around
             // one is refused by name here, before the compiler's generic
