@@ -100,6 +100,24 @@ declare function hostPark(taskId: i64, class_: i32, key: i32): void;
 declare function hostCompletion(taskId: i64): i32;
 
 /**
+ * `scheduler::completionClass(task_id) -> i32` — **which class the wake arrived as**.
+ *
+ * `completion` answers the payload (`b`); this answers the delivered class, and a family
+ * with more than one member needs both. The AI stream is the case: `AI_READY` means bytes
+ * are waiting, `AI_DONE` means the reply is over, and `AI_ERROR` means it failed — three
+ * events one payload word cannot tell apart, which is why `rt.classify` reads
+ * `record.class_` rather than the payload. Until DL57 nothing wrote that field on the fiber
+ * path: `__parkHost` set `payload` and left the handle's creation-time stamp in place, so a
+ * resumed stream read `AI_DONE` for every chunk.
+ *
+ * A separate import rather than a new field on `completion`: an artifact built before this
+ * round does not import it, so its bytes and its behaviour are untouched. The host answers
+ * the park's own class when it has no completion, which keeps a keyless park harmless.
+ */
+@external("scheduler", "completionClass")
+declare function hostCompletionClass(taskId: i64): i32;
+
+/**
  * The fiber backend's **keyed** park: the call a stackful suspension becomes when
  * the host is the thing that suspends.
  *
@@ -125,6 +143,11 @@ export function __parkHost(awaited: TaskRecord): void {
   // Promise path's `__taskResume` writes, so `rt.classify` and this agree on
   // what a settled record looks like.
   awaited.payload = hostCompletion(<i64>id);
+  // **The delivered class, not the handle's stamp** (DL57). A family whose members mean
+  // different things — the AI stream's READY/DONE/ERROR — is only readable if the record
+  // says which arrived; without this line every resumed chunk read as the class
+  // `streamTask` wrote at creation.
+  awaited.class_ = hostCompletionClass(<i64>id);
   awaited.status = 0;
   awaited.done = 1;
 }
