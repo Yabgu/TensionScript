@@ -1,0 +1,7 @@
+{
+  "skipFixture": true,
+  "skipInstantiate": true,
+  "asc_flags": [
+    "--stackful-backend=fiber"
+  ]
+}

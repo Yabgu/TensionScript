@@ -876,6 +876,13 @@ export class Compiler extends DiagnosticEmitter {
    * added by `emitStartsTable`, when the index is final).
    */
   spawnIndexTargets: Map<string, string> = new Map<string, string>();
+  /**
+   * Whether `$starts` was materialized. The table can be asked for from two
+   * places — the shell, when its start is ready, and the tail of `compile`, when
+   * a body named an index but no shell was started for it — so it is emitted
+   * once, by whichever asks first.
+   */
+  startsTableEmitted: bool = false;
 
   /** The program's own `mainStep`, once found and validated (design §6). */
   mainStepOverride: Function | null = null;
@@ -1962,6 +1969,8 @@ export class Compiler extends DiagnosticEmitter {
    * merely declared for `ref.func`'s sake.
    */
   private emitStartsTable(): void {
+    if (this.startsTableEmitted) return;
+    this.startsTableEmitted = true;
     let seeds = Set_values(this.asyncStartFunctions);
     let names = new Array<string>(seeds.length);
     for (let i = 0, k = seeds.length; i < k; ++i) unchecked(names[i] = unchecked(seeds[i]));
@@ -2486,9 +2495,22 @@ export class Compiler extends DiagnosticEmitter {
     // worker dispatches through `$starts` with `call_indirect`, so the table must
     // exist whenever a worker body was exported — even one built from a program
     // that registers no entry yet, because the instruction's type is checked
-    // before any run. A suspending build already emitted it above, in its own
-    // order; this branch is the non-suspending half and touches nothing there.
-    if (!this.asyncShellSuspends && this.workerExported) {
+    // before any run. A suspending build whose start was ready already emitted it
+    // above, in its own order; `startsTableEmitted` makes this call a no-op there.
+    //
+    // **And a body that named an index materializes it, shell or no shell.** The
+    // suspending shell emits `$starts` only when its *start* is ready, and that is
+    // `program.hasAsyncMain` — but a program with a synchronous entry can still call an
+    // async function, whose factory carries `$rec.entry = __spawnIndexOf(f$spawnStart)`.
+    // `__spawnIndexOf`'s own guard has always accepted that program (the table "will
+    // exist"), and until now it did not: the helper it recorded had no body, and the
+    // module failed validation with `call target must exist`. Two predicates, one
+    // promise — this is where the promise is kept.
+    //
+    // Emitted here, at the tail, because the index is final only once every reachable
+    // body has been compiled; and only when something actually asked, so a program
+    // that names no index is byte-for-byte what it was.
+    if (this.workerExported || Map_keys(this.spawnIndexTargets).length > 0) {
       this.emitStartsTable();
     }
 
