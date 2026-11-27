@@ -797,6 +797,13 @@ export namespace BuiltinNames {
   /** The shell's `await` for a task that may be a producer-backed handle (DL55). */
   export const asyncAwaitShellTask = "~lib/task-stack/__awaitShellTask";
   /**
+   * Answers `1` in a build that can park a producer handle, and is a **compile error**
+   * naming the backend otherwise (DL57). Called by the SDK's `inputTask()`, so a guest
+   * that awaits input on a backend with no producer is refused when it is compiled
+   * rather than parking forever at run time.
+   */
+  export const ioInputSupported = "~lib/io/__inputSupported";
+  /**
    * `__driveSlot(slot)`: run the task at `slot` on the current stack (DL40).
    *
    * The fiber backend's `__resumeTask` (see the builtin): a slot is a task the
@@ -12659,6 +12666,38 @@ function builtin_async_spawnIndexOf(ctx: BuiltinFunctionContext): ExpressionRef 
   compiler.spawnIndexTargets.set(helper, spawnName);
   return module.call(helper, [], TypeRef.I32);
 }
+// __inputSupported() -> i32
+//
+// **Fail early, fail loud** (DL57). Awaiting a producer handle is a park, and a park needs a
+// backend that can suspend the guest and a host that posts for it. On the fiber backend both
+// exist and are proved (`tests/park_frame.rs`). On the others they do not — the continuation
+// shell's park records and returns with nothing to post for it (measured, DL56 §4), and a
+// non-stackful build compiles the await to the operand, which is the silent `0` I103 is
+// about.
+//
+// So a guest that asks for an input handle in one of those builds stops here, with a message
+// naming the awaitable and the backend it was asked for — never a program that runs, prints
+// nothing and exits 0.
+function builtin_io_inputSupported(ctx: BuiltinFunctionContext): ExpressionRef {
+  let compiler = ctx.compiler;
+  let module = compiler.module;
+  compiler.currentType = Type.i32;
+  if (checkTypeAbsent(ctx)) return module.unreachable();
+  if (!compiler.fiberBackendActive) {
+    let backend = compiler.options.stackfulBackend;
+    compiler.error(
+      DiagnosticCode.Not_implemented_0,
+      ctx.reportNode.range,
+      "`await inputTask(...)` parks on a producer handle, which needs a backend that can " +
+        "suspend and a host that posts for it; this build's backend is `" + backend + "` " +
+        "(use --stackful-backend=fiber)"
+    );
+    return module.unreachable();
+  }
+  return module.i32(1);
+}
+builtinFunctions.set(BuiltinNames.ioInputSupported, builtin_io_inputSupported);
+
 builtinFunctions.set(BuiltinNames.asyncSpawnIndexOf, builtin_async_spawnIndexOf);
 
 // __callStart(funcIndex: i32) -> i32
