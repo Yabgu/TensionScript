@@ -5,18 +5,19 @@
  (type $3 (func (param i32 i32)))
  (type $4 (func (param i32 i32) (result i32)))
  (type $5 (func))
- (type $6 (func (param i32 i32 i32 i32)))
- (type $7 (func (param i32 i32 i32)))
- (type $8 (func (param i32 i32 i64)))
- (type $9 (func (param i64 i32 i32)))
- (type $10 (func (param i32 i32 i32) (result i32)))
- (type $11 (func (param i64) (result i32)))
+ (type $6 (func (param i64) (result i32)))
+ (type $7 (func (param i32 i32 i32 i32)))
+ (type $8 (func (param i32 i32 i32)))
+ (type $9 (func (param i32 i32 i64)))
+ (type $10 (func (param i64 i32 i32)))
+ (type $11 (func (param i32 i32 i32) (result i32)))
  (import "env" "memory" (memory $0 2 256 shared))
- (import "env" "abort" (func $~lib/builtins/abort (type $6) (param i32 i32 i32 i32)))
- (import "scheduler" "park" (func $~lib/task-stack/hostPark (type $9) (param i64 i32 i32)))
+ (import "env" "abort" (func $~lib/builtins/abort (type $7) (param i32 i32 i32 i32)))
+ (import "scheduler" "park" (func $~lib/task-stack/hostPark (type $10) (param i64 i32 i32)))
  (import "env" "__startThread" (func $~lib/thread/__startThread (type $0) (param i32) (result i32)))
  (import "env" "__executorCount" (func $~lib/thread/__executorCount (type $1) (result i32)))
- (import "scheduler" "completion" (func $~lib/task-stack/hostCompletion (type $11) (param i64) (result i32)))
+ (import "scheduler" "completionClass" (func $~lib/task-stack/hostCompletionClass (type $6) (param i64) (result i32)))
+ (import "scheduler" "completion" (func $~lib/task-stack/hostCompletion (type $6) (param i64) (result i32)))
  (global $~asyncStatus (mut i32) (i32.const 0))
  (global $~lib/task-stack/selfExecutor (mut i32) (i32.const 0))
  (global $~lib/thread/executors (mut i32) (i32.const 0))
@@ -129,7 +130,7 @@
    global.set $~lib/rt/itcms/visitCount
   end
  )
- (func $~lib/rt/itcms/__link (type $7) (param $0 i32) (param $1 i32) (param $2 i32)
+ (func $~lib/rt/itcms/__link (type $8) (param $0 i32) (param $1 i32) (param $2 i32)
   (local $3 i32)
   local.get $1
   if (result i32)
@@ -1251,7 +1252,7 @@
   i32.or
   i32.store offset=4
  )
- (func $~lib/rt/tlsf/addMemory (type $8) (param $0 i32) (param $1 i32) (param $2 i64)
+ (func $~lib/rt/tlsf/addMemory (type $9) (param $0 i32) (param $1 i32) (param $2 i64)
   (local $3 i32)
   (local $4 i32)
   (local $5 i32)
@@ -1388,7 +1389,7 @@
    local.get $1
    global.set $~lib/rt/itcms/iter
   end
-  block $__inlined_func$~lib/rt/itcms/Object#unlink$390
+  block $__inlined_func$~lib/rt/itcms/Object#unlink$391
    local.get $0
    i32.load offset=4
    i32.const -4
@@ -1412,7 +1413,7 @@
      call $~lib/builtins/abort
      unreachable
     end
-    br $__inlined_func$~lib/rt/itcms/Object#unlink$390
+    br $__inlined_func$~lib/rt/itcms/Object#unlink$391
    end
    local.get $0
    i32.load offset=8
@@ -1878,7 +1879,7 @@
       i32.add
       i32.atomic.load
       drop
-      block $__inlined_func$~lib/thread/blockFreeRequest$233
+      block $__inlined_func$~lib/thread/blockFreeRequest$234
        local.get $3
        global.get $~lib/thread/freeRingBase
        local.tee $3
@@ -1893,7 +1894,7 @@
        local.get $5
        i32.ge_s
        i32.or
-       br_if $__inlined_func$~lib/thread/blockFreeRequest$233
+       br_if $__inlined_func$~lib/thread/blockFreeRequest$234
        loop $while-continue|01
         local.get $3
         i32.const 4
@@ -1906,7 +1907,7 @@
         i32.sub
         local.get $5
         i32.ge_s
-        br_if $__inlined_func$~lib/thread/blockFreeRequest$233
+        br_if $__inlined_func$~lib/thread/blockFreeRequest$234
         local.get $6
         local.get $4
         local.get $4
@@ -2523,7 +2524,7 @@
    global.get $~lib/memory/__stack_pointer
    local.get $0
    i32.store
-   block $__inlined_func$~lib/rt/itcms/__renew$376
+   block $__inlined_func$~lib/rt/itcms/__renew$377
     i32.const 1073741820
     local.get $2
     i32.const 1
@@ -2566,7 +2567,7 @@
      i32.store offset=16
      local.get $2
      local.set $1
-     br $__inlined_func$~lib/rt/itcms/__renew$376
+     br $__inlined_func$~lib/rt/itcms/__renew$377
     end
     local.get $3
     local.get $4
@@ -3174,17 +3175,17 @@
    global.get $~lib/memory/__stack_pointer
    i64.const 0
    i64.store offset=8
-   block $__inlined_func$~lib/thread/controlBlockBase$291
+   block $__inlined_func$~lib/thread/controlBlockBase$292
     global.get $~lib/thread/__controlBase
     local.tee $1
-    br_if $__inlined_func$~lib/thread/controlBlockBase$291
+    br_if $__inlined_func$~lib/thread/controlBlockBase$292
     i32.const 0
     local.set $1
     i32.const 65536
     i32.atomic.load
     i32.const 1414025796
     i32.ne
-    br_if $__inlined_func$~lib/thread/controlBlockBase$291
+    br_if $__inlined_func$~lib/thread/controlBlockBase$292
     i32.const 65536
     local.set $1
    end
@@ -3630,7 +3631,7 @@
   local.get $1
   call $~lib/thread/__carveThreadLayout
  )
- (func $~lib/thread/__spawnThread (type $10) (param $0 i32) (param $1 i32) (param $2 i32) (result i32)
+ (func $~lib/thread/__spawnThread (type $11) (param $0 i32) (param $1 i32) (param $2 i32) (result i32)
   (local $3 i32)
   global.get $~lib/thread/__controlBase
   i32.eqz
@@ -3728,12 +3729,12 @@
    i32.load offset=4
    local.tee $0
    i32.store
-   block $__inlined_func$~lib/thread/driveReady$384
+   block $__inlined_func$~lib/thread/driveReady$385
     local.get $0
     call $~lib/thread/SlotRing#pop
     i32.const 0
     i32.lt_s
-    br_if $__inlined_func$~lib/thread/driveReady$384
+    br_if $__inlined_func$~lib/thread/driveReady$385
     global.get $~lib/memory/__stack_pointer
     call $~lib/task-stack/__taskAt
     local.tee $0
@@ -3745,7 +3746,7 @@
      i32.store
      local.get $0
      i32.load8_u offset=8
-     br_if $__inlined_func$~lib/thread/driveReady$384
+     br_if $__inlined_func$~lib/thread/driveReady$385
     end
     call $~lib/task-stack/__driveSlot
    end
@@ -3864,7 +3865,7 @@
     global.get $~lib/thread/executors
     local.tee $3
     i32.store
-    block $__inlined_func$~lib/thread/__executorOf$389
+    block $__inlined_func$~lib/thread/__executorOf$390
      local.get $1
      local.get $3
      i32.eqz
@@ -3887,7 +3888,7 @@
       global.set $~lib/memory/__stack_pointer
       i32.const 0
       local.set $0
-      br $__inlined_func$~lib/thread/__executorOf$389
+      br $__inlined_func$~lib/thread/__executorOf$390
      end
      global.get $~lib/memory/__stack_pointer
      local.get $3
@@ -4639,6 +4640,13 @@
      local.get $1
      i32.store
      local.get $1
+     i64.const 0
+     call $~lib/task-stack/hostCompletionClass
+     i32.store
+     global.get $~lib/memory/__stack_pointer
+     local.get $1
+     i32.store
+     local.get $1
      i32.const 0
      i32.store offset=12
      global.get $~lib/memory/__stack_pointer
@@ -4657,7 +4665,7 @@
      global.get $~lib/memory/__stack_pointer
      local.get $1
      i32.store offset=8
-     block $__inlined_func$~lib/task/TaskBase#__settleFromRecord@override$400
+     block $__inlined_func$~lib/task/TaskBase#__settleFromRecord@override$401
       local.get $0
       i32.const 8
       i32.sub
@@ -4714,7 +4722,7 @@
        i32.const 12
        i32.add
        global.set $~lib/memory/__stack_pointer
-       br $__inlined_func$~lib/task/TaskBase#__settleFromRecord@override$400
+       br $__inlined_func$~lib/task/TaskBase#__settleFromRecord@override$401
       end
       global.get $~lib/memory/__stack_pointer
       i32.const 8

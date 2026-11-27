@@ -9,16 +9,17 @@
  (type $7 (func (param i32 i32 i32 i32) (result i32)))
  (type $8 (func (param i32 i32 i32 i32)))
  (type $9 (func (param i32 f32)))
- (type $10 (func (param i32 i32 i32) (result i32)))
- (type $11 (func (param i32 i32 i64) (result i32)))
- (type $12 (func (param i64 i32 i32)))
- (type $13 (func (param i64) (result i32)))
+ (type $10 (func (param i64) (result i32)))
+ (type $11 (func (param i32 i32 i32) (result i32)))
+ (type $12 (func (param i32 i32 i64) (result i32)))
+ (type $13 (func (param i64 i32 i32)))
  (type $14 (func (param i32 i32 i32 i32 i32) (result i32)))
  (type $15 (func (param i32 i32 i32 i32 i32 i32) (result i32)))
  (import "env" "memory" (memory $0 2 256 shared))
  (import "env" "abort" (func $~lib/builtins/abort (type $8) (param i32 i32 i32 i32)))
- (import "scheduler" "park" (func $~lib/task-stack/hostPark (type $12) (param i64 i32 i32)))
- (import "scheduler" "completion" (func $~lib/task-stack/hostCompletion (type $13) (param i64) (result i32)))
+ (import "scheduler" "park" (func $~lib/task-stack/hostPark (type $13) (param i64 i32 i32)))
+ (import "scheduler" "completion" (func $~lib/task-stack/hostCompletion (type $10) (param i64) (result i32)))
+ (import "scheduler" "completionClass" (func $~lib/task-stack/hostCompletionClass (type $10) (param i64) (result i32)))
  (import "env" "__executorCount" (func $~lib/thread/__executorCount (type $4) (result i32)))
  (import "env" "__startThread" (func $~lib/thread/__startThread (type $1) (param i32) (result i32)))
  (global $~asyncLastStatus (mut i32) (i32.const 0))
@@ -1223,7 +1224,7 @@
   local.get $slMap
   i32.store offset=4
  )
- (func $~lib/rt/tlsf/addMemory (type $11) (param $root i32) (param $start i32) (param $endU64 i64) (result i32)
+ (func $~lib/rt/tlsf/addMemory (type $12) (param $root i32) (param $start i32) (param $endU64 i64) (result i32)
   (local $end i32)
   (local $root|4 i32)
   (local $tail i32)
@@ -3925,7 +3926,7 @@
   end
   return
  )
- (func $~lib/thread/__spawnThread (type $10) (param $id i32) (param $entryIndex i32) (param $argSlot i32) (result i32)
+ (func $~lib/thread/__spawnThread (type $11) (param $id i32) (param $entryIndex i32) (param $argSlot i32) (result i32)
   (local $id|3 i32)
   (local $rec i32)
   (local $rec|5 i32)
@@ -6725,6 +6726,16 @@
   local.get $2
   i32.store
   local.get $2
+  local.get $id
+  i64.extend_i32_s
+  call $~lib/task-stack/hostCompletionClass
+  call $~lib/task/TaskRecord#set:class_
+  local.get $awaited
+  local.set $2
+  global.get $~lib/memory/__stack_pointer
+  local.get $2
+  i32.store
+  local.get $2
   i32.const 0
   call $~lib/task/TaskRecord#set:status
   local.get $awaited
@@ -8646,7 +8657,7 @@
   local.get $1
   return
  )
- (func $~lib/arraybuffer/ArrayBufferView#constructor (type $10) (param $this i32) (param $length i32) (param $alignLog2 i32) (result i32)
+ (func $~lib/arraybuffer/ArrayBufferView#constructor (type $11) (param $this i32) (param $length i32) (param $alignLog2 i32) (result i32)
   (local $buffer i32)
   (local $4 i32)
   global.get $~lib/memory/__stack_pointer
