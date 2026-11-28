@@ -40,6 +40,7 @@ import {
   ExpressionStatement,
   ForOfStatement,
   ForStatement,
+  FieldDeclaration,
   FunctionDeclaration,
   IfStatement,
   NamespaceDeclaration,
@@ -160,6 +161,18 @@ function scanStatement(statement: Statement, program: Program): void {
     case NodeKind.ClassDeclaration: {
       let members = (<ClassDeclaration>statement).members;
       for (let i = 0, k = members.length; i < k; ++i) scanStatement(members[i], program);
+      break;
+    }
+    case NodeKind.FieldDeclaration: {
+      // **A field's initializer is a body too** (DL62). Without this case an `await`
+      // inside `go: () => void = async (): void => { await … }` was invisible to the
+      // latch, so `hasAwait` stayed false, `applyInTreeTransforms` chose the *generic*
+      // lowering instead of the stackful one, and the user got
+      // `async arrow functions (async lowering)` — a message naming no backend, for a
+      // program the stackful transform never saw. No shipped artifact moves: the only
+      // programs this reaches are the ones that were refused before.
+      let initializer = (<FieldDeclaration>statement).initializer;
+      if (initializer) scanExpression(initializer, program);
       break;
     }
     case NodeKind.NamespaceDeclaration: {

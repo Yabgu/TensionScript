@@ -84,6 +84,7 @@ import {
   ElementAccessExpression,
   Expression,
   ExpressionStatement,
+  FieldDeclaration,
   ForOfStatement,
   ForStatement,
   FunctionDeclaration,
@@ -116,6 +117,29 @@ import {
 } from "../ast";
 
 /** Suffix of the synthesized body function. */
+/**
+ * What a **lifted method** needs that a free function does not (DL62).
+ *
+ * A method body references `this`, and a lifted free function has no receiver. Rather
+ * than rewrite every `this` expression (a walk over every node kind that can hold one),
+ * the body stays a **member** of its own class — so `this` means what it always meant —
+ * and the record carries the receiver as a field the body is called on.
+ */
+class MethodLift {
+  constructor(
+    /** The class it belongs to. Prefixes the top-level synthesized names (`C$run$Rec`). */
+    public className: string,
+    /** The class's own type: the record's receiver field and the constructor's first parameter. */
+    public classType: TypeNode,
+    /**
+     * Where the lifted body member is filed. It cannot be a top-level artifact — it is an
+     * *instance method* of the class, which is what keeps `this` resolvable — so the
+     * caller appends it to the class's own member list.
+     */
+    public bodyMembers: DeclarationStatement[]
+  ) {}
+}
+
 const BODY_SUFFIX = "$body";
 /** Suffix of the synthesized continuation function. */
 const START_SUFFIX = "$start";
@@ -183,21 +207,33 @@ export class StackfulAsyncTransform {
    */
   private buildFiberDriveBody(
     bodyName: string,
-    parameters: ParameterNode[],
+    argumentFields: string[],
+    /** The source range each field's identifier is attributed to — DWARF reads it. */
+    argumentRanges: Range[],
+    receiverField: string | null,
+    receiverRange: Range,
     returnType: TypeNode,
     range: Range
   ): BlockStatement {
-    let bodyArgs = new Array<Expression>(parameters.length);
-    for (let i = 0, k = parameters.length; i < k; ++i) {
+    let bodyArgs = new Array<Expression>(argumentFields.length);
+    for (let i = 0, k = argumentFields.length; i < k; ++i) {
       unchecked(bodyArgs[i] = Node.createPropertyAccessExpression(
-        Node.createThisExpression(range),
-        Node.createIdentifierExpression(parameterFieldName(i), parameters[i].range),
-        parameters[i].range
+        Node.createThisExpression(argumentRanges[i]),
+        Node.createIdentifierExpression(argumentFields[i], argumentRanges[i]),
+        argumentRanges[i]
       ));
     }
-    let bodyCall = Node.createCallExpression(
-      Node.createIdentifierExpression(bodyName, range),
-      null,
+    // A lifted method's body is a member, so the call is `this.$p0.run$body(…)`; a free
+    // function's is `f$body(…)` (DL62).
+    let bodyCall = createBodyCall(
+      receiverField != null
+        ? Node.createPropertyAccessExpression(
+            Node.createThisExpression(receiverRange),
+            Node.createIdentifierExpression(receiverField, receiverRange),
+            receiverRange
+          )
+        : null,
+      bodyName,
       bodyArgs,
       range
     );
@@ -336,8 +372,11 @@ export class StackfulAsyncTransform {
         }
         case NodeKind.ClassDeclaration: {
           let classDeclaration = <ClassDeclaration>statement;
-          this.transformClass(classDeclaration, parser);
+          let artifacts = this.transformClass(classDeclaration, declared, parser);
           out.push(statement);
+          if (artifacts != null) {
+            for (let j = 0, l = artifacts.length; j < l; ++j) out.push(artifacts[j]);
+          }
           break;
         }
         default: {
@@ -363,7 +402,9 @@ export class StackfulAsyncTransform {
   private transformFunction(
     declaration: FunctionDeclaration,
     declared: string[],
-    parser: Parser
+    parser: Parser,
+    /** Set when this is a **method** being lifted (DL62): the class it belongs to. */
+    lift: MethodLift | null = null
   ): Statement[] | null {
     if (!declaration.isAsync) {
       // An `await` in a non-async function is the parser's diagnostic (AS1308);
@@ -415,9 +456,14 @@ export class StackfulAsyncTransform {
     }
 
     let name = declaration.name.text;
+    // **A lifted method's synthesized names carry its class**, because they are
+    // top-level declarations and two classes may both declare `async run()` (DL62).
+    // The body keeps the plain name: it becomes a *member* of the class, where it is
+    // already scoped.
+    let prefix = lift != null ? lift.className + "$" : "";
     let bodyName = name + BODY_SUFFIX;
-    let startName = name + START_SUFFIX;
-    let recordName = name + RECORD_SUFFIX;
+    let startName = prefix + name + START_SUFFIX;
+    let recordName = prefix + name + RECORD_SUFFIX;
     for (let i = 0, k = declared.length; i < k; ++i) {
       let taken = declared[i];
       if (taken == bodyName || taken == startName || taken == recordName) {
@@ -450,20 +496,40 @@ export class StackfulAsyncTransform {
         parameter.range
       ));
     }
-    let bodyFunction = Node.createFunctionDeclaration(
-      Node.createIdentifierExpression(bodyName, declaration.name.range),
-      null, CommonFlags.None,
-      null,
-      Node.createFunctionType(
-        bodyParameters,
-        returnType,
-        null, false,
-        range
-      ),
-      body,
-      ArrowKind.None,
-      range
-    );
+    // **The body, as a member when lifted.** Keeping it inside the class is what
+    // makes the receiver a real `this`: every `this.` in the original body — before,
+    // after, or inside an arrow that captures it — resolves exactly as written, and
+    // no expression has to be rewritten. A free function would need a `$self`
+    // parameter and a `this` → `$self` walk over every node kind that can hold an
+    // expression, which is a much larger surface for the same result.
+    let bodyFunction = lift != null
+      ? Node.createMethodDeclaration(
+          Node.createIdentifierExpression(bodyName, declaration.name.range),
+          null, CommonFlags.Instance,
+          null,
+          Node.createFunctionType(
+            bodyParameters,
+            returnType,
+            null, false,
+            range
+          ),
+          body,
+          range
+        )
+      : Node.createFunctionDeclaration(
+          Node.createIdentifierExpression(bodyName, declaration.name.range),
+          null, CommonFlags.None,
+          null,
+          Node.createFunctionType(
+            bodyParameters,
+            returnType,
+            null, false,
+            range
+          ),
+          body,
+          ArrowKind.None,
+          range
+        );
 
     // --- the task subclass ------------------------------------------------
 
@@ -473,16 +539,41 @@ export class StackfulAsyncTransform {
     // `struct.new` under `--wasmGc`), the captured parameters are its fields —
     // reached by name, not by `32 + 4i` — and `drive` is the only operation the
     // scheduler needs. There is no second record and no arena.
-    let recordFields = new Array<DeclarationStatement>(parameters.length + 1);
+    // **The captured list is `[receiver?, ...parameters]`** (DL62), one list used by
+    // the fields, the constructor, the drive body's arguments and the entry's
+    // constructor arguments — so the four cannot disagree about the order.
+    let receiverOffset = lift != null ? 1 : 0;
+    let capturedCount = parameters.length + receiverOffset;
+    let capturedNames = new Array<string>(capturedCount);
+    let capturedTypes = new Array<TypeNode>(capturedCount);
+    let capturedRanges = new Array<Range>(capturedCount);
+    if (lift != null) {
+      unchecked(capturedNames[0] = parameterFieldName(0));
+      unchecked(capturedTypes[0] = lift.classType);
+      unchecked(capturedRanges[0] = range);
+    }
     for (let i = 0, k = parameters.length; i < k; ++i) {
-      let parameter = parameters[i];
+      unchecked(capturedNames[i + receiverOffset] = parameterFieldName(i + receiverOffset));
+      unchecked(capturedTypes[i + receiverOffset] = parameters[i].type);
+      unchecked(capturedRanges[i + receiverOffset] = parameters[i].name.range);
+    }
+    let recordFields = new Array<DeclarationStatement>(capturedCount + 1);
+    for (let i = 0, k = capturedCount; i < k; ++i) {
       unchecked(recordFields[i] = Node.createFieldDeclaration(
-        Node.createIdentifierExpression(parameterFieldName(i), parameter.name.range),
+        Node.createIdentifierExpression(capturedNames[i], capturedRanges[i]),
         null, CommonFlags.Instance,
-        parameter.type,
+        capturedTypes[i],
         null,
-        parameter.range
+        capturedRanges[i]
       ));
+    }
+    // The drive body's arguments are every captured field but the receiver, which is the
+    // object the call is made on.
+    let argumentFields = new Array<string>(parameters.length);
+    let argumentRanges = new Array<Range>(parameters.length);
+    for (let i = 0, k = parameters.length; i < k; ++i) {
+      unchecked(argumentFields[i] = capturedNames[i + receiverOffset]);
+      unchecked(argumentRanges[i] = capturedRanges[i + receiverOffset]);
     }
     // **Two `drive` bodies, and the difference is the whole backend** (I90).
     //
@@ -506,7 +597,12 @@ export class StackfulAsyncTransform {
     // body chosen by a literal `"fiber"` comparison would take the promise path for an
     // `auto` build whose artifact says `backend=fiber`.
     let driveBody = this.program.options.fiberBackendSelected
-      ? this.buildFiberDriveBody(bodyName, parameters, returnType, range)
+      ? this.buildFiberDriveBody(
+          bodyName, argumentFields, argumentRanges,
+          lift != null ? capturedNames[0] : null,
+          lift != null ? capturedRanges[0] : range,
+          returnType, range
+        )
       : Node.createBlockStatement([
       Node.createIfStatement(
         Node.createUnaryPrefixExpression(
@@ -559,16 +655,14 @@ export class StackfulAsyncTransform {
         range
       )
     ], range);
-    unchecked(recordFields[parameters.length] = Node.createMethodDeclaration(
+    unchecked(recordFields[capturedCount] = Node.createMethodDeclaration(
       Node.createIdentifierExpression(DRIVE_METHOD, range),
-      // **This member does not reach the artifact** (DL60, I95). `work$Rec` is emitted
-      // with its constructor and its field accessors and no `drive`, so
-      // `TaskBase#drive@override` is a bare `unreachable` and anything that reaches a
-      // synthesized task through virtual `drive` traps. Measured, not inferred: a
-      // sibling method added at the same index for the experiment did not appear
-      // either, and neither `CommonFlags.Override` nor a `this` type in the signature
-      // changed the output — so the cause is in how the compiler emits members of a
-      // class the transform added after parsing, not in this declaration.
+      // **Corrected by DL61**: the earlier note here ("this member does not reach the
+      // artifact") was wrong and is retracted. `work$Rec#drive` is emitted; what was
+      // broken was *ordering* — the fiber ABI surface was compiled after the override
+      // stubs were finalized, so a record reachable only through `__submitTask` never
+      // got its `drive` compiled. The lesson is binding for this round's synthesis too:
+      // a member that seems to vanish is a question about what compiled it and when.
       null, CommonFlags.Instance,
       null,
       Node.createFunctionType(
@@ -603,9 +697,9 @@ export class StackfulAsyncTransform {
     // would put a call in the path of every parameterless task for no gain.
     // Leaving it out keeps the emitted code for the common case exactly what it
     // was before this change.
-    if (parameters.length > 0) {
-      let constructorParameters = new Array<ParameterNode>(parameters.length);
-      let constructorStatements = new Array<Statement>(parameters.length + 1);
+    if (capturedCount > 0) {
+      let constructorParameters = new Array<ParameterNode>(capturedCount);
+      let constructorStatements = new Array<Statement>(capturedCount + 1);
       unchecked(constructorStatements[0] = Node.createExpressionStatement(
         Node.createCallExpression(
           Node.createSuperExpression(range),
@@ -614,21 +708,20 @@ export class StackfulAsyncTransform {
           range
         )
       ));
-      for (let i = 0, k = parameters.length; i < k; ++i) {
-        let parameter = parameters[i];
+      for (let i = 0, k = capturedCount; i < k; ++i) {
         unchecked(constructorParameters[i] = Node.createParameter(
           ParameterKind.Default,
-          Node.createIdentifierExpression(constructorParameterName(i), parameter.range),
-          parameter.type,
+          Node.createIdentifierExpression(constructorParameterName(i), capturedRanges[i]),
+          capturedTypes[i],
           null,
-          parameter.range
+          capturedRanges[i]
         ));
         unchecked(constructorStatements[i + 1] = Node.createExpressionStatement(
           assignField(
             Node.createThisExpression(range),
-            parameterFieldName(i),
-            Node.createIdentifierExpression(constructorParameterName(i), parameter.range),
-            parameter.range
+            capturedNames[i],
+            Node.createIdentifierExpression(constructorParameterName(i), capturedRanges[i]),
+            capturedRanges[i]
           )
         ));
       }
@@ -683,15 +776,28 @@ export class StackfulAsyncTransform {
     ));
     let bodyArgs = new Array<Expression>(parameters.length);
     for (let i = 0, k = parameters.length; i < k; ++i) {
+      // The identifier carries the **parameter's own range**, not the function's: DWARF
+      // attributes instructions through these node ranges, and a synthesized node handed
+      // a broader range moved a debug fixture's line table by 15 bytes with identical code
+      // (DL62, measured on `debug/main-policy.wasm`).
       unchecked(bodyArgs[i] = Node.createPropertyAccessExpression(
         recIdent,
-        Node.createIdentifierExpression(parameterFieldName(i), parameters[i].range),
-        parameters[i].range
+        Node.createIdentifierExpression(
+          capturedNames[i + receiverOffset],
+          capturedRanges[i + receiverOffset]
+        ),
+        capturedRanges[i + receiverOffset]
       ));
     }
-    let bodyCall = Node.createCallExpression(
-      Node.createIdentifierExpression(bodyName, range),
-      null,
+    let bodyCall = createBodyCall(
+      lift != null
+        ? Node.createPropertyAccessExpression(
+            recIdent,
+            Node.createIdentifierExpression(capturedNames[0], capturedRanges[0]),
+            capturedRanges[0]
+          )
+        : null,
+      bodyName,
       bodyArgs,
       range
     );
@@ -757,9 +863,13 @@ export class StackfulAsyncTransform {
     // construction rather than by two list comprehensions staying in step.
     let entryStatements = new Array<Statement>();
     let recVar = Node.createIdentifierExpression("$rec", range);
-    let constructorArguments = new Array<Expression>(parameters.length);
+    let constructorArguments = new Array<Expression>(capturedCount);
+    if (lift != null) {
+      // The receiver is the method's own `this`, in the entry body.
+      unchecked(constructorArguments[0] = Node.createThisExpression(range));
+    }
     for (let i = 0, k = parameters.length; i < k; ++i) {
-      unchecked(constructorArguments[i] = Node.createIdentifierExpression(
+      unchecked(constructorArguments[i + receiverOffset] = Node.createIdentifierExpression(
         parameters[i].name.text,
         parameters[i].range
       ));
@@ -822,7 +932,11 @@ export class StackfulAsyncTransform {
     // parameterized one keeps `-1` and cannot be posted by index.
     let hasSpawnStart = false;
     let spawnName = "";
-    if (parameters.length == 0) {
+    // **A lifted method gets no spawn start** (DL62): `f$spawnStart` is a parameterless
+    // function called by index, so it has no receiver to pass. The task keeps `entry =
+    // -1` and cannot be posted across a store, which is the same limit a parameterised
+    // async function already has (`Gate 3d`).
+    if (parameters.length == 0 && lift == null) {
       spawnName = name + SPAWN_SUFFIX;
       let takenCollision = false;
       for (let i = 0, k = declared.length; i < k; ++i) {
@@ -875,7 +989,14 @@ export class StackfulAsyncTransform {
     // a status word in every generated continuation.
     let artifacts = new Array<Statement>();
     artifacts.push(recordClass);
-    artifacts.push(bodyFunction);
+    // **A lifted body is a class member, not a top-level artifact** (DL62). It is filed
+    // with the class, where its `this` resolves; the record, the start function and the
+    // spawn start are the top-level artifacts either way.
+    if (lift == null) {
+      artifacts.push(bodyFunction);
+    } else {
+      lift.bodyMembers.push(<DeclarationStatement>bodyFunction);
+    }
     artifacts.push(startFunction);
     if (hasSpawnStart) {
       let taskIdentSpawn = Node.createIdentifierExpression("$spawnTask", range);
@@ -952,22 +1073,88 @@ export class StackfulAsyncTransform {
     return artifacts;
   }
 
-  /** Refuses an async method; clears the modifier on a non-suspending one. */
-  private transformClass(declaration: ClassDeclaration, parser: Parser): void {
+  /**
+   * **Lowers a class's suspending `async` methods** (DL62), and clears the modifier on
+   * the ones that cannot suspend.
+   *
+   * The shape, and why the tree pointed here: a function's body is moved out to a
+   * top-level `f$body`, but a *method's* body references `this`, and a lifted free
+   * function has no receiver. Rewriting every `this` would be a walk over every node
+   * kind that can hold an expression, and would still miss a closure that captures it.
+   * So the body stays a member of the class (`run$body`), where `this` is exactly what
+   * it always was, and the record carries the receiver as its first field — the drive
+   * body calls `this.$p0.run$body(...)`. One extra field; nothing rewritten.
+   *
+   * Returns the top-level artifacts (record class, start function) for the caller to
+   * file beside the class declaration — beside, not inside, so a nested class's
+   * artifacts land in the same namespace and can still name it.
+   */
+  private transformClass(
+    declaration: ClassDeclaration,
+    declared: string[],
+    parser: Parser
+  ): Statement[] | null {
     let members = declaration.members;
-    for (let i = 0, k = members.length; i < k; ++i) {
-      let member = members[i];
-      if (member.kind == NodeKind.MethodDeclaration) {
-        let method = <MethodDeclaration>member;
-        if (method.isAsync) {
-          if (containsAwait(method.body)) {
-            this.refuse(parser, method.range, "an async method (the stackful backend)");
-          } else {
-            method.isAsync = false;
+    let className = declaration.name.text;
+    // The record's receiver field and the constructor's first parameter are typed with
+    // the class's own name. A **generic** class would need `C<T>` and this transform
+    // does not synthesize type-argument forwarding, so it is refused by name rather
+    // than emitted with a bare `C` that would not type-check.
+    // Bound to a local first: the self-host's flow analysis does not narrow a nullable
+    // property across `&&`, and it refuses `declaration.typeParameters.length` after the
+    // null check (measured — the bootstrap build is the gate that catches this).
+    let typeParameters = declaration.typeParameters;
+    if (typeParameters != null && typeParameters.length != 0) {
+      for (let i = 0, k = members.length; i < k; ++i) {
+        let member = members[i];
+        if (member.kind == NodeKind.MethodDeclaration) {
+          let method = <MethodDeclaration>member;
+          if (method.isAsync && containsAwait(method.body)) {
+            this.refuse(parser, method.range, "an async method on a generic class (the stackful backend)");
           }
         }
       }
+      return null;
     }
+    let classType = typeNode(className, declaration.name.range);
+    let artifacts = new Array<Statement>();
+    for (let i = 0, k = members.length; i < k; ++i) {
+      let member = members[i];
+      if (member.kind == NodeKind.FieldDeclaration) {
+        // **An `async` arrow in a field initializer is refused by name** (DL62, decision
+        // 4). It is not a method the record could carry a receiver for — the field is
+        // assigned once, per object, and the transform never sees a call site to rewrite —
+        // so it names the shape *and* the backend here rather than leaving the generic
+        // guard to say "(async lowering)" without saying which backend refused it.
+        this.refuseUnsupportedAsyncConstructs((<FieldDeclaration>member).initializer, parser);
+        continue;
+      }
+      if (member.kind != NodeKind.MethodDeclaration) continue;
+      let method = <MethodDeclaration>member;
+      if (!method.isAsync) continue;
+      if (!containsAwait(method.body)) {
+        method.isAsync = false;
+        continue;
+      }
+      // An accessor is a method to the AST but not a call one makes with `()`, and the
+      // record's `drive` has no place to put a getter's value.
+      if (method.isAny(CommonFlags.Get | CommonFlags.Set)) {
+        this.refuse(parser, method.range, "an async accessor (the stackful backend)");
+        continue;
+      }
+      this.program.loweredAsyncMethods.add(method);
+      let bodyMembers = new Array<DeclarationStatement>();
+      let produced = this.transformFunction(
+        method, declared, parser,
+        new MethodLift(className, classType, bodyMembers)
+      );
+      if (produced == null) continue;
+      for (let j = 0, l = bodyMembers.length; j < l; ++j) members.push(bodyMembers[j]);
+      // Everything `transformFunction` returns for a lift is top level: the body member
+      // was filed into the class above, not into this list.
+      for (let j = 0, l = produced.length; j < l; ++j) artifacts.push(produced[j]);
+    }
+    return artifacts.length != 0 ? artifacts : null;
   }
 
   /**
@@ -1086,6 +1273,33 @@ function assignField(owner: Expression, field: string, value: Expression, range:
     Node.createPropertyAccessExpression(owner, Node.createIdentifierExpression(field, range), range),
     value,
     range
+  );
+}
+
+/**
+ * The call that runs a lowered body (DL62).
+ *
+ * A free async function's body is a top-level function, so the call is
+ * `f$body(a, b)`. A lifted **method**'s body is an instance method of the class it
+ * came from — that is what keeps `this` resolvable without rewriting a single
+ * expression — so the call is `recv.run$body(a, b)`.
+ */
+function createBodyCall(
+  receiver: Expression | null,
+  bodyName: string,
+  args: Expression[],
+  range: Range
+): Expression {
+  if (receiver == null) {
+    return Node.createCallExpression(
+      Node.createIdentifierExpression(bodyName, range), null, args, range
+    );
+  }
+  return Node.createCallExpression(
+    Node.createPropertyAccessExpression(
+      receiver, Node.createIdentifierExpression(bodyName, range), range
+    ),
+    null, args, range
   );
 }
 

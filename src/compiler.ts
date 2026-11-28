@@ -6406,18 +6406,17 @@ export class Compiler extends DiagnosticEmitter {
   private compileExpressionStatement(
     statement: ExpressionStatement
   ): ExpressionRef {
-    let module = this.module;
-    // **A statement that drops a spawn is the spawn** (DL61, I95).
+    // **A statement that drops a spawn is the spawn** (DL61, I95 / DL62).
     //
-    // `work(1);` — a call to an async function whose value nobody keeps — is a program
-    // saying "start this and do not wait". The lowering has already turned `work` into a
-    // factory returning a task, so the call *allocates* the work; what was missing is the
-    // hand-over that makes it run. On fiber nothing else could run it: the stack is a host
-    // object and the guest must not pump — that is why the same three lines printed
-    // `order 3` on continuation and `order 0` on fiber. **Both backends get it**: the
-    // hand-over is `__submitTask`, which the host owns on fiber and the guest's own
-    // executor ring owns on continuation, so "start this and do not wait" means one thing
-    // in the language and each backend runs it its own way.
+    // `work(1);` — a call to an async function or method whose value nobody keeps — is a
+    // program saying "start this and do not wait". The lowering has already turned the
+    // callee into a factory returning a task, so the call *allocates* the work; what was
+    // missing is the hand-over that makes it run. On fiber nothing else could run it: the
+    // stack is a host object and the guest must not pump — that is why the same three
+    // lines printed `order 3` on continuation and `order 0` on fiber. **Both backends get
+    // it**: the hand-over is `__submitTask`, which the host owns on fiber and the guest's
+    // own executor ring owns on continuation, so "start this and do not wait" means one
+    // thing in the language and each backend runs it its own way.
     //
     // The rule is not name-shaped at the call site alone: a local of the same name would
     // shadow the factory, so the name must resolve to a *function prototype*. And an
@@ -6425,7 +6424,22 @@ export class Compiler extends DiagnosticEmitter {
     let expression = statement.expression;
     if (expression.kind == NodeKind.Call) {
       let callee = (<CallExpression>expression).expression;
-      if (callee.kind == NodeKind.Identifier) {
+      if (callee.kind == NodeKind.PropertyAccess) {
+        // **A method call is a lowered factory too** (DL62): `c.run(1);` resolves to the
+        // class member, which the transform turned into a task factory. Matched through
+        // the *declaration* rather than the name — `Foo.run` and `Bar.run` are different
+        // members with the same spelling, and only one of them may have been lowered.
+        let element = this.resolver.lookupExpression(
+          callee, this.currentFlow, Type.auto, ReportMode.Swallow
+        );
+        if (
+          element != null &&
+          element.kind == ElementKind.FunctionPrototype &&
+          this.program.loweredAsyncMethods.has((<FunctionPrototype>element).declaration)
+        ) {
+          return this.compileSpawnStatement(statement, expression, element);
+        }
+      } else if (callee.kind == NodeKind.Identifier) {
         let name = (<IdentifierExpression>callee).text;
         let bound = this.currentFlow.lookup(name);
         if (
@@ -6433,40 +6447,51 @@ export class Compiler extends DiagnosticEmitter {
           bound != null &&
           bound.kind == ElementKind.FunctionPrototype
         ) {
-          // **A floating spawn the backend cannot start is refused by name** (DL61,
-          // decision 7). On continuation the task would land in the guest's own executor
-          // ring, and nothing drives that ring once the entry has returned — there is no
-          // guest-side "run the ring to empty" entry for the host to call, and the shell's
-          // core loop has already ended. Compiling it would be a silent zero: the program
-          // exits 0 having run none of the bodies it asked for. So it is an error, naming
-          // the backend, instead of a green line that lies.
-          if (!this.fiberBackendActive) {
-            this.error(
-              DiagnosticCode.Not_implemented_0,
-              statement.range,
-              "a spawned task on the continuation backend (nothing drives the executor ring "
-              + "after the entry returns, so the body would never run). Await the task, or "
-              + "build with `--stackful-backend fiber`"
-            );
-            return module.unreachable();
-          }
-          let instance = this.resolver.resolveFunction(<FunctionPrototype>bound, null);
-          if (instance != null) {
-            // The factory's own return type is the contextual type: `Type.auto` is not a
-            // valid context here (`Type 'Task<void>' is not assignable to type 'auto'`,
-            // measured), and the value goes straight into `__submitTask(TaskBase)`.
-            let value = this.compileExpression(
-              expression, instance.signature.returnType, Constraints.None
-            );
-            let submit = this.program.requireFunction("~lib/thread/__submitTask");
-            this.usesSubmitTaskCall = true;
-            this.currentType = Type.bool;
-            return module.drop(module.call(submit.internalName, [ value ], TypeRef.I32));
-          }
+          return this.compileSpawnStatement(statement, expression, bound);
         }
       }
     }
     return this.compileExpression(expression, Type.void, Constraints.ConvImplicit);
+  }
+
+  /**
+   * The hand-over itself, shared by the free-function and method call sites (DL62).
+   *
+   * `element` is the resolved callee: a `FunctionPrototype` for either shape, because the
+   * transform leaves the declaration in place and only changes what its body *is*.
+   */
+  private compileSpawnStatement(
+    statement: ExpressionStatement,
+    call: Expression,
+    element: Element
+  ): ExpressionRef {
+    let module = this.module;
+    // **A floating spawn the backend cannot start is refused by name** (DL61, decision 7).
+    // On continuation the task lands in the guest's own executor ring, and nothing drives
+    // that ring once the entry has returned — there is no guest-side "run the ring to
+    // empty" entry for the host to call, and the shell's core loop has already ended.
+    // Compiling it would be a silent zero: the program exits 0 having run none of the
+    // bodies it asked for. So it is an error, naming the backend, not a green line.
+    if (!this.fiberBackendActive) {
+      this.error(
+        DiagnosticCode.Not_implemented_0,
+        statement.range,
+        "a spawned task on the continuation backend (nothing drives the executor ring "
+        + "after the entry returns, so the body would never run). Await the task, or "
+        + "build with `--stackful-backend fiber`"
+      );
+      return module.unreachable();
+    }
+    let instance = this.resolver.resolveFunction(<FunctionPrototype>element, null);
+    if (instance == null) return this.compileExpression(call, Type.void, Constraints.ConvImplicit);
+    // The factory's own return type is the contextual type: `Type.auto` is not a valid
+    // context here (`Type 'Task<void>' is not assignable to type 'auto'`, measured), and
+    // the value goes straight into `__submitTask(TaskBase)`.
+    let value = this.compileExpression(call, instance.signature.returnType, Constraints.None);
+    let submit = this.program.requireFunction("~lib/thread/__submitTask");
+    this.usesSubmitTaskCall = true;
+    this.currentType = Type.bool;
+    return module.drop(module.call(submit.internalName, [ value ], TypeRef.I32));
   }
 
   private compileForStatement(

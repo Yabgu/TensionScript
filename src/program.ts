@@ -501,6 +501,18 @@ export class Program extends DiagnosticEmitter {
   loweredAsync: Set<string> = new Set();
 
   /**
+   * **The method declarations the stackful transform lowered into task factories**
+   * (DL62), by declaration identity.
+   *
+   * `loweredAsync` above is by *name* because a free function's name is unique in its
+   * source. A method's is not — `Foo.run` and `Bar.run` are different members with the
+   * same spelling — so a floating call has to be matched through the resolved element's
+   * declaration, not its text. `compileExpressionStatement` resolves the callee and asks
+   * this set.
+   */
+  loweredAsyncMethods: Set<DeclarationStatement> = new Set();
+
+  /**
    * The sources the compiler's *own* standard library was parsed from.
    *
    * `Source.isLibrary` cannot answer this: `SourceKind` is derived from the
