@@ -1,0 +1,12 @@
+{
+  "asc_flags": [
+    "--enable",
+    "stack-switching",
+    "--stackful-backend",
+    "continuation"
+  ],
+  "stderr": [
+    "AS100: Not implemented: a spawned task on the continuation backend (nothing drives the executor ring after the entry returns, so the body would never run). Await the task, or build with `--stackful-backend fiber`",
+    "1 compile error(s)"
+  ]
+}

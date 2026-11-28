@@ -1081,13 +1081,6 @@ export class Compiler extends DiagnosticEmitter {
   fiberServeEntryNeeded: bool = false;
 
   /**
-   * Set when `__readySubmit` emitted its `scheduler::ready` call (DL61, I95). The import is
-   * added then, and only then, so an artifact that never hands a slot over carries neither
-   * the call nor the import.
-   */
-  fiberReadyNeeded: bool = false;
-
-  /**
    * Set when a statement-position spawn was rewritten into a hand-over (DL61). `__submitTask`
    * is compiled explicitly in that case: the rewrite is its only caller, so no ordinary call
    * site would pull it in.
@@ -2385,12 +2378,6 @@ export class Compiler extends DiagnosticEmitter {
       if (this.usesSubmitTaskCall) {
         let submit = this.program.requireFunction(SUBMIT_TASK);
         if (!module.hasFunction(submit.internalName)) this.compileFunction(submit);
-      }
-      // `scheduler::ready` — the door a handed-over slot goes through, emitted only when the
-      // builtin emitted the call. An artifact that never hands a slot over carries no host
-      // queue it could not use.
-      if (this.fiberReadyNeeded && !module.hasFunction(HOST_READY)) {
-        module.addFunctionImport(HOST_READY, "scheduler", "ready", TypeRef.I32, TypeRef.I32);
       }
       // `__driveSlot` is what the host's ready drain calls, exported when the guest can
       // submit: a guest that cannot has nothing for the drain to resume, and the host

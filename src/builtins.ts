@@ -12760,10 +12760,18 @@ function builtin_async_readySubmit(ctx: BuiltinFunctionContext): ExpressionRef {
   let slot = compiler.compileExpression(ctx.operands[0], Type.i32, Constraints.ConvImplicit);
   compiler.currentType = Type.i32;
   if (!compiler.fiberBackendActive) return module.i32(-1);
-  // The import is emitted by the compiler's tail (`HOST_READY`) in the same place as
-  // `$serveEntry`: a builtin has no std declaration to compile, so it names the import
-  // that tail adds. This flag is what tells the tail the call exists.
-  compiler.fiberReadyNeeded = true;
+  // **The import is added here, where the call is** (DL63). It used to be added by a
+  // block near the end of `compile()`, gated on a flag this builtin set — which is an
+  // assumption about ordering: `__submitTask` is also reached from a guest's custom step
+  // and from the override stubs, both compiled *after* that block, and then the call
+  // existed with no import:
+  //
+  //     call target must exist, on (call $~lib/task-stack/$hostReady (local.get $1))
+  //
+  // Measured on `async/schedule-order.ten` built for fiber, which no gate covered.
+  if (!module.hasFunction(HOST_READY)) {
+    module.addFunctionImport(HOST_READY, "scheduler", "ready", TypeRef.I32, TypeRef.I32);
+  }
   return module.call(HOST_READY, [ slot ], TypeRef.I32);
 }
 
